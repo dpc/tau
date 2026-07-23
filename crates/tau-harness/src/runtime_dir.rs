@@ -114,7 +114,7 @@ pub struct DaemonMetadata {
     /// Active/current session id presently bound to this daemon.
     ///
     /// This field is intentionally kept under the original name for runtime
-    /// metadata compatibility. Harnesses that support `/session new` update it
+    /// metadata compatibility. Harnesses that support `:session new` update it
     /// after every successful session switch.
     pub session_id: String,
     /// Untrusted discovery hint that this daemon currently advertises a peer

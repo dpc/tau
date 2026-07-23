@@ -33,7 +33,7 @@ appear as active watched-agent work.
 Prompt navigation modes are harness-owned current-session daemon memory:
 ordinary agents default to `active`, delegated agents default to `active-auto`,
 and any attached UI can request `suspended`, `active`, or `active-auto` with
-`/agent suspend`, `/agent resume`, or `/agent auto`. Complete
+`:agent suspend`, `:agent resume`, or `:agent auto`. Complete
 `agent.stats_updated` snapshots update each UI cache. Selection, transcript,
 drafts, and presentation remain UI-local. Explicit overrides are not persisted;
 cold restore recomputes defaults from existing provenance. Selecting, picking, or
@@ -76,7 +76,7 @@ before stdout is touched; a stdout write failure can leave a written prefix
 because arbitrary output streams cannot be rolled back. The command only
 inspects runtime candidates and does not create or clean up state.
 
-There is also a narrow temporary action-input redaction exception: `/email auth
+There is also a narrow temporary action-input redaction exception: `:email auth
 google finish ...` command echo and prompt-history entries are redacted because
 the pasted Gmail loopback URL contains a one-time OAuth authorization code and
 the action schema does not yet provide sensitive-argument metadata. The emitted
@@ -89,6 +89,6 @@ The current implementation has a socket reader thread, renderer path, redraw/tim
 
 ## Command paths
 
-Interactive chat, `tau dev send`, and `--prompt-stdin` should share socket/session setup and prompt construction wherever possible. Mode-specific command capabilities are fine, but avoid duplicating protocol handshakes or slash-command parsing in separate paths.
-Bare `/tree` is a one-shot exception to fire-and-forget `tau dev send`: it
+Interactive chat, `tau dev send`, and `--prompt-stdin` should share socket/session setup and prompt construction wherever possible. Mode-specific command capabilities are fine, but avoid duplicating protocol handshakes or command parsing in separate paths.
+Bare `:tree` is a one-shot exception to fire-and-forget `tau dev send`: it
 waits for and prints the harness's single requester-directed multiline notice.

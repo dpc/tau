@@ -221,7 +221,7 @@ fn action_schema_contains_email_and_calendar_roots() {
         .map(|root| root.name)
         .collect::<Vec<_>>();
 
-    assert_eq!(roots, vec!["/email", "/calendar"]);
+    assert_eq!(roots, vec![":email", ":calendar"]);
 }
 
 /// Effective interactive OAuth inventories must drive both deep account
@@ -233,7 +233,7 @@ fn google_auth_schema_uses_sorted_effective_account_names() {
         &["work".to_owned(), "personal".to_owned()],
     );
 
-    let email_arg = action_arg(&schema, &["/email", "auth", "google", "start"], "account");
+    let email_arg = action_arg(&schema, &[":email", "auth", "google", "start"], "account");
     assert_eq!(
         email_arg
             .suggestions
@@ -243,17 +243,17 @@ fn google_auth_schema_uses_sorted_effective_account_names() {
         vec!["alpha", "zeta"]
     );
     let email_error = schema
-        .parse_line("/email auth google start")
+        .parse_line(":email auth google start")
         .expect_err("account is required");
     assert_eq!(
         email_error.usage(),
-        Some("/email auth google start <account>")
+        Some(":email auth google start <account>")
     );
     assert!(email_error.message().contains("alpha, zeta"));
 
     let calendar_arg = action_arg(
         &schema,
-        &["/calendar", "auth", "google", "start"],
+        &[":calendar", "auth", "google", "start"],
         "account",
     );
     assert_eq!(
@@ -265,11 +265,11 @@ fn google_auth_schema_uses_sorted_effective_account_names() {
         vec!["personal", "work"]
     );
     let calendar_error = schema
-        .parse_line("/calendar auth google start")
+        .parse_line(":calendar auth google start")
         .expect_err("account is required");
     assert_eq!(
         calendar_error.usage(),
-        Some("/calendar auth google start <account>")
+        Some(":calendar auth google start <account>")
     );
     assert!(calendar_error.message().contains("personal, work"));
 }
@@ -283,12 +283,12 @@ fn google_auth_schema_explains_empty_account_inventory() {
 
     for (line, path) in [
         (
-            "/email auth google start",
-            vec!["/email", "auth", "google", "start"],
+            ":email auth google start",
+            vec![":email", "auth", "google", "start"],
         ),
         (
-            "/calendar auth google start",
-            vec!["/calendar", "auth", "google", "start"],
+            ":calendar auth google start",
+            vec![":calendar", "auth", "google", "start"],
         ),
     ] {
         assert!(action_arg(&schema, &path, "account").suggestions.is_empty());
@@ -312,7 +312,7 @@ fn google_auth_schema_bounds_large_account_inventory() {
     let schema = action_schema_with_accounts(&accounts, &accounts);
     schema.validate().expect("bounded schema validates");
 
-    let arg = action_arg(&schema, &["/email", "auth", "google", "start"], "account");
+    let arg = action_arg(&schema, &[":email", "auth", "google", "start"], "account");
     assert_eq!(arg.suggestions.len(), AUTH_ACCOUNT_COMPLETION_LIMIT);
     assert!(arg.description.contains("showing 6 of 130"));
     assert!(!arg.description.contains("id-006"));
@@ -438,7 +438,7 @@ fn effective_config_and_reconfigure_replace_google_auth_inventory() {
         .expect("effective config");
     let schema = runtime.action_schema();
     assert_eq!(
-        action_arg(&schema, &["/email", "auth", "google", "start"], "account")
+        action_arg(&schema, &[":email", "auth", "google", "start"], "account")
             .suggestions
             .iter()
             .map(|choice| choice.value.as_str())
@@ -448,7 +448,7 @@ fn effective_config_and_reconfigure_replace_google_auth_inventory() {
     assert_eq!(
         action_arg(
             &schema,
-            &["/calendar", "auth", "google", "start"],
+            &[":calendar", "auth", "google", "start"],
             "account"
         )
         .suggestions
@@ -491,14 +491,14 @@ fn effective_config_and_reconfigure_replace_google_auth_inventory() {
         .expect("replacement config");
     let schema = runtime.action_schema();
     assert!(
-        action_arg(&schema, &["/email", "auth", "google", "start"], "account")
+        action_arg(&schema, &[":email", "auth", "google", "start"], "account")
             .suggestions
             .is_empty()
     );
     assert_eq!(
         action_arg(
             &schema,
-            &["/calendar", "auth", "google", "start"],
+            &[":calendar", "auth", "google", "start"],
             "account"
         )
         .suggestions[0]
@@ -537,13 +537,13 @@ fn action_arg<'a>(
 fn calendar_google_auth_schema_remains_device_flow_shape() {
     let schema = action_schema_with_accounts(&[], &[]);
     let start = schema
-        .parse_line("/calendar auth google start google")
+        .parse_line(":calendar auth google start google")
         .expect("calendar auth start parses");
     assert_eq!(start.action_id, "calendar.auth.google.start");
     assert_eq!(start.argv, vec!["google".to_owned()]);
 
     let finish = schema
-        .parse_line("/calendar auth google finish google")
+        .parse_line(":calendar auth google finish google")
         .expect("calendar auth finish parses");
     assert_eq!(finish.action_id, "calendar.auth.google.finish");
     assert_eq!(finish.argv, vec!["google".to_owned()]);
@@ -551,7 +551,7 @@ fn calendar_google_auth_schema_remains_device_flow_shape() {
     assert!(
         schema
             .parse_line(
-                "/calendar auth google finish google http://127.0.0.1:54321/?state=s&code=c",
+                ":calendar auth google finish google http://127.0.0.1:54321/?state=s&code=c",
             )
             .is_err(),
         "calendar finish must not accept Gmail redirect URL arguments"
@@ -748,14 +748,14 @@ fn startup_registers_email_and_calendar_tools() {
                 .iter()
                 .map(|root| root.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["/email", "/calendar"],
+            vec![":email", ":calendar"],
             "tool prefixes must not rewrite action roots"
         );
     }
     assert_eq!(
         action_arg(
             &action_schemas[0].1,
-            &["/email", "auth", "google", "start"],
+            &[":email", "auth", "google", "start"],
             "account",
         )
         .suggestions
@@ -767,7 +767,7 @@ fn startup_registers_email_and_calendar_tools() {
     assert_eq!(
         action_arg(
             &action_schemas[0].1,
-            &["/calendar", "auth", "google", "start"],
+            &[":calendar", "auth", "google", "start"],
             "account",
         )
         .suggestions
@@ -779,7 +779,7 @@ fn startup_registers_email_and_calendar_tools() {
     assert_eq!(
         action_arg(
             &action_schemas[1].1,
-            &["/email", "auth", "google", "start"],
+            &[":email", "auth", "google", "start"],
             "account",
         )
         .suggestions
@@ -791,7 +791,7 @@ fn startup_registers_email_and_calendar_tools() {
     assert!(
         action_arg(
             &action_schemas[1].1,
-            &["/calendar", "auth", "google", "start"],
+            &[":calendar", "auth", "google", "start"],
             "account",
         )
         .suggestions

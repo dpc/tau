@@ -28,7 +28,7 @@ visible transcript. The hidden fold becomes visible only when that transcript is
 selected.
 
 The initial no-agent/start-new-agent screen is not a durable transcript boundary.
-Startup or post-`/session new` status, action, and extension output that is
+Startup or post-`:session new` status, action, and extension output that is
 visible there is the beginning of the first selected/created agent conversation.
 Selecting that first agent therefore adopts the visible no-agent output in place,
 without replacing the terminal snapshot or clearing scrollback. Pending no-agent
@@ -71,7 +71,7 @@ endpoints unloaded before attachment, their earlier messages are absent from tha
 new CLI's overview; no extra persistence or session-wide replay authority exists
 solely for this presentation.
 
-Explicit `/agent none` and `/agent new` after leaving an agent also create a
+Explicit `:agent none` and `:agent new` after leaving an agent also create a
 protected no-agent snapshot, and fresh agents must not inherit output or pending
 owners from that explicit global view. The no-agent screen remains the
 start-new-agent input target as well as the all-agent overview.

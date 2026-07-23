@@ -402,7 +402,7 @@ impl GoogleBackend {
         stored_refresh_token: Option<&str>,
     ) -> Result<String, String> {
         let config = google_oauth_config(account)?;
-        let message = "Google calendar account is not authorized; run `/calendar auth google start <account>` and then `/calendar auth google finish <account>`";
+        let message = "Google calendar account is not authorized; run `:calendar auth google start <account>` and then `:calendar auth google finish <account>`";
         self.oauth
             .access_token(&account.id, config, stored_refresh_token, message)
     }

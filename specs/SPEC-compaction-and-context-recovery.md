@@ -18,7 +18,7 @@ away like any other input fact. This behavior is confirmed by
 
 ## Recovery authority
 
-The CLI `/compact` command is human/UI authority. The model-callable `compact`
+The CLI `:compact` command is human/UI authority. The model-callable `compact`
 tool is a separate, enabled-by-default self-compaction authority, while
 `agent_compact` is an independently opted-in authority over any *other loaded
 agent in the same harness session*. Enabling either tool never enables the
@@ -69,14 +69,14 @@ provider-qualified model supports standalone compaction and its route exists.
 It has no inline fallback. Provider terminal errors, including context-window
 rejection during standalone compaction, produce one terminal transaction
 failure and are not retried indefinitely.
-An explicit `/compact` or authorized `agent_compact` request may recover a
+An explicit `:compact` or authorized `agent_compact` request may recover a
 terminally blocked standalone transaction. Its successor may preserve the
 failed cut or retreat it along the same ancestor path to obtain a closed
 provider prefix, but may never advance or cross branches and may not drop a
 retained resume obligation. Its resume watermark must remain on the original
 owed branch, and explicit recovery refuses a current head reached by navigating
 away from that branch. Ordinary activating input remains queued and does
-not clear or implicitly retry the block; `/cancel` does not abandon this idle
+not clear or implicitly retry the block; `:cancel` does not abandon this idle
 durable obligation.
 When a failed transaction carries `resume_through`, that watermark must be an
 ancestor of the successor watermark; a sibling branch with superficial
@@ -154,14 +154,14 @@ connection ids are deliberately not persisted:
 they identify a daemon incarnation rather than durable provider work.
 Only the start's post-commit reaction sends one cut-local compact request with
 that exact prompt id, provider-qualified model, operation, model parameters,
-tool surface, accounting identity, and synthetic trigger. Mutable `/model`
+tool surface, accounting identity, and synthetic trigger. Mutable `:model`
 selection applies only to future work; it cannot rewrite a committed start.
 If the captured model route disappears, the transaction durably fails
 before any provider request is published. Success installs a
 cut/suffix-bearing boundary so facts
 committed during compaction survive after the replacement window. Terminal
 failure records a safe durable category, blocks the owed activation from
-automatic retry, and leaves the agent addressable for explicit `/compact` or
+automatic retry, and leaves the agent addressable for explicit `:compact` or
 authorized `agent_compact` recovery.
 Inference resumes only after a durable dispatch watermark commits.
 While that checkpoint is interceptable or waiting to persist, an explicit
@@ -212,7 +212,7 @@ Discovery completion, or an explicit removal from the model's prior provider
 snapshot, is authoritative:
 the harness commits one fully qualified checkpoint and either dispatches its
 captured route or durably terminalizes it through the normal unavailable-route
-path. Current role or `/model` selection never substitutes another model.
+path. Current role or `:model` selection never substitutes another model.
 
 Canonical submitted, injected, and steered transcript facts carry a
 harness-owned `inference_activation` bit. Typed pending-prompt provenance—not

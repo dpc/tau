@@ -59,7 +59,7 @@ For Tau VCR runs, `ls`, `read`, `edit`, `apply_patch`, `shell`, and `gpt_shell` 
 
 ## Directory locks and mutation safety
 
-`config.dir_lock.enable` defaults false. When it is true, `dir_lock` is available and mutating `edit` / `apply_patch` calls automatically acquire matching directory locks. `shell` / `gpt_shell` calls are inferred read-write only while the agent holds a manual lock covering the command's call-local `cwd` / `workdir`; otherwise they are inferred read-only and do not wait on update locks. When directory locking is disabled, all shell calls run read-write and the UI does not show an access-mode chip. The extension publishes a `/shell-dir-force-unlock DIRECTORY` user action when a manual lock blocks work long enough to matter. `config.dir_lock.backend` defaults to `"memory"` for process-local coordination; set it to `"filesystem"` with an optional private `state_dir` to coordinate locks across Tau/ext-shell processes on the same host and user account.
+`config.dir_lock.enable` defaults false. When it is true, `dir_lock` is available and mutating `edit` / `apply_patch` calls automatically acquire matching directory locks. `shell` / `gpt_shell` calls are inferred read-write only while the agent holds a manual lock covering the command's call-local `cwd` / `workdir`; otherwise they are inferred read-only and do not wait on update locks. When directory locking is disabled, all shell calls run read-write and the UI does not show an access-mode chip. The extension publishes a `:shell-dir-force-unlock DIRECTORY` user action when a manual lock blocks work long enough to matter. `config.dir_lock.backend` defaults to `"memory"` for process-local coordination; set it to `"filesystem"` with an optional private `state_dir` to coordinate locks across Tau/ext-shell processes on the same host and user account.
 
 Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bind: true` is set while directory locking is enabled. The read-only bind defaults true under `dir_lock`; when enabled, Tau requires a read-only bind mount of the tool cwd and fails the shell call if native isolation is unsupported or cannot be installed.
 
@@ -79,7 +79,7 @@ Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bin
 - duplicate user-skill names from XDG skill roots beat legacy user roots before
   modified-time collision resolution
 
-`tau-ext-shell` parses skill `user-invocable`, `disable-model-invocation`, and `argument-hint` metadata and forwards it to the harness. The harness owns collision winner selection and policy: `disable-model-invocation` hides a skill from `<available_skills>` and the model `skill` tool and implies user invocation, while `/skill <name> [args]` (or `/skill:<name> [args]`) explicitly injects user-invocable skill content into the next prompt with arguments appended.
+`tau-ext-shell` parses skill `user-invocable`, `disable-model-invocation`, and `argument-hint` metadata and forwards it to the harness. The harness owns collision winner selection and policy: `disable-model-invocation` hides a skill from `<available_skills>` and the model `skill` tool and implies user invocation, while `:skill <name> [args]` (or `:skill:<name> [args]`) explicitly injects user-invocable skill content into the next prompt with arguments appended.
 
 `.local` locations are intended for machine- or user-specific instructions and are usually gitignored.
 

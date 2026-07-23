@@ -132,7 +132,7 @@ pub enum Command {
     /// for the duration of the session. Pass `--attach` (or `-a`) to
     /// connect to an already-running daemon for the current project
     /// instead — useful for a second UI, or for reconnecting after
-    /// `/detach`.
+    /// `:detach`.
     #[command(hide = true)]
     Run(RunArgs),
 
@@ -270,7 +270,7 @@ pub enum DevCommand {
         /// Running session identifier.
         session_id: String,
 
-        /// Line to submit. Slash commands are interpreted like the TUI.
+        /// Line to submit. Commands are interpreted like the TUI.
         #[arg(required = true, trailing_var_arg = true)]
         line: Vec<String>,
     },

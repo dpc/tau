@@ -330,7 +330,7 @@ impl RealAccount {
         } else {
             Some(self.state.google_refresh_token(&self.id)?.ok_or_else(|| {
                 format!(
-                    "Google email account `{}` is not authorized; run `/email auth google start {}` and then `/email auth google finish {} <copied-url>`",
+                    "Google email account `{}` is not authorized; run `:email auth google start {}` and then `:email auth google finish {} <copied-url>`",
                     self.id, self.id, self.id
                 )
             })?)
@@ -340,7 +340,7 @@ impl RealAccount {
             config,
             stored_refresh_token.as_deref(),
             &format!(
-                "Google email account `{}` is not authorized; run `/email auth google start {}` and then `/email auth google finish {} <copied-url>`",
+                "Google email account `{}` is not authorized; run `:email auth google start {}` and then `:email auth google finish {} <copied-url>`",
                 self.id, self.id, self.id
             ),
         )

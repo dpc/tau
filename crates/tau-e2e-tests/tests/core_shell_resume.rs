@@ -206,6 +206,7 @@ fn create_agent_without_prompt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
         UiCreateAgent {
+            literal: false,
             session_id: SESSION.into(),
             role: "deterministic-e2e".to_owned(),
             model_override: None,

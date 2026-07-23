@@ -62,7 +62,7 @@ it authenticates caller-supplied sender identity plus message/watch-response kin
 by calling back to the claimed sender
 harness with a sender-minted per-message capability bound to the message body and
 routing fields. Runtime daemon metadata is discovery data only: `session_id`
-means the daemon's current active session and is updated on `/session new`; stale
+means the daemon's current active session and is updated on `:session new`; stale
 or ambiguous metadata must fail discovery rather than silently choosing a target.
 A discovery scan never deletes runtime files: even a dead-pid and file-identity
 check cannot be atomic with PID reuse and a replacement daemon binding the same

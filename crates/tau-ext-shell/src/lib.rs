@@ -1049,7 +1049,7 @@ fn shell_action_schema() -> tau_actions::ActionSchema {
     tau_actions::ActionSchema {
         version: tau_actions::ACTION_SCHEMA_VERSION,
         roots: vec![tau_actions::ActionCommand {
-            name: "/shell-dir-force-unlock".to_owned(),
+            name: ":shell-dir-force-unlock".to_owned(),
             description: "Force-release ext-shell manual directory locks overlapping a directory"
                 .to_owned(),
             action_id: Some(SHELL_DIR_FORCE_UNLOCK_ACTION_ID.to_owned()),

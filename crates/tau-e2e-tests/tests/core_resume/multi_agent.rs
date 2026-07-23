@@ -133,22 +133,22 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
     observer_b.drain_available()?;
     assert_final_pre_input_replay(&observer_b.events, &session_id, &identities)?;
 
-    boot_b.send_line(&format!("/agent switch {}", identities.worker))?;
+    boot_b.send_line(&format!(":agent switch {}", identities.worker))?;
     let restored_worker = boot_b.wait_for("This active-auto agent is idle", deadline)?;
     assert_worker_restored_frame(&restored_worker)?;
     boot_b.require_no_tool_violation()?;
 
-    boot_b.send_line(&format!("/agent switch {}", identities.main))?;
+    boot_b.send_line(&format!(":agent switch {}", identities.main))?;
     boot_b.wait_for("worker completion observed", deadline)?;
     let main_frame = boot_b.wait_ready_for(identities.main.as_str(), deadline)?;
     assert_main_terminal_frame(&main_frame)?;
     boot_b.require_no_tool_violation()?;
 
-    boot_b.send_line(&format!("/agent switch {}", identities.worker))?;
+    boot_b.send_line(&format!(":agent switch {}", identities.worker))?;
     let restored_worker = boot_b.wait_for("This active-auto agent is idle", deadline)?;
     assert_worker_restored_frame(&restored_worker)?;
     boot_b.require_no_tool_violation()?;
-    boot_b.send_line(&format!("/agent resume {}", identities.worker))?;
+    boot_b.send_line(&format!(":agent resume {}", identities.worker))?;
     boot_b.wait_ready_for(identities.worker.as_str(), deadline)?;
 
     let fresh_start = observer_b.events.len();

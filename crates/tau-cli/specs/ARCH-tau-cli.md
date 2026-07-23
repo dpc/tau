@@ -34,7 +34,7 @@ unignored files. These operations should stay bounded and best-effort: failures
 or quota/size limits should disable the completion source or surface a local
 notice, not wedge the prompt.
 
-Theme completion and no-argument `/theme` listings may inspect custom theme
+Theme completion and no-argument `:theme` listings may inspect custom theme
 files only for optional display metadata. These reads must remain best-effort
 and bounded: avoid opening non-regular or special theme directory entries, do
 not follow symlinks in the metadata path, keep a byte limit for regular files in
@@ -86,10 +86,10 @@ mixing state derived from different selections.
 The CLI owns local terminal commands and parsing, completion, and echo for
 harness-owned prompt commands. Dynamic extension actions are resolved against the
 current published action schema, while harness-owned prompt commands remain prompt
-input for harness resolution. Cross-boundary commands such as `/retry` and `/tree`
+input for harness resolution. Cross-boundary commands such as `:retry` and `:tree`
 parse in the CLI but address exact harness-owned prompt work or provenance rather
 than reconstructing it locally. Their behavior is specified by
-[SPEC-tau-cli-slash-commands](SPEC-tau-cli-slash-commands.md).
+[SPEC-tau-cli-command-mode](SPEC-tau-cli-command-mode.md).
 
 The CLI also owns presentation-only recursive watch activity. It folds the
 harness-owned live watch DAG and edge-scoped outer-turn lifecycle into direct
@@ -133,7 +133,7 @@ prevents the current harness process from writing session membership logs,
 session metadata/locks, per-session debug `events.jsonl`, per-session
 harness/extension stderr logs, session-scoped extension data, and terminal UI
 logs. Agent transcripts remain durable under the global agent store unless an
-agent is explicitly staged as ephemeral with `/new` then `/ephemeral on`.
+agent is explicitly staged as ephemeral with `:new` then `:ephemeral on`.
 
 Ephemeral agents are also local Tau persistence controls, not confidentiality
 boundaries. Their own semantic transcript, metadata, durable session membership,
@@ -157,7 +157,7 @@ returned only as a directed non-persisted notice, and must remain bounded by
 key-cardinality caps with overflow buckets so a noisy peer cannot grow daemon
 memory by emitting many unique custom event names.
 
-The local `/debug-show-ui-event-stats` report preserves its lifetime cumulative
+The local `:debug-show-ui-event-stats` report preserves its lifetime cumulative
 totals and additionally reports an attach-phase by delivery-kind matrix. Initial
 traffic, including the non-replay `session.replay_complete` boundary, is cold
 attach; traffic after that boundary is steady. Replay/non-replay remains an

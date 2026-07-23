@@ -1,4 +1,4 @@
-//! Higher-level terminal prompt with slash-command completion.
+//! Higher-level terminal prompt with command completion.
 //!
 //! This crate is now a thin shell around [`tau_cli_term_raw`]: the
 //! raw layer owns the input state machine (history navigation,
@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use bounded_command::{ProcessOwnership, run_with_bounded_stdout, run_with_inherited_stdio};
 pub use completion::{
-    ArgCompleter, CommandName, CompletionData, CompletionItem, CompletionRule, CompletionRules,
-    SlashCommand,
+    ArgCompleter, CommandCompletion, CommandName, CompletionData, CompletionItem, CompletionRule,
+    CompletionRules,
 };
 #[cfg(test)]
 pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
@@ -150,14 +150,14 @@ pub struct HighTerm {
 }
 
 impl HighTerm {
-    /// Creates a new terminal with the given prompt and slash commands.
+    /// Creates a new terminal with the given prompt and commands.
     ///
     /// Returns the terminal, a thread-safe handle for rendering, and a
     /// [`CompletionData`] handle for pushing dynamic argument completions
     /// from background threads.
     pub fn new(
         left_prompt: impl Into<StyledText>,
-        commands: Vec<SlashCommand>,
+        commands: Vec<CommandCompletion>,
         theme: Theme,
         cursor_shape: CursorShape,
         bindings: impl IntoIterator<Item = (String, String)>,
@@ -176,7 +176,7 @@ impl HighTerm {
     /// Creates a new terminal and seeds prompt input history.
     pub fn new_with_input_history(
         left_prompt: impl Into<StyledText>,
-        commands: Vec<SlashCommand>,
+        commands: Vec<CommandCompletion>,
         theme: Theme,
         cursor_shape: CursorShape,
         bindings: impl IntoIterator<Item = (String, String)>,
@@ -196,7 +196,7 @@ impl HighTerm {
     /// Creates a new terminal with explicit prompt completion rules.
     pub fn new_with_completion_rules(
         left_prompt: impl Into<StyledText>,
-        commands: Vec<SlashCommand>,
+        commands: Vec<CommandCompletion>,
         theme: Theme,
         cursor_shape: CursorShape,
         bindings: impl IntoIterator<Item = (String, String)>,
@@ -240,7 +240,7 @@ impl HighTerm {
     pub(crate) fn new_for_test(
         mut term: tau_cli_term_raw::Term,
         handle: TermHandle,
-        commands: Vec<SlashCommand>,
+        commands: Vec<CommandCompletion>,
         theme: Theme,
         bindings: impl IntoIterator<Item = (String, String)>,
     ) -> (Self, CompletionData) {
@@ -407,9 +407,7 @@ impl HighTerm {
     }
 
     fn handle_line_event(&mut self, line: String) -> NextEventStep {
-        if !line.is_empty() {
-            self.prompt_history.push(line.clone());
-        }
+        self.record_submitted_prompt(&line);
         self.sync_menu_block();
         self.handle.redraw();
         NextEventStep::Return(Event::Line(line))
@@ -549,9 +547,7 @@ impl HighTerm {
                 PromptActionOutcome::Continue
             }
             RawEvent::Line(line) => {
-                if !line.is_empty() {
-                    self.prompt_history.push(line.clone());
-                }
+                self.record_submitted_prompt(&line);
                 self.sync_menu_block();
                 PromptActionOutcome::Return(Event::Line(line))
             }
@@ -573,6 +569,17 @@ impl HighTerm {
                 unreachable!("unsupported prompt action event")
             }
         }
+    }
+
+    /// Records one submitted prompt using the canonical literal-escape
+    /// spelling.
+    fn record_submitted_prompt(&mut self, line: &str) {
+        if line.is_empty() {
+            return;
+        }
+        let history_line = canonical_literal_colon_prompt(line).unwrap_or_else(|| line.to_owned());
+        self.prompt_history.push(history_line.clone());
+        self.term.replace_last_submitted_input(history_line);
     }
 
     fn maybe_run_command_completion(&mut self) -> bool {
@@ -617,6 +624,18 @@ impl HighTerm {
         );
         self.handle.print_output("prompt-action-error", block);
     }
+}
+
+/// Returns canonical literal-colon prompt text for a line beginning with `::`.
+///
+/// Leading whitespace is preserved while exactly one colon is removed from the
+/// first non-whitespace token. Lines that do not use the escape return `None`.
+#[must_use]
+pub fn canonical_literal_colon_prompt(line: &str) -> Option<String> {
+    let leading_len = line.len() - line.trim_start().len();
+    line.get(leading_len..)?
+        .strip_prefix("::")
+        .map(|suffix| format!("{}:{suffix}", &line[..leading_len]))
 }
 
 fn run_agent_fzf_command(program: &std::ffi::OsStr, rows: &str) -> Result<Option<String>, String> {
@@ -761,7 +780,7 @@ fn parse_agent_fzf_output(output: Vec<u8>) -> Result<Option<String>, String> {
 }
 
 fn make_completion_source(
-    commands: Vec<SlashCommand>,
+    commands: Vec<CommandCompletion>,
     data: CompletionData,
     rules: CompletionRules,
 ) -> Box<dyn tau_cli_term_raw::CompletionSource> {

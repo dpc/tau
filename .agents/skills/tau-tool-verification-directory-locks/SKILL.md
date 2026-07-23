@@ -42,7 +42,7 @@ When locking is enabled, verify all of these behaviors:
 * A mutating tool that waits more than 5s and then acquires its automatic lock reports `lock_wait_duration_seconds` in its final result or error details. Fast, unblocked, canceled, and abandoned lock paths omit it.
 * Waiting on an idle manual lock eventually returns an abandoned-lock error. It should return `error: dir_lock_abandoned` with details headers including `blocking_directory`, `lock_owner_id`, `idle_seconds`, and `held_seconds`, plus a clear text payload in `output`. Active same-owner mutating tools under the lock should prevent this abandoned-lock error.
 * Waiting tool UI/status includes the directory or directories being waited on. `dir_lock` success and failure UI/status should also include the relevant directory when known, and successful lock/unlock status should use the normal `ok` chip.
-* The `/shell-dir-force-unlock DIRECTORY` UI action is published by ext-shell and force-releases manual locks overlapping that canonical directory, regardless of owner.
+* The `:shell-dir-force-unlock DIRECTORY` UI action is published by ext-shell and force-releases manual locks overlapping that canonical directory, regardless of owner.
 * `agent_start` agents are independent owners. A parent lock does not automatically cover a delegate, and a delegate lock does not belong to the parent.
 * User `!` shell commands are excluded from this lock path.
 
@@ -95,9 +95,9 @@ The FIFO check is the starvation guard only among overlapping path requests. If 
 
 #### Phase 5: user force-unlock action
 
-Hold `root/a` from Agent A. Start Agent B mutating `root/a/child` and wait until the UI shows it is waiting on `root/a/child` or another canonical child directory. Invoke `/shell-dir-force-unlock root/a/child` from the UI. Expected: the action output names the released lock owner, Agent B completes, and a later `dir_lock unlock root/a` from Agent A errors because the manual lock was already force-released.
+Hold `root/a` from Agent A. Start Agent B mutating `root/a/child` and wait until the UI shows it is waiting on `root/a/child` or another canonical child directory. Invoke `:shell-dir-force-unlock root/a/child` from the UI. Expected: the action output names the released lock owner, Agent B completes, and a later `dir_lock unlock root/a` from Agent A errors because the manual lock was already force-released.
 
-Also test the reverse overlap: Agent A holds `root/a/child`, Agent B waits on `root/a`, and `/shell-dir-force-unlock root/a` releases the child lock. Calling the action for a directory with no overlapping manual locks should return a clear action error. Running automatic locks should not be force-released; wait for those tools or cancel them normally.
+Also test the reverse overlap: Agent A holds `root/a/child`, Agent B waits on `root/a`, and `:shell-dir-force-unlock root/a` releases the child lock. Calling the action for a directory with no overlapping manual locks should return a clear action error. Running automatic locks should not be force-released; wait for those tools or cancel them normally.
 
 #### Phase 6: cancellation and background behavior
 
@@ -132,7 +132,7 @@ Report concise but complete findings:
 * For each automatically locked filesystem mutation tool, whether it waited on the expected directory and completed only after unlock; for `shell`/`gpt_shell`, whether no-coverage commands bypassed update locks and same-owner manual-lock-covered commands kept the lock active.
 * Whether waiting UI/status showed the blocked directory, whether `dir_lock` failures showed the target directory, and whether auto-background plus `wait` behaved normally.
 * Whether slow acquired lock waits reported `lock_wait_duration_seconds`, and whether quick/no-wait, canceled, and abandoned paths omitted it.
-* Whether `/shell-dir-force-unlock DIRECTORY` was available, released overlapping manual locks, reported owner details, and left automatic locks alone.
+* Whether `:shell-dir-force-unlock DIRECTORY` was available, released overlapping manual locks, reported owner details, and left automatic locks alone.
 * Whether unrelated later waiters could proceed despite an earlier blocked waiter, while later overlapping waiters still stayed behind the earlier conflicting waiter.
 * Whether cancellation removed a waiting lock request and prevented the delayed mutation.
 * Whether abandoned-lock liveness errors used `error: dir_lock_abandoned`, structured details headers for `blocking_directory`, `lock_owner_id`, `idle_seconds`, and `held_seconds`, and an explanatory `output` payload, and whether active same-owner tools suppressed the abandoned-lock error.

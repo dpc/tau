@@ -98,7 +98,7 @@ fn google_config_allows_http_only_for_loopback_api_base() {
 
 #[test]
 fn google_config_allows_missing_refresh_token_for_action_auth() {
-    // Interactive `/calendar auth google` stores refresh tokens in private
+    // Interactive `:calendar auth google` stores refresh tokens in private
     // extension state, so the manual refresh token secret is optional.
     let cfg = CalendarExtensionConfig {
         enable: true,

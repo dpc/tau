@@ -19,6 +19,28 @@ is WebSocket-only, and all built-in provider egress shares the immutable policy
 documented in
 [`tau-provider/SECURITY.md`](crates/tau-provider/SECURITY.md).
 
+## Command-mode and prompt boundary
+
+First-non-whitespace `:` selects non-provider command authority. Unknown or
+malformed colon commands fail locally, while slash-prefixed text—including
+obsolete command spellings—is ordinary provider input. A doubled `::` escape
+keeps a typed literal marker through every harness-owned command consumer even
+though history, durable prompt text, and provider projection contain only the
+canonical single-colon text. This prevents canonical `:skill` prompt text from
+being reinterpreted after the CLI removes the escape.
+
+Gmail OAuth finish arguments remain raw only for exact-owner extension routing.
+The CLI redacts them from command echo and persistent prompt history, and the
+harness excludes transient inbound invokes from debug JSONL and redacts the
+published debug-log copy. Re-check stale
+user-facing command instructions, interactive/headless parity, completion
+precedence, literal escape handling around skills, and both debug-log paths
+whenever command routing or action logging changes. See
+[DECISION-colon-command-mode](specs/DECISION-colon-command-mode.md),
+[SPEC-tau-cli-command-mode](crates/tau-cli/specs/SPEC-tau-cli-command-mode.md),
+and
+[SPEC-tau-harness-session-state](crates/tau-harness/specs/SPEC-tau-harness-session-state.md).
+
 Peer harness messaging is cooperative same-UID local IPC, not a hostile-process
 sandbox or per-sender ACL. Callback correlation prevents accidental sender/route
 confusion before bounded admission or model-spending auto-start, while peer text
@@ -429,7 +451,7 @@ transaction with a resume watermark remains fail-closed until an explicit
 successor preserves same-branch coverage of that watermark. A successor may
 retreat its cut to retain more exact suffix, but it must not replace the owed
 watermark with an ancestor or sibling selected by later head navigation.
-Ordinary input and `/cancel` do not abandon this ownership; if the selected head
+Ordinary input and `:cancel` do not abandon this ownership; if the selected head
 no longer descends from the owed watermark, explicit recovery must remain
 blocked. Core validation and warm/cold replay regressions enforce these rules.
 Revisit them when adding any explicit abandon/rewind operation or changing

@@ -2,7 +2,7 @@ use tau_proto::{NodeId, UiTreeNavigationTarget};
 
 use super::parse_tree_navigation_target;
 
-/// The shared `/tree` argument parser is used by both the interactive input
+/// The shared `:tree` argument parser is used by both the interactive input
 /// loop and `tau send`; numeric arguments are prompt anchors, while raw
 /// node ids require the explicit expert `node` keyword.
 #[test]

@@ -60,7 +60,7 @@ fn selected_named_builtin_theme_case_insensitively() {
     select_theme_for_command(&dirs, "Tau-Plain-Dark").expect("case-insensitive built-in loads");
 }
 
-/// Ensures the runtime `/theme` selection helper honors the user's explicit
+/// Ensures the runtime `:theme` selection helper honors the user's explicit
 /// argument instead of applying the startup-only `TAU_THEME` override.
 #[test]
 fn command_theme_selection_ignores_env_override() {
@@ -122,7 +122,7 @@ fn selected_external_theme_from_config_themes_dir() {
     assert!(prompt.spans()[0].style.bold);
 }
 
-/// Ensures `/theme` completion/listing can show descriptions for built-in
+/// Ensures `:theme` completion/listing can show descriptions for built-in
 /// selectors and valid user theme files without exposing path-like or duplicate
 /// external names.
 #[test]
@@ -179,7 +179,7 @@ fn available_theme_choices_include_builtins_and_user_themes() {
     }));
 }
 
-/// Ensures no-argument `/theme` listings include descriptions when available,
+/// Ensures no-argument `:theme` listings include descriptions when available,
 /// while preserving compact name-only output for themes without metadata.
 #[test]
 fn theme_listing_formats_descriptions_when_present() {
@@ -228,7 +228,7 @@ fn available_theme_choices_omit_description_for_oversized_theme_files() {
 
 /// Ensures completion/listing metadata extraction does not open non-regular
 /// theme entries. They remain visible by name, but with empty descriptions so
-/// special files cannot wedge prompt completion or no-argument `/theme` output.
+/// special files cannot wedge prompt completion or no-argument `:theme` output.
 #[test]
 fn available_theme_choices_omit_description_for_non_regular_entries() {
     let temp = tempfile::TempDir::new().expect("tempdir");
@@ -381,7 +381,7 @@ fn suspended_prompt_input_placeholder_explains_explicit_resume() {
 
     assert_eq!(
         text,
-        "This agent is suspended. Use /resume to include it in navigation."
+        "This agent is suspended. Use :resume to include it in navigation."
     );
 }
 

@@ -302,7 +302,7 @@ fn published_action_invoke_redacts_gmail_oauth_redirect_url() {
         extension_name: ExtensionName::from("tau-ext-pim"),
         instance_id: ExtensionInstanceId::from(0),
         action_id: "email.auth.google.finish".to_owned(),
-        raw_line: "/email auth google finish work http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret".to_owned(),
+        raw_line: ":email auth google finish work http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret".to_owned(),
         argv: vec![
             "work".to_owned(),
             "http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret".to_owned(),

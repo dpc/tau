@@ -6,7 +6,7 @@
 
 This crate owns prompt features that need application-shaped data but should not live in the low-level renderer:
 
-- slash-command and argument completion candidate construction,
+- command and argument completion candidate construction,
 - completion menu rendering as `tau-term-screen` styled blocks,
 - prompt-local binding actions such as prompt history search, undo/redo, external editing, and shell insertion,
 - `$EDITOR` / `$VISUAL` resolution and terminal pause/resume around external programs,
@@ -17,6 +17,11 @@ This crate owns prompt features that need application-shaped data but should not
 `tau-cli-term-raw` owns terminal state and editing mechanics: raw mode, crossterm events, key dispatch, multiline buffer editing, completion menu lifecycle, prompt history navigation, undo/redo, redraw scheduling, and screen rendering.
 
 `tau-cli-term` owns prompt semantics that depend on configured commands or external tools. It may call raw named actions, but it should not duplicate the raw editing state machine.
+
+First-non-whitespace `:` enters intrinsic command mode before configured
+prompt-text completion rules run. A doubled prefix is literal prompt syntax:
+`::text` remains visible while editing but is stored canonically as `:text` in
+both raw editable history and the high-level history-search list.
 
 `tau-cli` owns application behavior. High-level binding actions unknown to this crate are surfaced as `Event::Action(String)` and interpreted by `tau-cli`; this crate should not interpret application actions or provider/role behavior.
 

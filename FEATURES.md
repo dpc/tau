@@ -17,7 +17,7 @@ without surrounding them with heavy chrome. It includes:
   bindings, and prompt editing in `$EDITOR`;
 - local `!` shell commands, arbitrary picker commands such as `fzf`, and
   user-defined prompt templates;
-- slash commands for agents, sessions, roles, models, transcript branches, and
+- commands for agents, sessions, roles, models, transcript branches, and
   display settings; and
 - built-in dark and light themes plus user-defined JSON5 themes.
 

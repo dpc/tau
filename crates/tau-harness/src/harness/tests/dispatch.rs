@@ -446,6 +446,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     h.selected_model = None;
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         parent_agent: None,
         session_id: "s1".into(),
         role: h.selected_role.clone(),
@@ -545,6 +546,7 @@ fn existing_agent_human_ui_prompt_is_wrapped_only_in_provider_context() {
     let raw = "  hello <world> & 雪\nnext  ";
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: raw.to_owned(),
         agent_id: agent_id.clone(),
@@ -591,6 +593,7 @@ fn new_agent_initial_human_ui_prompt_is_wrapped_only_in_provider_context() {
     let raw = "initial <prompt> & text";
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         parent_agent: None,
         session_id: "s1".into(),
         role: h.selected_role.clone(),
@@ -651,6 +654,7 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
     let cwd = std::path::PathBuf::from("/tmp/tau-ui-cwd");
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         parent_agent: None,
         session_id: "s1".into(),
         role: h.selected_role.clone(),
@@ -4088,6 +4092,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "run two slow tools".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -7758,6 +7763,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
 
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "redirect".to_owned(),
         agent_id,
@@ -13935,7 +13941,7 @@ fn seed_historical_open_prefix_failure(
     (prefix, assistant, results)
 }
 
-/// Explicit `/compact` must repair a warm historical open-prefix failure,
+/// Explicit `:compact` must repair a warm historical open-prefix failure,
 /// retain queued activation ownership, and dispatch the exact tool round once.
 #[test]
 fn compact_repairs_warm_historical_open_prefix_failure() {
@@ -14027,7 +14033,7 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
     h.shutdown().expect("shutdown");
 }
 
-/// Cold replay must retain the failed transaction and allow `/compact` to
+/// Cold replay must retain the failed transaction and allow `:compact` to
 /// supersede its historical open cut with the normalized ancestor.
 #[test]
 fn compact_repairs_cold_historical_open_prefix_failure() {
@@ -14101,7 +14107,7 @@ fn compact_repairs_cold_historical_open_prefix_failure() {
     resumed.shutdown().expect("shutdown");
 }
 
-/// `/compact` must remain fail-closed when navigation moves a warm blocked
+/// `:compact` must remain fail-closed when navigation moves a warm blocked
 /// agent before the transaction's owed resume watermark.
 #[test]
 fn compact_refuses_warm_blocked_recovery_off_owed_branch() {
@@ -16875,6 +16881,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -17126,6 +17133,7 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
     );
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "fresh worker turn".to_owned(),
         agent_id: worker_agent_id.clone(),
@@ -17291,6 +17299,7 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
     );
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "fresh after terminal cut".to_owned(),
         agent_id: worker_agent_id.clone(),
@@ -17509,6 +17518,7 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
     );
     resumed
         .handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "fresh after compaction failure".to_owned(),
             agent_id: worker_agent_id.clone(),
@@ -17684,7 +17694,7 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
 fn delegated_agent_user_interaction_prevents_auto_suspend() {
     // If a UI targets a running delegated agent before its delegated reply is
     // returned, that interaction converts it into a normal active agent. The
-    // later delegate completion must not hide it from `/agent switch`.
+    // later delegate completion must not hide it from `:agent switch`.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -18013,6 +18023,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -18149,6 +18160,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "find the bug in foo.rs".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -18424,6 +18436,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "go".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -18637,6 +18650,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -18827,6 +18841,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "delegate slow work".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -19120,6 +19135,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "delegate slow work".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -19280,6 +19296,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "run fail".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -19522,6 +19539,7 @@ fn backgrounded_tool_progress_is_not_published() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "run slow".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -19738,7 +19756,7 @@ fn tool_backed_start_agent_display_name_does_not_include_parent_lineage() {
     h.shutdown().expect("shutdown");
 }
 
-/// A manually created agent has no explicit task or `/name`, so the durable
+/// A manually created agent has no explicit task or `:name`, so the durable
 /// start fact must not synthesize its role as presentation metadata.
 #[test]
 fn manually_created_agent_has_no_default_display_name() {
@@ -20139,6 +20157,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "fan out".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -21425,6 +21444,7 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
     );
     resumed
         .handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "continue after restart".to_owned(),
             agent_id: crate::parse_agent_id(&watcher_id),
@@ -22291,6 +22311,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -22573,6 +22594,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     h.publish_for_agent(
         &default_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -22750,6 +22772,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -22932,6 +22955,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     h.publish_for_agent(
         &default_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "ROOT: ask top delegate to delegate again".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -23373,7 +23397,7 @@ fn external_agent_message_request_publishes_received_projection() {
 }
 
 /// Cross-harness message RPCs are addressed to one active session; stale
-/// runtime metadata or a racing `/session new` must not deliver into the wrong
+/// runtime metadata or a racing `:session new` must not deliver into the wrong
 /// active session.
 #[test]
 fn external_agent_message_request_rejects_wrong_active_session() {
@@ -24763,7 +24787,7 @@ fn external_message_auth_rejects_bare_exact_capability_substitution() {
 }
 
 /// Stale async external-message completions from an abandoned session must not
-/// publish sender projections or tool completions after `/session new`, even if
+/// publish sender projections or tool completions after `:session new`, even if
 /// the new session happens to reinstall the same conversation/tool ownership
 /// keys before the old worker finishes.
 #[test]
@@ -24822,7 +24846,7 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
     h.shutdown().expect("shutdown");
 }
 
-/// `/session new` reuses the daemon process, so the daemon's runtime discovery
+/// `:session new` reuses the daemon process, so the daemon's runtime discovery
 /// metadata must advertise the new active session and stop matching the stale
 /// old session after `switch_session` succeeds.
 #[test]
@@ -25618,6 +25642,7 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     );
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: false,
         session_id: h.current_session_id.clone(),
         text: "please continue <now>&</now> >".to_owned(),
         agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
@@ -25697,6 +25722,7 @@ fn internal_prompt_to_watched_agent_does_not_notify_watchers() {
     );
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: false,
         session_id: h.current_session_id.clone(),
         text: "[tau-internal] Tool call `call-1` is complete.".to_owned(),
         agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
@@ -25765,6 +25791,7 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
     );
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: false,
         session_id: h.current_session_id.clone(),
         text: "queued follow-up".to_owned(),
         agent_id: watched_agent_id.clone(),
@@ -26621,6 +26648,7 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     );
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "fresh child turn".to_owned(),
         agent_id: child_agent_id.clone(),
@@ -27100,6 +27128,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     )
     .expect("set mode before reconnect");
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: false,
         session_id: h.current_session_id.clone(),
         text: "resume before reconnect".to_owned(),
         agent_id: agent_id.clone(),
@@ -27256,6 +27285,7 @@ fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
         h.handle_client_event_inner(
             "prompt-ui",
             Event::UiPromptSubmitted(UiPromptSubmitted {
+                literal: false,
                 session_id: h.current_session_id.clone(),
                 text: format!("target this agent, not @{other_id}"),
                 agent_id: target_id.clone(),
@@ -27469,7 +27499,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
             target_id.clone()
         };
         let text = if matches!(case, Case::InvalidSkill) {
-            "/skill definitely-not-installed".to_owned()
+            ":skill definitely-not-installed".to_owned()
         } else {
             case_name.to_owned()
         };
@@ -27488,6 +27518,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
         };
 
         let prompt_event = Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id,
             text,
             agent_id: submitted_agent_id,
@@ -27645,6 +27676,7 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
     let result = h.handle_client_event_inner(
         "append-failure-ui",
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: h.current_session_id.clone(),
             text: "must not be admitted".to_owned(),
             agent_id: target_id.clone(),

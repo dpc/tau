@@ -431,7 +431,7 @@ Recovery is a separately gated follow-on. The exact authority question is:
 > the uncertain work; must it reuse the checkpointed `AgentPromptId` or mint a
 > new one; and when may later targeted input run?
 
-Current `/retry` is not that operation: it addresses a live provider-owned
+Current `:retry` is not that operation: it addresses a live provider-owned
 parked delayed retry and requires transient in-flight routing. Pause this
 follow-on until a separately reviewed decision answers the question; do not
 change recovery behavior to make the E2E terminate.
@@ -512,7 +512,7 @@ no-`ctx_id` prompt to select among multiple unbound lanes.
 The VT model proves only that both restored conversations can be selected,
 their terminal rows do not become pending again, and a targeted worker prompt
 renders after its restored transcript. Drive selection with
-`/agent switch <stable-id>` using IDs from the side observer; do not add
+`:agent switch <stable-id>` using IDs from the side observer; do not add
 `fzf`/picker behavior to this gate. Simultaneously require side-observer replay
 boundaries, directed roster state, typed store prefixes/suffixes, exact provider
 consumption, and bounded cleanup.
@@ -532,7 +532,7 @@ target/debug/tau dev tmux start \
 
 Configure the exact trusted provider profile first through
 `~/.config/tau/testing.yaml`. Inside the isolated tmux session, create a main
-and worker, inspect `/agent`, select each with `/agent switch <agent-id>`, and
+and worker, inspect `:agent`, select each with `:agent switch <agent-id>`, and
 send one follow-up. From a separate shell pointed at the scratch runtime, the
 external roster command is `tau agent list <session-id>`.
 

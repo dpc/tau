@@ -7,23 +7,68 @@ use tau_proto::{Event, HarnessInputMessage, HarnessOutputMessage};
 
 use crate::CliError;
 use crate::ui_prompt::{
-    CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, create_user_agent_prompt,
+    CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, PromptCommandHandling,
+    create_user_agent_prompt,
 };
 
 const TREE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+enum SendLineDisposition {
+    Message(Box<HarnessInputMessage>),
+    Noop,
+}
+
 pub(crate) fn run_send(session_id: &str, line: &str) -> Result<(), CliError> {
-    let text = line.trim();
-    if text.is_empty() {
+    let disposition = classify_send_line(session_id, line)?;
+    let SendLineDisposition::Message(message) = disposition else {
         return Ok(());
+    };
+    send_message(session_id, *message)
+}
+
+fn classify_send_line(session_id: &str, line: &str) -> Result<SendLineDisposition, CliError> {
+    let canonical_line = tau_cli_term::canonical_literal_colon_prompt(line);
+    let text = canonical_line.as_deref().unwrap_or(line).trim();
+    if text.is_empty() {
+        return Ok(SendLineDisposition::Noop);
     }
 
+    if canonical_line.is_some() {
+        return Ok(SendLineDisposition::Message(Box::new(
+            HarnessInputMessage::emit(create_user_agent_prompt(
+                session_id,
+                DEFAULT_AGENT_ROLE,
+                text,
+                CreateUserAgentPromptOptions {
+                    command_handling: PromptCommandHandling::LiteralEscape,
+                    ..CreateUserAgentPromptOptions::default()
+                },
+            )),
+        )));
+    }
+    if text == ":tree" {
+        return Ok(SendLineDisposition::Message(Box::new(
+            crate::ui_events::tree_request_message(session_id, None),
+        )));
+    }
+    if let Some(event) = event_for_line(session_id, text) {
+        return Ok(SendLineDisposition::Message(Box::new(
+            HarnessInputMessage::emit(event),
+        )));
+    }
+    if valid_headless_noop(text) {
+        return Ok(SendLineDisposition::Noop);
+    }
+    Err(CliError::Participant(format!(
+        "unknown or unsupported command `{}`",
+        text.split_whitespace().next().unwrap_or(text)
+    )))
+}
+
+fn send_message(session_id: &str, message: HarnessInputMessage) -> Result<(), CliError> {
     let harness_path = find_daemon_for_session(session_id).ok_or_else(|| {
         CliError::Participant(format!("no running daemon for session `{session_id}`"))
     })?;
-    let Some(message) = message_for_line(session_id, text) else {
-        return Ok(());
-    };
     let socket_path = tau_harness::runtime_dir::socket_path(&harness_path);
     if matches!(message, HarnessInputMessage::UiTreeRequest(_)) {
         let deadline = Instant::now() + TREE_REQUEST_TIMEOUT;
@@ -35,51 +80,47 @@ pub(crate) fn run_send(session_id: &str, line: &str) -> Result<(), CliError> {
         let mut writer = crate::ui_client::connect_ui_writer(&socket_path, "tau-dev-send")?;
         crate::ui_client::send_message(&mut writer, &message)?;
     }
-
     Ok(())
 }
 
-fn message_for_line(session_id: &str, text: &str) -> Option<HarnessInputMessage> {
-    if text == "/tree" {
-        return Some(crate::ui_events::tree_request_message(session_id, None));
+#[cfg(test)]
+fn message_for_line(session_id: &str, line: &str) -> Option<HarnessInputMessage> {
+    match classify_send_line(session_id, line).ok()? {
+        SendLineDisposition::Message(message) => Some(*message),
+        SendLineDisposition::Noop => None,
     }
-    event_for_line(session_id, text).map(HarnessInputMessage::emit)
+}
+
+#[cfg(test)]
+fn event_for_test_line(session_id: &str, line: &str) -> Option<Event> {
+    let HarnessInputMessage::Emit(emit) = message_for_line(session_id, line)? else {
+        return None;
+    };
+    Some(*emit.event)
 }
 
 fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
-    if text == "/quit" || text == "/detach" {
+    if text == ":quit" || text == ":detach" {
         return None;
     }
-    if text == "/cancel" {
+    if text == ":cancel" {
         return Some(crate::ui_events::cancel_prompt(session_id, None));
     }
-    if text == "/retry" {
+    if text == ":retry" {
         return Some(crate::ui_events::retry_prompt(session_id, None));
     }
-    if text
-        .strip_prefix("/retry")
-        .is_some_and(|suffix| suffix.chars().next().is_some_and(char::is_whitespace))
-    {
-        return None;
-    }
-    if let Some(arg) = text.strip_prefix("/tree ")
+    if let Some(arg) = text.strip_prefix(":tree ")
         && let Ok(target) = crate::ui_commands::parse_tree_navigation_target(arg)
     {
         return Some(crate::ui_events::navigate_tree(session_id, None, target));
     }
-    if text == "/compact" {
+    if text == ":compact" {
         return Some(crate::ui_events::compact_request(session_id, None));
     }
-    if text == "/fast" || text.starts_with("/fast ") {
-        return None;
-    }
-    if text == "/role" {
-        return None;
-    }
-    if let Some(rest) = text.strip_prefix("/role ") {
+    if let Some(rest) = text.strip_prefix(":role ") {
         return role_event_for_command(rest.trim());
     }
-    if let Some(model) = text.strip_prefix("/model ") {
+    if let Some(model) = text.strip_prefix(":model ") {
         let model = model.trim();
         if let Ok(model) = model.parse::<tau_proto::ModelId>() {
             return Some(crate::ui_events::agent_model_select(
@@ -106,13 +147,50 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
         }
         return None;
     }
+    if text == ":skill" || text.starts_with(":skill ") || text.starts_with(":skill:") {
+        return Some(create_user_agent_prompt(
+            session_id,
+            DEFAULT_AGENT_ROLE,
+            text,
+            CreateUserAgentPromptOptions::default(),
+        ));
+    }
+    if !text.starts_with(':') {
+        return Some(create_user_agent_prompt(
+            session_id,
+            DEFAULT_AGENT_ROLE,
+            text,
+            CreateUserAgentPromptOptions::default(),
+        ));
+    }
+    None
+}
 
-    Some(create_user_agent_prompt(
-        session_id,
-        DEFAULT_AGENT_ROLE,
-        text,
-        CreateUserAgentPromptOptions::default(),
-    ))
+fn valid_headless_noop(text: &str) -> bool {
+    let args = text.split_whitespace().collect::<Vec<_>>();
+    matches!(
+        args.as_slice(),
+        [":quit" | ":detach" | ":fast" | ":suspend" | ":resume" | ":version" | ":role"]
+            | [":new"]
+            | [":new", _]
+            | [":name", _, ..]
+            | [":ephemeral"]
+            | [":ephemeral", "on" | "off"]
+            | [":set", _, _]
+            | [":theme"]
+            | [":theme", _]
+            | [":prompt", _]
+            | [":session", "new"]
+            | [":provider-auth"]
+            | [":provider-auth", _]
+            | [":debug-show-ui-event-stats"]
+            | [":debug-show-event-stats", _]
+            | [":agent"]
+            | [":agent", "new"]
+            | [":agent", "switch" | "suspend" | "resume" | "auto"]
+            | [":agent", "switch" | "suspend" | "resume" | "auto", _]
+            | [":agent", "name", _, _, ..]
+    )
 }
 
 fn read_tree_result(reader: &mut crate::ui_client::UiInputReader) -> Result<String, CliError> {

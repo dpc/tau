@@ -1,4 +1,4 @@
-/// `/set show-messages` is registry-driven, so the registry must expose all
+/// `:set show-messages` is registry-driven, so the registry must expose all
 /// documented modes for parsing and completion.
 #[test]
 fn show_messages_values_are_registered() {
@@ -17,7 +17,7 @@ fn show_messages_values_are_registered() {
     );
 }
 
-/// `/set show-ui-io` is a boolean status-bar toggle, so it should use the
+/// `:set show-ui-io` is a boolean status-bar toggle, so it should use the
 /// standard true/false values that completion and validation expect.
 #[test]
 fn show_ui_io_values_are_registered() {
@@ -27,7 +27,7 @@ fn show_ui_io_values_are_registered() {
     assert_eq!(values, vec!["true", "false"]);
 }
 
-/// `/set notice-level` is ordered by visibility threshold and uses meaningful
+/// `:set notice-level` is ordered by visibility threshold and uses meaningful
 /// severity names for completion and validation.
 #[test]
 fn notice_level_values_are_registered() {
@@ -40,7 +40,7 @@ fn notice_level_values_are_registered() {
     );
 }
 
-/// `/set show-prompt-scroll-indicator` is a boolean prompt-input toggle.
+/// `:set show-prompt-scroll-indicator` is a boolean prompt-input toggle.
 #[test]
 fn show_prompt_scroll_indicator_values_are_registered() {
     let setting =
@@ -50,7 +50,7 @@ fn show_prompt_scroll_indicator_values_are_registered() {
     assert_eq!(values, vec!["true", "false"]);
 }
 
-/// `/set redraw-history-size` accepts arbitrary non-negative integers while
+/// `:set redraw-history-size` accepts arbitrary non-negative integers while
 /// still offering common sizes in completion.
 #[test]
 fn redraw_history_size_accepts_integer_values() {

@@ -4,7 +4,7 @@ fn action_schema(action_id: &str) -> tau_actions::ActionSchema {
     tau_actions::ActionSchema {
         version: tau_actions::ACTION_SCHEMA_VERSION,
         roots: vec![tau_actions::ActionCommand {
-            name: "/email".to_owned(),
+            name: ":email".to_owned(),
             description: "Email approvals".to_owned(),
             action_id: None,
             args: Vec::new(),
@@ -40,7 +40,7 @@ fn action_invoke(invocation_id: &str, extension_name: &str) -> tau_proto::Action
         extension_name: extension_name.into(),
         instance_id: 0.into(),
         action_id: "email.list".to_owned(),
-        raw_line: "/email list".to_owned(),
+        raw_line: ":email list".to_owned(),
         argv: Vec::new(),
         arguments: CborValue::Map(Vec::new()),
     }
@@ -285,7 +285,7 @@ fn action_invoke_rejects_non_ui_source_wrong_session_and_invalid_arguments() {
     drain_sink(&ui);
 
     let mut invalid = action_invoke("bad-args", "email-ext");
-    invalid.raw_line = "/email list unexpected".to_owned();
+    invalid.raw_line = ":email list unexpected".to_owned();
     invalid.argv = vec!["unexpected".to_owned()];
     h.handle_client_event_inner("ui", Event::ActionInvoke(invalid))
         .expect("invalid invoke should be handled as rejection");

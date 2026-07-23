@@ -1,4 +1,4 @@
-//! Shared parsing for UI slash-command subsets.
+//! Shared parsing for UI command subsets.
 
 #[cfg(test)]
 mod tests;
@@ -201,7 +201,7 @@ pub(crate) fn parse_role_command(rest: &str) -> Result<Option<Event>, String> {
     };
     if command == "delete" {
         if value.is_some() {
-            return Err("/role <role> delete takes no value".to_owned());
+            return Err(":role <role> delete takes no value".to_owned());
         }
         return Ok(Some(crate::ui_events::role_update(
             role,
@@ -209,12 +209,12 @@ pub(crate) fn parse_role_command(rest: &str) -> Result<Option<Event>, String> {
         )));
     }
     let Some(value) = value else {
-        return Err("/role <role> <setting> <value>".to_owned());
+        return Err(":role <role> <setting> <value>".to_owned());
     };
     if extra.is_some() {
-        return Err("/role: too many arguments".to_owned());
+        return Err(":role: too many arguments".to_owned());
     }
     let action =
-        parse_role_setting_update(command, value).map_err(|error| format!("/role: {error}"))?;
+        parse_role_setting_update(command, value).map_err(|error| format!(":role: {error}"))?;
     Ok(Some(crate::ui_events::role_update(role, action)))
 }

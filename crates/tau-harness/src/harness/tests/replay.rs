@@ -293,6 +293,7 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("start");
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         session_id: "s1".into(),
         role: "engineer".to_owned(),
         model_override: None,
@@ -427,6 +428,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         session_id: "s1".into(),
         role: "engineer".to_owned(),
         model_override: None,

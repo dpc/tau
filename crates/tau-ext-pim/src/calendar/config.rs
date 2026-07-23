@@ -57,7 +57,7 @@ pub enum CalendarBackendConfig {
         /// Optional secret containing the OAuth client secret.
         client_secret_secret: Option<String>,
         /// Secret containing a Google OAuth refresh token. If omitted, use
-        /// `/calendar auth google` to store account auth in calendar state.
+        /// `:calendar auth google` to store account auth in calendar state.
         refresh_token_secret: Option<String>,
         /// Optional Google Calendar API base URL for tests or proxies.
         api_base: Option<String>,
@@ -229,7 +229,7 @@ pub enum ValidatedBackendConfig {
         /// Optional secret containing the OAuth client secret.
         client_secret_secret: Option<String>,
         /// Secret containing a Google OAuth refresh token. If omitted, use
-        /// `/calendar auth google` to store account auth in calendar state.
+        /// `:calendar auth google` to store account auth in calendar state.
         refresh_token_secret: Option<String>,
         /// Optional Google Calendar API base URL for tests or proxies.
         api_base: Option<String>,

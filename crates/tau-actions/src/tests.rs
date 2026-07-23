@@ -44,7 +44,7 @@ fn email_schema() -> ActionSchema {
     ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
-            name: "/email".to_owned(),
+            name: ":email".to_owned(),
             description: "Review email approvals".to_owned(),
             action_id: None,
             args: Vec::new(),
@@ -66,7 +66,7 @@ fn email_schema() -> ActionSchema {
 }
 
 /// Ensures a representative nested schema remains valid so extensions can
-/// publish namespace-style slash actions without parser regressions.
+/// publish namespace-style extension actions without parser regressions.
 #[test]
 fn schema_validation_accepts_nested_executable_leaves() {
     let ids = email_schema()
@@ -90,7 +90,7 @@ fn schema_validation_rejects_duplicate_action_ids() {
     let schema = ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
-            name: "/email".to_owned(),
+            name: ":email".to_owned(),
             description: String::new(),
             action_id: None,
             args: Vec::new(),
@@ -105,8 +105,8 @@ fn schema_validation_rejects_duplicate_action_ids() {
     assert!(error.message().contains("duplicate action_id `email.same`"));
 }
 
-/// Keeps dynamic action roots in the slash-command namespace by requiring the
-/// leading slash form used by the CLI and harness.
+/// Keeps dynamic action roots in the command namespace by requiring the
+/// leading colon form used by the CLI and harness.
 #[test]
 fn schema_validation_rejects_invalid_root_names() {
     let schema = ActionSchema {
@@ -116,7 +116,7 @@ fn schema_validation_rejects_invalid_root_names() {
 
     let error = schema
         .validate()
-        .expect_err("root without slash should fail");
+        .expect_err("root without colon should fail");
     assert!(error.message().contains("invalid root action name"));
 }
 
@@ -128,7 +128,7 @@ fn schema_validation_rejects_invalid_child_names() {
         let schema = ActionSchema {
             version: ACTION_SCHEMA_VERSION,
             roots: vec![ActionCommand {
-                name: "/email".to_owned(),
+                name: ":email".to_owned(),
                 description: String::new(),
                 action_id: None,
                 args: Vec::new(),
@@ -145,13 +145,21 @@ fn schema_validation_rejects_invalid_child_names() {
 }
 
 /// Protects the accepted command-token grammar so useful ASCII names keep
-/// working while slash, whitespace, punctuation, and non-ASCII forms stay out.
+/// working while a missing prefix, whitespace, punctuation, and non-ASCII forms
+/// stay out.
 #[test]
 fn schema_validation_documents_command_token_grammar() {
-    assert!(is_valid_root_name("/a_b-1"));
+    assert!(is_valid_root_name(":a_b-1"));
     assert!(is_valid_child_name("a_b-1"));
 
-    for root in ["/-bad", "/bad.name", "/bad/name", "/bad name", "/åbad"] {
+    for root in [
+        "/a_b-1",
+        ":-bad",
+        ":bad.name",
+        ":bad/name",
+        ":bad name",
+        ":åbad",
+    ] {
         assert!(!is_valid_root_name(root), "{root:?} should be invalid");
     }
     for child in ["-bad", "bad.name", "bad/name", "bad name", "åbad"] {
@@ -175,7 +183,7 @@ fn schema_validation_rejects_oversized_command_trees() {
     let schema = ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
-            name: "/email".to_owned(),
+            name: ":email".to_owned(),
             description: String::new(),
             action_id: None,
             args: Vec::new(),
@@ -196,7 +204,7 @@ fn schema_validation_rejects_oversized_identifiers() {
     let schema = ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![leaf(
-            "/email",
+            ":email",
             &"a".repeat(MAX_ACTION_TOKEN_BYTES + 1),
             Vec::new(),
         )],
@@ -217,7 +225,7 @@ fn schema_validation_rejects_per_action_argument_limit() {
         .collect();
     let schema = ActionSchema {
         version: ACTION_SCHEMA_VERSION,
-        roots: vec![leaf("/email", "email.large", args)],
+        roots: vec![leaf(":email", "email.large", args)],
     };
 
     let error = schema
@@ -233,7 +241,7 @@ fn schema_validation_rejects_per_list_choice_limit() {
     let schema = ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![leaf(
-            "/email",
+            ":email",
             "email.large",
             vec![ActionArg {
                 name: "choice".to_owned(),
@@ -265,7 +273,7 @@ fn schema_validation_rejects_per_field_description_limit() {
     let schema = ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
-            name: "/email".to_owned(),
+            name: ":email".to_owned(),
             description: "a".repeat(MAX_ACTION_DESCRIPTION_BYTES + 1),
             action_id: Some("email.large".to_owned()),
             args: Vec::new(),
@@ -297,7 +305,7 @@ fn schema_validation_rejects_aggregate_argument_counts() {
         .collect();
     let schema = ActionSchema {
         version: ACTION_SCHEMA_VERSION,
-        roots: vec![group("/email", children)],
+        roots: vec![group(":email", children)],
     };
 
     let error = schema
@@ -328,7 +336,7 @@ fn schema_validation_rejects_aggregate_choice_counts() {
         .collect();
     let schema = ActionSchema {
         version: ACTION_SCHEMA_VERSION,
-        roots: vec![leaf("/email", "email.large", args)],
+        roots: vec![leaf(":email", "email.large", args)],
     };
 
     let error = schema
@@ -353,7 +361,7 @@ fn schema_validation_rejects_aggregate_text_bytes() {
         .collect();
     let schema = ActionSchema {
         version: ACTION_SCHEMA_VERSION,
-        roots: vec![group("/email", children)],
+        roots: vec![group(":email", children)],
     };
 
     let error = schema
@@ -367,7 +375,7 @@ fn schema_validation_rejects_aggregate_text_bytes() {
 #[test]
 fn parse_nested_action_with_positional_string_arg() {
     let parsed = email_schema()
-        .parse_line("/email out approve abc-123")
+        .parse_line(":email out approve abc-123")
         .expect("action line should parse");
 
     assert_eq!(parsed.action_id, "email.out.approve");
@@ -383,7 +391,7 @@ fn parse_nested_action_with_positional_string_arg() {
 #[test]
 fn parse_rest_string_joins_remaining_tokens() {
     let parsed = email_schema()
-        .parse_line("/email draft note hello from tau")
+        .parse_line(":email draft note hello from tau")
         .expect("rest action line should parse");
 
     assert_eq!(parsed.action_id, "email.draft.note");
@@ -395,11 +403,11 @@ fn parse_rest_string_joins_remaining_tokens() {
 }
 
 /// Keeps unknown dynamic roots distinguishable so the CLI can fall back to
-/// built-in slash-command handling when no extension owns a root.
+/// built-in command handling when no extension owns a root.
 #[test]
 fn parse_unknown_root_is_distinguishable() {
     let error = email_schema()
-        .parse_line("/missing out approve abc")
+        .parse_line(":missing out approve abc")
         .expect_err("unknown root should fail");
 
     assert!(error.is_unknown_root());
@@ -410,7 +418,7 @@ fn parse_unknown_root_is_distinguishable() {
 #[test]
 fn parse_incomplete_namespace_reports_child_usage() {
     let error = email_schema()
-        .parse_line("/email out")
+        .parse_line(":email out")
         .expect_err("namespace should not execute");
 
     assert_eq!(error.kind(), &ParseErrorKind::IncompleteCommand);
@@ -422,12 +430,12 @@ fn parse_incomplete_namespace_reports_child_usage() {
 #[test]
 fn parse_missing_arg_reports_leaf_usage() {
     let error = email_schema()
-        .parse_line("/email out approve")
+        .parse_line(":email out approve")
         .expect_err("missing id should fail");
 
     assert_eq!(error.kind(), &ParseErrorKind::InvalidArguments);
     assert_eq!(error.message(), "missing required argument `id`: id value");
-    assert_eq!(error.usage(), Some("/email out approve <id>"));
+    assert_eq!(error.usage(), Some(":email out approve <id>"));
 }
 
 /// Every required argument kind shares missing-argument diagnostics. Keep all
@@ -450,31 +458,31 @@ fn parse_missing_arg_descriptions_cover_every_argument_kind() {
             ActionArgKind::String,
             "text value",
             "missing required argument `value`: text value",
-            "/test <value>",
+            ":test <value>",
         ),
         (
             ActionArgKind::Integer,
             "integer value",
             "missing required argument `value`: integer value",
-            "/test <value:int>",
+            ":test <value:int>",
         ),
         (
             ActionArgKind::Enum { values: choices },
             "selected value",
             "missing required argument `value`: selected value",
-            "/test <one|two>",
+            ":test <one|two>",
         ),
         (
             ActionArgKind::RestString,
             "remaining text",
             "missing required argument `value`: remaining text",
-            "/test <value...>",
+            ":test <value...>",
         ),
         (
             ActionArgKind::String,
             "",
             "missing required argument `value`",
-            "/test <value>",
+            ":test <value>",
         ),
     ];
 
@@ -482,7 +490,7 @@ fn parse_missing_arg_descriptions_cover_every_argument_kind() {
         let schema = ActionSchema {
             version: ACTION_SCHEMA_VERSION,
             roots: vec![leaf(
-                "/test",
+                ":test",
                 "test.action",
                 vec![ActionArg {
                     name: "value".to_owned(),
@@ -494,7 +502,7 @@ fn parse_missing_arg_descriptions_cover_every_argument_kind() {
             )],
         };
         let error = schema
-            .parse_line("/test")
+            .parse_line(":test")
             .expect_err("required argument is missing");
         assert_eq!(error.message(), expected_message);
         assert_eq!(error.usage(), Some(expected_usage));

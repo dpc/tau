@@ -1057,6 +1057,7 @@ fn peer_internal_ephemeral_lifecycle_is_suppressed_from_debug_log() {
     );
     harness
         .handle_ui_create_agent(tau_proto::UiCreateAgent {
+            literal: false,
             session_id: "s1".into(),
             role: "engineer".to_owned(),
             model_override: None,

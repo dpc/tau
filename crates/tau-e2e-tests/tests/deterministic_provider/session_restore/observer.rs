@@ -69,6 +69,7 @@ impl SessionRestoreObserver {
         self.peer
             .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
                 tau_proto::UiCreateAgent {
+                    literal: false,
                     session_id: SESSION.into(),
                     role: "deterministic-main".to_owned(),
                     model_override: None,
@@ -94,6 +95,7 @@ impl SessionRestoreObserver {
         self.peer
             .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
                 tau_proto::UiCreateAgent {
+                    literal: false,
                     session_id: SESSION.into(),
                     role: "deterministic-worker".to_owned(),
                     model_override: None,
@@ -165,6 +167,7 @@ impl SessionRestoreObserver {
         self.peer
             .send(&HarnessInputMessage::emit(Event::UiPromptSubmitted(
                 tau_proto::UiPromptSubmitted {
+                    literal: false,
                     session_id: SESSION.into(),
                     text: text.to_owned(),
                     agent_id: agent_id.clone(),

@@ -65,7 +65,7 @@ impl DaemonHandle {
 
     /// Consume the handle without killing the child.
     ///
-    /// Used by `/detach`: we want the daemon to outlive this CLI,
+    /// Used by `:detach`: we want the daemon to outlive this CLI,
     /// whether we spawned it or attached to it. For `Owned` this
     /// `mem::forget`s the `Child` — on Linux its parent becomes init
     /// on our exit, which is exactly what we want for a long-lived

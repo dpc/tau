@@ -1096,7 +1096,7 @@ impl TermHandle {
     ///
     /// Use this when a mutation affects rows that may already be in
     /// terminal scrollback — e.g. toggling visibility of a block from
-    /// a past turn (`/set show-diff`, `/set show-thinking`). The
+    /// a past turn (`:set show-diff`, `:set show-thinking`). The
     /// differential renderer only repaints the visible window, so
     /// without invalidation those scrolled-out rows would remain as
     /// stale fossils that disagree with current state. See
@@ -1859,6 +1859,18 @@ impl Term {
                 .filter(|buffer| !buffer.is_empty())
                 .map(PromptDraft::submitted),
         );
+        st.history_nav = None;
+    }
+
+    /// Replaces the most recently submitted input-history entry.
+    ///
+    /// Higher layers use this after canonicalizing prompt syntax that the raw
+    /// editor intentionally does not interpret.
+    pub fn replace_last_submitted_input(&mut self, text: String) {
+        let mut st = self.handle.lock();
+        if let Some(last) = st.input_history.last_mut() {
+            *last = PromptDraft::submitted(text);
+        }
         st.history_nav = None;
     }
 

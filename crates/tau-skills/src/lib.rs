@@ -40,7 +40,7 @@ pub struct Skill {
     /// True when the skill file explicitly set `advertise:`. Scoped
     /// directory defaults only apply when this is false.
     pub add_to_prompt_explicit: bool,
-    /// Whether users may explicitly invoke this skill with `/skill`.
+    /// Whether users may explicitly invoke this skill with `:skill`.
     pub user_invocable: bool,
     /// True when `user-invocable:` was explicitly present.
     pub user_invocable_explicit: bool,
@@ -80,7 +80,7 @@ pub struct BuiltInSkill {
     pub content: Cow<'static, str>,
     /// Whether this skill should appear in the initial system prompt.
     pub add_to_prompt: bool,
-    /// Whether users may explicitly invoke this skill with `/skill`.
+    /// Whether users may explicitly invoke this skill with `:skill`.
     pub user_invocable: bool,
     /// Whether model-side skill discovery/loading should hide this skill.
     /// Implies that the skill remains user-invocable.

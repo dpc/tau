@@ -396,7 +396,7 @@ fn redact_debug_event(value: &mut serde_json::Value) {
     }
     if let Some(raw_line) = payload.get_mut("raw_line") {
         *raw_line = serde_json::Value::String(
-            "/email auth google finish <account> <redirect-url-redacted>".to_owned(),
+            ":email auth google finish <account> <redirect-url-redacted>".to_owned(),
         );
     }
     if let Some(argv) = payload

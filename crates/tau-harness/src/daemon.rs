@@ -893,6 +893,7 @@ fn send_daemon_message_prompt(
 
 fn daemon_message_create_agent(session_id: &str, message: &str, ctx_id: &str) -> UiCreateAgent {
     UiCreateAgent {
+        literal: false,
         parent_agent: None,
         session_id: session_id.into(),
         role: "engineer".to_owned(),

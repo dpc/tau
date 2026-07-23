@@ -50,7 +50,7 @@ provider cooldown. Extending a cooldown can only delay matching work. Releasing
 an exact generation removes only that constraint and applies stable prompt-local
 anti-herd jitter without changing unrelated deadlines or providers.
 
-An explicit user `/retry` may atomically remove one exact `AgentPromptId` from
+An explicit user `:retry` may atomically remove one exact `AgentPromptId` from
 the delayed scheduler before its deadline. This deliberately shortens even a
 trusted server delay for that job only. The same owned job and retry accounting
 are preserved, peers remain parked, and the released job bypasses the shared

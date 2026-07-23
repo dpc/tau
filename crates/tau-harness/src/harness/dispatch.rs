@@ -236,7 +236,7 @@ impl Harness {
                 let Some(model) = model else {
                     let role_name = self.role_name_for_agent_id(&agent_id);
                     self.emit_info(&format!(
-                        "role `{role_name}` has no available model — use /role to pick a role, /model <provider>/<model> to pick an agent model, or enable a provider"
+                        "role `{role_name}` has no available model — use :role to pick a role, :model <provider>/<model> to pick an agent model, or enable a provider"
                     ));
                     self.set_agent_turn_state(&agent_id, crate::agent::AgentTurnState::Idle);
                     return;

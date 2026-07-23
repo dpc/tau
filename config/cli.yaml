@@ -7,6 +7,8 @@
 # notice_level: info  # critical|warning|info|debug|trace
 # redraw_history_size: 2000  # rendered history lines replayed on full redraw
 # Optional prompt completion rules keyed by word prefix.
+# First-non-whitespace `:` command completion is intrinsic and cannot be
+# overridden here.
 # completions:
 #   "@": complete_agents
 #   "./": complete_path

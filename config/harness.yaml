@@ -1,7 +1,7 @@
 # Provider extensions publish the live model list and model metadata at
 # runtime. Harness config owns role defaults and extension settings.
-# Use `/model <provider>/<model>` to switch the selected agent model and
-# `/role ...` to edit persisted role overrides.
+# Use `:model <provider>/<model>` to switch the selected agent model and
+# `:role ...` to edit persisted role overrides.
 
 # Agent settings, role defaults, and role groups live under `agents:`.
 #
@@ -44,7 +44,7 @@
 # next role group. Group-level fields are defaults for every role in `roles`.
 # Per-role `order` sorts roles within a group before role name; unordered roles
 # sort after ordered roles by name.
-# `description` is shown in `/role ...` completions. `compaction` controls
+# `description` is shown in `:role ...` completions. `compaction` controls
 # provider-side automatic compaction: omit it or set `provider_default` for the
 # provider's model-specific default, `disabled` to turn it off, or `{ threshold:
 # 200000 }` for an explicit token threshold.
@@ -176,8 +176,8 @@
 #             #   # Use a Google OAuth client of type "Desktop app".
 #             #   # Omit refresh_token_secret, run start, open the URL, then paste
 #             #   # the full failed loopback address-bar URL into finish:
-#             #   #   /email auth google start personal
-#             #   #   /email auth google finish personal http://127.0.0.1:54321/?state=...&code=...
+#             #   #   :email auth google start personal
+#             #   #   :email auth google finish personal http://127.0.0.1:54321/?state=...&code=...
 #             #   # refresh_token_secret: google_mail_refresh_token
 #       calendar:
 #         enable: true
@@ -190,9 +190,9 @@
 #             calendars:
 #               default: main
 #               allow: [main]
-#           # Google read/write support can use /calendar auth google to
+#           # Google read/write support can use :calendar auth google to
 #           # store OAuth in private extension state, or a manual refresh-token
-#           # secret for power users. Mutations queue under /calendar change by
+#           # secret for power users. Mutations queue under :calendar change by
 #           # default.
 #           - id: google-calendar
 #             enable: false
@@ -202,8 +202,8 @@
 #               client_secret_secret: google_calendar_device_client_secret
 #               # Use a Google OAuth client of type "TVs and Limited Input devices".
 #               # Omit refresh_token_secret and run:
-#               #   /calendar auth google start google-calendar
-#               #   /calendar auth google finish google-calendar
+#               #   :calendar auth google start google-calendar
+#               #   :calendar auth google finish google-calendar
 #               # refresh_token_secret: google_calendar_refresh_token
 #             calendars:
 #               default: primary

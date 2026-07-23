@@ -88,6 +88,36 @@ fn metadata_requests_have_distinct_transient_wire_names() {
     assert!(Event::AgentMetadataUnset(unset).defaults_to_persist());
 }
 
+/// Literal prompt provenance survives the UI wire boundary while legacy
+/// requests without the marker retain ordinary command-processing behavior.
+#[test]
+fn ui_prompt_literal_marker_round_trips_and_defaults_false() {
+    let request = UiPromptSubmitted {
+        session_id: "session".into(),
+        text: ":skill example".to_owned(),
+        literal: true,
+        agent_id: AgentId::parse("worker").expect("agent id"),
+        message_class: PromptMessageClass::User,
+        originator: PromptOriginator::User,
+        ctx_id: None,
+    };
+    let mut encoded = serde_json::to_value(&request).expect("encode literal prompt");
+    assert_eq!(encoded.get("literal"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(
+        serde_json::from_value::<UiPromptSubmitted>(encoded.clone())
+            .expect("decode literal prompt"),
+        request
+    );
+
+    encoded
+        .as_object_mut()
+        .expect("prompt object")
+        .remove("literal");
+    let legacy =
+        serde_json::from_value::<UiPromptSubmitted>(encoded).expect("decode legacy prompt");
+    assert!(!legacy.literal);
+}
+
 /// Prefix syntax rejects ambiguous separators and non-provider-safe bytes.
 #[test]
 fn tool_prefix_validation_is_segmented_ascii() {
@@ -471,7 +501,7 @@ fn action_schema_fixture() -> ActionSchema {
     ActionSchema {
         version: tau_actions::ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
-            name: "/email".to_owned(),
+            name: ":email".to_owned(),
             description: "Review email approvals".to_owned(),
             action_id: None,
             args: Vec::new(),
@@ -655,7 +685,7 @@ fn representative_events() -> Vec<Event> {
             extension_name: "std-email".into(),
             instance_id: 7.into(),
             action_id: "email.out.list".to_owned(),
-            raw_line: "/email out list".to_owned(),
+            raw_line: ":email out list".to_owned(),
             argv: Vec::new(),
             arguments: CborValue::Map(Vec::new()),
         }),
@@ -755,6 +785,7 @@ fn representative_events() -> Vec<Event> {
                 .expect("bounded extension data"),
         }),
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "hello".to_owned(),
             agent_id: agent_id("agent"),
@@ -1301,6 +1332,7 @@ fn representative_events() -> Vec<Event> {
             reason: SessionStartReason::New,
         }),
         Event::UiCreateAgent(UiCreateAgent {
+            literal: false,
             session_id: "s1".into(),
             role: "engineer".to_owned(),
             model_override: Some("openai/gpt-4.1".parse().expect("model id")),
@@ -3563,7 +3595,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             extension_name: "std-email".into(),
             instance_id: 7.into(),
             action_id: "email.out.list".to_owned(),
-            raw_line: "/email out list".to_owned(),
+            raw_line: ":email out list".to_owned(),
             argv: Vec::new(),
             arguments: CborValue::Map(Vec::new()),
         }),
@@ -3593,6 +3625,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             text: "draft".to_owned(),
         }),
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "hi".to_owned(),
             agent_id: agent_id("agent"),
@@ -4030,7 +4063,7 @@ fn verbosity_next_in_skips_disallowed_levels_and_wraps() {
 }
 
 /// `ThinkingSummary` parses from / displays through the canonical
-/// wire forms used by slash commands and harness role config.
+/// wire forms used by commands and harness role config.
 #[test]
 fn thinking_summary_round_trips_through_display_and_from_str() {
     use ThinkingSummary::*;

@@ -91,8 +91,8 @@ target/debug/tau dev tmux start \
   --session "$tmux_session"
 ```
 
-Inside the isolated session, create a main and worker, inspect `/agent`, select
-each with `/agent switch <agent-id>`, and send one follow-up. From a separate
+Inside the isolated session, create a main and worker, inspect `:agent`, select
+each with `:agent switch <agent-id>`, and send one follow-up. From a separate
 shell using that scratch environment, verify the directed external roster with:
 
 ```sh
@@ -210,7 +210,7 @@ Boot A is allowed to show the ordinary live pending state before completion.
 A second gate creates and completes the production `agent_start` main/worker pair
 through a headless Boot A with exact lane correlations, then starts only Boot B
 under the public PTY. Stable IDs from typed protocol facts drive explicit
-`/agent switch` commands for both restored transcripts and one targeted worker
+`:agent switch` commands for both restored transcripts and one targeted worker
 follow-up. Replay boundaries, directed rosters, typed multi-agent store
 prefixes/suffixes, exact provider consumption, and process-group/socket cleanup
 remain independent oracles; the VT model proves only selection, terminal
@@ -279,7 +279,7 @@ lifecycle. Backend fixtures should cover Codex WebSocket, generic Chat
 Completions HTTP/SSE, and OpenRouter retry-then-success paths, including tentative
 output clearing, trusted hint lower bounds for non-usage-window classes, and
 bounded policy scheduling despite distant usage-window reset estimates.
-Manual `/retry` coverage must drive the scheduler/runtime boundary
+Manual `:retry` coverage must drive the scheduler/runtime boundary
 deterministically: assert delayed-count transfer, timer/manual and
 shutdown/manual ownership races, one-shot cooldown bypass, and that a failed
 manually released attempt increments accounting once and parks again normally.

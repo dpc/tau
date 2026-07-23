@@ -2460,7 +2460,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
             ))
             .count(),
         2,
-        "both competing /retry controls resolve exactly once"
+        "both competing :retry controls resolve exactly once"
     );
 
     // The harness-owned Stage 3 gate covers routing/renderer composition. Here

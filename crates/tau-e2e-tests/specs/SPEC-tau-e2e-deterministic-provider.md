@@ -263,7 +263,7 @@ actions across exactly four main provider turns and one worker action/turn.
 Universal PTY Boot B replay consumes nothing, then one explicit worker follow-up
 consumes the fifth action and exactly one worker provider turn; the main consumes
 zero Boot B turns. Stable IDs from typed creation facts drive worker-to-main-to-
-worker `/agent switch` transitions without a picker. The VT oracle covers only
+worker `:agent switch` transitions without a picker. The VT oracle covers only
 selected restored transcripts, the completed `agent_start` row never becoming
 pending, and fresh worker transcript ordering. Side replay boundaries, exact
 replayed `agent_start` lifecycle, post-boundary directed current/history rosters,

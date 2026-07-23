@@ -433,7 +433,7 @@ fn ui_io_rates_format_for_status_bar() {
     assert_eq!(super::format_ui_io_rate(1024 * 1024 + 512 * 1024), "1.5M");
 }
 
-/// `/set show-messages` must hide, summarize, or fully render durable
+/// `:set show-messages` must hide, summarize, or fully render durable
 /// message events based on whether they involve the user. User-directed
 /// messages are broadcasts and always render fully, while agent-to-agent
 /// messages still respect the privacy modes. This locks the policy down
@@ -841,7 +841,7 @@ fn role_details_abbreviate_description() {
     );
 }
 
-/// `/role <name>` completion appends free-form role descriptions after the
+/// `:role <name>` completion appends free-form role descriptions after the
 /// parsed model/knob summary instead of parsing that user text as settings.
 #[test]
 fn role_details_append_configured_role_description() {
@@ -925,7 +925,7 @@ fn role_values_have_descriptions() {
     assert_eq!(item.description, "detailed thinking summaries");
 }
 
-/// Ensures `/role ... effort` completion exposes GPT-5.6 maximum effort with a
+/// Ensures `:role ... effort` completion exposes GPT-5.6 maximum effort with a
 /// description distinct from `xhigh`.
 #[test]
 fn role_effort_completions_include_max() {

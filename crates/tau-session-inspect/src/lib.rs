@@ -206,7 +206,7 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError>
 }
 
 /// Pretty-print one session entry for line-oriented inspection output
-/// (`tau session show`, `/tree`, debug log).
+/// (`tau session show`, `:tree`, debug log).
 #[must_use]
 pub fn format_session_entry(entry: &AgentEntry) -> String {
     match entry {

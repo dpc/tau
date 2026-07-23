@@ -1,14 +1,14 @@
 # ARCH-tau-actions: tau-actions architecture
 
 `tau-actions` defines Tau's extension-published UI action schema and the shared
-parser for slash-style action invocations.
+parser for command-mode action invocations.
 
 ## Responsibility
 
 - Define serializable action schema types used by extensions to publish dynamic
-  slash actions.
+  actions.
 - Validate schemas before CLI/core consumers accept them.
-- Parse a whitespace-tokenized slash line into an action id, positional argv, and
+- Parse a whitespace-tokenized command line into an action id, positional argv, and
   typed named arguments.
 - Build simple usage strings for validation and UI errors.
 
@@ -28,8 +28,8 @@ against the provider schema.
 Action schema validation is the acceptance boundary for extension-controlled UI
 and prompt-facing action metadata.
 
-- Root command names are `/` plus an ASCII command token.
-- Child command names and argument names are ASCII command tokens without `/`.
+- Root command names are `:` plus an ASCII command token.
+- Child command names and argument names are ASCII command tokens without `:`.
 - Command tokens start with ASCII alphanumeric and then contain only ASCII
   alphanumeric, `_`, or `-`.
 - Action ids and static choice values must be non-empty, contain no whitespace,

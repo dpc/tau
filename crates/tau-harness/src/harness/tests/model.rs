@@ -706,7 +706,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     ));
 }
 
-/// `/model <provider>/<model>` is an agent-local selection, not a role switch
+/// `:model <provider>/<model>` is an agent-local selection, not a role switch
 /// or role mutation. Future prompts for that loaded agent should resolve to the
 /// override while the agent's role stays unchanged.
 #[test]
@@ -755,7 +755,7 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
 }
 
 /// Creating an agent may include the model override staged by the interactive
-/// `/new` + `/model` flow; the harness must apply it before the first prompt is
+/// `:new` + `:model` flow; the harness must apply it before the first prompt is
 /// routed so the initial provider request uses the requested model.
 #[test]
 fn ui_create_agent_applies_initial_model_override() {
@@ -778,6 +778,7 @@ fn ui_create_agent_applies_initial_model_override() {
     .expect("handle provider snapshot");
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         parent_agent: None,
         session_id: "s1".into(),
         role,
@@ -799,7 +800,7 @@ fn ui_create_agent_applies_initial_model_override() {
     assert_eq!(created.model, "test/selected".parse().expect("model id"));
 }
 
-/// A model staged by `/new` + `/model` must survive the supported cold-provider
+/// A model staged by `:new` + `:model` must survive the supported cold-provider
 /// path where the first prompt queues before any provider has published models.
 #[test]
 fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() {
@@ -815,6 +816,7 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
     let selected_model: ModelId = "test/cold-selected".parse().expect("model id");
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         parent_agent: None,
         session_id: "s1".into(),
         role,
@@ -882,7 +884,7 @@ fn unavailable_agent_model_override_falls_back_to_role_model() {
     assert_eq!(h.model_for_agent_role(&h.agents[&cid]), Some(role_model));
 }
 
-/// A target-less `/model` request is only safe when the session has exactly one
+/// A target-less `:model` request is only safe when the session has exactly one
 /// loaded user agent. With multiple user agents the UI must send an explicit
 /// target so the harness does not depend on `HashMap` iteration order.
 #[test]

@@ -36,9 +36,15 @@ errors rather than missing files.
 
 `CliSettings` comes from layered `cli.yaml` config and provides the default UI
 state for a process. Persisted `<state_dir>/cli.json` is a partial runtime patch
-written by `/set`; when it is loaded, present fields override the `CliSettings`
+written by `:set`; when it is loaded, present fields override the `CliSettings`
 derived defaults and missing fields keep those defaults. This preserves new or
 user-configured defaults for existing state files from older Tau versions.
+
+Prompt completion maps configure word-prefix completers such as `@`, `./`, and
+`/`; the shipped `/` rule uses `complete_path` for absolute and token-level
+paths. First-non-whitespace `:` command mode is intrinsic to the terminal and
+takes precedence over every configured completion rule, so user config cannot
+shadow command routing or inject unrelated candidates into command arguments.
 
 ## Alias normalization
 

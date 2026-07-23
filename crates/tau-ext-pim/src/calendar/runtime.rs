@@ -253,7 +253,7 @@ impl RuntimeState {
         finish_tool_result(invoke, result)
     }
 
-    /// Dispatch a user `/calendar` action invocation.
+    /// Dispatch a user `:calendar` action invocation.
     pub fn dispatch_action(&mut self, invoke: ActionInvoke) -> Event {
         let result = match &self.config_state {
             ConfigState::Configured(engine) => {
@@ -552,15 +552,7 @@ impl Engine {
             started.interval_secs,
         );
         self.state.save_pending_google_auth(&pending)?;
-        Ok(format!(
-            "Google Calendar authorization started for account {}.\nOpen this URL:\n{}\nEnter this code:\n{}\nThen run:\n/calendar auth google finish {}\nExpires in {} second(s). If authorization is still pending, wait at least {} second(s) before retrying finish.",
-            safe_display_line(&account.id),
-            safe_display_line(&started.verification_uri),
-            safe_display_line(&started.user_code),
-            safe_display_line(&account.id),
-            started.expires_in_secs,
-            started.interval_secs
-        ))
+        Ok(format_google_auth_started(&account.id, &started))
     }
 
     fn action_auth_google_finish(&self, account_id: &str) -> Result<String, String> {
@@ -569,7 +561,7 @@ impl Engine {
         if pending.expired() {
             self.state.clear_pending_google_auth(&account.id)?;
             return Err(format!(
-                "Google authorization for account `{}` expired; run `/calendar auth google start {}` again",
+                "Google authorization for account `{}` expired; run `:calendar auth google start {}` again",
                 safe_display_line(&account.id),
                 safe_display_line(&account.id)
             ));
@@ -1561,7 +1553,7 @@ impl Engine {
                 ..
             }) => Ok(account),
             Some(ValidatedBackendConfig::Google { .. }) => Err(format!(
-                "calendar account `{}` already uses refresh_token_secret; remove it before using `/calendar auth google`",
+                "calendar account `{}` already uses refresh_token_secret; remove it before using `:calendar auth google`",
                 account.id
             )),
             _ => Err(format!(
@@ -1587,7 +1579,7 @@ impl Engine {
                 .map(Some)
                 .ok_or_else(|| {
                     format!(
-                        "Google calendar account `{}` is not authorized; run `/calendar auth google start {}` and then `/calendar auth google finish {}`",
+                        "Google calendar account `{}` is not authorized; run `:calendar auth google start {}` and then `:calendar auth google finish {}`",
                         account.id, account.id, account.id
                     )
                 }),
@@ -1598,6 +1590,21 @@ impl Engine {
             )),
         }
     }
+}
+
+fn format_google_auth_started(
+    account_id: &str,
+    started: &crate::google_oauth::GoogleDeviceAuthStart,
+) -> String {
+    format!(
+        "Google Calendar authorization started for account {}.\nOpen this URL:\n{}\nEnter this code:\n{}\nThen run:\n:calendar auth google finish {}\nExpires in {} second(s). If authorization is still pending, wait at least {} second(s) before retrying finish.",
+        safe_display_line(account_id),
+        safe_display_line(&started.verification_uri),
+        safe_display_line(&started.user_code),
+        safe_display_line(account_id),
+        started.expires_in_secs,
+        started.interval_secs
+    )
 }
 
 fn default_calendar_id_for_account(account: &ValidatedAccount) -> Option<&str> {

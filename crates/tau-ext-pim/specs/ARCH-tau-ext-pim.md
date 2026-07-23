@@ -95,9 +95,9 @@ modes:
 
 - Manual mode: config names a `refresh_token_secret`; auth actions are refused
   and the backend reads the refresh token from the harness secret map.
-- State-owned mode: no `refresh_token_secret` is configured; `/email auth google`
+- State-owned mode: no `refresh_token_secret` is configured; `:email auth google`
   stores the refresh token in private extension state after installed-app PKCE
-  authorization completes, while `/calendar auth google` stores it after the
+  authorization completes, while `:calendar auth google` stores it after the
   device flow completes.
 
 Access tokens are cached in memory per account and refreshed on demand. When a

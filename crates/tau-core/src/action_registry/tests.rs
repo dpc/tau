@@ -7,7 +7,7 @@ fn schema(action_id: &str) -> ActionSchema {
     ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
-            name: "/email".to_owned(),
+            name: ":email".to_owned(),
             description: "Email approvals".to_owned(),
             action_id: None,
             args: Vec::new(),
@@ -41,7 +41,7 @@ fn invoke(action_id: &str, instance_id: u64) -> ActionInvoke {
         extension_name: ExtensionName::from("std-email"),
         instance_id: ExtensionInstanceId::from(instance_id),
         action_id: action_id.to_owned(),
-        raw_line: "/email out approve 123".to_owned(),
+        raw_line: ":email out approve 123".to_owned(),
         argv: vec!["123".to_owned()],
         arguments: CborValue::Map(vec![(
             CborValue::Text("id".to_owned()),
@@ -102,7 +102,7 @@ fn invocation_payload_must_match_owner_schema_parse() {
         .expect("schema should register");
 
     let mut mismatched = invoke("email.out.approve", 1);
-    mismatched.raw_line = "/email out approve".to_owned();
+    mismatched.raw_line = ":email out approve".to_owned();
     assert!(matches!(
         registry.route_action_invoke(&mismatched),
         Err(ActionRouteError::InvalidInvocation { .. })
@@ -178,7 +178,7 @@ fn invalid_schema_is_rejected_without_replacing_previous_schema() {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
             name: "email".to_owned(),
-            description: "missing slash".to_owned(),
+            description: "missing colon".to_owned(),
             action_id: Some("email.invalid".to_owned()),
             args: Vec::new(),
             children: Vec::new(),

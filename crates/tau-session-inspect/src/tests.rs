@@ -14,7 +14,7 @@ fn assistant_message(text: impl Into<String>) -> ContextItem {
 }
 
 /// Ensures assistant previews preserve the provider output order when a
-/// response mixes plain text and tool calls. This prevents `/tree` and
+/// response mixes plain text and tool calls. This prevents `:tree` and
 /// session-inspection output from hiding tool calls that explain following
 /// messages.
 #[test]

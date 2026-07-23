@@ -1,24 +1,26 @@
 use super::*;
 
-/// Ensures the user skill command parser recognizes Tau and Pi syntaxes,
-/// preserves opaque args, and does not capture unrelated slash commands.
+/// Ensures the user skill command parser recognizes spaced and compact forms,
+/// preserves opaque args, and does not capture unrelated commands.
 #[test]
 fn parses_user_skill_command_edges() {
     assert_eq!(
-        parse_user_skill_command("/skill demo arg text"),
+        parse_user_skill_command(":skill demo arg text"),
         Some(("demo", "arg text"))
     );
     assert_eq!(
-        parse_user_skill_command("  /skill:demo arg text"),
+        parse_user_skill_command("  :skill:demo arg text"),
         Some(("demo", "arg text"))
     );
-    assert_eq!(parse_user_skill_command("/skill"), Some(("", "")));
-    assert_eq!(parse_user_skill_command("/skill:"), Some(("", "")));
-    assert_eq!(parse_user_skill_command("/skillx demo"), None);
-    assert_eq!(parse_user_skill_command("hello /skill demo"), None);
+    assert_eq!(parse_user_skill_command(":skill"), Some(("", "")));
+    assert_eq!(parse_user_skill_command(":skill:"), Some(("", "")));
+    assert_eq!(parse_user_skill_command("/skill demo"), None);
+    assert_eq!(parse_user_skill_command("/skill:demo"), None);
+    assert_eq!(parse_user_skill_command(":skillx demo"), None);
+    assert_eq!(parse_user_skill_command("hello :skill demo"), None);
 }
 
-/// Ensures user `/skill` rejects the same too-long unclosed frontmatter case
+/// Ensures user `:skill` rejects the same too-long unclosed frontmatter case
 /// as the model-visible `skill` tool instead of injecting YAML as body.
 #[test]
 fn rejects_frontmatter_truncated_before_closing_fence() {

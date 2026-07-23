@@ -174,7 +174,7 @@ Provider retries carry closed structured categories, saturating attempt counts, 
 model advertises standalone compaction. Unsupported or inline-only models are
 rejected without a durable accepted request. Provider failures terminate the
 background tool exactly once.
-The static `/retry` command can release the selected agent's exact parked
+The static `:retry` command can release the selected agent's exact parked
 logical prompt immediately. This one-job override preserves retry accounting,
 does not initially wake peer jobs, and still waits for a bounded provider worker
 slot. If that exact probe commits a successful terminal response, Tau clears the

@@ -22,7 +22,7 @@ Common startup flow:
 2. The CLI creates a child `tau component harness` process and passes session metadata through `TAU_SESSION_ID` and `TAU_SESSION_STATUS`.
 3. The harness creates a per-process runtime socket at `${XDG_RUNTIME_DIR}/tau/harnesses/<pid>.sock` (or the `/tmp/tau-$USER/harnesses/` fallback).
 4. After startup is ready for discovery, the harness writes `${XDG_RUNTIME_DIR}/tau/harnesses/<pid>.json` metadata: pid, project root, Tau version, and current active session id.
-5. Later UI clients discover the daemon through that metadata and connect to the runtime-dir Unix socket. When `/session new` succeeds inside the same daemon, the metadata `session_id` is updated to the new active session.
+5. Later UI clients discover the daemon through that metadata and connect to the runtime-dir Unix socket. When `:session new` succeeds inside the same daemon, the metadata `session_id` is updated to the new active session.
 
 The runtime-dir harness path always binds its generated socket path itself. It does not use socket activation, because Tau attach/discovery expects the socket to exist at the generated runtime-dir path.
 
@@ -78,7 +78,7 @@ Running `tau component harness` directly starts the harness component without th
 This path is useful for debugging or embedding the harness component, but it does not receive an initial UI over stdio unless `--initial-ui-stdio` is supplied by the CLI-managed startup path.
 
 Runtime-dir harness metadata advertises the daemon's current active session id,
-not just its startup session. `/session new` reuses the daemon process and
+not just its startup session. `:session new` reuses the daemon process and
 updates this metadata after a successful switch so attach/send and
 cross-harness agent-message discovery do not route to stale sessions.
 
@@ -96,5 +96,5 @@ The enabled-by-default `compact {}` tool durably compacts the calling agent
 after its complete tool round. Role policy can disable it. The separately
 enabled `agent_compact {agent_id}` capability may compact any other loaded
 agent. Both return background acceptance and can be awaited with `wait`.
-`/compact` remains a distinct human/UI command; watches, messages, and ancestry
+`:compact` remains a distinct human/UI command; watches, messages, and ancestry
 do not grant either model tool.

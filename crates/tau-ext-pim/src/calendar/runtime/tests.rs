@@ -694,7 +694,7 @@ fn calendar_log_records_failed_write_attempts_without_payloads() {
 
 #[test]
 fn calendar_approve_all_accepts_empty_pending_list() {
-    // `/calendar change approve all` should be a valid convenience command
+    // `:calendar change approve all` should be a valid convenience command
     // even when there is nothing queued.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let engine = test_engine(temp.path());
@@ -920,7 +920,7 @@ fn update_event_rejects_invite_response_argument() {
 #[test]
 fn google_reads_without_stored_auth_report_auth_error() {
     // Accounts that opt into action-owned OAuth should fail before any
-    // network call until `/calendar auth google` stores a refresh token.
+    // network call until `:calendar auth google` stores a refresh token.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let cfg = CalendarExtensionConfig {
         enable: true,
@@ -958,10 +958,30 @@ fn google_reads_without_stored_auth_report_auth_error() {
         Some("auth_error")
     );
     assert!(
-        calendar_error_message(&output).contains("/calendar auth google start google"),
+        calendar_error_message(&output).contains(":calendar auth google start google"),
         "{}",
         calendar_error_message(&output)
     );
+}
+
+/// Ensures the live Google Calendar authorization response teaches the colon
+/// finish command so its device code cannot be pasted as ordinary prompt text.
+#[test]
+fn google_auth_start_response_uses_colon_finish_command() {
+    let response = format_google_auth_started(
+        "google",
+        &crate::google_oauth::GoogleDeviceAuthStart {
+            device_code: "device-secret".to_owned(),
+            user_code: "USER-CODE".to_owned(),
+            verification_uri: "https://example.test/device".to_owned(),
+            expires_in_secs: 900,
+            interval_secs: 5,
+        },
+    );
+
+    assert!(response.contains("\n:calendar auth google finish google\n"));
+    assert!(!response.contains("\n/calendar auth google finish"));
+    assert!(!response.contains("device-secret"));
 }
 
 #[test]

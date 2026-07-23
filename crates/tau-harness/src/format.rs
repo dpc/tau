@@ -36,7 +36,7 @@ pub fn format_extension_event(event: &Event) -> String {
     }
 }
 
-/// One-line preview of a session entry for `/tree` output.
+/// One-line preview of a session entry for `:tree` output.
 pub(crate) fn render_entry_preview(entry: &AgentEntry) -> String {
     let raw = tau_session_inspect::format_session_entry(entry);
     let single_line: String = raw

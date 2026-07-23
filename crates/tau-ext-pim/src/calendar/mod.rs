@@ -1,7 +1,7 @@
 //! Calendar module for the standard PIM extension.
 //!
 //! This module establishes the model-visible split `calendar_*` tool surface
-//! and extension-owned slash actions.
+//! and actions owned by extensions.
 
 mod actions;
 mod config;

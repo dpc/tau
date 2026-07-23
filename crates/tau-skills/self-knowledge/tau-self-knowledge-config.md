@@ -42,7 +42,7 @@ Tau follows the XDG directory layout on Linux:
 - Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`.
   - `<pid>.sock` — daemon socket.
   - `<pid>.json` — discovery metadata with pid, project root, version, and the
-    daemon's current active `session_id` (updated after successful `/session new`).
+    daemon's current active `session_id` (updated after successful `:session new`).
 
 Use `tau init` to create starter `cli.yaml` and `harness.yaml` files.
 
@@ -89,7 +89,7 @@ but optional; Tau will skip it on startup/config/secret/pre-ready failures,
 continue without it, and emit a mandatory warning `harness.notice` explaining
 the skip. Harness notices have stable `kind` strings and levels `critical`,
 `warning`, `info`, `debug`, and `trace`; CLI users can set the default threshold
-with `cli.yaml` `notice_level: warning` or runtime `/set notice-level warning`.
+with `cli.yaml` `notice_level: warning` or runtime `:set notice-level warning`.
 
 Per-secret `optional: true` is narrower: it omits only that secret when absent.
 A missing non-optional secret skips the whole extension only when
@@ -135,7 +135,7 @@ Rendered IDs must use only ASCII letters, digits, `_`, or `-`, and must fit Tau'
 
 Delegated children started through the built-in `agent_start` tool use the exact
 task title as their display name. Parent relationships remain separate metadata
-and are not embedded in names. `/name` and `/agent name` set an explicit durable
+and are not embedded in names. `:name` and `:agent name` set an explicit durable
 display name even when it equals the agent's role. Persisted display-name facts
 remain authoritative on replay, including role-derived defaults written by
 older Tau versions; Tau does not guess whether such an old value was explicit.
@@ -149,6 +149,6 @@ Other provider commands:
 - `tau provider list` — show configured provider profiles.
 - `tau provider remove <name>` — remove a provider profile.
 
-Models are published by provider extensions at runtime; start Tau and use `/model` to inspect the current model list.
+Models are published by provider extensions at runtime; start Tau and use `:model` to inspect the current model list.
 
-- `harness.yaml` can define `custom_prompts` as a map from prompt id to prompt text; in the CLI, `/prompt <id>` replaces the editable prompt buffer with that text without submitting it.
+- `harness.yaml` can define `custom_prompts` as a map from prompt id to prompt text; in the CLI, `:prompt <id>` replaces the editable prompt buffer with that text without submitting it.

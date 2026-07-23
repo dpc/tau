@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::*;
 
 fn new_test_term_with_data_and_bindings(
-    commands: Vec<SlashCommand>,
+    commands: Vec<CommandCompletion>,
     bindings: impl IntoIterator<Item = (String, String)>,
 ) -> (
     HighTerm,
@@ -24,7 +24,7 @@ fn new_test_term_with_data_and_bindings(
 }
 
 fn new_test_term_with_data(
-    commands: Vec<SlashCommand>,
+    commands: Vec<CommandCompletion>,
 ) -> (
     HighTerm,
     TermHandle,
@@ -35,7 +35,7 @@ fn new_test_term_with_data(
 }
 
 fn new_test_term(
-    commands: Vec<SlashCommand>,
+    commands: Vec<CommandCompletion>,
 ) -> (HighTerm, TermHandle, std::sync::mpsc::Sender<TestRawEvent>) {
     let (term, handle, _completion_data, input_tx) = new_test_term_with_data(commands);
     (term, handle, input_tx)
@@ -98,11 +98,11 @@ fn submit_typed(term: &mut HighTerm, input_tx: &std::sync::mpsc::Sender<TestRawE
 #[test]
 fn completion_menu_rendering_reuses_fixed_suggestion_block_id() {
     let (mut term, handle, input_tx) = new_test_term(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
 
-    send_key(&input_tx, KeyCode::Char('/'));
+    send_key(&input_tx, KeyCode::Char(':'));
     assert!(matches!(
         term.get_next_event().expect("open completion"),
         Event::BufferChanged
@@ -122,57 +122,82 @@ fn completion_menu_rendering_reuses_fixed_suggestion_block_id() {
     assert_eq!(snapshot.suggestion_ids(), &[COMPLETION_MENU_BLOCK_ID]);
 }
 
+/// Merges extension-provided command roots into the intrinsic root menu.
 #[test]
-fn dynamic_slash_commands_are_in_root_completion_menu() {
+fn dynamic_commands_are_in_root_completion_menu() {
     let data = CompletionData::new();
-    data.set_dynamic_commands(vec![SlashCommand::new("/email", "Email approvals")]);
+    data.set_dynamic_commands(vec![CommandCompletion::new(":email", "Email approvals")]);
 
     let candidates =
-        completion::build_candidates(&[SlashCommand::new("/quit", "Exit")], &data, "/", 1);
+        completion::build_candidates(&[CommandCompletion::new(":quit", "Exit")], &data, ":", 1);
 
     let labels: Vec<_> = candidates
         .iter()
         .map(|candidate| candidate.label.as_str())
         .collect();
-    assert_eq!(labels, vec!["/quit", "/email"]);
+    assert_eq!(labels, vec![":quit", ":email"]);
+}
+
+/// Accepts the complete command-token alphabet.
+#[test]
+fn command_name_accepts_one_colon_and_one_token() {
+    assert_eq!(CommandName::new(":a_b-1").as_str(), ":a_b-1");
+}
+
+/// Rejects missing, doubled, empty, separated, non-ASCII, or punctuated tokens.
+#[test]
+fn command_name_rejects_text_outside_command_token_grammar() {
+    for invalid in ["model", ":", "::literal", ":model arg", ":é", ":model!"] {
+        assert!(
+            !completion::is_valid_command_name(invalid),
+            "{invalid:?} should be rejected"
+        );
+    }
+}
+
+/// Enforces the validated grammar at construction time.
+#[test]
+#[should_panic(expected = "CommandName must be")]
+fn command_name_constructor_panics_for_invalid_tokens() {
+    CommandName::new("model");
 }
 
 #[test]
 fn dynamic_arg_completers_are_replaced_with_dynamic_commands() {
     let data = CompletionData::new();
     data.set_dynamic_commands_and_arg_completers(
-        vec![SlashCommand::new("/email", "Email approvals")],
+        vec![CommandCompletion::new(":email", "Email approvals")],
         vec![(
-            CommandName::new("/email"),
+            CommandName::new(":email"),
             std::sync::Arc::new(|_| vec![CompletionItem::plain("in")]),
         )],
     );
     assert_eq!(
-        completion::build_candidates(&[], &data, "/email ", 7)[0].label,
+        completion::build_candidates(&[], &data, ":email ", 7)[0].label,
         "in"
     );
 
     data.set_dynamic_commands(Vec::new());
-    assert!(completion::build_candidates(&[], &data, "/email ", 7).is_empty());
+    assert!(completion::build_candidates(&[], &data, ":email ", 7).is_empty());
 }
 
 #[test]
 fn typed_history_item_matching_completion_needs_one_up_per_item() {
     let (mut term, handle, input_tx) = new_test_term(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
 
     submit_typed(&mut term, &input_tx, "Hi");
-    submit_typed(&mut term, &input_tx, "/model openai/gpt-5");
+    submit_typed(&mut term, &input_tx, ":model openai/gpt-5");
 
     send_key(&input_tx, KeyCode::Up);
     assert!(matches!(
         term.get_next_event()
-            .expect("navigate to slash history item"),
+            .expect("navigate to command history item"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model openai/gpt-5");
+    assert_eq!(handle.get_buffer(), ":model openai/gpt-5");
 
     send_key(&input_tx, KeyCode::Up);
     assert!(matches!(
@@ -182,32 +207,63 @@ fn typed_history_item_matching_completion_needs_one_up_per_item() {
     assert_eq!(handle.get_buffer(), "Hi");
 }
 
+/// Ensures literal-colon escaping stays visible while editing and submitting,
+/// but the terminal stores only canonical prompt text for later recall.
+#[test]
+fn literal_colon_escape_is_canonicalized_in_prompt_history() {
+    let (mut term, handle, input_tx) = new_test_term(Vec::new());
+
+    submit_typed(&mut term, &input_tx, "  ::literal");
+    send_key(&input_tx, KeyCode::Up);
+    assert!(matches!(
+        term.get_next_event().expect("recall canonical prompt"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "  :literal");
+}
+
+/// Documents exact escape canonicalization, including leading whitespace and
+/// the rule that only one colon is removed.
+#[test]
+fn literal_colon_prompt_canonicalization_removes_exactly_one_colon() {
+    assert_eq!(
+        canonical_literal_colon_prompt("::text"),
+        Some(":text".to_owned())
+    );
+    assert_eq!(
+        canonical_literal_colon_prompt("  :::text"),
+        Some("  ::text".to_owned())
+    );
+    assert_eq!(canonical_literal_colon_prompt(":text"), None);
+    assert_eq!(canonical_literal_colon_prompt("text ::later"), None);
+}
+
 #[test]
 fn history_after_accepting_argument_completion_needs_one_up_per_item() {
     let (mut term, handle, completion_data, input_tx) = new_test_term_with_data(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
     completion_data.set_arg_completions(
-        CommandName::new("/model"),
+        CommandName::new(":model"),
         vec![CompletionItem::plain("openai/gpt-5")],
     );
 
     submit_typed(&mut term, &input_tx, "Hi");
-    type_text(&mut term, &input_tx, "/model op");
+    type_text(&mut term, &input_tx, ":model op");
 
     send_key(&input_tx, KeyCode::Down);
     assert!(matches!(
         term.get_next_event().expect("cycle argument completion"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model openai/gpt-5");
+    assert_eq!(handle.get_buffer(), ":model openai/gpt-5");
 
     send_submit(&input_tx);
     send_submit(&input_tx);
     assert!(matches!(
         term.get_next_event().expect("accept and submit completion"),
-        Event::Line(line) if line == "/model openai/gpt-5"
+        Event::Line(line) if line == ":model openai/gpt-5"
     ));
 
     send_key(&input_tx, KeyCode::Up);
@@ -216,7 +272,7 @@ fn history_after_accepting_argument_completion_needs_one_up_per_item() {
             .expect("navigate to completed history item"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model openai/gpt-5");
+    assert_eq!(handle.get_buffer(), ":model openai/gpt-5");
 
     send_key(&input_tx, KeyCode::Up);
     assert!(matches!(
@@ -229,20 +285,20 @@ fn history_after_accepting_argument_completion_needs_one_up_per_item() {
 #[test]
 fn history_items_matching_completion_do_not_steal_following_history_navigation() {
     let (mut term, handle, input_tx) = new_test_term(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
 
     submit(&mut term, &handle, &input_tx, "Hi");
-    submit(&mut term, &handle, &input_tx, "/model openai/gpt-5");
+    submit(&mut term, &handle, &input_tx, ":model openai/gpt-5");
 
     send_key(&input_tx, KeyCode::Up);
     assert!(matches!(
         term.get_next_event()
-            .expect("navigate to slash history item"),
+            .expect("navigate to command history item"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model openai/gpt-5");
+    assert_eq!(handle.get_buffer(), ":model openai/gpt-5");
 
     send_key(&input_tx, KeyCode::Up);
     assert!(matches!(
@@ -255,11 +311,11 @@ fn history_items_matching_completion_do_not_steal_following_history_navigation()
 #[test]
 fn up_arrow_cycles_completion_after_down_cycles_with_history_present() {
     let (mut term, handle, completion_data, input_tx) = new_test_term_with_data(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
     completion_data.set_arg_completions(
-        CommandName::new("/model"),
+        CommandName::new(":model"),
         vec![
             CompletionItem::plain("anthropic/claude-sonnet-4-5"),
             CompletionItem::plain("openai/gpt-5"),
@@ -268,45 +324,45 @@ fn up_arrow_cycles_completion_after_down_cycles_with_history_present() {
     );
 
     submit_typed(&mut term, &input_tx, "Hi");
-    type_text(&mut term, &input_tx, "/model ");
+    type_text(&mut term, &input_tx, ":model ");
 
     send_key(&input_tx, KeyCode::Down);
     assert!(matches!(
         term.get_next_event().expect("cycle to first model"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model anthropic/claude-sonnet-4-5");
+    assert_eq!(handle.get_buffer(), ":model anthropic/claude-sonnet-4-5");
 
     send_key(&input_tx, KeyCode::Down);
     assert!(matches!(
         term.get_next_event().expect("cycle to second model"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model openai/gpt-5");
+    assert_eq!(handle.get_buffer(), ":model openai/gpt-5");
 
     send_key(&input_tx, KeyCode::Up);
     assert!(matches!(
         term.get_next_event().expect("cycle back to first model"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model anthropic/claude-sonnet-4-5");
+    assert_eq!(handle.get_buffer(), ":model anthropic/claude-sonnet-4-5");
 }
 
 #[test]
 fn arrows_cycle_active_completion_even_when_history_exists() {
     let (mut term, handle, input_tx) = new_test_term(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
 
     submit(&mut term, &handle, &input_tx, "Hi");
 
-    send_key(&input_tx, KeyCode::Char('/'));
+    send_key(&input_tx, KeyCode::Char(':'));
     assert!(matches!(
         term.get_next_event().expect("trigger completion"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/");
+    assert_eq!(handle.get_buffer(), ":");
 
     send_key(&input_tx, KeyCode::Down);
     assert!(matches!(
@@ -314,7 +370,7 @@ fn arrows_cycle_active_completion_even_when_history_exists() {
             .expect("cycle completion with history present"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model");
+    assert_eq!(handle.get_buffer(), ":model");
 
     send_key(&input_tx, KeyCode::Down);
     assert!(matches!(
@@ -322,7 +378,7 @@ fn arrows_cycle_active_completion_even_when_history_exists() {
             .expect("cycle completion again with history present"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/quit");
+    assert_eq!(handle.get_buffer(), ":quit");
 }
 
 #[test]
@@ -333,25 +389,25 @@ fn up_at_first_match_returns_to_original_buffer_then_wraps() {
     // four-state cycle: None → 0 → 1 → ... → len-1 → 0 → 1 → ...,
     // with one None reachable on the Up-from-0 boundary.
     let (mut term, handle, input_tx) = new_test_term(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
 
-    send_key(&input_tx, KeyCode::Char('/'));
+    send_key(&input_tx, KeyCode::Char(':'));
     assert!(matches!(
         term.get_next_event().expect("trigger completion"),
         Event::BufferChanged
     ));
 
     let sequence: &[(KeyCode, &str)] = &[
-        (KeyCode::Down, "/model"),
-        (KeyCode::Down, "/quit"),
-        (KeyCode::Up, "/model"),
+        (KeyCode::Down, ":model"),
+        (KeyCode::Down, ":quit"),
+        (KeyCode::Up, ":model"),
         // Up from idx 0 → no selection → buffer is restored to what
         // the user actually typed.
-        (KeyCode::Up, "/"),
+        (KeyCode::Up, ":"),
         // Continuing Up from None wraps to the last match.
-        (KeyCode::Up, "/quit"),
+        (KeyCode::Up, ":quit"),
     ];
     for (i, (key, want)) in sequence.iter().enumerate() {
         send_key(&input_tx, *key);
@@ -376,21 +432,21 @@ fn arrows_cycle_repeatedly_through_completion_with_history_present() {
     // gives the open completion menu first claim on Up/Down, so the
     // arrows cycle the menu and the history is never touched.
     let (mut term, handle, input_tx) = new_test_term(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
 
     submit(&mut term, &handle, &input_tx, "earlier-1");
     submit(&mut term, &handle, &input_tx, "earlier-2");
 
-    send_key(&input_tx, KeyCode::Char('/'));
+    send_key(&input_tx, KeyCode::Char(':'));
     assert!(matches!(
         term.get_next_event().expect("trigger completion"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/");
+    assert_eq!(handle.get_buffer(), ":");
 
-    let expected = ["/model", "/quit", "/model", "/quit"];
+    let expected = [":model", ":quit", ":model", ":quit"];
     for (i, want) in expected.iter().enumerate() {
         send_key(&input_tx, KeyCode::Down);
         assert!(matches!(
@@ -410,22 +466,22 @@ fn arrows_cycle_repeatedly_through_completion_with_history_present() {
 
 #[test]
 fn arrows_cycle_repeatedly_through_completion_suggestions() {
-    // Down four times should cycle: /model, /quit, /model, /quit.
+    // Down four times should cycle: :model, :quit, :model, :quit.
     // Wrapping is the normal `(i + 1) mod len` — the None state is
     // only reachable via Up at idx 0.
     let (mut term, handle, input_tx) = new_test_term(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
 
-    send_key(&input_tx, KeyCode::Char('/'));
+    send_key(&input_tx, KeyCode::Char(':'));
     assert!(matches!(
         term.get_next_event().expect("trigger completion"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/");
+    assert_eq!(handle.get_buffer(), ":");
 
-    let expected = ["/model", "/quit", "/model", "/quit"];
+    let expected = [":model", ":quit", ":model", ":quit"];
     for (i, want) in expected.iter().enumerate() {
         send_key(&input_tx, KeyCode::Down);
         assert!(matches!(
@@ -445,30 +501,30 @@ fn arrows_cycle_repeatedly_through_completion_suggestions() {
 #[test]
 fn arrows_still_cycle_active_completion_suggestions() {
     let (mut term, handle, input_tx) = new_test_term(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
 
-    send_key(&input_tx, KeyCode::Char('/'));
+    send_key(&input_tx, KeyCode::Char(':'));
     assert!(matches!(
         term.get_next_event().expect("trigger completion"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/");
+    assert_eq!(handle.get_buffer(), ":");
 
     send_key(&input_tx, KeyCode::Down);
     assert!(matches!(
         term.get_next_event().expect("cycle completion"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model");
+    assert_eq!(handle.get_buffer(), ":model");
 
     send_key(&input_tx, KeyCode::Down);
     assert!(matches!(
         term.get_next_event().expect("cycle completion again"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/quit");
+    assert_eq!(handle.get_buffer(), ":quit");
 }
 
 #[test]
@@ -479,39 +535,39 @@ fn editing_after_preview_commits_it_as_the_new_original_buffer() {
     // opening the menu. This pins the "every edit commits the prior
     // preview" rule the raw layer documents in `refresh_completion`.
     let (mut term, handle, input_tx) = new_test_term(vec![
-        SlashCommand::new("/model", "Switch model"),
-        SlashCommand::new("/quit", "Exit"),
+        CommandCompletion::new(":model", "Switch model"),
+        CommandCompletion::new(":quit", "Exit"),
     ]);
 
-    type_text(&mut term, &input_tx, "/m");
-    assert_eq!(handle.get_buffer(), "/m");
+    type_text(&mut term, &input_tx, ":m");
+    assert_eq!(handle.get_buffer(), ":m");
 
-    // Cycle to "/model" — buffer now previews the candidate.
+    // Cycle to ":model" — buffer now previews the candidate.
     send_key(&input_tx, KeyCode::Down);
     assert!(matches!(
-        term.get_next_event().expect("preview /model"),
+        term.get_next_event().expect("preview :model"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model");
+    assert_eq!(handle.get_buffer(), ":model");
 
-    // Backspace edits the preview. The new buffer ("/mode") still
-    // matches "/model" by prefix, so the menu re-opens — but with
-    // "/mode" as the new original.
+    // Backspace edits the preview. The new buffer (":mode") still
+    // matches ":model" by prefix, so the menu re-opens — but with
+    // ":mode" as the new original.
     send_key(&input_tx, KeyCode::Backspace);
     assert!(matches!(
         term.get_next_event().expect("backspace edits preview"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/mode");
+    assert_eq!(handle.get_buffer(), ":mode");
 
-    // Esc dismisses to the edited preview, not back to "/m".
+    // Esc dismisses to the edited preview, not back to ":m".
     send_key(&input_tx, KeyCode::Esc);
     assert!(matches!(
         term.get_next_event()
             .expect("esc returns to edited preview"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/mode");
+    assert_eq!(handle.get_buffer(), ":mode");
 }
 
 #[test]
@@ -540,25 +596,25 @@ fn submit_prompt_binding_accepts_completion_before_submit() {
     // submits the accepted text, matching raw Ctrl-Enter.
     let (mut term, handle, _completion_data, input_tx) = new_test_term_with_data_and_bindings(
         vec![
-            SlashCommand::new("/model", "Switch model"),
-            SlashCommand::new("/quit", "Exit"),
+            CommandCompletion::new(":model", "Switch model"),
+            CommandCompletion::new(":quit", "Exit"),
         ],
         vec![("C-Enter".to_owned(), "submit-prompt".to_owned())],
     );
 
-    type_text(&mut term, &input_tx, "/");
+    type_text(&mut term, &input_tx, ":");
     send_key(&input_tx, KeyCode::Down);
     assert!(matches!(
         term.get_next_event().expect("preview first completion"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/model");
+    assert_eq!(handle.get_buffer(), ":model");
 
     send_submit(&input_tx);
     send_submit(&input_tx);
     assert!(matches!(
         term.get_next_event().expect("accept then submit"),
-        Event::Line(line) if line == "/model"
+        Event::Line(line) if line == ":model"
     ));
 }
 
@@ -632,9 +688,9 @@ fn dismiss_completion_menu_closes_rendered_completion_menu() {
     // not edit the prompt buffer. They still need a central way to close stale
     // completion UI so the rendered suggestion block cannot stick around.
     let (mut term, handle, input_tx) =
-        new_test_term(vec![SlashCommand::new("/agent", "Manage agents")]);
+        new_test_term(vec![CommandCompletion::new(":agent", "Manage agents")]);
 
-    type_text(&mut term, &input_tx, "/");
+    type_text(&mut term, &input_tx, ":");
     assert!(handle.completion_state().is_some());
     assert!(term.menu_block_id.is_some());
 

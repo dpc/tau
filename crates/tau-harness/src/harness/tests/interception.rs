@@ -1749,7 +1749,7 @@ fn intercepted_final_response_cannot_fan_out_after_watched_agent_unload() {
 }
 
 /// A checkpoint parked before commit owns its provider-qualified model even if
-/// `/model` timing changes the loaded agent before prompt materialization.
+/// `:model` timing changes the loaded agent before prompt materialization.
 #[test]
 fn intercepted_inference_checkpoint_pins_materialized_model() {
     let tmp = TempDir::new().expect("tempdir");
@@ -4081,6 +4081,7 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
     .expect("register interceptor");
 
     h.handle_authenticated_ui_prompt_submitted(tau_proto::UiPromptSubmitted {
+        literal: false,
         session_id: h.current_session_id.clone(),
         text: "park me".to_owned(),
         agent_id: parsed_agent_id.clone(),

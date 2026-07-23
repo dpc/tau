@@ -870,7 +870,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .expect("built-in CLI UI skill");
     assert!(!cli_ui.add_to_prompt);
     assert!(cli_ui.content.contains("complete_with_command"));
-    assert!(cli_ui.content.contains("slash/action completion"));
+    assert!(cli_ui.content.contains("command/action completion"));
 
     let prompt_templating = skills
         .iter()

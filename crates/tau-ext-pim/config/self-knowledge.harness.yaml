@@ -41,8 +41,8 @@ extensions:
               # Use a Google OAuth client of type "Desktop app".
               # Omit refresh_token_secret, run start, open the URL, then paste
               # the full failed loopback address-bar URL into finish:
-              #   /email auth google start work
-              #   /email auth google finish work http://127.0.0.1:54321/?state=...&code=...
+              #   :email auth google start work
+              #   :email auth google finish work http://127.0.0.1:54321/?state=...&code=...
               # Or set refresh_token_secret for a manually provisioned token.
               # refresh_token_secret: google_mail_refresh_token
             folders:
@@ -83,8 +83,8 @@ extensions:
               client_secret_secret: google_calendar_device_client_secret
               # Use a Google OAuth client of type "TVs and Limited Input devices".
               # Omit refresh_token_secret and authorize with:
-              #   /calendar auth google start google
-              #   /calendar auth google finish google
+              #   :calendar auth google start google
+              #   :calendar auth google finish google
               # Or set refresh_token_secret for a manually provisioned token.
             calendars:
               default: primary

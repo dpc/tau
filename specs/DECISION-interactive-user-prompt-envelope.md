@@ -16,7 +16,7 @@ only during provider assembly. The projection creates no second payload fact,
 role, activation, wake, route, identity, or trust authority.
 
 This covers existing-agent, new-agent initial, and queued/steered interactive UI
-prompts. A successful `/skill` invocation wraps the harness-expanded canonical
+prompts. A successful `:skill` invocation wraps the harness-expanded canonical
 prompt, so its literal inner markup is escaped in the `<user>` body. Injected,
 internal, extension, external-message, and agent-message inputs retain their
 separate projections.

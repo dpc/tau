@@ -103,7 +103,7 @@ membership journal, not a transcript.
 
 - **`session.started`** — Must-pass immutable runtime lifecycle fact: the
   harness created or switched to a session. Carries `session_id` and a reason
-  (`initial` startup, `new` via `/session new`, `resume` of an existing session).
+  (`initial` startup, `new` via `:session new`, `resume` of an existing session).
   Registered session context providers react with per-session setup and reply
   with `extension.session_context_ready`; per-agent context providers react to
   `session.agent_loaded` and reply with `extension.context_ready`. Interceptors
@@ -446,7 +446,7 @@ agent requests, and harness dispatch. The registration lifecycle contract is
 
 ## Actions
 
-Action events carry slash-command/action schema and invocation traffic between
+Action events carry command/action schema and invocation traffic between
 extensions, the harness, and interested UIs.
 
 - **`action.schema_published`** — An extension publishes its current action
@@ -502,7 +502,7 @@ transient runtime observations and never enter semantic replay. See
 
 - **`extension.skill_available`** — The extension discovered a skill on
   disk: name, description, file path, whether to inject it into the
-  system prompt, whether users may invoke it with `/skill`, whether model-side
+  system prompt, whether users may invoke it with `:skill`, whether model-side
   invocation is disabled (which implies user invocation), and an optional argument hint.
   The transient declaration commits before validation, collision selection, or diagnostics.
 - **`extension.agents_md_available`** — The extension discovered an
@@ -572,7 +572,7 @@ transient runtime observations and never enter semantic replay. See
   have no received projection. User-recipient sent projections are human-visible
   broadcasts that UIs always render fully in the currently visible transcript. UI
    subscribers filter, summarize, or fully display agent-to-agent message
-   projections according to `/set show-messages`. The received projection is the
+   projections according to `:set show-messages`. The received projection is the
    sole model payload; local senders render in a stable-sender-labelled escaped
    `[tau-internal]` wrapper and external senders in an authenticated peer envelope.
    Live activation is a payload-free runtime wake; replay restores context without
@@ -653,12 +653,12 @@ intent.
   `model_override` is installed on the new agent before its first prompt is
   queued or routed, and `ephemeral: true` keeps the agent transcript and session
   membership memory-only for the daemon lifetime.
-- **`ui.navigate_tree`** — User typed `/tree <anchor>`, `/tree root`, or the
-  expert `/tree node <node-id>` form: move the selected or targeted agent head
+- **`ui.navigate_tree`** — User typed `:tree <anchor>`, `:tree root`, or the
+  expert `:tree node <node-id>` form: move the selected or targeted agent head
   to the resolved root-or-node target so the next prompt branches there.
-  Prompt anchors are one-based; UI parsers should encode `/tree 0` as the
+  Prompt anchors are one-based; UI parsers should encode `:tree 0` as the
   explicit root target before the first prompt.
-- **`ui.compact_request`** — User typed `/compact`: request provider-side
+- **`ui.compact_request`** — User typed `:compact`: request provider-side
   compaction for the selected or targeted agent before the next prompt.
 - **`ui.cancel_prompt`** — User requests cancellation of a prompt by session,
   optional target agent, and optional prompt id; applies to active or queued

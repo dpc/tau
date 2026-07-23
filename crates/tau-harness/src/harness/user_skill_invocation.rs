@@ -1,4 +1,4 @@
-//! User-facing `/skill` command parsing and prompt expansion helpers.
+//! User-facing `:skill` command parsing and prompt expansion helpers.
 
 use std::io::Read as _;
 
@@ -8,10 +8,10 @@ pub(super) const MAX_USER_INVOKED_SKILL_BYTES: usize = 64 * 1024;
 
 pub(super) fn parse_user_skill_command(text: &str) -> Option<(&str, &str)> {
     let trimmed = text.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("/skill:") {
+    if let Some(rest) = trimmed.strip_prefix(":skill:") {
         return Some(split_skill_name_and_args(rest));
     }
-    if let Some(rest) = trimmed.strip_prefix("/skill") {
+    if let Some(rest) = trimmed.strip_prefix(":skill") {
         if rest.is_empty() {
             return Some(("", ""));
         }

@@ -165,6 +165,7 @@ pub struct CliSettings {
     pub theme: CliTheme,
     /// Prompt-text completion rules keyed by word prefix. Values name
     /// the completer to run, optionally followed by completer arguments.
+    /// Intrinsic first-non-whitespace colon command mode takes precedence.
     #[serde(default)]
     pub completions: HashMap<String, String>,
     /// Key bindings for prompt-local actions. Defaults to an
@@ -244,43 +245,43 @@ pub(crate) fn default_cli_bindings() -> HashMap<String, CliBindingAction> {
 /// Mutable CLI state persisted across runs at
 /// `<state_dir>/cli.json`. Distinct from `CliSettings` (config) —
 /// this file is written by the CLI itself in response to
-/// `/set <name> <value>` commands.
+/// `:set <name> <value>` commands.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct CliState {
     /// Whether to render file-mutation diffs in their full expanded
     /// form (vs the compact `+N/-M` chip). Controlled by
-    /// `/set show-diff <true|false>`.
+    /// `:set show-diff <true|false>`.
     pub show_diff: bool,
     /// Whether to render the agent's reasoning summary (the
     /// `agent.thinking` block). Controlled by
-    /// `/set show-thinking <true|false>`.
+    /// `:set show-thinking <true|false>`.
     pub show_thinking: bool,
     /// Whether to render per-turn token usage stats below agent
-    /// responses. Controlled by `/set show-turn-stats <true|false>`.
+    /// responses. Controlled by `:set show-turn-stats <true|false>`.
     pub show_turn_stats: bool,
     /// Whether to render the full-redraw debug counter in the model
-    /// status bar. Controlled by `/set redraw-counter <true|false>`.
+    /// status bar. Controlled by `:set redraw-counter <true|false>`.
     pub redraw_counter: bool,
     /// Maximum number of rendered history lines replayed to the terminal on a
-    /// full redraw. Controlled by `/set redraw-history-size <lines>`.
+    /// full redraw. Controlled by `:set redraw-history-size <lines>`.
     pub redraw_history_size: usize,
     /// Whether to render UI↔harness socket throughput in the model
-    /// status bar. Controlled by `/set show-ui-io <true|false>`.
+    /// status bar. Controlled by `:set show-ui-io <true|false>`.
     pub show_ui_io: bool,
     /// How tool calls are rendered in the transcript. Controlled by
-    /// `/set show-tools <off|summarize-turn|summarize-prompt|compact|full>`.
+    /// `:set show-tools <off|summarize-turn|summarize-prompt|compact|full>`.
     pub show_tools: ShowTools,
     /// How messages between the user and agents, or between agents, are
-    /// rendered in the transcript. Controlled by `/set show-messages <mode>`.
+    /// rendered in the transcript. Controlled by `:set show-messages <mode>`.
     pub show_messages: ShowMessages,
     /// Notice visibility threshold. Controlled by
-    /// `/set notice-level <critical|warning|info|debug|trace>`.
+    /// `:set notice-level <critical|warning|info|debug|trace>`.
     pub notice_level: tau_proto::NoticeLevel,
     /// Deprecated compatibility setting for old routine status visibility.
     pub show_status: ShowStatus,
     /// Whether to show a compact indicator when the prompt input has hidden
-    /// rows. Controlled by `/set show-prompt-scroll-indicator <true|false>`.
+    /// rows. Controlled by `:set show-prompt-scroll-indicator <true|false>`.
     pub show_prompt_scroll_indicator: bool,
 }
 
@@ -555,7 +556,7 @@ impl CliState {
 
     /// Load the persisted CLI state, using `default` when state is missing or
     /// malformed. This lets static CLI config provide the initial values while
-    /// `/set` changes still persist as runtime state.
+    /// `:set` changes still persist as runtime state.
     #[must_use]
     pub fn load_with_default(dirs: &TauDirs, default: Self) -> Self {
         let Some(dir) = dirs.state_dir.as_ref() else {
@@ -571,7 +572,7 @@ impl CliState {
         }
     }
 
-    /// Persist current state. Best-effort: a slash command never fails
+    /// Persist current state. Best-effort: a command never fails
     /// because the user's state dir is read-only, but failures are
     /// logged on stderr so a silently-resetting state dir is visible
     /// to the user.
@@ -658,9 +659,9 @@ pub struct HarnessSettings {
     /// Agent-global named context-size alerts applied to every role.
     pub context_size_alerts: BTreeMap<String, ContextSizeAlert>,
 
-    /// User-configured prompt templates exposed in the CLI as `/prompt <id>`.
+    /// User-configured prompt templates exposed in the CLI as `:prompt <id>`.
     /// Map keys are non-empty ids with no whitespace so they can be addressed
-    /// unambiguously from the slash command.
+    /// unambiguously from the command.
     pub custom_prompts: Vec<CustomPrompt>,
 
     /// Harness-owned declarative policy applied to tool tags before role
@@ -921,7 +922,7 @@ struct HarnessAgentRoleOverrides {
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
 }
 
-/// One saved prompt template exposed through the CLI `/prompt <id>` command.
+/// One saved prompt template exposed through the CLI `:prompt <id>` command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustomPrompt {
     /// Stable command argument used to select the prompt. Must be non-empty

@@ -1837,13 +1837,13 @@ pub struct Harness {
     pub(crate) session_persistence: tau_core::SessionPersistenceMode,
     /// Runtime harness path stem for this daemon's socket/metadata pair.
     ///
-    /// Daemon-mode harnesses set this so `/session new` can keep discovery
+    /// Daemon-mode harnesses set this so `:session new` can keep discovery
     /// metadata's active session id synchronized with `current_session_id`.
     pub(crate) runtime_harness_path: Option<PathBuf>,
     /// Absolute canonical startup root returned by live-session control reads.
     project_root: PathBuf,
     /// The single active session this harness currently owns. User messages and
-    /// harness-owned RPCs with a different `session_id` are rejected. `/session
+    /// harness-owned RPCs with a different `session_id` are rejected. `:session
     /// new` reuses the daemon process but switches this binding, clears
     /// session-scoped runtime state, and starts a new session init sequence.
     pub(crate) current_session_id: SessionId,
@@ -1955,7 +1955,7 @@ pub struct Harness {
     /// Inbound callback jobs grouped by the socket whose request owns them.
     pub(crate) inbound_peer_io_cancellations:
         HashMap<tau_proto::ConnectionId, Vec<std::sync::Weak<std::sync::atomic::AtomicBool>>>,
-    /// A UI sent `/detach` while the harness was still in startup gating.
+    /// A UI sent `:detach` while the harness was still in startup gating.
     /// The main event loop consumes this to preserve detach semantics after
     /// startup completes.
     startup_detach_requested: bool,
@@ -2003,7 +2003,7 @@ pub struct Harness {
     /// agents use the same identity; there is no default/main alias.
     pub(crate) agents: std::collections::HashMap<AgentId, Agent>,
     /// Agent id to conversation routing for addressable agents in the current
-    /// session. Suspended agents remain here so `/agent resume` and follow-up
+    /// session. Suspended agents remain here so `:agent resume` and follow-up
     /// prompts can continue their conversation.
     pub(crate) agent_routes: HashMap<String, AgentId>,
     /// Harness-local acceptance order for visible user interactions.
@@ -2141,7 +2141,7 @@ pub struct Harness {
     pub(crate) selected_model: Option<ModelId>,
     /// State that belongs to exactly the currently bound session.
     /// Keep session-scoped counters here instead of as top-level
-    /// harness fields, so `/session new` resets them with one assignment.
+    /// harness fields, so `:session new` resets them with one assignment.
     pub(crate) current_session_state: CurrentSessionState,
     /// Provider/model for each prompt sent to the provider, used to
     /// attribute the corresponding finished response even if the user
@@ -2236,7 +2236,7 @@ pub struct Harness {
     /// completion. Kept so suppression can remove and later restore queued
     /// completion prompts across repeated wait/interrupt cycles.
     pub(crate) background_completion_targets: HashMap<ToolCallId, AgentId>,
-    /// Prompt ids canceled by `/cancel`. Late agent events for these
+    /// Prompt ids canceled by `:cancel`. Late agent events for these
     /// prompts are ignored and never folded into session state.
     pub(crate) canceled_prompts: std::collections::HashSet<AgentPromptId>,
     /// Extension-started side agents waiting for dispatch after their
@@ -2626,7 +2626,7 @@ struct StartupHarnessParts {
     project_root: PathBuf,
 }
 
-/// One user-facing `/tree` prompt rewind anchor derived from durable prompt
+/// One user-facing `:tree` prompt rewind anchor derived from durable prompt
 /// provenance and resolved through the folded agent tree.
 struct PromptAnchorTarget<'a> {
     /// One-based prompt anchor shown to the user.
@@ -2667,7 +2667,7 @@ fn prompt_anchor_targets<'a>(
     anchors
 }
 
-/// Returns whether a durable event should receive a default `/tree` prompt
+/// Returns whether a durable event should receive a default `:tree` prompt
 /// anchor.
 ///
 /// Default anchors are intentionally provenance-based: visible prompts
@@ -7353,7 +7353,7 @@ impl Harness {
             .map(|m| m.origin.clone());
         match origin {
             Some(ConnectionOrigin::Socket) => {
-                // `/detach` → stay alive even after this UI leaves; a later
+                // `:detach` → stay alive even after this UI leaves; a later
                 // `tau --attach` can pick up right here.
                 if self.is_authorized_ui_detach_request(&connection_id, &message) {
                     *exit_on_disconnect = false;
@@ -12410,7 +12410,7 @@ impl Harness {
             }
         };
         let Some(cid) = cid else {
-            self.emit_info("/model: no selected agent to update");
+            self.emit_info(":model: no selected agent to update");
             return Ok(true);
         };
         let previous_usage_model = self
@@ -12418,11 +12418,11 @@ impl Harness {
             .get(&cid)
             .and_then(|conv| conv.context_usage_model.clone());
         let Some(conv) = self.agents.get_mut(&cid) else {
-            self.emit_info("/model: selected agent is not loaded");
+            self.emit_info(":model: selected agent is not loaded");
             return Ok(true);
         };
         if conv.session_id != select.session_id {
-            self.emit_info("/model: selected agent is not in this session");
+            self.emit_info(":model: selected agent is not in this session");
             return Ok(true);
         }
         conv.model_override = Some(select.model.clone());
@@ -12446,7 +12446,7 @@ impl Harness {
     ) -> Result<bool, HarnessError> {
         if let Some(reason) = self.disabled_role_reasons.get(&req.role) {
             self.emit_info(&format!(
-                "/role: role `{}` is disabled by configuration: {}",
+                ":role: role `{}` is disabled by configuration: {}",
                 req.role, reason.message
             ));
             return Ok(true);
@@ -12513,7 +12513,7 @@ impl Harness {
             if let Some(role) = previous_override {
                 self.role_overrides.insert(role_name.clone(), role);
             }
-            self.emit_info("/role: cannot delete the last role");
+            self.emit_info(":role: cannot delete the last role");
             return Ok(false);
         }
         if was_selected {
@@ -12572,7 +12572,7 @@ impl Harness {
         let agent_id = prompt.agent_id.to_string();
         let is_user_interaction =
             prompt.originator.is_user() && !prompt.message_class.is_internal();
-        let text = if is_user_interaction {
+        let text = if is_user_interaction && !prompt.literal {
             let Some(text) = self.expand_user_skill_command(&prompt.text) else {
                 return Ok(true);
             };
@@ -12685,16 +12685,16 @@ impl Harness {
             return Some(text.to_owned());
         };
         if let Some(message) = tau_skills::skill_name_validation_message(name) {
-            self.emit_info(&format!("/skill: invalid skill name `{name}`: {message}"));
+            self.emit_info(&format!(":skill: invalid skill name `{name}`: {message}"));
             return None;
         }
         let skill_name = tau_proto::SkillName::from(name.to_owned());
         let Some(skill) = self.discovered_skills.get(&skill_name).cloned() else {
-            self.emit_info(&format!("/skill: unknown skill `{name}`"));
+            self.emit_info(&format!(":skill: unknown skill `{name}`"));
             return None;
         };
         if !skill.user_invocable {
-            self.emit_info(&format!("/skill: skill `{name}` is not user-invocable"));
+            self.emit_info(&format!(":skill: skill `{name}` is not user-invocable"));
             return None;
         }
         match user_skill_invocation::read_user_invoked_skill_body(&skill.source) {
@@ -12715,7 +12715,7 @@ impl Harness {
                 ))
             }
             Err(message) => {
-                self.emit_info(&format!("/skill: failed to load `{name}`: {message}"));
+                self.emit_info(&format!(":skill: failed to load `{name}`: {message}"));
                 None
             }
         }
@@ -12808,7 +12808,7 @@ impl Harness {
             && req.originator.is_user()
             && !req.message_class.is_internal();
         let initial_prompt = if let Some(initial_prompt) = req.initial_prompt {
-            let initial_prompt = if is_user_initial_prompt {
+            let initial_prompt = if is_user_initial_prompt && !req.literal {
                 let Some(text) = self.expand_user_skill_command(&initial_prompt) else {
                     return Ok(true);
                 };
@@ -20681,7 +20681,7 @@ impl Harness {
             .unwrap_or_default();
         let Some(model) = prompt_model else {
             self.emit_info(&format!(
-                "role `{role_name}` has no available model — use /role to pick a role, /model <provider>/<model> to pick an agent model, or enable a provider"
+                "role `{role_name}` has no available model — use :role to pick a role, :model <provider>/<model> to pick an agent model, or enable a provider"
             ));
             return None;
         };
@@ -22419,7 +22419,7 @@ impl Harness {
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
         self.emit_info_important(&format!(
-            "standalone compaction failed for agent `{cid}` ({reason:?}); retry with /compact, switch model/role, or rewind"
+            "standalone compaction failed for agent `{cid}` ({reason:?}); retry with :compact, switch model/role, or rewind"
         ));
         self.publish_for_agent_from(
             cid,

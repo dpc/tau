@@ -4,6 +4,22 @@ use tau_proto::{Event, PromptMessageClass, PromptOriginator, UiCreateAgent};
 /// role from session state.
 pub(crate) const DEFAULT_AGENT_ROLE: &str = "engineer";
 
+/// Whether downstream prompt-command processors may interpret canonical text.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PromptCommandHandling {
+    /// Apply the ordinary harness-owned prompt-command grammar.
+    #[default]
+    Interpret,
+    /// Preserve canonical text produced by the doubled-colon literal escape.
+    LiteralEscape,
+}
+
+impl PromptCommandHandling {
+    fn is_literal_escape(self) -> bool {
+        matches!(self, Self::LiteralEscape)
+    }
+}
+
 /// One-shot options applied while building a user-owned agent creation request.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CreateUserAgentPromptOptions {
@@ -11,6 +27,8 @@ pub(crate) struct CreateUserAgentPromptOptions {
     pub(crate) model_override: Option<tau_proto::ModelId>,
     /// Whether the new agent should be memory-only for the daemon lifetime.
     pub(crate) ephemeral: bool,
+    /// Controls harness-owned prompt-command interpretation.
+    pub(crate) command_handling: PromptCommandHandling,
 }
 
 /// Build the standard user-originated create-agent event used by interactive
@@ -28,6 +46,7 @@ pub(crate) fn create_user_agent_prompt(
         model_override: options.model_override,
         metadata: Vec::new(),
         initial_prompt: Some(prompt.into()),
+        literal: options.command_handling.is_literal_escape(),
         message_class: PromptMessageClass::User,
         originator: PromptOriginator::User,
         ctx_id: None,
@@ -45,7 +64,7 @@ mod tests {
         assert_eq!(built_in.default_role.as_deref(), Some(DEFAULT_AGENT_ROLE));
     }
 
-    /// The interactive `/new` + `/model` flow must be able to carry a one-shot
+    /// The interactive `:new` + `:model` flow must be able to carry a one-shot
     /// model override through the create-agent event for the first prompt.
     #[test]
     fn create_user_agent_prompt_preserves_model_override() {
@@ -57,6 +76,7 @@ mod tests {
             CreateUserAgentPromptOptions {
                 model_override: Some(model.clone()),
                 ephemeral: false,
+                command_handling: PromptCommandHandling::Interpret,
             },
         ) else {
             panic!("expected create agent event");
@@ -65,7 +85,7 @@ mod tests {
         assert_eq!(req.model_override, Some(model));
     }
 
-    /// The interactive `/new` + `/ephemeral` flow must be able to carry a
+    /// The interactive `:new` + `:ephemeral` flow must be able to carry a
     /// one-shot memory-only request through the create-agent event.
     #[test]
     fn create_user_agent_prompt_preserves_ephemeral_flag() {
@@ -76,6 +96,7 @@ mod tests {
             CreateUserAgentPromptOptions {
                 model_override: None,
                 ephemeral: true,
+                command_handling: PromptCommandHandling::Interpret,
             },
         ) else {
             panic!("expected create agent event");

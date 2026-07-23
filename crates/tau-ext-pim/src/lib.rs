@@ -412,7 +412,7 @@ fn google_auth_account_arg(account_kind: &str, accounts: &[String]) -> ActionArg
 }
 
 /// Return whether an account id can be inserted exactly as one bounded, safe
-/// slash-action token.
+/// action token.
 fn is_safe_action_account_id(id: &str) -> bool {
     id.len() <= tau_proto::MAX_ACTION_TOKEN_BYTES && id.chars().all(|ch| ch.is_ascii_graphic())
 }

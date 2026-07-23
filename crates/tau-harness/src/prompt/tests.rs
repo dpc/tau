@@ -1142,7 +1142,7 @@ fn human_ui_prompt_projects_fieldless_user_envelope_without_changing_canonical_t
 fn non_human_and_injected_user_text_remain_unwrapped() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&sourced_user_prompt(
-        "/skill example <user>literal</user>",
+        ":skill example <user>literal</user>",
         tau_proto::PromptSubmissionSource::HarnessInternal,
     ));
     tree.apply_event(&Event::AgentUserMessageInjected(
@@ -1158,7 +1158,7 @@ fn non_human_and_injected_user_text_remain_unwrapped() {
     assert_eq!(
         items.iter().filter_map(context_text).collect::<Vec<_>>(),
         vec![
-            "/skill example <user>literal</user>",
+            ":skill example <user>literal</user>",
             "injected <user>literal</user>"
         ]
     );

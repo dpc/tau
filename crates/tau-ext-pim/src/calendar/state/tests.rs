@@ -14,7 +14,7 @@ fn file_mode(path: &Path) -> u32 {
 #[test]
 fn recent_calendar_log_ignores_invalid_entries_and_keeps_limit() {
     // Logs can be manually truncated or edited during debugging. Invalid
-    // lines should not break `/calendar log last`, and the tail limit should
+    // lines should not break `:calendar log last`, and the tail limit should
     // still be enforced.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let state = StateStore::open(temp.path().join("state")).expect("state");

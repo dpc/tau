@@ -18,8 +18,8 @@ use tau_proto::{
 
 use super::agent_navigation::AgentNavigationState;
 use super::chat::{
-    DraftSlot, custom_prompt_replacement, invalidate_pending_draft, is_local_slash_command,
-    leading_slash_action, next_agent_cycle_selection, queue_prompt_draft_snapshot,
+    DraftSlot, custom_prompt_replacement, invalidate_pending_draft, is_known_static_command,
+    leading_command_token, next_agent_cycle_selection, queue_prompt_draft_snapshot,
     redacted_command_echo_line, redacted_prompt_history_line, retarget_prompt_draft_snapshot,
     role_cycling_enabled, should_send_draft_snapshot,
 };
@@ -241,7 +241,7 @@ fn dev_tmux_send_parses_literal_text_and_enter_toggle() {
         "/tmp/tau-e2e-test",
         "--no-enter",
         "--",
-        "/help",
+        ":version",
         "with spaces",
     ]);
 
@@ -253,7 +253,7 @@ fn dev_tmux_send_parses_literal_text_and_enter_toggle() {
             },
         }) if args.target.common.scratch_root == Some(std::path::PathBuf::from("/tmp/tau-e2e-test"))
             && args.no_enter
-            && args.text == vec!["/help".to_owned(), "with spaces".to_owned()]
+            && args.text == vec![":version".to_owned(), "with spaces".to_owned()]
     ));
 }
 
@@ -752,7 +752,7 @@ fn dev_tmux_rejects_startup_overrides_before_harness_validation() {
     );
 }
 
-/// Ensures `/prompt <id>` resolves a configured template to editable prompt
+/// Ensures `:prompt <id>` resolves a configured template to editable prompt
 /// text rather than submitting it immediately.
 #[test]
 fn custom_prompt_command_returns_configured_prompt_text() {
@@ -761,14 +761,14 @@ fn custom_prompt_command_returns_configured_prompt_text() {
         text: "Review this patch carefully".to_owned(),
     }];
 
-    let replacement = custom_prompt_replacement("/prompt review", &prompts)
+    let replacement = custom_prompt_replacement(":prompt review", &prompts)
         .expect("prompt command")
         .expect("known prompt");
 
     assert_eq!(replacement, "Review this patch carefully");
 }
 
-/// Ensures unknown `/prompt` ids produce a clear local error and list
+/// Ensures unknown `:prompt` ids produce a clear local error and list
 /// configured ids so users can recover without accidentally submitting the
 /// command text.
 #[test]
@@ -778,7 +778,7 @@ fn custom_prompt_command_reports_unknown_id() {
         text: "Review this patch carefully".to_owned(),
     }];
 
-    let error = custom_prompt_replacement("/prompt missing", &prompts)
+    let error = custom_prompt_replacement(":prompt missing", &prompts)
         .expect("prompt command")
         .expect_err("unknown prompt should fail");
 
@@ -812,79 +812,80 @@ fn renderer_tracks_custom_prompts_from_harness_event() {
     assert_eq!(prompts, vec![prompt]);
 }
 
-/// Ensures `/prompt` remains a local slash command for command echo/history
+/// Ensures `:prompt` remains a local command for command echo/history
 /// routing and does not fall through as a normal user prompt.
 #[test]
-fn prompt_command_is_local_slash_command() {
-    assert!(is_local_slash_command("/prompt review"));
+fn prompt_command_is_known_static_command() {
+    assert!(is_known_static_command(":prompt review"));
 }
 
-/// Protects the final slash-command ownership fallback recorded by
-/// `SPEC-tau-cli-slash-commands`: a likely mistyped leading command
+/// Protects the final command ownership fallback recorded by
+/// `SPEC-tau-cli-command-mode`: a likely mistyped leading command
 /// must not become a normal prompt, while non-leading slashes remain prompt
 /// text.
 #[test]
-fn leading_slash_actions_are_identified_before_prompt_submission() {
-    assert_eq!(leading_slash_action("/typo"), Some("/typo"));
-    assert_eq!(leading_slash_action("  /typo arg"), Some("/typo"));
+fn leading_command_tokens_are_identified_before_prompt_submission() {
+    assert_eq!(leading_command_token(":typo"), Some(":typo"));
+    assert_eq!(leading_command_token("  :typo arg"), Some(":typo"));
     assert_eq!(
-        leading_slash_action("/skill:jujutsu args"),
-        Some("/skill:jujutsu")
+        leading_command_token(":skill:jujutsu args"),
+        Some(":skill:jujutsu")
     );
-    assert_eq!(leading_slash_action("hello /typo"), None);
-    assert_eq!(leading_slash_action("please inspect /tmp/file"), None);
-    assert_eq!(leading_slash_action("./relative/path"), None);
+    assert_eq!(leading_command_token("hello /typo"), None);
+    assert_eq!(leading_command_token("please inspect /tmp/file"), None);
+    assert_eq!(leading_command_token("./relative/path"), None);
 }
 
+/// Classifies only the static commands rendered locally by the interactive CLI.
 #[test]
-fn local_slash_commands_are_identified_for_history_rendering() {
-    assert!(is_local_slash_command("/model engineer"));
-    assert!(is_local_slash_command("/set show-tools compact"));
-    assert!(is_local_slash_command("/theme dpc"));
-    assert!(is_local_slash_command("/debug-show-ui-event-stats"));
-    assert!(is_local_slash_command("/debug-show-event-stats std-shell"));
-    assert!(is_local_slash_command("/quit"));
-    assert!(is_local_slash_command("/agent"));
-    assert!(is_local_slash_command("/agent switch worker-1"));
-    assert!(is_local_slash_command("/agent suspend"));
-    assert!(is_local_slash_command("/agent resume worker-1"));
-    assert!(is_local_slash_command("/agent new"));
-    assert!(is_local_slash_command("/new"));
-    assert!(is_local_slash_command("/name Current worker"));
-    assert!(is_local_slash_command("/suspend"));
-    assert!(is_local_slash_command("/resume"));
-    assert!(is_local_slash_command("/new now"));
-    assert!(is_local_slash_command("/session new"));
-    assert!(is_local_slash_command("/version"));
-    assert!(is_local_slash_command("/version now"));
-    assert!(is_local_slash_command("/skill jujutsu"));
-    assert!(is_local_slash_command("/skill:jujutsu args"));
-    assert!(!is_local_slash_command("/skillx jujutsu"));
-    assert!(!is_local_slash_command("hello /model engineer"));
+fn known_static_commands_are_identified_for_history_rendering() {
+    assert!(is_known_static_command(":model engineer"));
+    assert!(is_known_static_command(":set show-tools compact"));
+    assert!(is_known_static_command(":theme dpc"));
+    assert!(is_known_static_command(":debug-show-ui-event-stats"));
+    assert!(is_known_static_command(":debug-show-event-stats std-shell"));
+    assert!(is_known_static_command(":quit"));
+    assert!(is_known_static_command(":agent"));
+    assert!(is_known_static_command(":agent switch worker-1"));
+    assert!(is_known_static_command(":agent suspend"));
+    assert!(is_known_static_command(":agent resume worker-1"));
+    assert!(is_known_static_command(":agent new"));
+    assert!(is_known_static_command(":new"));
+    assert!(is_known_static_command(":name Current worker"));
+    assert!(is_known_static_command(":suspend"));
+    assert!(is_known_static_command(":resume"));
+    assert!(is_known_static_command(":new now"));
+    assert!(is_known_static_command(":session new"));
+    assert!(is_known_static_command(":version"));
+    assert!(is_known_static_command(":version now"));
+    assert!(is_known_static_command(":skill jujutsu"));
+    assert!(is_known_static_command(":skill:jujutsu args"));
+    assert!(!is_known_static_command("/skillx jujutsu"));
+    assert!(!is_known_static_command("hello :model engineer"));
 }
 
 #[test]
 fn gmail_oauth_finish_redirect_url_is_redacted_from_echo_and_prompt_history() {
-    let line = "/email auth google finish work http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret";
-    let redacted = "/email auth google finish <redacted>";
+    let line = ":email auth google finish work http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret";
+    let redacted = ":email auth google finish <redacted>";
     assert_eq!(redacted_command_echo_line(line), redacted);
     assert_eq!(redacted_prompt_history_line(line, line), redacted);
     assert!(!redacted_command_echo_line(line).contains("auth-code-secret"));
-    let missing_account = "/email auth google finish http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret";
+    let missing_account = ":email auth google finish http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret";
     assert_eq!(redacted_command_echo_line(missing_account), redacted);
     assert!(
         !redacted_prompt_history_line(missing_account, missing_account)
             .contains("auth-code-secret")
     );
     assert_eq!(
-        redacted_command_echo_line("/email auth google start work"),
-        "/email auth google start work"
+        redacted_command_echo_line(":email auth google start work"),
+        ":email auth google start work"
     );
 }
 
 #[test]
 fn runtime_version_label_matches_cli_version_shape() {
-    // `/version` uses this same label at runtime, so keep it aligned with the
+    // `:version` uses this same label at runtime, so keep it aligned with the
     // custom `tau --version` output instead of clap's default package version.
     let label = super::version_label();
     assert!(label.starts_with(concat!("tau ", env!("CARGO_PKG_VERSION"), " (")));
@@ -1330,7 +1331,7 @@ fn renderer_starts_without_selected_or_default_agent() {
     );
 }
 
-/// Increasing `/set redraw-history-size` should restore more scrollback
+/// Increasing `:set redraw-history-size` should restore more scrollback
 /// immediately by forcing a full redraw, while decreasing it should only affect
 /// the next otherwise-needed full redraw.
 #[test]
@@ -1359,7 +1360,7 @@ fn redraw_history_size_only_redraws_immediately_when_increased() {
 fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
     // Regression: the first prompt created for the default conversation carries
     // the new agent id; seeing it from the empty state selects that agent. A
-    // later `/session new` returns to the empty start-new-agent state.
+    // later `:session new` returns to the empty start-new-agent state.
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1521,7 +1522,7 @@ fn theme_refresh_preserves_optimistic_session_context() {
 #[test]
 fn extension_prompt_with_target_does_not_select_from_empty_state() {
     // Regression: extension side prompts now carry target_agent_id for routing,
-    // but `/agent none`/startup must stay on the no-agent screen until the user
+    // but `:agent none`/startup must stay on the no-agent screen until the user
     // explicitly selects a transcript.
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
@@ -2032,6 +2033,7 @@ fn queued_prompt_uses_composing_marker() {
     assert!(!vt.screen_contains(80, "⬤ queued marker check (queued)"));
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "queued marker check".into(),
         agent_id: agent_id("main"),
@@ -2277,7 +2279,7 @@ fn first_agent_event_does_not_force_full_redraw() {
 
 #[test]
 fn new_agent_after_new_session_does_not_force_full_redraw() {
-    // `/session new` intentionally moves to the start-new-agent screen and clears
+    // `:session new` intentionally moves to the start-new-agent screen and clears
     // the old transcript. Starting the next agent from that already-visible
     // empty screen should only update target/status metadata, not redraw
     // scrollback.
@@ -2292,6 +2294,7 @@ fn new_agent_after_new_session_does_not_force_full_redraw() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "first".into(),
         agent_id: tau_proto::AgentId::parse("engineer_one").expect("agent id"),
@@ -2307,6 +2310,7 @@ fn new_agent_after_new_session_does_not_force_full_redraw() {
     let full_render_count = handle.full_render_count();
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s2".into(),
         text: "second".into(),
         agent_id: tau_proto::AgentId::parse("engineer_two").expect("agent id"),
@@ -2321,7 +2325,7 @@ fn new_agent_after_new_session_does_not_force_full_redraw() {
 
 #[test]
 fn new_session_initial_history_appends_to_first_agent() {
-    // `/session new` can be reached after an explicit no-agent state, but the new
+    // `:session new` can be reached after an explicit no-agent state, but the new
     // session's start screen is a fresh initial screen. Visible startup history
     // there should be adopted by the first agent instead of preserved as an
     // explicit no-agent snapshot.
@@ -2427,6 +2431,7 @@ fn switching_between_displayed_agents_restores_transcripts() {
     );
     renderer.switch_agent("worker-1".to_owned());
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "worker one transcript".into(),
         agent_id: agent_id("worker-1"),
@@ -2436,6 +2441,7 @@ fn switching_between_displayed_agents_restores_transcripts() {
     }));
     renderer.switch_agent("worker-2".to_owned());
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "worker two transcript".into(),
         agent_id: agent_id("worker-2"),
@@ -2470,6 +2476,7 @@ fn agent_switch_first_frame_has_matching_transcript_and_placeholder() {
     handle.with_redraw_suppressed(|| {
         renderer.switch_agent("worker-1".to_owned());
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "worker one transcript".into(),
             agent_id: agent_id("worker-1"),
@@ -2479,6 +2486,7 @@ fn agent_switch_first_frame_has_matching_transcript_and_placeholder() {
         }));
         renderer.switch_agent("worker-2".to_owned());
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "worker two transcript".into(),
             agent_id: agent_id("worker-2"),
@@ -2525,6 +2533,7 @@ fn clear_selection_first_frame_has_new_agent_placeholder() {
     handle.with_redraw_suppressed(|| {
         renderer.switch_agent("worker-1".to_owned());
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "selected agent transcript".into(),
             agent_id: agent_id("worker-1"),
@@ -3337,7 +3346,7 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
 
 #[test]
 fn agent_stats_does_not_overwrite_display_name() {
-    // `/agent switch` completions are backed by durable display names. Agent stats
+    // `:agent switch` completions are backed by durable display names. Agent stats
     // must not replace the display name chosen by the harness template.
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
@@ -3406,6 +3415,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         context: Default::default(),
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "follow up".to_owned(),
         agent_id: agent_id("worker-1"),
@@ -3741,6 +3751,7 @@ fn clearing_selected_agent_preserves_previous_transcript() {
     }));
     renderer.switch_agent("worker-1".to_owned());
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "worker transcript survives".into(),
         agent_id: agent_id("worker-1"),
@@ -4153,7 +4164,7 @@ fn agent_switch_preserves_separate_transcripts() {
 
 #[test]
 fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() {
-    // Regression: `/agent none` must restore an empty no-agent screen. The
+    // Regression: `:agent none` must restore an empty no-agent screen. The
     // first prompt that selects a new agent from that state should render into
     // that agent's own fresh transcript rather than appending to the previously
     // selected agent's terminal output.
@@ -4168,6 +4179,7 @@ fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() 
         reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "agent one prompt".to_owned(),
         agent_id: agent_id("agent-one"),
@@ -4183,6 +4195,7 @@ fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() 
     assert!(!vt.screen_contains(80, "agent one prompt"));
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "agent two prompt".to_owned(),
         agent_id: agent_id("agent-two"),
@@ -4197,7 +4210,7 @@ fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() 
 
 #[test]
 fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
-    // Regression: after `/agent new`, an already-running agent can still emit
+    // Regression: after `:agent new`, an already-running agent can still emit
     // queued/dequeued prompt events. Those background events must not reselect
     // the old agent while the user is typing the prompt meant to create a fresh
     // agent.
@@ -4212,6 +4225,7 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
         reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "old agent prompt".to_owned(),
         agent_id: agent_id("old-agent"),
@@ -4229,6 +4243,7 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
         message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "stale old-agent prompt".to_owned(),
         agent_id: agent_id("old-agent"),
@@ -4265,7 +4280,7 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
     );
 }
 
-/// `/new` leaves the old agent running while the terminal shows the all-agent
+/// `:new` leaves the old agent running while the terminal shows the all-agent
 /// overview. Its messages must appear there without selecting the sender, while
 /// also remaining available in the sender's own transcript.
 #[test]
@@ -4281,6 +4296,7 @@ fn old_agent_message_updates_overview_without_selecting_sender() {
         reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "old agent prompt".to_owned(),
         agent_id: agent_id("old-agent"),
@@ -4406,7 +4422,7 @@ fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
 }
 
 /// Role-update parsing must keep explicit `off` distinct from clearing a field;
-/// otherwise `/role <role> effort off` and `/role <role> thinking-summary off`
+/// otherwise `:role <role> effort off` and `:role <role> thinking-summary off`
 /// would accidentally reset the selected role instead of storing the user's
 /// requested off state. `reset` is the only textual way to clear a setting.
 #[test]
@@ -4567,7 +4583,7 @@ fn action_submission_invalidates_pending_draft_like_prompt_submission() {
             tau_proto::UiPromptDraft {
                 session_id: "s1".into(),
                 target_agent_id: None,
-                text: "/email list".into(),
+                text: ":email list".into(),
             },
         ));
     }
@@ -4738,6 +4754,7 @@ fn agent_messages_render_all_recipients_as_history() {
 
     for idx in 0..20 {
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: format!("scroll filler {idx}"),
             agent_id: agent_id("engineer_22222222"),
@@ -4817,6 +4834,7 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
 
     renderer.clear_selected_agent();
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "start fresh from overview".to_owned(),
         agent_id: agent_id("fresh-agent"),
@@ -5254,6 +5272,7 @@ fn new_session_clears_session_ui_state() {
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "old prompt".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -5441,7 +5460,7 @@ fn critical_notice_level_keeps_always_show_harness_failure() {
 }
 
 /// Extension ready/kept messages are informational lifecycle notices, so a
-/// warning threshold should keep them out of live startup and `/session new`
+/// warning threshold should keep them out of live startup and `:session new`
 /// preambles.
 #[test]
 fn warning_notice_level_hides_routine_extension_status() {
@@ -5788,6 +5807,7 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     assert!(!status_row.contains("@engineer_abc"));
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hello".into(),
         agent_id: tau_proto::AgentId::parse("engineer_abc").expect("agent id"),
@@ -5842,6 +5862,7 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
         ephemeral: false,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hello".into(),
         agent_id: tau_proto::AgentId::parse("engineer-junior_b").expect("agent id"),
@@ -5884,6 +5905,7 @@ fn status_agent_chip_omits_parenthetical_for_unnamed_agent() {
         ephemeral: false,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hello".into(),
         agent_id: agent_id("engineer-junior_b"),
@@ -5928,6 +5950,7 @@ fn status_agent_chip_shows_current_agent_watchers() {
         ephemeral: false,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hello".into(),
         agent_id: tau_proto::AgentId::parse("engineer_child").expect("agent id"),
@@ -6281,6 +6304,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
     // Starting a new user task in the same session also keeps the chip hidden
     // until the main agent requests tools for that task.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "next task".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -6329,6 +6353,7 @@ fn agent_in_progress_ignores_completed_replayed_prompt_history() {
     let in_progress = renderer.agent_in_progress_state();
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "old prompt".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -6920,8 +6945,8 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     assert!(vt.screen_contains(80, "+engineer ~high"));
 }
 
-/// Role availability should feed `/new` argument completion as well as
-/// `/role`, because `/new <role>` is the fast path for opening a fresh
+/// Role availability should feed `:new` argument completion as well as
+/// `:role`, because `:new <role>` is the fast path for opening a fresh
 /// no-agent input target that will create the next agent with that role.
 #[test]
 fn new_command_completes_available_roles() {
@@ -6949,15 +6974,15 @@ fn new_command_completes_available_roles() {
     }));
 
     let candidates = tau_cli_term::completion::build_candidates(
-        &[tau_cli_term::SlashCommand::new("/new", "new agent")],
+        &[tau_cli_term::CommandCompletion::new(":new", "new agent")],
         &completion_data,
-        "/new rev",
-        "/new rev".len(),
+        ":new rev",
+        ":new rev".len(),
     );
 
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].label, "reviewer");
-    assert_eq!(candidates[0].replacement, "/new reviewer");
+    assert_eq!(candidates[0].replacement, ":new reviewer");
 }
 
 #[test]
@@ -7020,6 +7045,7 @@ fn single_prompt_response_cycle() {
 
     // User submits prompt.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hello".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -7076,6 +7102,7 @@ fn thinking_renders_as_separate_block_above_response() {
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -7169,6 +7196,7 @@ fn set_show_thinking_round_trip_restores_history() {
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -7253,6 +7281,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
     renderer.apply_setting("show-thinking", "false");
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -7293,6 +7322,7 @@ fn no_thinking_block_when_summary_absent() {
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -7326,6 +7356,7 @@ fn queued_prompt_renders_after_first_completes() {
 
     // First prompt.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "first".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -7438,6 +7469,7 @@ fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
         message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "late echo".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -7528,6 +7560,7 @@ fn internal_prompt_events_are_hidden() {
     // prompt-like events, but they are internal control text and must not show
     // up in the user's transcript or queued prompt area.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "[tau-internal] Tool call `bg` is complete.".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -7573,6 +7606,7 @@ fn queued_prompt_does_not_replace_dispatched_same_text() {
     // not remove the earlier transcript block while rendering the queued
     // marker.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "repeat".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -7615,6 +7649,7 @@ fn three_queued_prompts_render_sequentially() {
     for i in 0..3 {
         if i == 0 {
             renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+                literal: false,
                 session_id: "s1".into(),
                 text: format!("msg-{i}"),
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -9922,6 +9957,7 @@ fn streaming_block_does_not_duplicate_on_finish() {
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -10978,6 +11014,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
 
     // User sends first prompt.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -11002,6 +11039,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
 
     // User sends 2nd and 3rd prompts while streaming.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -11015,6 +11053,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -11144,6 +11183,7 @@ fn emoji_in_response_renders_correctly() {
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -11200,6 +11240,7 @@ fn multiple_emoji_no_column_drift() {
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "hi".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -11241,6 +11282,7 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
         text: "overflow please".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),

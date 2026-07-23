@@ -456,6 +456,7 @@ fn create_direct_repair_worker(
         .peer
         .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
             tau_proto::UiCreateAgent {
+                literal: false,
                 session_id: SESSION.into(),
                 role: REPAIR_ROLE.to_owned(),
                 model_override: None,

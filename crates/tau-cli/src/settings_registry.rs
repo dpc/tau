@@ -1,8 +1,8 @@
-//! User-tweakable UI settings exposed through `/set <name> <value>`.
+//! User-tweakable UI settings exposed through `:set <name> <value>`.
 //!
 //! Each [`SettingDef`] knows how to read/write a field on [`CliState`]
 //! and what its allowed values are. The registry drives both the
-//! `/set` parser and completion (setting names with current values,
+//! `:set` parser and completion (setting names with current values,
 //! then values with descriptions).
 //!
 //! Most settings are booleans rendered as `true`/`false`; the shape is
@@ -19,7 +19,7 @@ pub struct SettingValue {
     pub description: &'static str,
 }
 
-/// Definition of a `/set`-controllable UI setting.
+/// Definition of a `:set`-controllable UI setting.
 pub struct SettingDef {
     pub name: &'static str,
     pub description: &'static str,

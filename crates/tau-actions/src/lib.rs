@@ -1,9 +1,9 @@
 //! Shared schemas and parsing helpers for extension-provided UI actions.
 //!
-//! Extensions publish an [`ActionSchema`] to describe slash-style commands that
-//! a UI may invoke. The parser in this crate intentionally follows Tau's simple
-//! whitespace-token convention: no shell quoting, no escaping, and at most one
-//! rest-string argument at the end of a leaf command.
+//! Extensions publish an [`ActionSchema`] to describe command-mode entries
+//! that a UI may invoke. The parser in this crate intentionally follows Tau's
+//! simple whitespace-token convention: no shell quoting, no escaping, and at
+//! most one rest-string argument at the end of a leaf command.
 //!
 //! See `ARCH-tau-actions` for the crate boundary and validation contract.
 
@@ -48,7 +48,7 @@ pub struct ActionSchema {
     /// Schema version, fixed at zero while Tau supports only its current
     /// format.
     pub version: u32,
-    /// Root slash commands, such as `/email`.
+    /// Root commands, such as `:email`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roots: Vec<ActionCommand>,
 }
@@ -81,7 +81,7 @@ impl ActionSchema {
         self.executable_action_ids().map(|_| ())
     }
 
-    /// Parse one whitespace-tokenized slash line against this schema.
+    /// Parse one whitespace-tokenized command line against this schema.
     pub fn parse_line(&self, line: &str) -> Result<ParsedAction, ParseError> {
         parse_line(self, line)
     }
@@ -90,12 +90,12 @@ impl ActionSchema {
 /// One command node in an [`ActionSchema`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ActionCommand {
-    /// Root name including `/` (for example `/email`) or child name without
-    /// `/`.
+    /// Root name including `:` (for example `:email`) or child name without
+    /// `:`.
     ///
-    /// Root names must be `/` followed by an ASCII alphanumeric token start and
+    /// Root names must be `:` followed by an ASCII alphanumeric token start and
     /// then only ASCII alphanumeric, `_`, or `-` characters. Child names use
-    /// the same token grammar without the leading `/`. Names are also
+    /// the same token grammar without the leading `:`. Names are also
     /// byte-limited by [`MAX_ACTION_TOKEN_BYTES`].
     pub name: String,
     /// Human-readable command description shown in completions/help.
@@ -168,7 +168,7 @@ pub struct ActionChoice {
 pub struct ParsedAction {
     /// Stable action id selected by the command path.
     pub action_id: String,
-    /// Root command token that matched, including `/`.
+    /// Root command token that matched, including `:`.
     pub root: String,
     /// Full command path tokens, including the root.
     pub command_path: Vec<String>,
@@ -226,7 +226,7 @@ pub enum ParseErrorKind {
     InvalidArguments,
 }
 
-/// Error returned when a slash line cannot be parsed as an action.
+/// Error returned when a command line cannot be parsed as an action.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseError {
     kind: ParseErrorKind,
@@ -249,7 +249,7 @@ impl ParseError {
         &self.kind
     }
 
-    /// True when the line's slash root is not present in the schema.
+    /// True when the line's command root is not present in the schema.
     #[must_use]
     pub fn is_unknown_root(&self) -> bool {
         matches!(self.kind, ParseErrorKind::UnknownRoot)
@@ -538,7 +538,7 @@ fn validate_description_len(value: &str, context: &str) -> Result<(), Validation
     Ok(())
 }
 
-/// Parse one whitespace-tokenized slash line against a schema.
+/// Parse one whitespace-tokenized command line against a schema.
 pub fn parse_line(schema: &ActionSchema, line: &str) -> Result<ParsedAction, ParseError> {
     if let Err(error) = schema.validate() {
         return Err(ParseError::new(
@@ -749,13 +749,13 @@ pub fn usage_for(command: &ActionCommand, path: &[String]) -> String {
     usage
 }
 
-/// Return whether a string is a valid root slash command name.
+/// Return whether a string is a valid root command name.
 ///
-/// Valid roots are `/` followed by an ASCII alphanumeric token start and then
+/// Valid roots are `:` followed by an ASCII alphanumeric token start and then
 /// only ASCII alphanumeric, `_`, or `-` characters.
 #[must_use]
 pub fn is_valid_root_name(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix('/') else {
+    let Some(rest) = name.strip_prefix(':') else {
         return false;
     };
     is_valid_command_segment(rest)

@@ -1570,7 +1570,7 @@ impl StateStore {
             ));
         };
         let pending: EmailGooglePendingAuth = serde_json::from_slice(&bytes).map_err(|_| {
-            "pending Google email authorization is unsupported or corrupt; run `/email auth google start <account>` again".to_owned()
+            "pending Google email authorization is unsupported or corrupt; run `:email auth google start <account>` again".to_owned()
         })?;
         validate_google_pending_auth(&pending, Some(account))?;
         Ok(pending)
@@ -4332,7 +4332,7 @@ impl<B: EmailBackend> Engine<B> {
         );
         self.state.save_pending_google_auth(&pending)?;
         Ok(format!(
-            "Google email authorization started for account {}.\nOpen this URL:\n{}\nApprove access in the browser. The browser will fail to connect to localhost; copy the full final address-bar URL and run:\n/email auth google finish {} <copied-url>\nExpires in {} second(s).",
+            "Google email authorization started for account {}.\nOpen this URL:\n{}\nApprove access in the browser. The browser will fail to connect to localhost; copy the full final address-bar URL and run:\n:email auth google finish {} <copied-url>\nExpires in {} second(s).",
             safe_display_line(&account.id),
             safe_oauth_url_display(&authorization_url),
             safe_display_line(&account.id),
@@ -4363,7 +4363,7 @@ impl<B: EmailBackend> Engine<B> {
         if pending.expired() {
             self.state.clear_pending_google_auth(&account_id)?;
             return Err(format!(
-                "Google authorization for account `{}` expired; run `/email auth google start {}` again",
+                "Google authorization for account `{}` expired; run `:email auth google start {}` again",
                 safe_display_line(&account_id),
                 safe_display_line(&account_id)
             ));
@@ -4423,7 +4423,7 @@ impl<B: EmailBackend> Engine<B> {
         ) {
             (AuthMethod::Oauth2, Some(EmailOauth2Provider::Google), None) => Ok(account),
             (AuthMethod::Oauth2, Some(EmailOauth2Provider::Google), Some(_)) => Err(format!(
-                "email account `{}` already uses refresh_token_secret; remove it before using `/email auth google`",
+                "email account `{}` already uses refresh_token_secret; remove it before using `:email auth google`",
                 account.id
             )),
             _ => Err(format!(
@@ -4661,7 +4661,7 @@ impl<B: EmailBackend> Engine<B> {
 
     fn action_out_whitelist(&self, pattern: &str) -> Result<String, String> {
         self.ensure_state_policy_extensions_enabled()?;
-        let record = allow_record(pattern, "approved from /email out whitelist")?;
+        let record = allow_record(pattern, "approved from :email out whitelist")?;
         self.state.append_outgoing_allow_record(record)?;
         Ok(format!(
             "Added outgoing email whitelist pattern `{}`.",
@@ -4861,7 +4861,7 @@ impl<B: EmailBackend> Engine<B> {
 
     fn action_in_whitelist(&self, pattern: &str) -> Result<String, String> {
         self.ensure_state_policy_extensions_enabled()?;
-        let record = allow_record(pattern, "approved from /email in whitelist")?;
+        let record = allow_record(pattern, "approved from :email in whitelist")?;
         self.state.append_incoming_allow_record(record)?;
         Ok(format!(
             "Added incoming email whitelist pattern `{}`.",
@@ -5363,7 +5363,7 @@ impl RuntimeState {
         }
     }
 
-    /// Dispatch a user `/email` action invocation.
+    /// Dispatch a user `:email` action invocation.
     pub fn dispatch_action(&mut self, invoke: ActionInvoke) -> Event {
         let result = match &mut self.config_state {
             ConfigState::Configured(engine) => {
@@ -5661,12 +5661,12 @@ pub fn email_prompt_fragment() -> PromptFragment {
     )
 }
 
-/// Return the `/email` action schema.
+/// Return the `:email` action schema.
 pub fn email_action_schema() -> ActionSchema {
     email_action_schema_with_accounts(&[])
 }
 
-/// Return the `/email` action schema with current Google OAuth account choices.
+/// Return the `:email` action schema with current Google OAuth account choices.
 pub(crate) fn email_action_schema_with_accounts(accounts: &[String]) -> ActionSchema {
     fn string_arg(name: &str, description: &str) -> ActionArg {
         ActionArg {
@@ -5732,7 +5732,7 @@ pub(crate) fn email_action_schema_with_accounts(accounts: &[String]) -> ActionSc
     ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
-            name: "/email".to_owned(),
+            name: ":email".to_owned(),
             description: "Review, approve, deny, and audit email access".to_owned(),
             action_id: None,
             args: Vec::new(),

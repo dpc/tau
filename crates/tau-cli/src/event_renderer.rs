@@ -98,7 +98,7 @@ pub(crate) struct EventRenderer {
     /// background prompt lifecycle events.
     awaiting_new_agent_selection: bool,
     /// Output and renderer bookkeeping for the no-agent screen shown after
-    /// `/agent none`. This keeps deselection from leaving the previously
+    /// `:agent none`. This keeps deselection from leaving the previously
     /// selected agent's output in the visible renderer fields.
     no_agent_ui_state: AgentUiState,
     /// Output and renderer bookkeeping for agents that are not currently
@@ -109,9 +109,9 @@ pub(crate) struct EventRenderer {
     /// snapshot before switching to a fresh agent transcript.
     ///
     /// Preservation is additionally gated by
-    /// [`Self::awaiting_new_agent_selection`]: startup and post-`/session
+    /// [`Self::awaiting_new_agent_selection`]: startup and post-`:session
     /// new` no-agent output is adopted by the first selected agent, while
-    /// explicit `/agent none`/`/agent new` output remains a protected
+    /// explicit `:agent none`/`:agent new` output remains a protected
     /// no-agent snapshot.
     preserve_on_fresh_agent_switch: bool,
     /// Whether the visible snapshot contains a message fact owned by the global
@@ -127,7 +127,7 @@ pub(crate) struct EventRenderer {
     /// same id. The overview presents that semantic message once while each
     /// agent transcript keeps its own projection.
     overview_message_ids: HashSet<(Option<tau_proto::SessionId>, tau_proto::AgentMessageId)>,
-    /// Agent ids known to the UI for `/agent` completion.
+    /// Agent ids known to the UI for `:agent` completion.
     known_agents: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Session-scoped authoritative display names keyed by local agent id.
     ///
@@ -221,11 +221,11 @@ pub(crate) struct EventRenderer {
     extension_blocks: HashMap<tau_proto::ExtensionInstanceId, ExtensionBlockState>,
     /// Dynamic action invocations keyed by invocation id. Action results and
     /// errors do not carry an agent id, so the CLI snapshots the viewed
-    /// transcript when the slash command is invoked and routes completion
+    /// transcript when the command is invoked and routes completion
     /// output back to that transcript, per
     /// `SPEC-tau-cli-action-completions`.
     action_invocation_owners: HashMap<tau_proto::ActionInvocationId, UiSnapshotOwner>,
-    /// Extensions that are already up in this daemon. `/session new` starts a
+    /// Extensions that are already up in this daemon. `:session new` starts a
     /// fresh session, but these processes are intentionally kept.
     ready_extensions: HashSet<String>,
     /// Persistent status bar block showing the current model + effort.
@@ -236,7 +236,7 @@ pub(crate) struct EventRenderer {
     /// events.
     right_prompt_paths: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     /// Live history of completed diff-capable tool blocks plus the data
-    /// needed to re-render them. `/set show-diff` flips
+    /// needed to re-render them. `:set show-diff` flips
     /// `diffs_expanded` and walks this list calling `set_block` so
     /// the entire transcript switches mode at once.
     diff_blocks: Vec<DiffBlockEntry>,
@@ -244,7 +244,7 @@ pub(crate) struct EventRenderer {
     diffs_expanded: bool,
     /// Global show-thinking toggle. When false, agent reasoning
     /// summaries are not rendered (live or in history). Controlled
-    /// by `/set show-thinking`; persisted in `<state_dir>/cli.json`.
+    /// by `:set show-thinking`; persisted in `<state_dir>/cli.json`.
     show_thinking: bool,
     /// Persisted thinking blocks (one per finished assistant turn).
     /// When `show-thinking` flips, every entry is re-rendered as
@@ -253,7 +253,7 @@ pub(crate) struct EventRenderer {
     thinking_history: Vec<ThinkingBlockEntry>,
     turn_stats_history: Vec<TurnStatsBlockEntry>,
     tool_history: Vec<ToolBlockEntry>,
-    /// Durable message blocks and payloads, kept so `/set show-messages`
+    /// Durable message blocks and payloads, kept so `:set show-messages`
     /// can re-render the current transcript retroactively.
     message_history: Vec<MessageBlockEntry>,
     /// Where to persist `show_diff` / `show_thinking` /
@@ -345,7 +345,7 @@ pub(crate) struct EventRenderer {
     prompt_tool_summary_active: bool,
     /// Snapshot of persisted CLI settings, kept in sync with visible UI
     /// toggles by [`Self::save_cli_state`]. The input loop captures this
-    /// handle in the `/set` name-completion closure so the menu can show each
+    /// handle in the `:set` name-completion closure so the menu can show each
     /// setting's current value without snooping on renderer-thread fields
     /// directly.
     cli_state_mirror: std::sync::Arc<std::sync::Mutex<tau_config::settings::CliState>>,
@@ -504,7 +504,7 @@ impl EventAgentIdResolution {
     }
 }
 
-/// One completed file-mutation tool block. Held so `/set show-diff` can
+/// One completed file-mutation tool block. Held so `:set show-diff` can
 /// re-render every diff in the chat history when the global
 /// expand toggle flips.
 struct DiffBlockEntry {
@@ -603,7 +603,7 @@ enum MessageRenderMode {
     Full,
 }
 
-/// One finished thinking block. Held so `/set show-thinking` can swap
+/// One finished thinking block. Held so `:set show-thinking` can swap
 /// its content between the original reasoning text (visible) and
 /// empty content (hidden) without losing the block's position in
 /// the transcript.
@@ -984,7 +984,7 @@ struct ToolCallState {
     /// can update the bottom active-tools area without mutating old
     /// transcript rows.
     history_block_id: Option<tau_cli_term::BlockId>,
-    /// Latest live display for the block, used when `/set show-tools`
+    /// Latest live display for the block, used when `:set show-tools`
     /// flips while the call is still running.
     live_display: Option<ToolCallDisplay>,
     /// Monotonic start time for live duration updates.
@@ -1559,7 +1559,7 @@ impl EventRenderer {
 
             if display_changed {
                 // Let transcript switching see the previous awaiting flag so it can
-                // distinguish initial no-agent adoption from explicit `/agent new`.
+                // distinguish initial no-agent adoption from explicit `:agent new`.
                 self.show_agent_transcript(agent_id.clone());
             }
             after_display_update();
@@ -1596,7 +1596,7 @@ impl EventRenderer {
             if target_changed || display_changed {
                 // Only a clear that actually leaves an agent creates the explicit
                 // no-agent boundary. A delayed clear command that arrives after
-                // `/session new` while the UI is already on the fresh initial
+                // `:session new` while the UI is already on the fresh initial
                 // screen must stay a no-op, otherwise the first new-session agent
                 // would incorrectly clear startup history instead of adopting it.
                 self.awaiting_new_agent_selection = true;
@@ -1665,7 +1665,7 @@ impl EventRenderer {
         // Globally owned message facts are the exception: they never belong to an
         // agent transcript, so their snapshot is preserved even on that initial
         // screen. Other preservation state applies only after explicit
-        // `/agent none` or `/agent new`, when the user has deliberately left a
+        // `:agent none` or `:agent new`, when the user has deliberately left a
         // previous transcript and the no-agent output must remain available.
         self.displayed_agent_id.is_none()
             && (self.contains_global_message_fact
@@ -2298,9 +2298,9 @@ impl EventRenderer {
     }
 
     /// Shared snapshot of the persisted CLI settings, updated in sync
-    /// with every successful `/set` (i.e. on every
+    /// with every successful `:set` (i.e. on every
     /// [`Self::save_cli_state`] call). Cloned by the input loop so the
-    /// `/set` name-completion menu can show each setting's current
+    /// `:set` name-completion menu can show each setting's current
     /// value without touching renderer-thread fields directly.
     pub(crate) fn cli_state_mirror(
         &self,
@@ -2399,7 +2399,7 @@ impl EventRenderer {
         self.role_group_memory.clone()
     }
 
-    /// Applies a runtime `/theme` change to this renderer-only UI process.
+    /// Applies a runtime `:theme` change to this renderer-only UI process.
     pub(crate) fn apply_theme(&mut self, theme: tau_themes::Theme) {
         self.theme = theme;
         self.handle
@@ -2428,7 +2428,7 @@ impl EventRenderer {
         self.handle.invalidate_screen();
     }
 
-    /// Apply a `/set <name> <value>` change. The caller (input loop)
+    /// Apply a `:set <name> <value>` change. The caller (input loop)
     /// has already validated `name` and `value` against the
     /// [`crate::settings_registry`] table.
     pub(crate) fn apply_setting(&mut self, name: &str, value: &str) {
@@ -2527,7 +2527,7 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
-    /// Force a full repaint after a `/set show-*` change. Edited blocks
+    /// Force a full repaint after a `:set show-*` change. Edited blocks
     /// from earlier in the transcript may already have scrolled out of
     /// the visible window, so the renderer needs to redraw from scratch
     /// for the change to take effect retroactively across scrollback.
@@ -2908,7 +2908,7 @@ impl EventRenderer {
         self.clear_agent_display_names();
         self.clear_selected_agent();
         // A new session starts from the same append-in-place no-agent state as
-        // process startup. Unlike explicit `/agent none`, there is no previous
+        // process startup. Unlike explicit `:agent none`, there is no previous
         // in-session agent transcript to protect from the first new agent.
         self.awaiting_new_agent_selection = false;
         self.agents_ui_state.clear();
@@ -2935,7 +2935,7 @@ impl EventRenderer {
         self.contains_global_message_fact = false;
         self.contains_overview_message = false;
         // Model selection and effort are harness-global, not
-        // session-scoped. `/session new` only causes a SessionStarted event;
+        // session-scoped. `:session new` only causes a SessionStarted event;
         // the harness does not re-emit HarnessRoleSelected for the
         // unchanged model. Keep the cached selection so the status bar
         // can be recreated after clearing the terminal output.
@@ -3925,8 +3925,8 @@ impl EventRenderer {
     }
 
     fn can_select_target_from_empty(&self, target_agent_id: &str) -> bool {
-        // When the UI is in the explicit start-new-agent state (`/agent new` or
-        // `/agent switch none`), background activity from the previously visible
+        // When the UI is in the explicit start-new-agent state (`:agent new` or
+        // `:agent switch none`), background activity from the previously visible
         // agent must not steal selection while the user is typing the prompt
         // meant to create a fresh agent. An event for an agent whose transcript
         // is already hidden here is therefore treated as background work, not as
@@ -6854,7 +6854,7 @@ impl EventRenderer {
             .map(|model| tau_cli_term::CompletionItem::new(model.to_string(), "agent model"))
             .collect();
         self.completion_data
-            .set_arg_completions(tau_cli_term::CommandName::new("/model"), model_items);
+            .set_arg_completions(tau_cli_term::CommandName::new(":model"), model_items);
     }
 
     fn handle_harness_roles_available(&mut self, roles: &tau_proto::HarnessRolesAvailable) {
@@ -6879,13 +6879,13 @@ impl EventRenderer {
             .map(|prompt| tau_cli_term::CompletionItem::plain(prompt.id.clone()))
             .collect();
         self.completion_data
-            .set_arg_completions(tau_cli_term::CommandName::new("/prompt"), prompt_items);
+            .set_arg_completions(tau_cli_term::CommandName::new(":prompt"), prompt_items);
         let new_agent_role_items = role_items
             .iter()
             .map(|(item, _)| item.clone())
             .collect::<Vec<_>>();
         self.completion_data
-            .set_arg_completions(tau_cli_term::CommandName::new("/new"), new_agent_role_items);
+            .set_arg_completions(tau_cli_term::CommandName::new(":new"), new_agent_role_items);
         self.role_defaults = role_defaults;
         if self.current_role.is_some() && self.model_status_block.is_some() {
             self.render_model_status();
@@ -6893,7 +6893,7 @@ impl EventRenderer {
         let completer: tau_cli_term::ArgCompleter =
             std::sync::Arc::new(move |args| role_command_completions(&role_items, args));
         self.completion_data
-            .set_arg_completer(tau_cli_term::CommandName::new("/role"), completer);
+            .set_arg_completer(tau_cli_term::CommandName::new(":role"), completer);
     }
 
     fn role_completion_items(

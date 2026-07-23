@@ -4,7 +4,7 @@ Agent roles are named aliases for the model and model-behavior settings Tau shou
 
 A role can set:
 
-- `description`: short free-form summary shown in `/role ...` completions
+- `description`: short free-form summary shown in `:role ...` completions
 - `order`: optional numeric order within the containing role group
 - `model`: qualified model id, in `provider/model` form
 - `effort`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`
@@ -208,18 +208,18 @@ unavailable, including when role or model policy removes the tool.
 
 ## Selecting a role
 
-Use `/role <role>`.
+Use `:role <role>`.
 
-`/role` completion lists roles. Each completion description shows the currently
+`:role` completion lists roles. Each completion description shows the currently
 resolved model and role settings, and appends the configured role `description`
-when present. `/new <role>` also completes roles; it clears the current agent
+when present. `:new <role>` also completes roles; it clears the current agent
 selection and makes the next prompt create a new agent with that role. Later
-no-agent role selections such as `/role <role>` or role cycling supersede the
-role named in `/new <role>`.
+no-agent role selections such as `:role <role>` or role cycling supersede the
+role named in `:new <role>`.
 
-`/model <provider>/<model>` switches the model for the currently selected agent
-without changing the role. After `/new`, when no current agent is selected yet,
-`/model <provider>/<model>` stages a one-shot override for the next agent
+`:model <provider>/<model>` switches the model for the currently selected agent
+without changing the role. After `:new`, when no current agent is selected yet,
+`:model <provider>/<model>` stages a one-shot override for the next agent
 created by the first prompt.
 
 
@@ -228,27 +228,27 @@ created by the first prompt.
 Use:
 
 ```text
-/role <role> <delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|enable-tool-groups|disable-tool-groups|enable-tools|disable-tools> [value]
+:role <role> <delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|enable-tool-groups|disable-tool-groups|enable-tools|disable-tools> [value]
 ```
 
 Examples:
 
 ```text
-/role engineer model chatgpt/gpt-5.3-codex
-/role engineer-senior effort xhigh
-/role engineer enable-tool-groups calendar,email
-/role engineer disable-tools email_trash
-/role temporary model anthropic/claude-sonnet-4-20250514
-/role temporary delete
+:role engineer model chatgpt/gpt-5.3-codex
+:role engineer-senior effort xhigh
+:role engineer enable-tool-groups calendar,email
+:role engineer disable-tools email_trash
+:role temporary model anthropic/claude-sonnet-4-20250514
+:role temporary delete
 ```
 
 Use `reset` as the value to clear a field and return to model/provider fallback behavior (`off` is still the explicit off value for `effort` and `thinking-summary`).
 
-The convenience command `/fast` mutates the currently selected role using the same role-update path.
+The convenience command `:fast` mutates the currently selected role using the same role-update path.
 
 The `<role>` argument completes existing roles, but any new name can be used to create a role for the current run. Add it to `agents.role_groups` if it should be available after restart.
 
-`/role <role> delete` removes the runtime role override. It does not edit `agents.role_groups` from configuration; built-in or configured roles come back on the next harness start.
+`:role <role> delete` removes the runtime role override. It does not edit `agents.role_groups` from configuration; built-in or configured roles come back on the next harness start.
 
 Runtime role changes are not persisted. Startup is controlled by `agents.default_role` and `agents.role_groups` order, and durable role changes should be made in `harness.yaml`.
 

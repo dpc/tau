@@ -206,6 +206,7 @@ fn ephemeral_agent_uses_memory_only_agent_and_membership_stores() {
     let mut h = quiet_provider_harness(&sp).expect("harness");
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         session_id: "s1".into(),
         role: "engineer".to_owned(),
         model_override: None,
@@ -269,6 +270,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("harness");
     let request = tau_proto::UiCreateAgent {
+        literal: false,
         session_id: "s1".into(),
         role: "engineer".to_owned(),
         model_override: None,
@@ -288,6 +290,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         ))),
     });
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         session_id: "s1".into(),
         role: "engineer".to_owned(),
         model_override: None,
@@ -612,6 +615,7 @@ fn tool_backed_start_agent_request_targets_ephemeral_agent() {
     let mut h = quiet_provider_harness(&sp).expect("harness");
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         session_id: "s1".into(),
         role: "engineer".to_owned(),
         model_override: None,
@@ -665,6 +669,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("harness");
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         session_id: "s1".into(),
         role: "engineer".to_owned(),
         model_override: None,
@@ -738,6 +743,7 @@ fn ephemeral_parent_start_agent_request_creates_ephemeral_child() {
     let mut h = quiet_provider_harness(&sp).expect("harness");
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         session_id: "s1".into(),
         role: "engineer".to_owned(),
         model_override: None,
@@ -796,6 +802,7 @@ fn ui_create_agent_inherits_ephemeral_parent_persistence() {
     let mut h = quiet_provider_harness(&sp).expect("harness");
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         session_id: "s1".into(),
         role: "engineer".to_owned(),
         model_override: None,
@@ -817,6 +824,7 @@ fn ui_create_agent_inherits_ephemeral_parent_persistence() {
         .expect("parent");
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
         session_id: "s1".into(),
         role: "engineer".to_owned(),
         model_override: None,

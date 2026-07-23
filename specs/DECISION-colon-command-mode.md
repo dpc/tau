@@ -2,16 +2,6 @@
 
 Authority: confirmed, 2026-07-23, dpc
 
-## Status
-
-The current system still uses first-non-whitespace `/` for CLI commands,
-harness-owned prompt commands, and extension actions; it treats `:` as prompt
-text, publishes slash-root action schemas, and has no `::` escape. The confirmed
-end state below is not implemented yet. During this transition,
-[SPEC-tau-cli-slash-commands](../crates/tau-cli/specs/SPEC-tau-cli-slash-commands.md)
-and [ARCH-tau-actions](../crates/tau-actions/specs/ARCH-tau-actions.md) describe
-the current implementation.
-
 Tau uses a first-non-whitespace `:` to enter command mode. This mode offers
 only built-in CLI commands, harness-owned prompt commands, and live extension
 action roots while completing a command name. The harness-owned forms include
@@ -56,3 +46,7 @@ aliases would preserve the collision and make command ownership ambiguous.
 
 This interface decision follows the prior-approval requirement in
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
+The distributed behavior is specified by
+[SPEC-tau-cli-command-mode](../crates/tau-cli/specs/SPEC-tau-cli-command-mode.md),
+and the extension interface is described by
+[ARCH-tau-actions](../crates/tau-actions/specs/ARCH-tau-actions.md).

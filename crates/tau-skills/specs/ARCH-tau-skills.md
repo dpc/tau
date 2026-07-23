@@ -18,4 +18,4 @@ skill names are discoverable and model-loadable before a role may be selected or
 delegated; they do not make skill content trusted, restrict filesystem access to
 the skill file, or grant tools mentioned by skill frontmatter.
 
-User `/skill` invocation explicitly reads the selected skill file, strips frontmatter, and injects the skill body into the next model prompt along with any user arguments. Treat invoking a skill as intentionally adding that local file content to the conversation context.
+User `:skill` invocation explicitly reads the selected skill file, strips frontmatter, and injects the skill body into the next model prompt along with any user arguments. Treat invoking a skill as intentionally adding that local file content to the conversation context.

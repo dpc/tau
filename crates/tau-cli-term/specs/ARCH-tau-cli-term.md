@@ -6,6 +6,18 @@ prompt shell actions, prompt-history search, and editor integration. The lower
 suppression, and pause/resume of terminal mode. `tau-cli-picker` is the small
 standalone picker UI used by configured commands.
 
+## Command-mode boundary
+
+`tau-cli-term` recognizes `:` at the first non-whitespace position as Tau's
+intrinsic command-mode prefix. This rule is not configurable and takes
+precedence over configured completion rules. A doubled prefix (`::`) is a
+literal-prompt escape: the high-level terminal canonicalizes it to one leading
+colon in prompt history and replaces the raw terminal's last submitted entry
+with that canonical spelling. `tau-cli-term-raw` remains syntax-agnostic; it
+only exposes the history-replacement operation used by the high-level layer.
+Routing and typed literal provenance belong to `tau-cli`, as specified by
+[`SPEC-tau-cli-command-mode`](../../tau-cli/specs/SPEC-tau-cli-command-mode.md).
+
 ## Subprocess ownership
 
 Bounded subprocess execution lives in `src/bounded_command.rs`.

@@ -35,7 +35,7 @@ fn nested_schema() -> ActionSchema {
     ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
-            name: "/email".to_owned(),
+            name: ":email".to_owned(),
             description: "Email approvals".to_owned(),
             action_id: None,
             args: Vec::new(),
@@ -144,7 +144,7 @@ fn google_auth_published(accounts: &[&str], instance_id: u64) -> ActionSchemaPub
         schema: ActionSchema {
             version: ACTION_SCHEMA_VERSION,
             roots: vec![ActionCommand {
-                name: "/email".to_owned(),
+                name: ":email".to_owned(),
                 description: "Email actions".to_owned(),
                 action_id: None,
                 args: Vec::new(),
@@ -174,11 +174,11 @@ fn google_auth_published(accounts: &[&str], instance_id: u64) -> ActionSchemaPub
 
 #[test]
 fn parses_known_dynamic_action_line() {
-    let state = ActionCommandState::new(["/quit"]);
-    state.apply_schema_published(&published("/email", "email.list", 1));
+    let state = ActionCommandState::new([":quit"]);
+    state.apply_schema_published(&published(":email", "email.list", 1));
 
     let dispatch = state
-        .parse_line("/email list")
+        .parse_line(":email list")
         .expect("known root")
         .expect("valid action");
 
@@ -191,8 +191,8 @@ fn parses_known_dynamic_action_line() {
 fn completes_dynamic_action_subcommands_and_enum_args() {
     // Extension-published action schemas are command trees, not just root
     // commands. The completer must expose nested namespaces such as
-    // `/email in` and `/email out` after the root has been typed.
-    let state = ActionCommandState::new(["/quit"]);
+    // `:email in` and `:email out` after the root has been typed.
+    let state = ActionCommandState::new([":quit"]);
     state.apply_schema_published(&nested_published());
     let data = tau_cli_term::CompletionData::new();
     let (commands, arg_completers) = state.dynamic_completions();
@@ -205,26 +205,26 @@ fn completes_dynamic_action_subcommands_and_enum_args() {
             .collect()
     };
 
-    assert_eq!(labels("/email "), vec!["in".to_owned(), "out".to_owned()]);
-    assert_eq!(labels("/email i"), vec!["in".to_owned()]);
+    assert_eq!(labels(":email "), vec!["in".to_owned(), "out".to_owned()]);
+    assert_eq!(labels(":email i"), vec!["in".to_owned()]);
     assert_eq!(
-        labels("/email in "),
+        labels(":email in "),
         vec!["open".to_owned(), "approve".to_owned()]
     );
-    assert_eq!(labels("/email in approve "), vec!["all".to_owned()]);
-    assert_eq!(labels("/email out "), vec!["mode".to_owned()]);
+    assert_eq!(labels(":email in approve "), vec!["all".to_owned()]);
+    assert_eq!(labels(":email out "), vec!["mode".to_owned()]);
     assert_eq!(
-        labels("/email out mode "),
+        labels(":email out mode "),
         vec!["approve".to_owned(), "block".to_owned()]
     );
 }
 
 /// Account suggestions published by a configured extension must reach the deep
-/// slash-argument position, and a replacement schema generation must remove
+/// action-argument position, and a replacement schema generation must remove
 /// stale account names from both completion and omitted-argument errors.
 #[test]
 fn google_auth_account_completions_follow_latest_schema_generation() {
-    let state = ActionCommandState::new(["/quit"]);
+    let state = ActionCommandState::new([":quit"]);
     state.apply_schema_published(&google_auth_published(&["zeta", "alpha"], 7));
 
     let labels = |state: &ActionCommandState| {
@@ -234,8 +234,8 @@ fn google_auth_account_completions_follow_latest_schema_generation() {
         tau_cli_term::completion::build_candidates(
             &[],
             &data,
-            "/email auth google start ",
-            "/email auth google start ".len(),
+            ":email auth google start ",
+            ":email auth google start ".len(),
         )
         .into_iter()
         .map(|candidate| candidate.label)
@@ -244,16 +244,16 @@ fn google_auth_account_completions_follow_latest_schema_generation() {
 
     assert_eq!(labels(&state), vec!["zeta".to_owned(), "alpha".to_owned()]);
     let error = state
-        .parse_line("/email auth google start")
+        .parse_line(":email auth google start")
         .expect("known action")
         .expect_err("account is required");
     assert!(error.message().contains("zeta, alpha"));
-    assert_eq!(error.usage(), Some("/email auth google start <account>"));
+    assert_eq!(error.usage(), Some(":email auth google start <account>"));
 
     state.apply_schema_published(&google_auth_published(&["current"], 7));
     assert_eq!(labels(&state), vec!["current".to_owned()]);
     let error = state
-        .parse_line("/email auth google start")
+        .parse_line(":email auth google start")
         .expect("known action")
         .expect_err("account is required");
     assert!(error.message().contains("current"));
@@ -262,19 +262,19 @@ fn google_auth_account_completions_follow_latest_schema_generation() {
 
 #[test]
 fn ignores_roots_that_collide_with_builtin_commands() {
-    let state = ActionCommandState::new(["/quit"]);
-    state.apply_schema_published(&published("/quit", "quit.dynamic", 1));
+    let state = ActionCommandState::new([":quit"]);
+    state.apply_schema_published(&published(":quit", "quit.dynamic", 1));
 
-    assert!(!state.is_known_action_line("/quit list"));
+    assert!(!state.is_known_action_line(":quit list"));
     assert!(state.dynamic_completions().0.is_empty());
 }
 
 #[test]
 fn removes_schema_for_exited_extension() {
-    let state = ActionCommandState::new(["/quit"]);
-    state.apply_schema_published(&published("/email", "email.list", 2));
+    let state = ActionCommandState::new([":quit"]);
+    state.apply_schema_published(&published(":email", "email.list", 2));
 
     state.remove_extension(&ExtensionName::from("std-email"), 2.into());
 
-    assert!(state.parse_line("/email list").is_none());
+    assert!(state.parse_line(":email list").is_none());
 }

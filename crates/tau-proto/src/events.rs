@@ -398,10 +398,10 @@ pub struct HarnessRoleGroup {
 }
 
 /// One reusable prompt template configured by the running harness and offered
-/// to UI clients as `/prompt <id>`.
+/// to UI clients as `:prompt <id>`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessCustomPrompt {
-    /// Stable prompt id accepted by `/prompt <id>`.
+    /// Stable prompt id accepted by `:prompt <id>`.
     pub id: String,
     /// Prompt text inserted into the editable prompt buffer.
     pub text: String,
@@ -502,7 +502,7 @@ pub enum Effort {
     High = 4,
     /// `rename_all = "snake_case"` would emit `x_high` for this
     /// variant, but the canonical wire string is `xhigh` everywhere
-    /// else (`/role engineer effort xhigh`, OpenAI's `reasoning_effort` field,
+    /// else (`:role engineer effort xhigh`, OpenAI's `reasoning_effort` field,
     /// `Display`, `FromStr`, `effort_wire`). Pin it explicitly so
     /// serde-driven config paths (`default_efforts`,
     /// `reasoningEfforts`) agree with the rest.
@@ -1139,7 +1139,7 @@ pub struct ActionSchemaPublished {
     pub extension_name: ExtensionName,
     /// Extension instance id owning this schema. Stamped by the harness.
     pub instance_id: ExtensionInstanceId,
-    /// Full slash-action schema published by the extension.
+    /// Full action schema published by the extension.
     pub schema: tau_actions::ActionSchema,
 }
 
@@ -1156,7 +1156,7 @@ pub struct ActionInvoke {
     pub instance_id: ExtensionInstanceId,
     /// Stable action id selected by the parsed command line.
     pub action_id: String,
-    /// Original slash command line submitted by the user.
+    /// Original command line submitted by the user.
     pub raw_line: String,
     /// Positional arguments in schema order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1906,7 +1906,7 @@ pub struct ExtSkillAvailable {
     pub file_path: std::path::PathBuf,
     /// When true the harness should include this skill in the system prompt.
     pub add_to_prompt: bool,
-    /// Whether users may explicitly invoke this skill with `/skill`.
+    /// Whether users may explicitly invoke this skill with `:skill`.
     #[serde(default = "default_true")]
     pub user_invocable: bool,
     /// Whether model-side skill discovery/loading should hide this skill.
@@ -2851,6 +2851,10 @@ impl PromptMessageClass {
 pub struct UiPromptSubmitted {
     pub session_id: SessionId,
     pub text: String,
+    /// Whether the canonical text came from a doubled-colon literal escape and
+    /// must bypass harness-owned prompt command processing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub literal: bool,
     /// Agent that should receive this prompt. Agent creation is explicit via
     /// [`UiCreateAgent`]; prompt submissions only target existing agents.
     pub agent_id: AgentId,
@@ -3096,6 +3100,10 @@ pub struct UiCreateAgent {
     /// Optional first prompt to append after agent context has been loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<String>,
+    /// Whether `initial_prompt` came from a doubled-colon literal escape and
+    /// must bypass harness-owned prompt command processing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub literal: bool,
     /// Whether the initial prompt is user-authored or hidden internal control
     /// text.
     #[serde(default)]
@@ -3138,7 +3146,7 @@ pub struct UiSetAgentDisplayName {
     pub display_name: String,
 }
 
-/// The user typed `/tree <target>`: move an agent's head pointer to a
+/// The user typed `:tree <target>`: move an agent's head pointer to a
 /// user-facing prompt anchor, root, or explicit raw node.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiNavigateTree {
@@ -3151,7 +3159,7 @@ pub struct UiNavigateTree {
     pub target: UiTreeNavigationTarget,
 }
 
-/// The user typed `/compact`: force a provider-side compaction pass on
+/// The user typed `:compact`: force a provider-side compaction pass on
 /// the target agent history before the next prompt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiCompactRequest {
@@ -3164,7 +3172,7 @@ pub struct UiCompactRequest {
 
 /// Stop advancing an in-flight prompt at the next harness boundary.
 ///
-/// Originally tied to the user typing `/cancel`, now also published
+/// Originally tied to the user typing `:cancel`, now also published
 /// by the harness itself to preempt non-tool extension side
 /// conversations when a user prompt arrives. The optional
 /// [`Self::agent_prompt_id`] disambiguates the two cases:
@@ -3834,7 +3842,7 @@ pub struct AgentUserMessageInjected {
 pub enum SessionStartReason {
     /// The harness eagerly initialized this session at startup.
     Initial,
-    /// The user requested a fresh session via `/session new`.
+    /// The user requested a fresh session via `:session new`.
     New,
     /// The user resumed an existing session by id.
     Resume,

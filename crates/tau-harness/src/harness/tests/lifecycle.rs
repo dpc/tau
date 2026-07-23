@@ -3483,6 +3483,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "run two tools".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -5627,6 +5628,7 @@ fn unavailable_tool_is_reported_without_crashing() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "shell printf hi".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -5849,6 +5851,7 @@ fn disconnected_tool_is_removed_cleanly() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "shell printf hi".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -6059,6 +6062,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "do it".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -6411,6 +6415,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "do it".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
@@ -6529,6 +6534,7 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
             session_id: "s1".into(),
             text: "do it".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),

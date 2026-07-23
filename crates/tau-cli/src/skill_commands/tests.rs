@@ -1,6 +1,6 @@
 use super::*;
 
-/// Ensures `/skill` completion exposes only user-invocable skills and keeps
+/// Ensures `:skill` completion exposes only user-invocable skills and keeps
 /// argument hints in the user-facing menu text.
 #[test]
 fn completes_only_user_invocable_skills() {

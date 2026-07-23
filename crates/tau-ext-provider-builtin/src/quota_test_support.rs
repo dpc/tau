@@ -191,7 +191,7 @@ impl Drop for PumpGuard {
     }
 }
 
-/// Shared byte queue combining harness traffic with one injected `/retry`.
+/// Shared byte queue combining harness traffic with one injected `:retry`.
 #[derive(Clone, Default)]
 struct FixtureInput {
     /// Buffered bytes, upstream EOF state, and reader wakeup.

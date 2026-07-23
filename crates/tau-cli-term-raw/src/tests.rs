@@ -4932,17 +4932,17 @@ fn completion_keys_take_precedence_over_bindings() {
     let (mut term, handle, input_tx) =
         Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
     term.set_completion_source(Some(Box::new(|buffer: &str, _cursor: usize| {
-        if buffer == "/" {
+        if buffer == ":" {
             vec![
                 Candidate {
-                    label: "/model".to_owned(),
+                    label: ":model".to_owned(),
                     description: "switch model".to_owned(),
-                    replacement: "/model".to_owned(),
+                    replacement: ":model".to_owned(),
                 },
                 Candidate {
-                    label: "/quit".to_owned(),
+                    label: ":quit".to_owned(),
                     description: "exit".to_owned(),
-                    replacement: "/quit".to_owned(),
+                    replacement: ":quit".to_owned(),
                 },
             ]
         } else {
@@ -4956,15 +4956,15 @@ fn completion_keys_take_precedence_over_bindings() {
 
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
-            KeyCode::Char('/'),
+            KeyCode::Char(':'),
             KeyModifiers::NONE,
         )))
-        .expect("send slash");
+        .expect("send command prefix");
     assert!(matches!(
         term.get_next_event().expect("open completion"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/");
+    assert_eq!(handle.get_buffer(), ":");
 
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
@@ -4976,7 +4976,7 @@ fn completion_keys_take_precedence_over_bindings() {
         term.get_next_event().expect("cycle completion"),
         Event::BufferChanged
     ));
-    assert_eq!(handle.get_buffer(), "/quit");
+    assert_eq!(handle.get_buffer(), ":quit");
 
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
@@ -4988,7 +4988,7 @@ fn completion_keys_take_precedence_over_bindings() {
         term.get_next_event().expect("accept completion"),
         Event::CompletionAccept
     ));
-    assert_eq!(handle.get_buffer(), "/quit");
+    assert_eq!(handle.get_buffer(), ":quit");
 }
 
 /// Accepting a filesystem-like directory completion must immediately refresh

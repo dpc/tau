@@ -41,7 +41,7 @@ Tau follows the XDG directories:
 - Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`
   - `<pid>.sock` — Unix socket for clients.
   - `<pid>.json` — daemon discovery metadata containing pid, project root,
-    Tau version, and the daemon's current active `session_id`; `/session new`
+    Tau version, and the daemon's current active `session_id`; `:session new`
     updates this field after the daemon switches sessions successfully.
 
 ## Event logs are usually the first place to look
@@ -66,17 +66,17 @@ Examples:
 
 ```bash
 cargo r -- dev send <session_id> "normal user message"
-cargo r -- dev send <session_id> /cancel
-cargo r -- dev send <session_id> /model smart
-cargo r -- dev send <session_id> /compact
+cargo r -- dev send <session_id> :cancel
+cargo r -- dev send <session_id> :model test/model
+cargo r -- dev send <session_id> :compact
 cargo r -- dev send <session_id> '!pwd'
 ```
 
 The command requires the session id and finds the matching running daemon via
 runtime harness metadata. That metadata's `session_id` is the daemon's active
-current session and is updated by `/session new`; discovery leaves stale runtime
+current session and is updated by `:session new`; discovery leaves stale runtime
 files untouched, and ambiguous live matches are treated as an error. It
-supports normal prompts, core slash commands, and `!` / `!!` shell-command
+supports normal prompts, core commands, and `!` / `!!` shell-command
 submissions.
 
 ## Quick inspection workflow

@@ -1,4 +1,4 @@
-//! Client-side state for extension-provided slash actions.
+//! Client-side state for actions provided by extensions.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -33,7 +33,7 @@ pub(crate) struct ActionDispatch {
     pub(crate) extension_name: ExtensionName,
     /// Extension instance id from the schema snapshot selected by the UI.
     pub(crate) instance_id: ExtensionInstanceId,
-    /// Parsed slash action.
+    /// Parsed extension action.
     pub(crate) parsed: tau_actions::ParsedAction,
 }
 
@@ -136,7 +136,7 @@ impl ActionCommandState {
     pub(crate) fn dynamic_completions(
         &self,
     ) -> (
-        Vec<tau_cli_term::SlashCommand>,
+        Vec<tau_cli_term::CommandCompletion>,
         Vec<(tau_cli_term::CommandName, tau_cli_term::ArgCompleter)>,
     ) {
         let inner = locked(&self.inner);
@@ -144,7 +144,7 @@ impl ActionCommandState {
             .roots
             .iter()
             .map(|(root, binding)| {
-                tau_cli_term::SlashCommand::new(root.clone(), binding.description.clone())
+                tau_cli_term::CommandCompletion::new(root.clone(), binding.description.clone())
             })
             .collect();
         let completers = inner

@@ -129,7 +129,7 @@ is done.
   Legal-phase requests are silently denied before activation staging;
   illegal-phase requests retain normal protocol-failure behavior. The input
   remains visible in local debug JSONL and is metered as
-  `message.ui_tree_request`. `tau dev send <session> /tree` waits for and prints
+  `message.ui_tree_request`. `tau dev send <session> :tree` waits for and prints
   the directed notice.
 
 ## Emission and interception (peer ↔ harness)

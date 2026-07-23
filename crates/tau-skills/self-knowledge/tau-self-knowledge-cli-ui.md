@@ -2,13 +2,13 @@
 name: tau-self-knowledge-cli-ui
 description: >
   Use this skill when the user asks about Tau's terminal CLI UI, prompt input,
-  slash commands, prompt history, key bindings, or prompt completions.
+  commands, prompt history, key bindings, or prompt completions.
 advertise: false
 ---
 
 # Tau CLI UI
 
-Tau's terminal UI is the interactive `tau` client. It connects to a harness daemon, renders the transcript, and owns prompt input behavior such as slash commands, history, key bindings, external editor integration, and prompt completions.
+Tau's terminal UI is the interactive `tau` client. It connects to a harness daemon, renders the transcript, and owns prompt input behavior such as commands, history, key bindings, external editor integration, and prompt completions.
 
 ## Configuration files
 
@@ -17,7 +17,7 @@ CLI UI configuration lives under `~/.config/tau/`:
 - `cli.yaml` — main CLI display, key binding, and completion settings.
 - `cli.d/*.yaml` — drop-in CLI overrides layered after `cli.yaml`.
 
-Runtime UI toggles changed with `/set` are stored in the state directory as `cli.json`.
+Runtime UI toggles changed with `:set` are stored in the state directory as `cli.json`.
 
 ## Agent message labels
 
@@ -48,18 +48,18 @@ outside every watch edge.
 
 The no-agent-selected screen is both the start-new-agent input target and an
 overview of messages between all agents. It deduplicates sender and recipient
-projections of the same message and follows `/set show-messages`. Ctrl-K/Ctrl-J
+projections of the same message and follows `:set show-messages`. Ctrl-K/Ctrl-J
 include the overview when cycling among active agents. Submitting a prompt there
 still starts a new agent. The overview is local to that CLI: attachment catch-up
 includes currently loaded agents, not messages whose endpoints already unloaded.
 
-## Slash commands
+## Commands
 
-Type `/` as the first non-whitespace character in the prompt to open slash/action completion. Built-in commands include session and agent management, model/role switching, `/name <display name>` to rename the currently selected agent, `/skill <name> [args]` for explicit user-invocable skill injection, `/theme <name>` to switch only the current CLI UI's theme for this run, `/set`, `/tree`, `/fast`, `/detach`, and `/quit`. Extension-provided actions can add dynamic slash commands and argument completions at runtime. `/skill:<name> [args]` is accepted as a Pi-compatible alias; arguments are appended after the skill body without placeholder substitution.
+Type `:` as the first non-whitespace character to enter command mode and open command/action completion. Type `::text` to submit literal prompt text beginning with `:`, while `/` remains available for absolute and token-level path completion. Built-in commands include session and agent management, model/role switching, `:name <display name>` to rename the currently selected agent, `:skill <name> [args]` for explicit user-invocable skill injection, `:theme <name>` to switch only the current CLI UI's theme for this run, `:set`, `:tree`, `:fast`, `:detach`, and `:quit`. Extension-provided actions can add dynamic commands and argument completions at runtime. `:skill:<name> [args]` is accepted as a compact form; arguments are appended after the skill body without placeholder substitution.
 
-`/theme` completion lists built-in selectors (`tau-plain-dark`, `tau-plain-light`, and `tau-dpc`) plus valid user themes from `<config_dir>/themes/*.json5`. It is intentionally not persistent: it does not edit `cli.yaml`, update `cli.json`, or affect another attached UI.
+`:theme` completion lists built-in selectors (`tau-plain-dark`, `tau-plain-light`, and `tau-dpc`) plus valid user themes from `<config_dir>/themes/*.json5`. It is intentionally not persistent: it does not edit `cli.yaml`, update `cli.json`, or affect another attached UI.
 
-`/set notice-level <critical|warning|info|debug|trace>` controls which harness/UI notices this UI shows. The default is `info`; `warning` hides routine lifecycle chatter such as extension ready messages; `debug` and `trace` show progressively noisier developer-oriented notices. Critical and mandatory notices such as extension configuration errors remain visible even with restrictive thresholds.
+`:set notice-level <critical|warning|info|debug|trace>` controls which harness/UI notices this UI shows. The default is `info`; `warning` hides routine lifecycle chatter such as extension ready messages; `debug` and `trace` show progressively noisier developer-oriented notices. Critical and mandatory notices such as extension configuration errors remain visible even with restrictive thresholds.
 
 ## Prompt history and editing
 
@@ -80,7 +80,8 @@ completions:
   "#/": complete_with_command fzf some arguments
 ```
 
-The longest matching word prefix wins, except `/` as the first non-whitespace character always opens slash/action completion for now.
+The longest matching word prefix wins for prompt-text rules. Intrinsic
+first-non-whitespace `:` command mode always wins over configured rules.
 
 Available completers:
 
@@ -91,7 +92,7 @@ Available completers:
 - `complete_path` — plain filesystem directory-prefix completion.
 - `complete_path_fuzzy` — fuzzy git-tracked path completion for `./<partial>`,
   falling back to directory-prefix completion.
-- `complete_actions` — complete slash/action command names; useful for future or
+- `complete_actions` — complete action command names; useful for future or
   custom non-leading command triggers.
 - `complete_with_command <argv...>` — run the command when the trigger token is
   typed exactly, release the terminal while it runs, trim stdout, and replace the
@@ -110,18 +111,18 @@ caps preview files to 64 KiB each / 1 MiB total before launching the picker.
 
 The shipped defaults use plain path completion. Configure `./: complete_path_fuzzy`
 to opt into fuzzy git path completion for `./<partial>`.
-`/retry` runs the selected agent's exact currently delayed provider retry now.
+`:retry` runs the selected agent's exact currently delayed provider retry now.
 It does not resubmit prompt text; if the provider no longer has that prompt
 parked, Tau reports that it may already be running.
 
-Explicit targets in `/agent switch`, `/agent suspend`, `/agent resume`, `/agent
-auto`, and `/agent name` accept either `agent-id` or `@agent-id`. Completion
+Explicit targets in `:agent switch`, `:agent suspend`, `:agent resume`, `:agent
+auto`, and `:agent name` accept either `agent-id` or `@agent-id`. Completion
 accepts either spelling and inserts the canonical bare id.
 
 ## Shared agent navigation modes
 
 Navigation classification is shared by UIs attached to the same daemon. Use
-`/agent suspend`, `/agent resume`, or `/agent auto` for absolute `suspended`,
+`:agent suspend`, `:agent resume`, or `:agent auto` for absolute `suspended`,
 `active`, or `active-auto` modes. Selection, drafts, transcript view, and
 presentation remain local to each UI. Overrides survive UI reconnect while the
 agent remains loaded in the same daemon session; unload, session switch, and

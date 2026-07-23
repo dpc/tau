@@ -333,6 +333,7 @@ pub(super) fn create_agent(
 ) -> Result<(), Box<dyn std::error::Error>> {
     peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
         tau_proto::UiCreateAgent {
+            literal: false,
             session_id: "deterministic-e2e-session".into(),
             role: "deterministic-e2e".to_owned(),
             model_override: None,
@@ -356,6 +357,7 @@ pub(super) fn submit_prompt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     peer.send(&HarnessInputMessage::emit(Event::UiPromptSubmitted(
         tau_proto::UiPromptSubmitted {
+            literal: false,
             session_id: "deterministic-e2e-session".into(),
             text: prompt.to_owned(),
             agent_id: agent_id.clone(),

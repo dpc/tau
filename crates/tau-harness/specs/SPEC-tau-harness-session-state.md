@@ -44,8 +44,8 @@ normal persistence. User/cache extension data, provider state, credentials,
 policy/config files, and runtime sockets are also outside the session-ephemeral
 boundary.
 
-Agents can separately be staged as ephemeral from the TUI (`/new` then
-`/ephemeral on`). That policy is per agent: the harness marks the agent id before
+Agents can separately be staged as ephemeral from the TUI (`:new` then
+`:ephemeral on`). That policy is per agent: the harness marks the agent id before
 the first semantic write, stores its transcript and metadata in the live
 `AgentStore` only, and folds its `session.agent_loaded` membership fact in memory
 without appending it to a durable session journal. Late subscribers attached to
@@ -136,7 +136,7 @@ state. See
 
 ## Durable branch-head navigation
 
-The harness presents `/tree` as prompt rewind anchors by default. Numeric
+The harness presents `:tree` as prompt rewind anchors by default. Numeric
 anchors are one-based user-facing prompt positions; resolving an anchor moves
 the durable branch head to that prompt node's parent, so the next user prompt
 replaces or branches before the selected prompt. Root/before-first navigation is

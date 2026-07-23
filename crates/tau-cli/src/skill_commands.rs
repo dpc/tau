@@ -1,4 +1,4 @@
-//! Client-side state for `/skill` slash-command completion.
+//! Client-side state for `:skill` command completion.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -46,7 +46,7 @@ impl SkillCommandState {
         );
     }
 
-    /// Build the `/skill` argument completer for the current snapshot.
+    /// Build the `:skill` argument completer for the current snapshot.
     pub(crate) fn arg_completer(&self) -> tau_cli_term::ArgCompleter {
         let state = self.clone();
         Arc::new(move |args| state.complete_args(args))

@@ -127,7 +127,7 @@ delegate or side agent, `SessionAgentUnloaded` for the owner, or session termina
 through shutdown, disconnect, or EOF. Session cleanup also cancels queued waiters so
 worker shutdown can complete promptly.
 
-The `/shell-dir-force-unlock DIRECTORY` UI action canonicalizes an existing directory
+The `:shell-dir-force-unlock DIRECTORY` UI action canonicalizes an existing directory
 and releases all overlapping manual locks, regardless of owner. It does not cancel or
 release automatic locks held by running tools. An ancestor or descendant displayed by
 a waiting call can therefore be used to clear the conflicting manual lock.

@@ -1,11 +1,11 @@
-//! Slash-command and argument completion content + menu rendering.
+//! Command-mode and argument completion content + menu rendering.
 //!
 //! State and lifecycle live in [`tau_cli_term_raw`]; this module
 //! supplies the *content* (which candidates exist for a given buffer)
 //! and the *presentation* (how the menu block is laid out and styled).
 //!
 //! Public types:
-//! - [`SlashCommand`] — static command registration
+//! - [`CommandCompletion`] — command completion entry
 //! - [`CompletionItem`] / [`CompletionData`] — dynamic argument completions
 //! - [`build_candidates`] — turns the current buffer into a `Vec<Candidate>`
 //! - [`render_menu_block`] — turns a [`CompletionView`] into a [`StyledBlock`]
@@ -23,19 +23,23 @@ use crate::resolve;
 
 mod git_files;
 
-/// A slash-command name, always prefixed with `/` (e.g. `"/model"`).
+/// One command-mode token, including its leading `:` (for example, `":model"`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CommandName(String);
 
 impl CommandName {
-    /// Creates a command name and asserts it starts with `/`.
+    /// Creates a command name and asserts it follows the command-token grammar.
     ///
     /// # Panics
     ///
-    /// Panics when `name` does not start with `/`.
+    /// Panics unless `name` is one colon followed by an ASCII alphanumeric
+    /// character and then only ASCII alphanumeric, `_`, or `-` characters.
     pub fn new(name: impl Into<String>) -> Self {
         let s = name.into();
-        assert!(s.starts_with('/'), "CommandName must start with '/'");
+        assert!(
+            is_valid_command_name(&s),
+            "CommandName must be ':' followed by one command token"
+        );
         Self(s)
     }
 
@@ -51,27 +55,37 @@ impl fmt::Display for CommandName {
     }
 }
 
-/// A slash command with its name and description.
+/// One command-mode completion entry with its display description.
 #[derive(Clone, Debug)]
-pub struct SlashCommand {
-    /// Slash command token typed by the user, including the leading `/`.
+pub struct CommandCompletion {
+    /// Command token typed by the user, including the leading `:`.
     pub name: CommandName,
     /// Human-readable description shown in the completion menu.
     pub description: String,
 }
 
-impl SlashCommand {
-    /// Creates a slash command with a display description for completion menus.
+impl CommandCompletion {
+    /// Creates a command-mode entry with a display description for completion
+    /// menus.
     ///
     /// # Panics
     ///
-    /// Panics when `name` does not start with `/`.
+    /// Panics when `name` does not satisfy [`CommandName::new`].
     pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: CommandName::new(name),
             description: description.into(),
         }
     }
+}
+
+pub(crate) fn is_valid_command_name(name: &str) -> bool {
+    let Some(token) = name.strip_prefix(':') else {
+        return false;
+    };
+    let mut chars = token.chars();
+    chars.next().is_some_and(|ch| ch.is_ascii_alphanumeric())
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
 }
 
 /// A single argument completion candidate.
@@ -101,7 +115,7 @@ impl CompletionItem {
     }
 }
 
-/// Closure that produces argument completions for a slash command,
+/// Closure that produces argument completions for a command,
 /// given the already-typed args (the last element is the partial arg
 /// being completed; may be empty for "just typed a space").
 ///
@@ -116,11 +130,11 @@ pub type ArgCompleter = Arc<dyn Fn(&[&str]) -> Vec<CompletionItem> + Send + Sync
 struct CompletionInner {
     arg_completers: HashMap<CommandName, ArgCompleter>,
     dynamic_arg_completers: HashMap<CommandName, ArgCompleter>,
-    dynamic_commands: Vec<SlashCommand>,
+    dynamic_commands: Vec<CommandCompletion>,
     agent_mention_completer: Option<ArgCompleter>,
 }
 
-/// Thread-safe storage for dynamic slash-command and argument completions.
+/// Thread-safe storage for dynamic command and argument completions.
 ///
 /// Clone this handle and pass it to background threads that need to
 /// update available completions (e.g. when the harness sends a model
@@ -136,17 +150,17 @@ impl CompletionData {
         Self::default()
     }
 
-    /// Replaces extension-provided root slash commands shown alongside the
+    /// Replaces extension-provided root commands shown alongside the
     /// static command registry.
-    pub fn set_dynamic_commands(&self, commands: Vec<SlashCommand>) {
+    pub fn set_dynamic_commands(&self, commands: Vec<CommandCompletion>) {
         self.set_dynamic_commands_and_arg_completers(commands, Vec::new());
     }
 
-    /// Replaces extension-provided root slash commands and their nested
+    /// Replaces extension-provided root commands and their nested
     /// argument/subcommand completers as one atomic snapshot.
     pub fn set_dynamic_commands_and_arg_completers(
         &self,
-        commands: Vec<SlashCommand>,
+        commands: Vec<CommandCompletion>,
         arg_completers: Vec<(CommandName, ArgCompleter)>,
     ) {
         let mut inner = self.inner.lock().expect("completion data lock");
@@ -154,7 +168,7 @@ impl CompletionData {
         inner.dynamic_arg_completers = arg_completers.into_iter().collect();
     }
 
-    /// Sets a flat, single-arg completion list for a slash command.
+    /// Sets a flat, single-arg completion list for a command.
     /// Items are ranked prefix-match-first, substring-match-second
     /// (case-insensitive). For commands that take more than one arg
     /// or need to react to prior args, use
@@ -197,7 +211,7 @@ impl CompletionData {
             .insert(command, completer);
     }
 
-    /// Registers a custom argument completer for a slash command.
+    /// Registers a custom argument completer for a command.
     /// The closure receives the args typed so far (with the partial
     /// last element being completed) and returns ranked candidates.
     pub fn set_arg_completer(&self, command: CommandName, completer: ArgCompleter) {
@@ -234,7 +248,7 @@ impl CompletionData {
             .clone()
     }
 
-    fn dynamic_commands(&self) -> Vec<SlashCommand> {
+    fn dynamic_commands(&self) -> Vec<CommandCompletion> {
         self.inner
             .lock()
             .expect("completion data lock")
@@ -253,7 +267,7 @@ pub enum CompletionRuleKind {
     /// Complete filesystem paths, preferring fuzzy git-tracked file matches for
     /// `./<partial>` inside a repository.
     PathFuzzy,
-    /// Complete action/slash-command names.
+    /// Complete action/command names.
     Actions,
     /// Run an external command when the trigger token is typed exactly.
     Command(Vec<String>),
@@ -336,7 +350,7 @@ impl CompletionRules {
         buffer: &'a str,
         cursor: usize,
     ) -> Option<(&'a [String], &'a str, &'a str)> {
-        if first_non_whitespace_starts_action(buffer) {
+        if first_non_whitespace_starts_command(buffer) {
             return None;
         }
         let token = word_token(buffer, cursor)?;
@@ -366,7 +380,7 @@ impl Default for CompletionRules {
 
 /// Builds the candidate list for the given buffer/cursor.
 pub fn build_candidates(
-    commands: &[SlashCommand],
+    commands: &[CommandCompletion],
     data: &CompletionData,
     buffer: &str,
     cursor: usize,
@@ -376,7 +390,7 @@ pub fn build_candidates(
 
 /// Builds candidates using explicit prompt completion rules.
 pub fn build_candidates_with_rules(
-    commands: &[SlashCommand],
+    commands: &[CommandCompletion],
     data: &CompletionData,
     rules: &CompletionRules,
     buffer: &str,
@@ -394,7 +408,7 @@ pub fn build_candidates_with_rules(
 
 #[cfg(test)]
 pub(crate) fn build_candidates_with_home(
-    commands: &[SlashCommand],
+    commands: &[CommandCompletion],
     data: &CompletionData,
     buffer: &str,
     cursor: usize,
@@ -411,14 +425,14 @@ pub(crate) fn build_candidates_with_home(
 }
 
 pub(crate) fn build_candidates_with_home_and_rules(
-    commands: &[SlashCommand],
+    commands: &[CommandCompletion],
     data: &CompletionData,
     rules: &CompletionRules,
     buffer: &str,
     cursor: usize,
     home_dir: Option<&Path>,
 ) -> Vec<Candidate> {
-    if first_non_whitespace_starts_action(buffer) {
+    if first_non_whitespace_starts_command(buffer) {
         let leading_len = buffer.len() - buffer.trim_start().len();
         let view = &buffer[leading_len..];
         if cursor < leading_len {
@@ -472,8 +486,8 @@ pub(crate) fn build_candidates_with_home_and_rules(
 }
 
 fn build_cmd_candidates(
-    static_commands: &[SlashCommand],
-    dynamic_commands: &[SlashCommand],
+    static_commands: &[CommandCompletion],
+    dynamic_commands: &[CommandCompletion],
     prefix: &str,
 ) -> Vec<Candidate> {
     let mut seen = std::collections::HashSet::new();
@@ -514,8 +528,8 @@ fn replace_token_candidates(
 }
 
 fn build_action_token_candidates(
-    static_commands: &[SlashCommand],
-    dynamic_commands: &[SlashCommand],
+    static_commands: &[CommandCompletion],
+    dynamic_commands: &[CommandCompletion],
     token: &PathToken<'_>,
     trigger_prefix: &str,
 ) -> Vec<Candidate> {
@@ -523,20 +537,20 @@ fn build_action_token_candidates(
         .prefix
         .strip_prefix(trigger_prefix)
         .unwrap_or(token.prefix);
-    let lookup_prefix = if trigger_prefix == "/" {
+    let lookup_prefix = if trigger_prefix == ":" {
         token.prefix.to_owned()
     } else {
-        format!("/{partial}")
+        format!(":{partial}")
     };
     build_cmd_candidates(static_commands, dynamic_commands, &lookup_prefix)
         .into_iter()
         .map(|candidate| {
-            let replacement = if trigger_prefix == "/" {
+            let replacement = if trigger_prefix == ":" {
                 candidate.replacement.clone()
             } else {
                 format!(
                     "{trigger_prefix}{}",
-                    candidate.replacement.trim_start_matches('/')
+                    candidate.replacement.trim_start_matches(':')
                 )
             };
             Candidate {
@@ -552,8 +566,9 @@ struct PathToken<'a> {
     after: &'a str,
 }
 
-fn first_non_whitespace_starts_action(buffer: &str) -> bool {
-    buffer.trim_start().starts_with('/')
+fn first_non_whitespace_starts_command(buffer: &str) -> bool {
+    let trimmed = buffer.trim_start();
+    trimmed.starts_with(':') && !trimmed.starts_with("::")
 }
 
 fn word_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {

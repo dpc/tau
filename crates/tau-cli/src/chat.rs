@@ -30,7 +30,8 @@ use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, Ui
 use crate::prompt_history::PromptHistoryStore;
 use crate::tool_render::ui_dir_block;
 use crate::ui_prompt::{
-    CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, create_user_agent_prompt,
+    CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, PromptCommandHandling,
+    create_user_agent_prompt,
 };
 use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
 
@@ -205,7 +206,7 @@ fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
     send_frame(writer, &durable_emit_message(event))
 }
 
-/// Send the point-to-point connection-control request used by `/detach`.
+/// Send the point-to-point connection-control request used by `:detach`.
 fn send_ui_detach_request(writer: &WriterHandle) -> io::Result<()> {
     send_frame(
         writer,
@@ -213,10 +214,10 @@ fn send_ui_detach_request(writer: &WriterHandle) -> io::Result<()> {
     )
 }
 
-/// Consume `/detach`, send its connection-control request, and select the
+/// Consume `:detach`, send its connection-control request, and select the
 /// daemon-preserving exit path.
 fn handle_ui_detach_command_text(text: &str, writer: &WriterHandle) -> Option<InputLoopExit> {
-    if text != "/detach" {
+    if text != ":detach" {
         return None;
     }
     // If the write fails we still exit — the daemon will notice the disconnect
@@ -255,18 +256,18 @@ fn handle_debug_show_ui_event_stats_command_text(
     meter: &UiIoMeter,
     mut system_info: impl FnMut(&str),
 ) -> bool {
-    if text == "/debug-show-ui-event-stats" {
+    if text == ":debug-show-ui-event-stats" {
         system_info(&format_ui_io_stats(meter));
         return true;
     }
-    if text.starts_with("/debug-show-ui-event-stats ") {
-        system_info("/debug-show-ui-event-stats takes no arguments");
+    if text.starts_with(":debug-show-ui-event-stats ") {
+        system_info(":debug-show-ui-event-stats takes no arguments");
         return true;
     }
     false
 }
 
-const DEBUG_SHOW_EVENT_STATS_USAGE: &str = "/debug-show-event-stats <extension>";
+const DEBUG_SHOW_EVENT_STATS_USAGE: &str = ":debug-show-event-stats <extension>";
 
 fn parse_debug_show_event_stats_command(
     text: &str,
@@ -275,7 +276,7 @@ fn parse_debug_show_event_stats_command(
     let Some(command) = parts.next() else {
         return Ok(None);
     };
-    if command != "/debug-show-event-stats" {
+    if command != ":debug-show-event-stats" {
         return Ok(None);
     }
     let Some(extension_name) = parts.next() else {
@@ -499,7 +500,7 @@ mod ui_io_tests {
         assert_eq!(formatted.matches("  term.bell: bytes=").count(), 3);
     }
 
-    /// The slash-command handler should print the same cumulative dump users
+    /// The command handler should print the same cumulative dump users
     /// get interactively and consume the command locally instead of letting it
     /// fall through to prompt submission.
     #[test]
@@ -513,7 +514,7 @@ mod ui_io_tests {
         let mut output = Vec::new();
 
         let handled = handle_debug_show_ui_event_stats_command_text(
-            "/debug-show-ui-event-stats",
+            ":debug-show-ui-event-stats",
             &meter,
             |message| output.push(message.to_owned()),
         );
@@ -529,7 +530,7 @@ mod ui_io_tests {
     }
 
     /// A mistyped debug stats invocation with arguments should be consumed with
-    /// a local usage notice rather than becoming an unknown slash action or
+    /// a local usage notice rather than becoming an unknown extension action or
     /// prompt text.
     #[test]
     fn debug_show_ui_event_stats_command_rejects_arguments() {
@@ -537,7 +538,7 @@ mod ui_io_tests {
         let mut output = Vec::new();
 
         let handled = handle_debug_show_ui_event_stats_command_text(
-            "/debug-show-ui-event-stats now",
+            ":debug-show-ui-event-stats now",
             &meter,
             |message| output.push(message.to_owned()),
         );
@@ -545,7 +546,7 @@ mod ui_io_tests {
         assert!(handled);
         assert_eq!(
             output,
-            vec!["/debug-show-ui-event-stats takes no arguments".to_owned()]
+            vec![":debug-show-ui-event-stats takes no arguments".to_owned()]
         );
     }
 
@@ -554,7 +555,7 @@ mod ui_io_tests {
     /// usage errors local to the UI.
     #[test]
     fn debug_show_event_stats_command_builds_request() {
-        let message = parse_debug_show_event_stats_command("/debug-show-event-stats std-shell")
+        let message = parse_debug_show_event_stats_command(":debug-show-event-stats std-shell")
             .expect("parse command")
             .expect("request message");
 
@@ -565,12 +566,12 @@ mod ui_io_tests {
             })
         );
         assert_eq!(
-            parse_debug_show_event_stats_command("/debug-show-event-stats")
+            parse_debug_show_event_stats_command(":debug-show-event-stats")
                 .expect_err("missing extension"),
             DEBUG_SHOW_EVENT_STATS_USAGE
         );
         assert_eq!(
-            parse_debug_show_event_stats_command("/debug-show-event-stats std-shell extra")
+            parse_debug_show_event_stats_command(":debug-show-event-stats std-shell extra")
                 .expect_err("extra argument"),
             DEBUG_SHOW_EVENT_STATS_USAGE
         );
@@ -588,7 +589,7 @@ mod ui_io_tests {
         let mut usage = Vec::new();
 
         assert!(handle_debug_show_event_stats_command_text(
-            "/debug-show-event-stats std-shell",
+            ":debug-show-event-stats std-shell",
             &writer,
             |message| usage.push(message.to_owned()),
         ));
@@ -605,7 +606,7 @@ mod ui_io_tests {
         assert!(usage.is_empty());
     }
 
-    /// `/detach` selects the daemon-preserving exit path and writes exactly one
+    /// `:detach` selects the daemon-preserving exit path and writes exactly one
     /// dedicated connection-control frame rather than an emitted event.
     #[test]
     fn detach_command_sends_dedicated_request_frame() {
@@ -616,7 +617,7 @@ mod ui_io_tests {
         let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
 
         assert_eq!(
-            handle_ui_detach_command_text("/detach", &writer),
+            handle_ui_detach_command_text(":detach", &writer),
             Some(InputLoopExit::Detach)
         );
 
@@ -637,7 +638,7 @@ mod ui_io_tests {
         }
     }
 
-    /// Bare `/tree`'s production command boundary writes exactly one dedicated
+    /// Bare `:tree`'s production command boundary writes exactly one dedicated
     /// request frame rather than an emitted event.
     #[test]
     fn tree_command_sends_dedicated_request_frame() {
@@ -651,7 +652,7 @@ mod ui_io_tests {
         assert!(handle_tree_command_text(
             "s1",
             Some(tau_proto::AgentId::parse("agent-1").expect("agent id")),
-            "/tree",
+            ":tree",
             &writer,
             |message| errors.push(message.to_owned()),
         ));
@@ -848,76 +849,76 @@ fn cycle_role(
 /// to bump its idle deadline.
 const DRAFT_DEBOUNCE: Duration = Duration::from_secs(1);
 const EOF_DURING_AGENT_NOTICE: &str =
-    "An agent is still running; use /quit to terminate the session in progress.";
-const TREE_NAVIGATION_USAGE: &str = "/tree: use a prompt anchor, `root`, or explicit `node <id>`";
-const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/quit", "Exit the chat session"),
-    ("/cancel", "Cancel the current in-flight prompt"),
+    "An agent is still running; use :quit to terminate the session in progress.";
+const TREE_NAVIGATION_USAGE: &str = ":tree: use a prompt anchor, `root`, or explicit `node <id>`";
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    (":quit", "Exit the chat session"),
+    (":cancel", "Cancel the current in-flight prompt"),
     (
-        "/retry",
+        ":retry",
         "Run the selected agent's delayed provider retry now",
     ),
     (
-        "/detach",
+        ":detach",
         "Leave the UI but keep the harness running for later reattach",
     ),
     (
-        "/model",
-        "Switch selected agent model (e.g. /model openai/gpt-5)",
+        ":model",
+        "Switch selected agent model (e.g. :model openai/gpt-5)",
     ),
-    ("/agent", "Manage agent transcript navigation"),
+    (":agent", "Manage agent transcript navigation"),
     (
-        "/new",
-        "Start a new agent, optionally with a role (`/new reviewer`)",
+        ":new",
+        "Start a new agent, optionally with a role (`:new reviewer`)",
     ),
-    ("/name", "Alias for /agent name on the selected agent"),
+    (":name", "Alias for :agent name on the selected agent"),
     (
-        "/ephemeral",
-        "Stage the next /new agent as memory-only (/ephemeral on|off)",
+        ":ephemeral",
+        "Stage the next :new agent as memory-only (:ephemeral on|off)",
     ),
-    ("/suspend", "Alias for /agent suspend on the selected agent"),
-    ("/resume", "Alias for /agent resume on the selected agent"),
-    ("/role", "Switch, create, edit, or delete an agent role"),
+    (":suspend", "Alias for :agent suspend on the selected agent"),
+    (":resume", "Alias for :agent resume on the selected agent"),
+    (":role", "Switch, create, edit, or delete an agent role"),
     (
-        "/prompt",
+        ":prompt",
         "Replace the editor with a configured custom prompt template",
     ),
     (
-        "/skill",
-        "Invoke a user-invocable skill (e.g. /skill jujutsu optional args)",
+        ":skill",
+        "Invoke a user-invocable skill (e.g. :skill jujutsu optional args)",
     ),
     (
-        "/session",
-        "Manage chat sessions (e.g. /session new starts a fresh session)",
+        ":session",
+        "Manage chat sessions (e.g. :session new starts a fresh session)",
     ),
     (
-        "/tree",
-        "Print prompt rewind anchors (`/tree <anchor>` rewinds before that prompt)",
+        ":tree",
+        "Print prompt rewind anchors (`:tree <anchor>` rewinds before that prompt)",
     ),
     (
-        "/compact",
+        ":compact",
         "Force a provider-side compaction pass on the current session",
     ),
-    ("/fast", "Toggle Fast mode"),
+    (":fast", "Toggle Fast mode"),
     (
-        "/set",
-        "Set a UI setting (e.g. /set show-diff true); Tab cycles names + values",
+        ":set",
+        "Set a UI setting (e.g. :set show-diff true); Tab cycles names + values",
     ),
     (
-        "/theme",
+        ":theme",
         "Switch this UI's theme for this run; Tab cycles available themes",
     ),
-    ("/version", "Print Tau version and build information"),
+    (":version", "Print Tau version and build information"),
     (
-        "/provider-auth",
+        ":provider-auth",
         "Add or replace a provider profile (runs `tau provider add [kind]`)",
     ),
     (
-        "/debug-show-ui-event-stats",
+        ":debug-show-ui-event-stats",
         "Print cumulative UI event byte/count counters for this client",
     ),
     (
-        "/debug-show-event-stats",
+        ":debug-show-event-stats",
         "Request cumulative protocol byte/count counters for an extension",
     ),
 ];
@@ -970,7 +971,7 @@ fn debounce_loop(handle: DraftHandle, writer: WriterHandle) {
         }
         // Coalesce subsequent typing into one event per window. Wake
         // early on shutdown so we don't spend a second sleeping after
-        // the user already typed `/quit`.
+        // the user already typed `:quit`.
         let g = locked(mtx);
         let (g, _timed_out) = cv
             .wait_timeout_while(g, DRAFT_DEBOUNCE, |s| !s.done)
@@ -1060,7 +1061,7 @@ pub(crate) fn run_chat(
     cli_overrides: DaemonCliOverrides<'_>,
     ephemeral: bool,
 ) -> Result<(), CliError> {
-    use tau_cli_term::{HighTerm, SlashCommand};
+    use tau_cli_term::{CommandCompletion, HighTerm};
 
     let state_dir = tau_session_inspect::default_state_dir();
     let ui_logging = if ephemeral {
@@ -1117,7 +1118,7 @@ pub(crate) fn run_chat(
 
     // Background socket reader — decodes events and sends them to
     // a channel as `RendererCmd::Remote`. The input thread pushes
-    // `RendererCmd::Set` variants (e.g. `/set show-diff true`) into the
+    // `RendererCmd::Set` variants (e.g. `:set show-diff true`) into the
     // same channel so the renderer thread sees a single ordered
     // stream and never needs to share state with the input thread.
     let (event_tx, event_rx) = mpsc::channel::<RendererCmd>();
@@ -1190,12 +1191,11 @@ pub(crate) fn run_chat(
     });
 
     // Terminal setup.
-    let commands: Vec<SlashCommand> = BUILTIN_SLASH_COMMANDS
+    let commands: Vec<CommandCompletion> = BUILTIN_COMMANDS
         .iter()
-        .map(|(name, description)| SlashCommand::new(*name, *description))
+        .map(|(name, description)| CommandCompletion::new(*name, *description))
         .collect();
-    let action_state =
-        ActionCommandState::new(BUILTIN_SLASH_COMMANDS.iter().map(|(name, _)| *name));
+    let action_state = ActionCommandState::new(BUILTIN_COMMANDS.iter().map(|(name, _)| *name));
     // Fail fast on a malformed `cli.yaml`. The fields here drive
     // keybindings, prompt symbol, cursor shape, and theme — silently
     // falling back to defaults would leave the user with broken
@@ -1277,7 +1277,7 @@ pub(crate) fn run_chat(
     let renderer_rx = event_rx;
     // Pre-build the renderer so we can grab its shared state handles
     // for the input loop. CLI config provides the default UI toggle values;
-    // persisted `cli.json` state overrides them so `/set show-*` changes
+    // persisted `cli.json` state overrides them so `:set show-*` changes
     // survive restarts.
     let mut renderer = EventRenderer::new_with_state(
         renderer_handle,
@@ -1292,7 +1292,7 @@ pub(crate) fn run_chat(
     renderer.set_right_prompt_paths(cwd.clone(), home_dir.clone());
     renderer.set_action_state(action_state.clone());
     completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new("/skill"),
+        tau_cli_term::CommandName::new(":skill"),
         renderer.skill_arg_completer(),
     );
     let tool_timer = ToolTimerNotifier::new();
@@ -1300,12 +1300,12 @@ pub(crate) fn run_chat(
     let timer_tx = event_tx.clone();
     let timer_state = tool_timer.inner();
     let timer_thread = std::thread::spawn(move || tool_timer_loop(timer_state, timer_tx));
-    // Register `/set`'s context-aware arg completer. The first-arg
+    // Register `:set`'s context-aware arg completer. The first-arg
     // menu shows each setting's *current* value (read through the
     // renderer's shared mirror), and the second-arg menu shows
     // value-with-meaning for the selected setting.
     completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new("/set"),
+        tau_cli_term::CommandName::new(":set"),
         build_set_arg_completer(renderer.cli_state_mirror()),
     );
     let agent_in_progress = renderer.agent_in_progress_state();
@@ -1323,17 +1323,17 @@ pub(crate) fn run_chat(
         ephemeral_agents.clone(),
     );
     completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new("/agent"),
+        tau_cli_term::CommandName::new(":agent"),
         build_agent_arg_completer(input_routing.clone(), agent_display_names.clone()),
     );
     completion_data
         .set_agent_mention_completer(build_agent_mention_completer(input_routing.clone()));
     completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new("/session"),
+        tau_cli_term::CommandName::new(":session"),
         build_session_arg_completer(),
     );
     completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new("/theme"),
+        tau_cli_term::CommandName::new(":theme"),
         build_theme_arg_completer(dirs.clone()),
     );
     let roles_available = renderer.roles_available();
@@ -1385,7 +1385,7 @@ pub(crate) fn run_chat(
 
     // Terminal input loop — shares the writer with the debounce
     // thread via `WriterHandle`. Theme clone is for printing local
-    // validation errors (e.g. `/role engineer effort foo`) through the same
+    // validation errors (e.g. `:role engineer effort foo`) through the same
     // TermHandle as remote events, so they don't garble the TUI like
     // `eprintln!` would.
     let mut active_session_id = session_id.to_owned();
@@ -1451,11 +1451,11 @@ pub(crate) fn run_chat(
 /// How the input loop ended. Controls daemon disposition on exit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputLoopExit {
-    /// User typed `/quit`, hit Ctrl-D, or the socket dropped. The
+    /// User typed `:quit`, hit Ctrl-D, or the socket dropped. The
     /// daemon should be killed (if we own it) or just disconnected
     /// from (if we were attached).
     Quit,
-    /// User typed `/detach`. We leave the daemon running whether we
+    /// User typed `:detach`. We leave the daemon running whether we
     /// spawned it or attached to it.
     Detach,
 }
@@ -1508,7 +1508,7 @@ fn join_ui_thread(handle: std::thread::JoinHandle<()>, name: &str) {
 fn finish_daemon_for_exit(exit: InputLoopExit, daemon: DaemonHandle) {
     // On detach, we explicitly leak the daemon child (if we own one) so it
     // outlives this process. `DaemonHandle::Drop` would otherwise kill the
-    // child we spawned; `/detach` is exactly the case where we want it to keep
+    // child we spawned; `:detach` is exactly the case where we want it to keep
     // running.
     match exit {
         InputLoopExit::Quit => drop(daemon),
@@ -1553,18 +1553,18 @@ fn tool_timer_loop(
 /// local UI commands like `Set`. Keeping it one channel
 /// removes the need for shared state between the two threads.
 enum RendererCmd {
-    /// `/set <name> <value>` — validated by the input loop before send.
+    /// `:set <name> <value>` — validated by the input loop before send.
     Set {
         name: String,
         value: String,
     },
-    /// `/agent switch <agent_id>` — switch visible known agent transcript.
+    /// `:agent switch <agent_id>` — switch visible known agent transcript.
     SwitchAgent {
         agent_id: String,
     },
     /// Return to the start-new-agent prompt state.
     ClearSelectedAgent,
-    /// `/theme <name>` — apply a theme to this UI process only.
+    /// `:theme <name>` — apply a theme to this UI process only.
     SetTheme {
         theme: tau_themes::Theme,
     },
@@ -1729,7 +1729,7 @@ impl InputRoutingState {
 
     fn agent_switch_target(&self, target: Option<&str>) -> Result<Option<String>, String> {
         let Some(arg) = target.map(str::trim).filter(|arg| !arg.is_empty()) else {
-            return Err("/agent switch <agent_id|none>".to_owned());
+            return Err(":agent switch <agent_id|none>".to_owned());
         };
         if arg == "none" {
             return Ok(None);
@@ -1768,7 +1768,7 @@ fn handle_agent_suspend_command(
         }
     };
     let Some(agent_id) = target else {
-        print_local("/agent suspend <agent_id>");
+        print_local(":agent suspend <agent_id>");
         return None;
     };
     Some(agent_id)
@@ -1790,7 +1790,7 @@ fn handle_agent_resume_command(
         }
     };
     let Some(agent_id) = target else {
-        print_local("/agent resume <agent_id>");
+        print_local(":agent resume <agent_id>");
         return None;
     };
     Some(agent_id)
@@ -1840,7 +1840,7 @@ impl LocalTerminalOutput {
 ///
 /// `NotHandled` means the line should become a normal user prompt. `Continue`
 /// means a command consumed the line and the loop should wait for more input.
-/// `Exit` carries the daemon-disposition decision for `/quit` and `/detach`.
+/// `Exit` carries the daemon-disposition decision for `:quit` and `:detach`.
 enum CommandOutcome {
     NotHandled,
     Continue,
@@ -1887,7 +1887,7 @@ struct TerminalInputSession<'a> {
 struct PendingNewAgentOptions {
     /// Optional role override for the next created agent.
     ///
-    /// This is a latency bridge between `/new <role>` and the asynchronous
+    /// This is a latency bridge between `:new <role>` and the asynchronous
     /// `harness.role_selected` echo, not a second durable role authority.
     role: Option<String>,
     /// Optional model override for the next created agent.
@@ -1955,11 +1955,11 @@ impl PendingNewAgentOptions {
 }
 
 fn new_alias_role(text: &str) -> Result<Option<&str>, &'static str> {
-    let rest = text.strip_prefix("/new").unwrap_or("").trim();
+    let rest = text.strip_prefix(":new").unwrap_or("").trim();
     let mut parts = rest.split_whitespace();
     let role = parts.next();
     if parts.next().is_some() {
-        return Err("/new [role]");
+        return Err(":new [role]");
     }
     Ok(role)
 }
@@ -1993,13 +1993,13 @@ fn tree_command_message(
     target_agent_id: Option<tau_proto::AgentId>,
     text: &str,
 ) -> Result<Option<HarnessInputMessage>, &'static str> {
-    if text == "/tree" {
+    if text == ":tree" {
         return Ok(Some(crate::ui_events::tree_request_message(
             session_id,
             target_agent_id,
         )));
     }
-    if let Some(arg) = text.strip_prefix("/tree ") {
+    if let Some(arg) = text.strip_prefix(":tree ") {
         let target = crate::ui_commands::parse_tree_navigation_target(arg)
             .map_err(|()| TREE_NAVIGATION_USAGE)?;
         return Ok(Some(HarnessInputMessage::emit(
@@ -2037,7 +2037,7 @@ struct AgentDisplayNameRequest {
 
 impl AgentDisplayNameRequest {
     fn from_agent_command(rest: &str, routing: &InputRoutingState) -> Result<Self, String> {
-        let usage = "/agent name <agent_id> <display_name>";
+        let usage = ":agent name <agent_id> <display_name>";
         let rest = rest
             .strip_prefix("name")
             .ok_or_else(|| usage.to_owned())?
@@ -2070,13 +2070,13 @@ fn name_alias_request(
     selected_agent_id: Option<String>,
     agent_is_known: impl FnOnce(&str) -> bool,
 ) -> Result<AgentDisplayNameRequest, String> {
-    let display_name = text.strip_prefix("/name").unwrap_or("").trim();
+    let display_name = text.strip_prefix(":name").unwrap_or("").trim();
     if display_name.is_empty() {
-        return Err("/name <display_name>".to_owned());
+        return Err(":name <display_name>".to_owned());
     }
     let Some(agent_id) = selected_agent_id else {
         return Err(
-            "/name requires a selected agent; use /agent switch <agent_id> or /agent name <agent_id> <display_name>"
+            ":name requires a selected agent; use :agent switch <agent_id> or :agent name <agent_id> <display_name>"
                 .to_owned(),
         );
     };
@@ -2114,19 +2114,19 @@ fn apply_ephemeral_staging_command(
     pending: &mut PendingNewAgentOptions,
     mut system_info: impl FnMut(&str),
 ) -> bool {
-    if text != "/ephemeral" && !text.starts_with("/ephemeral ") {
+    if text != ":ephemeral" && !text.starts_with(":ephemeral ") {
         return false;
     }
-    let Some(rest) = text.strip_prefix("/ephemeral") else {
+    let Some(rest) = text.strip_prefix(":ephemeral") else {
         return false;
     };
     let rest = rest.trim();
     if !rest.is_empty() && !matches!(rest, "on" | "off") || text.split_whitespace().count() > 2 {
-        system_info("/ephemeral [on|off]");
+        system_info(":ephemeral [on|off]");
         return true;
     }
     if has_selected_agent {
-        system_info("Use /new first; /ephemeral controls only the next new agent.");
+        system_info("Use :new first; :ephemeral controls only the next new agent.");
         return true;
     }
     match rest {
@@ -2241,11 +2241,24 @@ impl<'a> TerminalInputSession<'a> {
             return Ok(None);
         }
 
+        if let Some(canonical_line) = tau_cli_term::canonical_literal_colon_prompt(line) {
+            let canonical_text = canonical_line.trim();
+            self.record_prompt_line_if_persistent_with_routing(
+                &canonical_line,
+                canonical_text,
+                text,
+            );
+            if let Ok(mut context) = self.ctx.editor_context.lock() {
+                context.previous_prompt = Some(canonical_text.to_owned());
+            }
+            return Ok(self.submit_literal_prompt(canonical_text));
+        }
+
         // Preserve the original side-effect order: every non-empty line is
-        // recorded before command handling, and local slash commands are echoed
+        // recorded before command handling, and local commands are echoed
         // before they produce validation errors or exit the loop.
         self.record_prompt_line_if_persistent(line, text);
-        if is_local_slash_command(text) || self.ctx.action_state.is_known_action_line(text) {
+        if is_known_static_command(text) || self.ctx.action_state.is_known_action_line(text) {
             self.output.command_echo(&redacted_command_echo_line(text));
         }
         self.handle_recorded_line(text)
@@ -2256,8 +2269,8 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        // Keep session-lifecycle commands first: `/quit` and `/detach` exit
-        // immediately, while `/session new` mutates `session_id` for later
+        // Keep session-lifecycle commands first: `:quit` and `:detach` exit
+        // immediately, while `:session new` mutates `session_id` for later
         // commands and prompt submission.
         let outcome = self.handle_session_command(text)?;
         if !matches!(outcome, CommandOutcome::NotHandled) {
@@ -2320,7 +2333,16 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn record_prompt_line_if_persistent(&self, line: &str, text: &str) {
-        if self.prompt_line_targets_ephemeral_agent(text) {
+        self.record_prompt_line_if_persistent_with_routing(line, text, text);
+    }
+
+    fn record_prompt_line_if_persistent_with_routing(
+        &self,
+        line: &str,
+        text: &str,
+        routing_text: &str,
+    ) {
+        if self.prompt_line_targets_ephemeral_agent(routing_text) {
             if let Ok(mut context) = self.ctx.editor_context.lock() {
                 context.previous_prompt = Some(text.to_owned());
             }
@@ -2345,19 +2367,19 @@ impl<'a> TerminalInputSession<'a> {
             selected_agent_is_ephemeral,
             selected_agent_id.is_some(),
             self.pending_new_agent_options.ephemeral(),
-            is_local_slash_command(text) || self.ctx.action_state.is_known_action_line(text),
+            is_known_static_command(text) || self.ctx.action_state.is_known_action_line(text),
         )
     }
 
     fn handle_session_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        if text == "/quit" {
+        if text == ":quit" {
             return Ok(CommandOutcome::Exit(InputLoopExit::Quit));
         }
-        if text == "/cancel" {
+        if text == ":cancel" {
             self.send_cancel_prompt();
             return Ok(CommandOutcome::Continue);
         }
-        if text == "/retry" {
+        if text == ":retry" {
             let _ = send_event(
                 self.writer,
                 &crate::ui_events::retry_prompt(self.session_id, self.selected_side_agent_id()),
@@ -2365,17 +2387,17 @@ impl<'a> TerminalInputSession<'a> {
             return Ok(CommandOutcome::Continue);
         }
         if text
-            .strip_prefix("/retry")
+            .strip_prefix(":retry")
             .is_some_and(|suffix| suffix.chars().next().is_some_and(char::is_whitespace))
         {
-            self.output.system_info("usage: /retry");
+            self.output.system_info("usage: :retry");
             return Ok(CommandOutcome::Continue);
         }
         if let Some(exit) = handle_ui_detach_command_text(text, self.writer) {
             // Tell the harness to stay alive after we leave, then exit the UI.
             return Ok(CommandOutcome::Exit(exit));
         }
-        if text == "/session" || text.starts_with("/session ") {
+        if text == ":session" || text.starts_with(":session ") {
             self.handle_session_namespace(text)?;
             return Ok(CommandOutcome::Continue);
         }
@@ -2384,18 +2406,18 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_session_namespace(&mut self, text: &str) -> Result<(), CliError> {
-        let rest = text.strip_prefix("/session").unwrap_or("").trim();
+        let rest = text.strip_prefix(":session").unwrap_or("").trim();
         let mut parts = rest.split_whitespace();
         let subcommand = parts.next();
         let extra = parts.next();
         match (subcommand, extra) {
             (Some("new"), None) => self.start_new_session(),
             (None, None) => {
-                self.output.system_info("/session new");
+                self.output.system_info(":session new");
                 Ok(())
             }
             _ => {
-                self.output.system_info("/session new");
+                self.output.system_info(":session new");
                 Ok(())
             }
         }
@@ -2454,16 +2476,16 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_compact_command(&self, text: &str) -> bool {
-        if text == "/compact" {
+        if text == ":compact" {
             let _ = send_event(
                 self.writer,
                 &crate::ui_events::compact_request(self.session_id, self.selected_side_agent_id()),
             );
             return true;
         }
-        if text.starts_with("/compact ") {
+        if text.starts_with(":compact ") {
             self.output
-                .system_info("/compact forces a compaction pass and takes no arguments");
+                .system_info(":compact forces a compaction pass and takes no arguments");
             return true;
         }
         false
@@ -2474,12 +2496,12 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_fast_shortcut(&self, text: &str) -> bool {
-        if text == "/fast" {
+        if text == ":fast" {
             self.toggle_fast_service_tier();
             return true;
         }
-        if text.starts_with("/fast ") {
-            self.output.system_info("/fast toggles Fast mode");
+        if text.starts_with(":fast ") {
+            self.output.system_info(":fast toggles Fast mode");
             return true;
         }
         false
@@ -2489,15 +2511,15 @@ impl<'a> TerminalInputSession<'a> {
         if self.handle_debug_utility_command(text) {
             return true;
         }
-        if text == "/version" {
+        if text == ":version" {
             self.output.system_info(&crate::version_label());
             return true;
         }
-        if text.starts_with("/version ") {
-            self.output.system_info("/version takes no arguments");
+        if text.starts_with(":version ") {
+            self.output.system_info(":version takes no arguments");
             return true;
         }
-        if let Some(provider) = text.strip_prefix("/provider-auth ") {
+        if let Some(provider) = text.strip_prefix(":provider-auth ") {
             let provider = provider.trim();
             if !provider.is_empty() {
                 let output = &self.output;
@@ -2505,36 +2527,36 @@ impl<'a> TerminalInputSession<'a> {
             }
             return true;
         }
-        if text == "/provider-auth" {
+        if text == ":provider-auth" {
             let output = &self.output;
             run_provider_auth("", &|message| output.system_info(message));
             return true;
         }
-        if text == "/theme" || text.starts_with("/theme ") {
+        if text == ":theme" || text.starts_with(":theme ") {
             self.handle_theme_command(text);
             return true;
         }
-        if text == "/agent" || text.starts_with("/agent ") {
+        if text == ":agent" || text.starts_with(":agent ") {
             self.handle_agent_command(text);
             return true;
         }
-        if text == "/new" || text.starts_with("/new ") {
+        if text == ":new" || text.starts_with(":new ") {
             self.handle_new_alias(text);
             return true;
         }
-        if text == "/name" || text.starts_with("/name ") {
+        if text == ":name" || text.starts_with(":name ") {
             self.handle_name_alias(text);
             return true;
         }
-        if text == "/suspend" || text.starts_with("/suspend ") {
+        if text == ":suspend" || text.starts_with(":suspend ") {
             self.handle_suspend_alias(text);
             return true;
         }
-        if text == "/resume" || text.starts_with("/resume ") {
+        if text == ":resume" || text.starts_with(":resume ") {
             self.handle_resume_alias(text);
             return true;
         }
-        if text == "/set" || text.starts_with("/set ") {
+        if text == ":set" || text.starts_with(":set ") {
             let output = &self.output;
             handle_set_command(text, &self.ctx.renderer_tx, &|message| {
                 output.system_info(message);
@@ -2563,7 +2585,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_theme_command(&mut self, text: &str) {
-        let name = text.strip_prefix("/theme").unwrap_or("").trim();
+        let name = text.strip_prefix(":theme").unwrap_or("").trim();
         if name.is_empty() {
             let names = crate::theme::available_theme_choices(&self.ctx.dirs)
                 .into_iter()
@@ -2571,13 +2593,13 @@ impl<'a> TerminalInputSession<'a> {
                 .collect::<Vec<_>>()
                 .join(", ");
             self.output
-                .system_info(&format!("/theme <name>; available: {names}"));
+                .system_info(&format!(":theme <name>; available: {names}"));
             return;
         }
         let theme = match crate::theme::select_theme_for_command(&self.ctx.dirs, name) {
             Ok(theme) => theme,
             Err(error) => {
-                self.output.system_info(&format!("/theme: {error}"));
+                self.output.system_info(&format!(":theme: {error}"));
                 return;
             }
         };
@@ -2615,7 +2637,7 @@ impl<'a> TerminalInputSession<'a> {
                 let known_agents = self.ctx.routing.known_agents();
                 let active_count = self.ctx.routing.active_count();
                 self.output.system_info(&format!(
-                    "/agent <new|switch|suspend|resume|auto|name> [agent_id]; current: {current}; active: {active_count}; known: {}",
+                    ":agent <new|switch|suspend|resume|auto|name> [agent_id]; current: {current}; active: {active_count}; known: {}",
                     known_agents.join(", ")
                 ));
             }
@@ -2659,16 +2681,16 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_suspend_alias(&self, text: &str) {
-        if text.trim() != "/suspend" {
-            self.output.system_info("/suspend");
+        if text.trim() != ":suspend" {
+            self.output.system_info(":suspend");
             return;
         }
         self.handle_agent_suspend(None);
     }
 
     fn handle_resume_alias(&self, text: &str) {
-        if text.trim() != "/resume" {
-            self.output.system_info("/resume");
+        if text.trim() != ":resume" {
+            self.output.system_info(":resume");
             return;
         }
         self.handle_agent_resume(None);
@@ -2759,11 +2781,11 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_role_selection_command(&mut self, text: &str) -> bool {
-        if text == "/role" || text.starts_with("/role ") {
+        if text == ":role" || text.starts_with(":role ") {
             self.handle_role_command(text);
             return true;
         }
-        if let Some(model) = text.strip_prefix("/model ") {
+        if let Some(model) = text.strip_prefix(":model ") {
             let model = model.trim();
             if !model.is_empty() {
                 match model.parse::<tau_proto::ModelId>() {
@@ -2784,7 +2806,7 @@ impl<'a> TerminalInputSession<'a> {
             }
             return true;
         }
-        if text == "/model" {
+        if text == ":model" {
             // No argument — just a reminder.
             return true;
         }
@@ -2793,7 +2815,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_role_command(&mut self, text: &str) {
-        let rest = text.strip_prefix("/role").unwrap_or("").trim();
+        let rest = text.strip_prefix(":role").unwrap_or("").trim();
         match crate::ui_commands::parse_role_command(rest) {
             Ok(Some(event)) => {
                 let has_selected_agent = self.selected_agent_id().is_some();
@@ -2805,7 +2827,7 @@ impl<'a> TerminalInputSession<'a> {
                 let _ = send_event(self.writer, &event);
             }
             Ok(None) => self.output.system_info(
-                "/role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|enable-tool-groups|disable-tool-groups|enable-tools|disable-tools] [value]",
+                ":role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|enable-tool-groups|disable-tool-groups|enable-tools|disable-tools] [value]",
             ),
             Err(error) => self.output.system_info(&error),
         }
@@ -2873,6 +2895,18 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
+        self.submit_prompt_with_command_handling(text, PromptCommandHandling::Interpret)
+    }
+
+    fn submit_literal_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
+        self.submit_prompt_with_command_handling(text, PromptCommandHandling::LiteralEscape)
+    }
+
+    fn submit_prompt_with_command_handling(
+        &mut self,
+        text: &str,
+        command_handling: PromptCommandHandling,
+    ) -> Option<InputLoopExit> {
         self.invalidate_pending_draft();
 
         let selected_agent = self.ctx.routing.selected_agent_id();
@@ -2883,6 +2917,7 @@ impl<'a> TerminalInputSession<'a> {
             tau_proto::AgentId::parse(&agent_id).expect("UI stores valid agent ids")
         }) {
             Event::UiPromptSubmitted(UiPromptSubmitted {
+                literal: matches!(command_handling, PromptCommandHandling::LiteralEscape),
                 session_id: self.session_id.as_str().into(),
                 text: text.to_owned(),
                 agent_id: target_agent_id,
@@ -2908,6 +2943,7 @@ impl<'a> TerminalInputSession<'a> {
                 CreateUserAgentPromptOptions {
                     model_override,
                     ephemeral,
+                    command_handling,
                 },
             )
         };
@@ -3149,7 +3185,7 @@ fn agent_command_effect(
     text: &str,
     routing: &InputRoutingState,
 ) -> Result<AgentCommandEffect, String> {
-    let rest = text.strip_prefix("/agent").unwrap_or("").trim();
+    let rest = text.strip_prefix(":agent").unwrap_or("").trim();
     if rest.is_empty() {
         return Ok(AgentCommandEffect::ShowStatus);
     }
@@ -3168,7 +3204,7 @@ fn agent_command_effect(
     let target = parts.next();
     if parts.next().is_some() {
         return Err(
-            "/agent: too many arguments (use /agent <new|switch|suspend|resume|auto|name> [agent_id])"
+            ":agent: too many arguments (use :agent <new|switch|suspend|resume|auto|name> [agent_id])"
                 .to_owned(),
         );
     }
@@ -3176,7 +3212,7 @@ fn agent_command_effect(
         "new" => target
             .is_none()
             .then_some(AgentCommandEffect::New)
-            .ok_or_else(|| "/agent new".to_owned()),
+            .ok_or_else(|| ":agent new".to_owned()),
         "switch" => routing
             .agent_switch_target(target)
             .map(AgentCommandEffect::Switch),
@@ -3185,7 +3221,7 @@ fn agent_command_effect(
             target,
             routing.selected_agent_id(),
             tau_proto::UiAgentNavigationModeAction::SetSuspended,
-            "/agent suspend <agent_id>",
+            ":agent suspend <agent_id>",
         ),
         "resume" => agent_navigation_command_effect(
             routing,
@@ -3194,17 +3230,17 @@ fn agent_command_effect(
                 .selected_agent_id()
                 .filter(|agent_id| !routing.agent_is_active(agent_id)),
             tau_proto::UiAgentNavigationModeAction::SetActive,
-            "/agent resume <agent_id>",
+            ":agent resume <agent_id>",
         ),
         "auto" => agent_navigation_command_effect(
             routing,
             target,
             routing.selected_agent_id(),
             tau_proto::UiAgentNavigationModeAction::SetActiveAuto,
-            "/agent auto <agent_id>",
+            ":agent auto <agent_id>",
         ),
         _ => Err(
-            "/agent <new|switch|suspend|resume|auto|name> [agent_id]; use /agent switch <agent_id>"
+            ":agent <new|switch|suspend|resume|auto|name> [agent_id]; use :agent switch <agent_id>"
                 .to_owned(),
         ),
     }
@@ -3406,7 +3442,7 @@ fn terminal_input_loop(
     ctx: TerminalInputLoopCtx,
 ) -> Result<InputLoopExit, CliError> {
     // Cloned `TermHandle` so we can `print_output` for client-side
-    // validation errors (`/role engineer effort foo`, `/tree blah`) from this
+    // validation errors (`:role engineer effort foo`, `:tree blah`) from this
     // thread without borrowing `term` while the loop also holds
     // `&mut term` for `get_next_event`.
     let output = LocalTerminalOutput::new(term.handle().clone(), ctx.theme.clone());
@@ -3549,7 +3585,7 @@ fn agent_completion_candidates(
     }
 }
 
-/// Build the `/theme` argument completer from built-in and user theme names.
+/// Build the `:theme` argument completer from built-in and user theme names.
 fn build_theme_arg_completer(dirs: tau_config::settings::TauDirs) -> tau_cli_term::ArgCompleter {
     use tau_cli_term::CompletionItem;
 
@@ -3574,7 +3610,7 @@ fn build_theme_arg_completer(dirs: tau_config::settings::TauDirs) -> tau_cli_ter
     })
 }
 
-/// Build the `/set` argument completer. The first arg is a setting
+/// Build the `:set` argument completer. The first arg is a setting
 /// name (description = current value); the second arg is one of that
 /// setting's allowed values (description = value meaning). Returns
 /// no candidates from the third arg onward.
@@ -3651,14 +3687,14 @@ fn parsed_action_arguments(
     )
 }
 
-/// Parses `/prompt <id>` and returns the configured prompt replacement or a
+/// Parses `:prompt <id>` and returns the configured prompt replacement or a
 /// user-visible validation message.
 pub(crate) fn custom_prompt_replacement(
     text: &str,
     prompts: &[tau_proto::HarnessCustomPrompt],
 ) -> Option<Result<String, String>> {
     let mut parts = text.split_whitespace();
-    if parts.next() != Some("/prompt") {
+    if parts.next() != Some(":prompt") {
         return None;
     }
 
@@ -3676,11 +3712,11 @@ pub(crate) fn custom_prompt_replacement(
             "no custom prompts are configured".to_owned()
         } else {
             format!(
-                "usage: /prompt <id>; available: {}",
+                "usage: :prompt <id>; available: {}",
                 custom_prompt_ids(prompts)
             )
         })),
-        _ => Some(Err("usage: /prompt <id>".to_owned())),
+        _ => Some(Err("usage: :prompt <id>".to_owned())),
     }
 }
 
@@ -3700,9 +3736,9 @@ fn custom_prompt_ids(prompts: &[tau_proto::HarnessCustomPrompt]) -> String {
         .join(", ")
 }
 
-pub(crate) fn leading_slash_action(text: &str) -> Option<&str> {
+pub(crate) fn leading_command_token(text: &str) -> Option<&str> {
     let command = text.split_whitespace().next()?;
-    command.starts_with('/').then_some(command)
+    command.starts_with(':').then_some(command)
 }
 
 pub(crate) fn redacted_command_echo_line(text: &str) -> String {
@@ -3719,15 +3755,15 @@ fn redact_sensitive_action_line(text: &str) -> Option<String> {
     let auth = parts.next()?;
     let provider = parts.next()?;
     let finish = parts.next()?;
-    if root == "/email" && auth == "auth" && provider == "google" && finish == "finish" {
-        Some("/email auth google finish <redacted>".to_owned())
+    if root == ":email" && auth == "auth" && provider == "google" && finish == "finish" {
+        Some(":email auth google finish <redacted>".to_owned())
     } else {
         None
     }
 }
 
-fn is_harness_prompt_slash_action(action: &str) -> bool {
-    action == "/skill" || action.starts_with("/skill:")
+fn is_harness_prompt_command(action: &str) -> bool {
+    action == ":skill" || action.starts_with(":skill:")
 }
 
 fn handle_recorded_line_with_handlers(
@@ -3737,14 +3773,14 @@ fn handle_recorded_line_with_handlers(
     match handlers.handle_known_command(text)? {
         CommandOutcome::NotHandled => match handlers.handle_dynamic_action(text) {
             CommandOutcome::NotHandled => {
-                // This is only a candidate leading slash-token detector. It must
+                // This is only a candidate leading command-token detector. It must
                 // run after CLI-owned commands, dynamic extension actions, and
-                // harness-owned prompt commands such as `/skill` are excluded so
+                // harness-owned prompt commands such as `:skill` are excluded so
                 // each owner keeps its routing contract.
-                if let Some(action) = leading_slash_action(text)
-                    && !is_harness_prompt_slash_action(action)
+                if let Some(action) = leading_command_token(text)
+                    && !is_harness_prompt_command(action)
                 {
-                    handlers.system_info(&format!("unknown CLI action `{action}`"));
+                    handlers.system_info(&format!("unknown command `{action}`"));
                     Ok(None)
                 } else {
                     Ok(handlers.submit_prompt(text))
@@ -3758,40 +3794,40 @@ fn handle_recorded_line_with_handlers(
     }
 }
 
-pub(crate) fn is_local_slash_command(text: &str) -> bool {
+pub(crate) fn is_known_static_command(text: &str) -> bool {
     let command = text.split_whitespace().next().unwrap_or(text);
-    if command == "/skill" || command.starts_with("/skill:") {
+    if command == ":skill" || command.starts_with(":skill:") {
         return true;
     }
     matches!(
         command,
-        "/quit"
-            | "/cancel"
-            | "/retry"
-            | "/detach"
-            | "/session"
-            | "/tree"
-            | "/compact"
-            | "/fast"
-            | "/provider-auth"
-            | "/agent"
-            | "/new"
-            | "/name"
-            | "/ephemeral"
-            | "/suspend"
-            | "/resume"
-            | "/set"
-            | "/theme"
-            | "/role"
-            | "/prompt"
-            | "/model"
-            | "/version"
-            | "/debug-show-ui-event-stats"
-            | "/debug-show-event-stats"
+        ":quit"
+            | ":cancel"
+            | ":retry"
+            | ":detach"
+            | ":session"
+            | ":tree"
+            | ":compact"
+            | ":fast"
+            | ":provider-auth"
+            | ":agent"
+            | ":new"
+            | ":name"
+            | ":ephemeral"
+            | ":suspend"
+            | ":resume"
+            | ":set"
+            | ":theme"
+            | ":role"
+            | ":prompt"
+            | ":model"
+            | ":version"
+            | ":debug-show-ui-event-stats"
+            | ":debug-show-event-stats"
     )
 }
 
-/// Parse and dispatch `/set <name> <value>`. Validation lives here
+/// Parse and dispatch `:set <name> <value>`. Validation lives here
 /// (input-loop thread) so the renderer can trust `RendererCmd::Set`
 /// to always be a known name and an allowed value.
 fn handle_set_command(
@@ -3801,7 +3837,7 @@ fn handle_set_command(
 ) {
     use crate::settings_registry;
 
-    let rest = text.strip_prefix("/set").unwrap_or("").trim();
+    let rest = text.strip_prefix(":set").unwrap_or("").trim();
     let mut parts = rest.split_whitespace();
     let name = parts.next();
     let value = parts.next();
@@ -3809,7 +3845,7 @@ fn handle_set_command(
 
     let usage = || {
         let names: Vec<&str> = settings_registry::SETTINGS.iter().map(|s| s.name).collect();
-        print_local(&format!("/set <name> <value>; names: {}", names.join(", ")));
+        print_local(&format!(":set <name> <value>; names: {}", names.join(", ")));
     };
 
     let (Some(name), Some(value)) = (name, value) else {
@@ -3817,11 +3853,11 @@ fn handle_set_command(
         return;
     };
     if extra.is_some() {
-        print_local("/set: too many arguments");
+        print_local(":set: too many arguments");
         return;
     }
     let Some(def) = settings_registry::find(name) else {
-        print_local(&format!("/set: unknown setting `{name}`"));
+        print_local(&format!(":set: unknown setting `{name}`"));
         return;
     };
     if !(def.validate)(value) {
@@ -3831,7 +3867,7 @@ fn handle_set_command(
         } else {
             format!("{}; suggested: {}", def.value_hint, allowed.join(", "))
         };
-        print_local(&format!("/set {name}: invalid value `{value}` ({hint})"));
+        print_local(&format!(":set {name}: invalid value `{value}` ({hint})"));
         return;
     }
     let _ = renderer_tx.send(RendererCmd::Set {

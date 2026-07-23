@@ -793,9 +793,9 @@ impl DirLockManager {
 
     /// Force-release every manual lock overlapping `dir`, regardless of owner.
     ///
-    /// This is used by the user-facing slash action for recovery from stale or
-    /// mistaken manual locks. Automatic locks held by running tools are not
-    /// touched.
+    /// This is used by the user-facing extension action for recovery from stale
+    /// or mistaken manual locks. Automatic locks held by running tools are
+    /// not touched.
     pub(crate) fn force_unlock_overlapping(
         &self,
         dir: &Path,

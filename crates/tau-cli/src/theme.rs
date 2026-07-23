@@ -48,10 +48,10 @@ pub(crate) fn prompt_input_placeholder(
 
     let parts = match current_agent_navigation {
         Some((AgentNavigationState::Suspended, _)) => vec![SpanTree::text(
-            "This agent is suspended. Use /resume to include it in navigation.",
+            "This agent is suspended. Use :resume to include it in navigation.",
         )],
         Some((AgentNavigationState::ActiveAuto, false)) => vec![SpanTree::text(
-            "This active-auto agent is idle. Use /resume to keep it in navigation.",
+            "This active-auto agent is idle. Use :resume to keep it in navigation.",
         )],
         _ => match current_agent_id {
             Some(agent_id) => vec![
@@ -155,17 +155,17 @@ fn select_named_theme(dirs: &TauDirs, name: &str) -> Result<tau_themes::Theme, T
     tau_themes::Theme::load(&path).map_err(|source| ThemeError::Load { path, source })
 }
 
-/// One theme shown to `/theme` argument completion and listing output.
+/// One theme shown to `:theme` argument completion and listing output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ThemeChoice {
-    /// Theme selector typed after `/theme`.
+    /// Theme selector typed after `:theme`.
     pub(crate) name: String,
     /// Human-facing description for completion menus and no-argument listings.
     pub(crate) description: String,
 }
 
 impl ThemeChoice {
-    /// Formats this theme choice for no-argument `/theme` output.
+    /// Formats this theme choice for no-argument `:theme` output.
     pub(crate) fn into_listing_text(self) -> String {
         if self.description.is_empty() {
             self.name

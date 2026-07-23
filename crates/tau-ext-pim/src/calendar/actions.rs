@@ -2,12 +2,12 @@ use tau_proto::{
     ACTION_SCHEMA_VERSION, ActionArg, ActionArgKind, ActionChoice, ActionCommand, ActionSchema,
 };
 
-/// Return the `/calendar` action schema.
+/// Return the `:calendar` action schema.
 pub fn calendar_action_schema() -> ActionSchema {
     calendar_action_schema_with_accounts(&[])
 }
 
-/// Return the `/calendar` schema with current Google OAuth account choices.
+/// Return the `:calendar` schema with current Google OAuth account choices.
 pub(crate) fn calendar_action_schema_with_accounts(accounts: &[String]) -> ActionSchema {
     fn string_arg(name: &str, description: &str) -> ActionArg {
         ActionArg {
@@ -52,7 +52,7 @@ pub(crate) fn calendar_action_schema_with_accounts(accounts: &[String]) -> Actio
     ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
-            name: "/calendar".to_owned(),
+            name: ":calendar".to_owned(),
             description: "Authorize Google Calendar, review logs, and approve pending changes"
                 .to_owned(),
             action_id: None,

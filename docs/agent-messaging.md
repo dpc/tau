@@ -28,7 +28,7 @@ replay does not recreate that private authority.
 These external message facts are separate from the harness-owned inter-session
 and agent-to-agent message events documented below.
 
-The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every successful send is recorded as an `agent.message_sent` sender projection; agent recipients also get a separate `agent.message_received` recipient projection with the same `message_id`. User-recipient messages always render fully; agent-to-agent UI display depends on `/set show-messages`. When shown fully, a message renders as:
+The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every successful send is recorded as an `agent.message_sent` sender projection; agent recipients also get a separate `agent.message_received` recipient projection with the same `message_id`. User-recipient messages always render fully; agent-to-agent UI display depends on `:set show-messages`. When shown fully, a message renders as:
 
 ```text
 Message from <sender> to <recipient>:
@@ -46,9 +46,9 @@ blocks use the latest folded name metadata when re-rendered, while their
 immutable semantic message events remain unchanged. See
 [`SPEC-tau-cli-agent-message-labels`](../crates/tau-cli/specs/SPEC-tau-cli-agent-message-labels.md).
 
-`/set show-messages` modes are:
+`:set show-messages` modes are:
 
-User-recipient messages are human-visible broadcasts: they always render fully in every attached UI's currently visible transcript, regardless of `/set show-messages`. Agent-to-agent message projections still obey `/set show-messages`:
+User-recipient messages are human-visible broadcasts: they always render fully in every attached UI's currently visible transcript, regardless of `:set show-messages`. Agent-to-agent message projections still obey `:set show-messages`:
 
 - `none`: no UI indication or history of agent-to-agent messages
 - `self-summary`: no UI indication for agent-to-agent messages
@@ -104,7 +104,7 @@ message({"recipient_id":"engineer_b","message":"Please also inspect crates/tau-c
 ```
 
 The UI may display, summarize, or hide agent-to-agent messages depending on
-`/set show-messages`. The recipient's durable `agent.message_received` fact is
+`:set show-messages`. The recipient's durable `agent.message_received` fact is
 also its sole model payload: provider context renders the body XML-escaped in a
 sender-labelled `[tau-internal]` `<message>` wrapper. Live delivery uses a
 payload-free runtime wake and does not persist a second submitted/steered prompt.
@@ -271,7 +271,7 @@ watcher is itself a side agent.
 The `agent_start` tool result only confirms metadata such as `self_agent_id` and
 `sub_agent_id`; response text arrives through watch notifications. Watches are
 session-local runtime state: they are dropped on session shutdown, including a
-session switch such as `/session new`. Disable watching explicitly when later
+session switch such as `:session new`. Disable watching explicitly when later
 responses in the same session are no longer wanted.
 
 Disable watching with:

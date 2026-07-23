@@ -569,7 +569,7 @@ fn email_action_invoke(invocation_id: &str) -> ActionInvoke {
         extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
         instance_id: tau_proto::ExtensionInstanceId::from(1),
         action_id: "email.in.list".to_owned(),
-        raw_line: "/email in list".to_owned(),
+        raw_line: ":email in list".to_owned(),
         argv: Vec::new(),
         arguments: CborValue::Map(Vec::new()),
     }
@@ -982,26 +982,26 @@ fn publishes_email_action_schema_at_startup() {
         ]
     );
     let parsed_approve = schema
-        .parse_line("/email out approve 1 2")
+        .parse_line(":email out approve 1 2")
         .expect("parse approve");
     assert_eq!(parsed_approve.action_id, "email.out.approve");
     assert_eq!(parsed_approve.argv, vec!["1 2".to_owned()]);
     let parsed_deny = schema
-        .parse_line("/email out deny 1 2")
+        .parse_line(":email out deny 1 2")
         .expect("parse deny");
     assert_eq!(parsed_deny.action_id, "email.out.deny");
     assert_eq!(parsed_deny.argv, vec!["1 2".to_owned()]);
-    let parsed_log = schema.parse_line("/email log last 5").expect("parse log");
+    let parsed_log = schema.parse_line(":email log last 5").expect("parse log");
     assert_eq!(parsed_log.action_id, "email.log.last");
     assert_eq!(parsed_log.argv, vec!["5".to_owned()]);
     let parsed_auth = schema
-        .parse_line("/email auth google start work")
+        .parse_line(":email auth google start work")
         .expect("parse auth");
     assert_eq!(parsed_auth.action_id, "email.auth.google.start");
     assert_eq!(parsed_auth.argv, vec!["work".to_owned()]);
     let parsed_finish = schema
         .parse_line(
-            "/email auth google finish work http://127.0.0.1:54321/?state=state&code=secret",
+            ":email auth google finish work http://127.0.0.1:54321/?state=state&code=secret",
         )
         .expect("parse auth finish");
     assert_eq!(parsed_finish.action_id, "email.auth.google.finish");
@@ -1018,7 +1018,7 @@ fn publishes_email_action_schema_at_startup() {
             if value == "http://127.0.0.1:54321/?state=state&code=secret"
     ));
     let default_log = schema
-        .parse_line("/email log last")
+        .parse_line(":email log last")
         .expect("parse default log");
     assert_eq!(default_log.action_id, "email.log.last");
     assert!(default_log.argv.is_empty());
@@ -1057,7 +1057,7 @@ fn email_runner_republishes_effective_google_auth_accounts() {
         secrets.clone(),
     );
     let schema = drain_action_schema(&mut pair.reader);
-    assert_eq!(schema.roots[0].name, "/email");
+    assert_eq!(schema.roots[0].name, ":email");
     let account_arg = &schema.roots[0].children[0].children[0].children[0].args[0];
     assert_eq!(
         account_arg
@@ -1084,7 +1084,7 @@ fn email_runner_republishes_effective_google_auth_accounts() {
         .expect("replacement configure");
     pair.writer.flush().expect("flush replacement configure");
     let schema = drain_action_schema(&mut pair.reader);
-    assert_eq!(schema.roots[0].name, "/email");
+    assert_eq!(schema.roots[0].name, ":email");
     let account_arg = &schema.roots[0].children[0].children[0].children[0].args[0];
     assert_eq!(
         account_arg
@@ -1298,7 +1298,7 @@ fn email_google_oauth_state_is_private_and_account_checked() {
     assert!(state.pending_google_auth("other").is_err());
 }
 
-/// Ensures `/email auth google` stores only private state secrets, accepts a
+/// Ensures `:email auth google` stores only private state secrets, accepts a
 /// pasted loopback redirect URL, omits token/code/verifier values from action
 /// output, and primes the access-token cache after finish.
 #[test]
@@ -1329,6 +1329,8 @@ fn email_google_oauth_actions_manage_private_state_without_token_output() {
     assert!(start.contains("prompt=consent"));
     assert!(start.contains("code_challenge=challenge-secret"));
     assert!(start.contains("copy the full final address-bar URL"));
+    assert!(start.contains("\n:email auth google finish work <copied-url>\n"));
+    assert!(!start.contains("\n/email auth google finish"));
     assert!(!start.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"));
     assert!(!start.contains("refresh-secret"));
     assert!(!start.contains("access-secret"));
@@ -1442,7 +1444,7 @@ fn email_google_oauth_finish_rejects_invalid_redirect_urls_without_code_echo() {
     assert_eq!(denied, "Google authorization was denied");
 }
 
-/// Ensures state-owned `/email auth google` refuses accounts that are
+/// Ensures state-owned `:email auth google` refuses accounts that are
 /// explicitly configured to use a manual refresh-token secret.
 #[test]
 fn email_google_oauth_actions_reject_manual_refresh_token_accounts() {
@@ -2780,7 +2782,7 @@ fn outgoing_actions_list_open_approve_and_whitelist_drive_policy() {
 
 #[test]
 fn outgoing_approve_accepts_multiple_ids() {
-    // Users often review several queued drafts from one `/email out list` output.
+    // Users often review several queued drafts from one `:email out list` output.
     // A single approve action should accept all selected ids and send each draft.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
@@ -2911,7 +2913,7 @@ fn outgoing_denied_tombstone_wins_over_stale_pending_record() {
 #[test]
 fn outgoing_deny_accepts_multiple_ids() {
     // The outgoing deny action mirrors the multi-id approve action so users can
-    // reject several queued drafts copied from one `/email out list` output.
+    // reject several queued drafts copied from one `:email out list` output.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
     for subject in ["proposal one", "proposal two"] {
@@ -2949,7 +2951,7 @@ fn outgoing_deny_accepts_multiple_ids() {
 
 #[test]
 fn outgoing_approve_all_accepts_every_pending_id() {
-    // `/email out approve all` is a convenience for approving every item from
+    // `:email out approve all` is a convenience for approving every item from
     // the current pending list without copying each generated id.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
@@ -2984,7 +2986,7 @@ fn outgoing_approve_all_accepts_every_pending_id() {
 
 #[test]
 fn incoming_approve_and_deny_accept_multiple_ids() {
-    // Incoming approval and denial use the same slash parser shape as outgoing
+    // Incoming approval and denial use the same action parser shape as outgoing
     // approval, so verify both actions split whitespace ids safely.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
@@ -3063,7 +3065,7 @@ fn incoming_approve_and_deny_accept_multiple_ids() {
 
 #[test]
 fn incoming_approve_all_accepts_every_pending_id() {
-    // `/email in approve all` approves every current read request from the
+    // `:email in approve all` approves every current read request from the
     // pending list while leaving future requests unaffected.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
@@ -3979,7 +3981,7 @@ fn runtime_action_invoke_returns_action_error_for_bad_id() {
         extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
         instance_id: tau_proto::ExtensionInstanceId::from(1),
         action_id: "email.in.list".to_owned(),
-        raw_line: "/email in list".to_owned(),
+        raw_line: ":email in list".to_owned(),
         argv: Vec::new(),
         arguments: CborValue::Map(Vec::new()),
     });
@@ -4417,7 +4419,7 @@ fn state_paths_are_private_and_existing_files_are_hardened() {
 #[cfg(unix)]
 #[test]
 fn recent_email_log_hardens_existing_log_file_on_read() {
-    // `/email log last` only reads the audit log, but the log still contains
+    // `:email log last` only reads the audit log, but the log still contains
     // sensitive message metadata. Reading a pre-existing permissive file should
     // defensively tighten it just like append paths do.
     let temp = tempfile::TempDir::new().expect("tempdir");

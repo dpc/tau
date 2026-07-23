@@ -472,7 +472,7 @@ fn cli_settings_user_meta_binding_overrides_built_in() {
     assert_eq!(s.bind.get("C-b").expect("C-b").action, "agent-pick");
 }
 
-/// Ensures user completion additions preserve built-in slash-command prefixes
+/// Ensures user completion additions preserve built-in command prefixes
 /// from lower-precedence config.
 #[test]
 fn cli_settings_user_completion_keeps_built_in_prefixes() {
@@ -499,6 +499,10 @@ fn cli_settings_user_completion_keeps_built_in_prefixes() {
     );
     assert_eq!(
         s.completions.get("./").map(String::as_str),
+        Some("complete_path")
+    );
+    assert_eq!(
+        s.completions.get("/").map(String::as_str),
         Some("complete_path")
     );
 }
@@ -2820,7 +2824,7 @@ fn harness_role_groups_load_role_order() {
 }
 
 /// Ensures harness custom prompts parse from map syntax, sort by id, and are
-/// available by stable id for the CLI `/prompt <id>` command.
+/// available by stable id for the CLI `:prompt <id>` command.
 #[test]
 fn harness_custom_prompts_parse_from_config() {
     let td = TempDir::new().expect("tempdir");
@@ -2853,7 +2857,7 @@ fn harness_custom_prompts_parse_from_config() {
 }
 
 /// Ensures invalid custom prompt ids fail during config loading instead of
-/// producing ambiguous or unreachable `/prompt <id>` commands.
+/// producing ambiguous or unreachable `:prompt <id>` commands.
 #[test]
 fn harness_custom_prompts_reject_empty_and_whitespace_ids() {
     for (yaml, expected) in [

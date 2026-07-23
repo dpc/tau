@@ -611,7 +611,7 @@ fn action_invoke(invocation_id: &str, action_id: &str, directory: &str) -> Event
         extension_name: "tau-ext-shell".into(),
         instance_id: 0.into(),
         action_id: action_id.to_owned(),
-        raw_line: format!("/shell-dir-force-unlock {directory}"),
+        raw_line: format!(":shell-dir-force-unlock {directory}"),
         argv: vec![directory.to_owned()],
         arguments: cbor_text_map(vec![("directory", directory)]),
     })
@@ -1213,7 +1213,7 @@ fn startup_publishes_shell_dir_force_unlock_action() {
             .schema
             .roots
             .iter()
-            .find(|root| root.name == "/shell-dir-force-unlock")
+            .find(|root| root.name == ":shell-dir-force-unlock")
             .expect("force unlock action root");
         assert_eq!(
             root.action_id.as_deref(),

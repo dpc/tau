@@ -30,7 +30,7 @@ fn routing_state(
 
 #[test]
 fn agent_completer_offers_subcommands_first() {
-    // `/agent` is now a command group; the first argument must guide users
+    // `:agent` is now a command group; the first argument must guide users
     // to the concrete action instead of switching immediately.
     let completer = build_agent_arg_completer(
         routing_state(
@@ -62,8 +62,8 @@ fn agent_completer_offers_subcommands_first() {
 
 #[test]
 fn session_completer_offers_new_subcommand() {
-    // `/session new` is the session-level fresh-start command; `/new` is
-    // reserved as an alias for `/agent new`.
+    // `:session new` is the session-level fresh-start command; `:new` is
+    // reserved as an alias for `:agent new`.
     let completer = build_session_arg_completer();
 
     let entries: Vec<_> = completer(&[""])
@@ -79,7 +79,7 @@ fn session_completer_offers_new_subcommand() {
 
 #[test]
 fn agent_new_takes_no_agent_id_completion() {
-    // `/agent new` only clears the selected agent; it must not offer or
+    // `:agent new` only clears the selected agent; it must not offer or
     // accept an agent-id argument like switch/suspend/resume do.
     let completer = build_agent_arg_completer(
         routing_state(
@@ -95,7 +95,7 @@ fn agent_new_takes_no_agent_id_completion() {
     assert!(completer(&["new", ""]).is_empty());
 }
 
-/// Ensures `/suspend` resolves the selected target without optimistically
+/// Ensures `:suspend` resolves the selected target without optimistically
 /// mutating the authoritative cache.
 #[test]
 fn selected_agent_suspend_alias_dispatches_existing_suspend_flow() {
@@ -120,7 +120,7 @@ fn selected_agent_suspend_alias_dispatches_existing_suspend_flow() {
     assert!(routing.agent_is_active("worker"));
 }
 
-/// Ensures `/resume` resolves the selected suspended agent without changing the
+/// Ensures `:resume` resolves the selected suspended agent without changing the
 /// cache before the harness snapshot arrives.
 #[test]
 fn selected_agent_resume_alias_dispatches_existing_resume_flow() {
@@ -150,7 +150,7 @@ fn selected_agent_resume_alias_dispatches_existing_resume_flow() {
 #[test]
 fn agent_mention_completer_offers_only_active_agents() {
     // Prompt-text `@agent` completion is for routing to active agents. It
-    // must not suggest suspended agents even though `/agent resume` does.
+    // must not suggest suspended agents even though `:agent resume` does.
     let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
     let live = Arc::new(Mutex::new(std::collections::HashSet::from([
         "helper".to_owned(),
@@ -249,7 +249,7 @@ fn agent_completer_filters_active_and_suspended_agents() {
 }
 
 /// Complete explicit-agent commands normalize one optional `@` before their
-/// command-specific effect, as specified by SPEC-tau-cli-slash-commands.
+/// command-specific effect, as specified by SPEC-tau-cli-command-mode.
 #[test]
 fn agent_commands_accept_prefixed_references_in_canonical_effects() {
     let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
@@ -262,13 +262,13 @@ fn agent_commands_accept_prefixed_references_in_canonical_effects() {
     ])));
     let routing = routing_state(known, live, suspended);
 
-    for command in ["/agent switch helper", "/agent switch @helper"] {
+    for command in [":agent switch helper", ":agent switch @helper"] {
         assert_eq!(
             agent_command_effect(command, &routing).expect("switch effect"),
             AgentCommandEffect::Switch(Some("helper".to_owned()))
         );
     }
-    for command in ["/agent suspend worker", "/agent suspend @worker"] {
+    for command in [":agent suspend worker", ":agent suspend @worker"] {
         assert_eq!(
             agent_command_effect(command, &routing).expect("suspend effect"),
             AgentCommandEffect::SetNavigation {
@@ -277,7 +277,7 @@ fn agent_commands_accept_prefixed_references_in_canonical_effects() {
             }
         );
     }
-    for command in ["/agent resume helper", "/agent resume @helper"] {
+    for command in [":agent resume helper", ":agent resume @helper"] {
         assert_eq!(
             agent_command_effect(command, &routing).expect("resume effect"),
             AgentCommandEffect::SetNavigation {
@@ -286,7 +286,7 @@ fn agent_commands_accept_prefixed_references_in_canonical_effects() {
             }
         );
     }
-    for command in ["/agent auto worker", "/agent auto @worker"] {
+    for command in [":agent auto worker", ":agent auto @worker"] {
         assert_eq!(
             agent_command_effect(command, &routing).expect("auto effect"),
             AgentCommandEffect::SetNavigation {
@@ -296,9 +296,9 @@ fn agent_commands_accept_prefixed_references_in_canonical_effects() {
         );
     }
     for command in [
-        "/agent name worker Worker name",
-        "/agent name @worker Worker name",
-        "/agent name\t@worker Worker name",
+        ":agent name worker Worker name",
+        ":agent name @worker Worker name",
+        ":agent name\t@worker Worker name",
     ] {
         assert_eq!(
             agent_command_effect(command, &routing).expect("name effect"),
@@ -324,11 +324,11 @@ fn agent_commands_reject_malformed_prefixed_references() {
     );
 
     for command in [
-        "/agent switch @",
-        "/agent suspend @@worker",
-        "/agent resume @bad/id",
-        "/agent auto @",
-        "/agent name @@worker Worker",
+        ":agent switch @",
+        ":agent suspend @@worker",
+        ":agent resume @bad/id",
+        ":agent auto @",
+        ":agent name @@worker Worker",
     ] {
         let error = agent_command_effect(command, &routing).expect_err("command must be rejected");
         assert!(error.starts_with("invalid agent id `@"), "{error}");
@@ -382,7 +382,7 @@ fn agent_cycle_dispatches_overview_and_agent_transitions() {
 
 #[test]
 fn agent_completer_uses_display_names_as_descriptions() {
-    // `/agent ... <agent_id>` keeps ids as values but shows the durable
+    // `:agent ... <agent_id>` keeps ids as values but shows the durable
     // display name in the completion description so long names remain visible.
     let known = Arc::new(Mutex::new(vec!["worker".to_owned()]));
     let names = Arc::new(Mutex::new(HashMap::from([(

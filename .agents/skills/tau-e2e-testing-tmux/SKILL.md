@@ -50,7 +50,7 @@ checks, not an automated test framework.
    ```
 4. Send input:
    ```sh
-   target/debug/tau dev tmux send --scratch-root "$scratch_root" -- /help
+   target/debug/tau dev tmux send --scratch-root "$scratch_root" -- :version
    ```
    Add `--no-enter` to paste without submitting.
 5. Stop and clean up:

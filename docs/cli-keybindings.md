@@ -47,7 +47,8 @@ Typing any of the following prefixes at the prompt triggers inline path completi
 | --- | --- |
 | `./` | Directory prefix matching in the current directory. Configure `complete_path_fuzzy` to prefer fuzzy git-tracked/unignored file matches for this prefix. |
 | `../` | Directory prefix matching in the parent directory. |
-| `/` | Filesystem-root path completion when the token is not the first non-whitespace prompt token; leading `/...` still opens slash/action completion. |
+| `:` | Intrinsic command/action completion when it is the first non-whitespace character; `::text` submits literal `:text`. |
+| `/` | Filesystem path completion for leading absolute paths and path tokens later in a prompt. |
 | `~`, `~/` | Directory prefix matching in the home directory. |
 
 `@...` is intentionally not a file completion trigger; it remains reserved for
@@ -63,7 +64,7 @@ These keys are handled by named actions in the default binding file, with raw fa
 | `Enter` | Insert a newline when not bound; submits by default via the built-in binding. |
 | `C-Enter` | Submit the prompt. |
 | `Shift-Enter`, `Alt-Enter` | Insert a newline. |
-| `C-d` on an empty prompt | Exit Tau when no agent/session work is in progress; otherwise print a notice to use `/quit` and keep the session running. |
+| `C-d` on an empty prompt | Exit Tau when no agent/session work is in progress; otherwise print a notice to use `:quit` and keep the session running. |
 | `C-c` on an empty prompt | Arm cancellation and print `Press Ctrl-C again to cancel the current response; use Ctrl-D to exit`; a second consecutive `C-c` cancels. |
 | `C-c` on a non-empty prompt | Clear the prompt; undoable with `prompt-undo`. |
 | `C-a` / `Home` | Move to the beginning of the prompt. |

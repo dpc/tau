@@ -285,9 +285,9 @@ impl PtyProcess {
             .clone())
     }
 
-    /// Requests `/quit`, then reaps the whole owned process tree within bounds.
+    /// Requests `:quit`, then reaps the whole owned process tree within bounds.
     pub(super) fn finish(mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.send_line("/quit")?;
+        self.send_line(":quit")?;
         let status = self.reap(Duration::from_secs(3))?;
         if !status.success() {
             return Err(format!("Tau PTY process exited with {status}").into());

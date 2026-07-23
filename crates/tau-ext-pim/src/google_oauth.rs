@@ -635,7 +635,7 @@ fn parse_installed_app_token_response(text: &str) -> Result<GoogleInstalledAppAu
     )
     .map_err(|error| {
         if error.contains("missing refresh_token") {
-            "Google did not return a refresh token; run `/email auth google start <account>` again and approve the consent prompt".to_owned()
+            "Google did not return a refresh token; run `:email auth google start <account>` again and approve the consent prompt".to_owned()
         } else {
             error
         }

@@ -332,7 +332,7 @@ credential/profile change permits a new attempt, and restart may probe once
 again. A failed preemptive refresh can use only an access token that remains
 valid; an expired bearer is never used. The logical prompt keeps its existing
 slow authentication retry cadence.
-`/retry` initially bypasses a shared cooldown for only the selected prompt. A
+`:retry` initially bypasses a shared cooldown for only the selected prompt. A
 successful terminal response from that probe invalidates the exact cooldown it
 tested and wakes same-profile peers with stable anti-herd jitter. Error,
 cancellation, stale probes, and best-effort quota display updates do not clear
@@ -399,7 +399,7 @@ asynchronous; the original tool call receives a `tool.background_result` or
 `tool.background_error`, which may be consumed through `wait`.
 ## Manual delayed retries
 
-Use `/retry` to run the selected agent's currently delayed provider retry now.
+Use `:retry` to run the selected agent's currently delayed provider retry now.
 The command applies only while that exact logical prompt is parked in the
 provider retry scheduler; it does not resend completed work or start a second
 prompt. It overrides the selected job's remaining delay once, including a

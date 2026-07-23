@@ -469,7 +469,7 @@ fn skill_collision_diagnostics_describe_replaced_and_ignored_candidates() {
     h.shutdown().expect("shutdown");
 }
 
-/// Ensures actual UI slash-command intake expands to a raw Pi-style canonical
+/// Ensures actual UI command intake expands to a raw Pi-style canonical
 /// prompt and sends its complete escaped HumanUi envelope to the provider.
 #[test]
 fn user_skill_command_expands_prompt_block() {
@@ -495,7 +495,7 @@ fn user_skill_command_expands_prompt_block() {
     );
 
     let expanded = h
-        .expand_user_skill_command("/skill manual do this")
+        .expand_user_skill_command(":skill manual do this")
         .expect("expanded");
     assert!(expanded.contains("<skill name=\"manual\" location="));
     assert!(expanded.contains("References are relative to"));
@@ -506,8 +506,9 @@ fn user_skill_command_expands_prompt_block() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: false,
         session_id: "s1".into(),
-        text: "/skill manual do this".to_owned(),
+        text: ":skill manual do this".to_owned(),
         agent_id: agent_id.clone(),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
@@ -558,6 +559,102 @@ fn user_skill_command_expands_prompt_block() {
     );
 }
 
+/// Ensures an escaped literal targeting an existing agent retains canonical
+/// `:skill` text without invoking the harness-owned skill command.
+#[test]
+fn literal_existing_agent_skill_text_bypasses_skill_expansion() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
+        literal: true,
+        session_id: "s1".into(),
+        text: ":skill definitely-not-installed".to_owned(),
+        agent_id,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: Some("literal-existing".to_owned()),
+    })
+    .expect("submit literal skill text");
+
+    let submitted = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptSubmitted(submitted)
+                if submitted.ctx_id.as_deref() == Some("literal-existing") =>
+            {
+                Some(submitted)
+            }
+            _ => None,
+        })
+        .expect("literal prompt submitted");
+    assert_eq!(submitted.text, ":skill definitely-not-installed");
+    assert_literal_provider_projection(&h, &submitted.agent_id, ":skill definitely-not-installed");
+}
+
+/// Ensures an escaped literal used as a new agent's first prompt retains
+/// canonical `:skill` text without invoking the harness-owned skill command.
+#[test]
+fn literal_new_agent_skill_text_bypasses_skill_expansion() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    h.selected_model = Some("test/model".into());
+
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: true,
+        parent_agent: None,
+        session_id: "s1".into(),
+        role: h.selected_role.clone(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: Some(":skill definitely-not-installed".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: Some("literal-new".to_owned()),
+        ephemeral: false,
+    })
+    .expect("create agent with literal skill text");
+
+    let submitted = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptSubmitted(submitted)
+                if submitted.ctx_id.as_deref() == Some("literal-new") =>
+            {
+                Some(submitted)
+            }
+            _ => None,
+        })
+        .expect("literal initial prompt submitted");
+    assert_eq!(submitted.text, ":skill definitely-not-installed");
+    assert_literal_provider_projection(&h, &submitted.agent_id, ":skill definitely-not-installed");
+}
+
+fn assert_literal_provider_projection(h: &Harness, agent_id: &AgentId, text: &str) {
+    let provider_prompt = event_log_events(h)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if &prompt.agent_id == agent_id => Some(prompt),
+            _ => None,
+        })
+        .expect("provider prompt");
+    assert_eq!(
+        provider_prompt.context.flatten(),
+        vec![ContextItem::Message(MessageItem {
+            role: ContextRole::User,
+            content: vec![ContentPart::Text {
+                text: format!("<user>{text}</user>"),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })]
+    );
+}
+
 /// Ensures `disable-model-invocation` is treated as manual-only rather than
 /// unreachable, even if an extension also sends `user-invocable: false`.
 #[test]
@@ -586,7 +683,7 @@ fn disable_model_invocation_implies_user_invocable() {
     assert!(h.discovered_skills["manual-only"].user_invocable);
     assert!(h.discovered_skills["manual-only"].disable_model_invocation);
     assert!(
-        h.expand_user_skill_command("/skill manual-only")
+        h.expand_user_skill_command(":skill manual-only")
             .expect("expanded")
             .contains("Manual only body.")
     );
@@ -663,7 +760,7 @@ fn user_skill_command_rejects_non_user_invocable_skill() {
         },
     );
 
-    assert!(h.expand_user_skill_command("/skill hidden").is_none());
+    assert!(h.expand_user_skill_command(":skill hidden").is_none());
     let infos = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {

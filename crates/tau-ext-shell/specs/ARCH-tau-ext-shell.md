@@ -145,4 +145,4 @@ the harness commits before activating prompt assembly state, as specified by
 `tau-skills` deduplicates files found by this extension before announcement; the
 harness still owns skill-name validation at the protocol boundary, canonical
 winner selection among announced candidates from all sources, model/user
-invocation filtering, and `/skill` prompt expansion policy.
+invocation filtering, and `:skill` prompt expansion policy.
