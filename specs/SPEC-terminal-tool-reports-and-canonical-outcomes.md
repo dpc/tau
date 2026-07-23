@@ -71,8 +71,10 @@ background completion facts retain their existing terminal semantic
 persistence. No report has cold-restart replay behavior, so a report committed
 immediately before a crash may have no canonical successor.
 
-The runtime event log and ordinary non-ephemeral debug JSONL retain committed
-reports and canonical projections in commit order. Result-report debug
+The runtime event log retains committed reports and canonical projections.
+Ordinary non-ephemeral debug JSONL observes attempted projections before
+semantic persistence, so a best-effort row may remain when the semantic store
+rejects the event and runtime publication does not occur. Result-report debug
 projections retain safe metadata but clear typed provider-image bytes under
 [SPEC-typed-image-tool-results](SPEC-typed-image-tool-results.md).
 Ephemeral-agent suppression applies to raw inbound reports, committed reports,

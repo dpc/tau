@@ -1,5 +1,5 @@
-//! [`DebugEventLog`]: append-only JSONL log of every harness event for
-//! offline inspection.
+//! [`DebugEventLog`]: serialization and nonblocking admission for the
+//! append-only JSONL debug mirror.
 
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -18,14 +18,20 @@ use tau_proto::{ConnectionId, Event, UnixMicros};
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 
+mod writer;
+#[cfg(not(test))]
+use writer::enqueue;
+
 /// Append-only JSON event log for debugging.
 pub(crate) struct DebugEventLog {
     /// Path of the JSONL file exposed to diagnostics and tests.
     path: PathBuf,
-    /// Append-open JSONL file.
+    /// Synchronous append handle retained only by fault-injection tests.
+    #[cfg(test)]
     file: std::fs::File,
     /// Whether an uncertain rollback permanently disabled this process's
     /// writer.
+    #[cfg(test)]
     poisoned: bool,
     /// Deterministic one-shot append fault used by debug-log tests.
     #[cfg(test)]
@@ -33,17 +39,21 @@ pub(crate) struct DebugEventLog {
 }
 
 impl DebugEventLog {
-    /// Opens the session's append-only debug event log.
+    /// Creates a producer for the session's append-only debug event log.
     pub(crate) fn open(dir: &Path) -> Result<Self, HarnessError> {
-        std::fs::create_dir_all(dir)?;
         let path = dir.join("events.jsonl");
+        #[cfg(test)]
+        std::fs::create_dir_all(dir)?;
+        #[cfg(test)]
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)?;
         Ok(Self {
             path,
+            #[cfg(test)]
             file,
+            #[cfg(test)]
             poisoned: false,
             #[cfg(test)]
             fault: None,
@@ -125,13 +135,14 @@ impl DebugEventLog {
         self.write_entry(&entry)
     }
 
-    /// Logs an event the harness committed (broadcast onto the bus).
+    /// Observes an event at its pre-semantic-persistence publication point.
     /// Captures the *enriched* payload — for `ProviderResponseFinished`
     /// that's the harness-built `token_usage` with model and running
     /// session stats, which the inbound `from_connection` line could
     /// not carry. Together with `log_harness_event`, an offline reader
-    /// can correlate the raw agent emit against the enriched committed
-    /// copy.
+    /// can correlate the raw agent emit against the enriched attempted copy.
+    /// The row may remain even when later semantic persistence rejects the
+    /// event.
     pub(crate) fn log_published_event(
         &mut self,
         source: Option<&ConnectionId>,
@@ -151,10 +162,9 @@ impl DebugEventLog {
         self.write_entry(&entry)
     }
 
-    /// Serializes one complete line before touching the file, then appends it
-    /// failure-atomically under the debug log's existing [`Write::flush`]
-    /// policy.
+    /// Serializes one complete line before nonblocking queue admission.
     fn write_entry(&mut self, entry: &serde_json::Value) -> Result<(), DebugLogError> {
+        #[cfg(test)]
         if self.poisoned {
             return Err(DebugLogError::Disabled);
         }
@@ -175,6 +185,27 @@ impl DebugEventLog {
         let serialize = serialize_started.elapsed();
         line.push(b'\n');
 
+        #[cfg(not(test))]
+        {
+            let line_bytes = line.len();
+            let accepted = enqueue(self.path.clone(), line);
+            let timing = DebugLogCycleTiming {
+                total: cycle_started.elapsed(),
+                serialize,
+                ..DebugLogCycleTiming::default()
+            };
+            timing.trace(
+                entry,
+                line_bytes,
+                if accepted {
+                    DebugLogCycleResult::Queued
+                } else {
+                    DebugLogCycleResult::Dropped
+                },
+            );
+            Ok(())
+        }
+
         #[cfg(test)]
         let result = if let Some(fault) = self.fault.take() {
             append_line(
@@ -184,9 +215,7 @@ impl DebugEventLog {
         } else {
             append_line(&mut self.file, &line)
         };
-        #[cfg(not(test))]
-        let result = append_line(&mut self.file, &line);
-
+        #[cfg(test)]
         let (append, result) = match result {
             Ok(append) => (append, Ok(())),
             Err(error) => {
@@ -200,17 +229,21 @@ impl DebugEventLog {
                 (error.timing, Err(debug_error))
             }
         };
+        #[cfg(test)]
         let timing = DebugLogCycleTiming {
             total: cycle_started.elapsed(),
             serialize,
             append,
         };
+        #[cfg(test)]
         let result_class = if result.is_ok() {
-            DebugLogCycleResult::Ok
+            DebugLogCycleResult::Appended
         } else {
             DebugLogCycleResult::AppendError
         };
+        #[cfg(test)]
         timing.trace(entry, line.len(), result_class);
+        #[cfg(test)]
         result
     }
 
@@ -245,6 +278,7 @@ pub(crate) enum DebugLogError {
         rollback: Option<io::Error>,
     },
     /// An earlier uncertain rollback disabled this process's writer.
+    #[cfg(test)]
     Disabled,
 }
 
@@ -255,18 +289,24 @@ impl DebugLogError {
     /// attempts stay silent, so rollback uncertainty emits exactly one
     /// diagnostic.
     pub(crate) fn should_report(&self) -> bool {
-        !matches!(self, Self::Disabled)
+        #[cfg(test)]
+        {
+            !matches!(self, Self::Disabled)
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
     }
 
     /// Returns whether this failure makes the append boundary uncertain.
     pub(crate) fn disables_logging(&self) -> bool {
-        matches!(
-            self,
-            Self::Append {
-                rollback: Some(_),
-                ..
-            } | Self::Disabled
-        )
+        match self {
+            Self::Append { rollback, .. } => rollback.is_some(),
+            #[cfg(test)]
+            Self::Disabled => true,
+            Self::Serialize(_) => false,
+        }
     }
 
     /// Renders a character-bounded, content-free diagnostic.
@@ -298,6 +338,7 @@ impl std::fmt::Display for DebugLogError {
                 f,
                 "failed to append debug JSONL entry: {source}; rollback failed: {rollback}"
             ),
+            #[cfg(test)]
             Self::Disabled => {
                 f.write_str("debug JSONL append disabled after an incomplete rollback")
             }
@@ -310,6 +351,7 @@ impl std::error::Error for DebugLogError {
         match self {
             Self::Serialize(source) => Some(source),
             Self::Append { source, .. } => Some(source),
+            #[cfg(test)]
             Self::Disabled => None,
         }
     }
@@ -359,6 +401,16 @@ struct LineAppendError {
     timing: LineAppendTiming,
 }
 
+impl LineAppendError {
+    fn without_timing(source: io::Error) -> Self {
+        Self {
+            source,
+            rollback: None,
+            timing: LineAppendTiming::default(),
+        }
+    }
+}
+
 /// Content-free measurements for one append/rollback attempt.
 #[derive(Clone, Copy, Debug, Default)]
 struct LineAppendTiming {
@@ -377,7 +429,7 @@ struct LineAppendTiming {
 /// Content-free measurements for serialization plus append processing.
 #[derive(Clone, Copy, Debug, Default)]
 struct DebugLogCycleTiming {
-    /// Whole `write_entry` cycle.
+    /// Whole producer serialization/admission cycle.
     total: Duration,
     /// JSON serialization phase.
     serialize: Duration,
@@ -386,14 +438,43 @@ struct DebugLogCycleTiming {
 }
 
 /// Terminal classification for one measured debug-log cycle.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DebugLogCycleResult {
     /// Serialization failed before file mutation.
     SerializeError,
     /// Append, flush, or rollback processing failed.
     AppendError,
-    /// One complete line was appended and flushed.
-    Ok,
+    #[cfg(not(test))]
+    /// The producer admitted one serialized line.
+    Queued,
+    #[cfg(not(test))]
+    /// The producer dropped one serialized line without waiting.
+    Dropped,
+    /// One complete line was appended and flushed by a file writer.
+    Appended,
+}
+
+/// Content-free fields emitted for one worker I/O cycle.
+#[derive(Clone, Copy, Debug)]
+struct DebugLogWorkerTrace {
+    /// Terminal classification of the worker attempt.
+    result: DebugLogCycleResult,
+    /// Whole worker cycle duration in microseconds.
+    total_us: u64,
+    /// Exact-EOF lookup duration in microseconds.
+    eof_us: u64,
+    /// Append and flush duration in microseconds.
+    write_flush_us: u64,
+    /// Rollback duration in microseconds.
+    rollback_us: u64,
+    /// Encoded line size.
+    line_bytes: usize,
+    /// Exact EOF before mutation, when observed.
+    start_eof: Option<u64>,
+    /// Expected EOF after append or rollback, when known.
+    end_eof: Option<u64>,
+    /// Whether the cycle exceeded the slow-cycle threshold.
+    slow: bool,
 }
 
 fn duration_micros(duration: Duration) -> u64 {
@@ -425,7 +506,7 @@ impl DebugLogCycleTiming {
             line_bytes,
             ?start_eof,
             ?end_eof,
-            "debug JSONL write cycle"
+            "debug JSONL producer cycle"
         );
         if SLOW_DEBUG_LOG_CYCLE < self.total {
             tracing::warn!(
@@ -440,9 +521,57 @@ impl DebugLogCycleTiming {
                 line_bytes,
                 ?start_eof,
                 ?end_eof,
-                "slow debug JSONL write cycle"
+                "slow debug JSONL producer cycle"
             );
         }
+    }
+}
+
+impl LineAppendTiming {
+    fn trace_worker(
+        &self,
+        total: Duration,
+        line_bytes: usize,
+        result: DebugLogCycleResult,
+    ) -> DebugLogWorkerTrace {
+        let trace = DebugLogWorkerTrace {
+            result,
+            total_us: duration_micros(total),
+            eof_us: duration_micros(self.eof),
+            write_flush_us: duration_micros(self.write_flush),
+            rollback_us: duration_micros(self.rollback),
+            line_bytes,
+            start_eof: self.start_offset,
+            end_eof: self.end_offset,
+            slow: SLOW_DEBUG_LOG_CYCLE < total,
+        };
+        tracing::trace!(
+            target: "tau_harness::debug_log_timing",
+            result = ?trace.result,
+            total_us = trace.total_us,
+            eof_us = trace.eof_us,
+            write_flush_us = trace.write_flush_us,
+            rollback_us = trace.rollback_us,
+            line_bytes = trace.line_bytes,
+            start_eof = ?trace.start_eof,
+            end_eof = ?trace.end_eof,
+            "debug JSONL worker I/O cycle"
+        );
+        if trace.slow {
+            tracing::warn!(
+                target: "tau_harness::debug_log_timing",
+                result = ?trace.result,
+                total_us = trace.total_us,
+                eof_us = trace.eof_us,
+                write_flush_us = trace.write_flush_us,
+                rollback_us = trace.rollback_us,
+                line_bytes = trace.line_bytes,
+                start_eof = ?trace.start_eof,
+                end_eof = ?trace.end_eof,
+                "slow debug JSONL worker I/O cycle"
+            );
+        }
+        trace
     }
 }
 

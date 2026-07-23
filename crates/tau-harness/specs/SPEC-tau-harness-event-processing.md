@@ -19,7 +19,8 @@ persistence exceptions remain independent.
 
 All ordinary event publication should flow through the central publish path:
 `enqueue_publish` runs interceptors in priority order, `commit_event` stamps a
-single runtime sequence/timestamp, writes debug/event-log records, persists
+single runtime sequence/timestamp, queues debug records, writes event-log
+records, persists
 eligible semantic facts, and broadcasts delivery frames. Direct calls to
 `commit_event` are reserved for code that has already resolved interception.
 Extension prompt-fragment projection runs only after this ordinary commit.
@@ -30,6 +31,14 @@ post-commit, and residual/unattributed phases. It carries only event name,
 terminal result class, and durations. Cycles over 500 milliseconds emit the
 same fields at warning level. This operational tracing never enters
 `events.jsonl`, changes commit ordering, or affects persistence/publication.
+
+Eligible debug JSONL observations serialize one complete line and attempt
+immediate admission to the process-wide bounded writer queue. File locking,
+opening, EOF lookup, append, flush, and rollback run only on the detached writer
+thread and never gate semantic persistence, publication, lifecycle, or process
+exit. Queue contention or capacity exhaustion drops only that diagnostic line.
+The confirmed owning contract is
+[DECISION-async-debug-event-log-writes](../../../specs/DECISION-async-debug-event-log-writes.md).
 
 When lifecycle teardown destructively cancels an intercepted publication, the
 harness temporarily skips that interceptor registration until it consumes the

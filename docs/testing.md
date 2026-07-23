@@ -431,6 +431,20 @@ Responses-style parsers must also cover final snapshot/done events (for example
 `response.output_item.done`) because providers can send complete content there
 without earlier deltas.
 
+## Debug JSONL writer
+
+Keep serialization/redaction and failure-atomic append-primitive fault coverage
+in the synchronous debug-log test writer. Exercise process-wide admission,
+queued-plus-in-flight count/byte bounds, FIFO and path switching, per-line
+sidecar reacquisition, recoverable omission/retry, uncertain-rollback poison,
+and warning-episode accounting directly against the detached writer.
+Use deterministic fault seams and channels/barriers for admission; do not infer
+nonblocking behavior from sleeps or elapsed-time thresholds. Direct worker tests
+must close their producer and join their test-only worker. Production
+no-drain/no-join behavior is a structural review invariant: the singleton drops
+the production join handle immediately, exposes no shutdown/drain API, and no
+lifecycle code may wait for it.
+
 
 ## Skill discovery and loading
 

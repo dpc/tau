@@ -132,6 +132,17 @@ requests retain stable configured publisher provenance but never rerun work on
 replay; see
 [SPEC-tool-requests-and-routing](../../../specs/SPEC-tool-requests-and-routing.md).
 
+Debug JSONL has a deliberately separate runtime/I/O boundary. Harness event
+handling redacts and serializes eligible observations, then attempts immediate
+nonblocking admission to one lazy process-lifetime bounded FIFO. One detached
+worker owns every append handle and performs directory/open work, per-line
+`events.jsonl.lock` acquisition, exact-EOF append, flush, and rollback. Queue
+accounting includes queued and in-flight line-plus-path bytes; overflow and
+recoverable I/O omit diagnostics, while uncertain rollback poisons the singleton.
+No harness lifecycle owns, drains, joins, or fsyncs this worker. Authoritative
+CBOR journals never use its queue or lock. See
+[DECISION-async-debug-event-log-writes](../../../specs/DECISION-async-debug-event-log-writes.md).
+
 Configured Provider execution uses the same generic commit boundary. Five `_reported`
 observations commit before exact generation and prompt/retry correlation; the harness
 then publishes canonical provider facts or a requester-directed retry outcome. Terminal

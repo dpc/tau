@@ -30,7 +30,7 @@ Tau follows the XDG directories:
   - `events.cbor` — durable per-session membership journal (`session.agent_loaded` / `session.agent_unloaded`).
   - `meta.json` — session metadata such as creation time and last-touched time.
   - `lock` — flock used while the daemon has the session loaded for writing.
-  - `events.jsonl` — debug runtime event log for the session. It mirrors committed bus events and is not authoritative replay state.
+  - `events.jsonl` — best-effort debug runtime event log. It is an ordered subsequence of attempted observations, not authoritative replay state; a missing row does not prove an event was absent.
   - `debug/provider-requests/*-{request,response}.json` — exact upstream provider request bodies plus parsed response captures written by provider extensions only when the harness reports the current session as durable and the durable session directory already exists, keyed by timestamp, `agent_prompt_id`, and transport. These include full prompt content, tool results, and model outputs, but not auth headers/API keys.
   - `logs/tau-harness.log` — harness daemon stderr/tracing for the session.
   - `logs/<extension>.log` — stderr for each spawned extension.
@@ -46,7 +46,18 @@ Tau follows the XDG directories:
 
 ## Event logs are usually the first place to look
 
-For session misbehavior, inspect `~/.local/state/tau/sessions/<session_id>/events.jsonl` early. It is append-only JSONL meant for post-mortems and contains the harness-level event stream, including transient events that are not in durable session or agent replay. This makes it better than semantic `events.cbor` files when debugging missing UI updates, streaming updates, tool progress, connection churn, ordering issues, or short-lived states.
+For session misbehavior, inspect `~/.local/state/tau/sessions/<session_id>/events.jsonl` early. It is append-only JSONL meant for post-mortems and may include transient observations absent from durable replay. It is useful for missing UI updates, streaming, tool progress, connection churn, ordering, and short-lived states, but it is deliberately incomplete.
+
+Producers redact and serialize each line, then attempt immediate nonblocking
+admission to one process-wide FIFO bounded at 1,024 retained lines and 64 MiB
+including in-flight line and path bytes. A detached worker takes
+`<session>/events.jsonl.lock` per line, appends at exact EOF, and flushes without
+fsync. Queue overflow, lock/open/write failure, uncertain rollback, and
+nonjoining process exit can omit rows; OS-cache loss or a torn final line is
+also possible. The worker never delays semantic event handling or fsyncs. No
+shutdown path requests or waits for a drain or joins
+the worker; it may continue draining while the process remains alive, and exit
+may interrupt queued or in-flight work. Restart does not repair a torn tail.
 
 Each debug log line includes fields such as:
 

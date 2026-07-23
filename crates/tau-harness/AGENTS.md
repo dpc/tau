@@ -8,6 +8,9 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 - Prefer focused deterministic unit or lifecycle tests for state-machine changes.
   Assert replay and late-subscriber delivery as well as the immediate transition
   when diagnostics or state must remain observable after startup.
+- Follow the debug JSONL worker strategy in
+  [`../../docs/testing.md`](../../docs/testing.md) when changing its queue,
+  filesystem worker, failure handling, or diagnostics.
 
 - Read `specs/ARCH-tau-harness.md` before changing or reviewing harness event sequencing, persistence, interception, extension boundaries, session semantics, or extension-data behavior.
 - Read the applicable trust-boundary records under `specs/` before changing daemon IPC, listener lifecycle, shutdown, runtime discovery, or security-sensitive harness behavior.

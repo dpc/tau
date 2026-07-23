@@ -75,15 +75,21 @@ salvaging a valid-looking suffix. Re-check byte-boundary, commit-sync,
 rollback-failure, retry-sequence, restore-journal, and suffix regressions whenever
 framed I/O changes.
 
-Session debug `events.jsonl` appends serialize a complete redacted object and
-newline before touching the file. Under the session's single-writer lock, a
-returned write or `Write::flush` failure rolls back to the exact prior EOF; an
-uncertain truncation or rollback flush disables later debug writes for that
-process. This mirror is non-authoritative and does not promise crash or power-loss
-durability: termination can leave a missing or torn final line, and restart does
-not repair or salvage it. Re-check every line-byte, newline, commit-flush,
-rollback, retry-after-rollback, and poison regression whenever debug-log I/O
-changes.
+Session debug `events.jsonl` producers redact and serialize a complete line,
+then attempt immediate nonblocking admission to one lazy process-wide FIFO
+bounded at 1,024 retained lines and 64 MiB of line-plus-path bytes including
+in-flight work. The detached worker holds `<session>/events.jsonl.lock` for each
+line through handle selection/open, exact-EOF append, flush, and rollback.
+Overflow and recoverable lock/open/write failures omit rows; uncertain rollback
+globally poisons the worker. The worker never fsyncs. No session/process shutdown
+path requests or waits for a drain or joins the worker; it may continue draining
+while the process remains alive, and exit may interrupt queued or in-flight work.
+This mirror is an ordered best-effort subsequence, not
+authoritative evidence: absence never proves an event was absent, termination
+can lose queued/OS-cached rows or tear the final line, and restart neither
+repairs nor salvages it. Re-check bounds under held locks, path switching,
+per-line lock reacquisition, overflow recovery, I/O retry, global poison,
+warning coalescing, and nonjoining exit whenever debug-log I/O changes.
 
 Summary files intentionally omit prompt previews. Legacy preview-bearing
 sidecars are unverified hints and are scrubbed when strict journal migration can

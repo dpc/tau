@@ -95,21 +95,24 @@ classified before logging. New event kinds that carry agent transcript content o
 reference prompt/tool-call ids must update that classifier and its regression
 tests.
 
-Each debug JSON object and its trailing newline are serialized before the file is
-touched, then appended under the existing `Write::flush` policy. Under the
-session's single-writer lock, a returned write or flush error truncates the file
-to its exact prior EOF. If truncation or its rollback flush fails, the process
-disables later debug-log writes rather than appending after an uncertain line
-boundary. This non-authoritative diagnostic mirror does not promise crash or
-power-loss durability: termination can leave a missing or torn final line, and
-restart neither repairs nor salvages that line.
+Each debug JSON object and its trailing newline are serialized before immediate
+nonblocking admission to one bounded process-wide FIFO. The detached writer
+takes `<session>/events.jsonl.lock` separately for each line, seeks exact EOF,
+appends and flushes, rolls a failed append back to the prior EOF, then releases
+the lock. It never fsyncs. Lock/open/write work, worker shutdown, and queue
+capacity never block harness event or lifecycle work. Overflow and recoverable
+I/O failures may omit individual lines; uncertain rollback poisons the
+process-wide writer. This non-authoritative diagnostic mirror does not promise
+crash or power-loss durability: termination can lose queued lines or leave a
+missing or torn final line, and restart neither repairs nor salvages that line.
 
-`tau_harness::debug_log_timing` traces exact monotonic microseconds for the
-whole write cycle and its serialization, EOF lookup, write/flush, and rollback
-phases, plus line byte count, start/end EOF, event name, and result class. Cycles
-over 500 milliseconds emit the same content-free fields at warning level. These
-diagnostics remain tracing output only: they never write recursively to
-`events.jsonl` and do not alter append, flush, rollback, or failure behavior.
+`tau_harness::debug_log_timing` separately traces producer
+serialization/admission and worker I/O. Worker records include exact monotonic
+microseconds for EOF lookup, write/flush, and rollback, plus line byte count,
+start/end EOF, and result class. Cycles over 500 milliseconds emit the same
+content-free fields at warning level. These diagnostics remain tracing output
+only: they never write recursively to `events.jsonl` or alter queue, append,
+flush, rollback, or failure behavior.
 
 The debug JSONL mirror also has a narrow temporary redaction exception for
 `action.invoke` events with action id `email.auth.google.finish`: the harness

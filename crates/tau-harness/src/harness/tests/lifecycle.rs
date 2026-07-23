@@ -16,10 +16,10 @@ use crate::harness::{
 };
 use crate::settings::ExtensionConfig;
 
-/// Rollback uncertainty disables debug logging across later per-session log
-/// replacement attempts in the same harness process.
+/// The synchronous harness fault seam preserves rollback-poison lifecycle
+/// behavior; direct writer tests own production singleton-poison coverage.
 #[test]
-fn debug_log_poison_prevents_process_lifetime_reenable() {
+fn synchronous_debug_log_poison_prevents_reenable() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut harness = echo_harness(td.path()).expect("harness");
     harness

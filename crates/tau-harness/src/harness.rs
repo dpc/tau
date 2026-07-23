@@ -159,7 +159,7 @@ struct CommitEventTiming {
     event_name: tau_proto::EventName,
     /// Start of commit processing after stale-event rejection.
     started: Instant,
-    /// Synchronous debug JSONL publication time.
+    /// Producer-side debug JSONL serialization and queue-admission time.
     debug_log: Duration,
     /// Semantic journal/store processing time.
     semantic_persist: Duration,
@@ -2145,12 +2145,13 @@ pub struct Harness {
     /// in-flight prompts simultaneously and the agent extension
     /// serializes its own consumption of `AgentPromptCreated`.
     pub(crate) turn_state: TurnState,
-    /// Append-only event debug log.
+    /// Producer for the append-only best-effort event debug log.
     pub(crate) debug_log: Option<DebugEventLog>,
-    /// Whether rollback uncertainty disabled debug logging for this process.
+    /// Whether the synchronous fault-injection writer observed uncertain
+    /// rollback.
     ///
-    /// This state intentionally survives session switches and replacement of
-    /// the per-session [`DebugEventLog`] instance.
+    /// Production rollback poison lives in the process-wide detached writer.
+    /// This harness-local compatibility state supports deterministic tests.
     debug_log_poisoned: bool,
     /// Event emission interceptors, exact name first and prefix fallback.
     pub(crate) interceptors: InterceptorRegistry,
@@ -4630,6 +4631,12 @@ impl Harness {
     pub(crate) fn commit_message_fact(&mut self, source: Option<&str>, event: Event) {
         debug_assert_eq!(event.name().category(), &tau_proto::EventCategory::Message);
         let recorded_at = tau_proto::UnixMicros::now();
+        let source_id = source.map(tau_proto::ConnectionId::from);
+        let skip_debug_log = self.event_targets_ephemeral_agent(&event, None);
+        if !skip_debug_log && let Some(log) = &mut self.debug_log {
+            let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
+            self.observe_debug_log_result(result);
+        }
         let persisted_agent = match self.persist_message_fact_record(source, &event, recorded_at) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -4647,18 +4654,12 @@ impl Harness {
             }
         };
 
-        let source_id = source.map(tau_proto::ConnectionId::from);
         let seq = self.event_log.reserve_seq();
         #[cfg(test)]
         self.event_log
             .record_for_test(seq, recorded_at, source_id.clone(), event.clone());
         #[cfg(not(test))]
         let _ = seq;
-        let skip_debug_log = self.event_targets_ephemeral_agent(&event, None);
-        if !skip_debug_log && let Some(log) = &mut self.debug_log {
-            let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
-            self.observe_debug_log_result(result);
-        }
         let frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
         let _ = self.bus.publish_from(source, frame);
         if let Some((agent_id, outcome)) = persisted_agent {
