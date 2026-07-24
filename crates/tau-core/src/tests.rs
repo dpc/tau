@@ -299,6 +299,113 @@ fn manual_compaction_request(agent_id: &str, request_id: &str) -> Event {
     })
 }
 
+/// Durable replay must preserve prompt-count and ordinary-inference generation
+/// authority, while stale manual compaction admission leaves no journal trace.
+#[test]
+fn manual_compaction_generation_replays_and_guards_durable_admission() {
+    let agents_dir = temp_dir("manual-compaction-generation-replay");
+    let prompt = |id: &str, operation| {
+        Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
+            agent_prompt_id: id.into(),
+            agent_id: AgentId::parse("target").expect("agent id"),
+            session_id: "session".into(),
+            system_prompt: String::new(),
+            context: tau_proto::PromptContext::default(),
+            tools: Vec::new(),
+            tools_ref: None,
+            model: "provider/model".into(),
+            model_params: Default::default(),
+            tool_choice: Default::default(),
+            originator: PromptOriginator::User,
+            share_user_cache_key: false,
+            ctx_id: None,
+            compaction: None,
+            operation,
+        })
+    };
+    let counters = |store: &AgentStore| {
+        let tree = store.agent("target").expect("target tree");
+        (
+            tree.materialized_prompt_count(),
+            tree.ordinary_inference_generation(),
+        )
+    };
+
+    let mut store = AgentStore::open(&agents_dir).expect("open store");
+    for event in [
+        prompt("ap-first", tau_proto::PromptOperation::Inference),
+        prompt(
+            "ap-compaction",
+            tau_proto::PromptOperation::StandaloneCompaction,
+        ),
+        prompt("ap-second", tau_proto::PromptOperation::Inference),
+    ] {
+        store
+            .append_agent_event("target", None, event)
+            .expect("append prompt");
+    }
+    assert_eq!(counters(&store), (3, 2));
+
+    drop(store);
+    let mut reopened = AgentStore::open(&agents_dir).expect("reopen store");
+    assert_eq!(counters(&reopened), (3, 2));
+
+    let sequence_before = reopened
+        .agent("target")
+        .expect("target tree")
+        .next_event_seq();
+    let event_count_before = reopened
+        .agent_events("target")
+        .expect("target events")
+        .len();
+    let mut request = manual_compaction_request("target", "cr-generation");
+    let Event::AgentManualCompactionRequested(requested) = &mut request else {
+        unreachable!("helper constructs a manual compaction request");
+    };
+    requested.target_generation = 1;
+    assert!(matches!(
+        reopened.append_agent_event("target", None, request.clone()),
+        Err(AgentStoreError::InvalidEvent { .. })
+    ));
+    assert_eq!(
+        reopened
+            .agent("target")
+            .expect("target tree")
+            .next_event_seq(),
+        sequence_before
+    );
+    assert_eq!(
+        reopened
+            .agent_events("target")
+            .expect("target events")
+            .len(),
+        event_count_before
+    );
+    assert_eq!(counters(&reopened), (3, 2));
+
+    let Event::AgentManualCompactionRequested(requested) = &mut request else {
+        unreachable!("helper constructs a manual compaction request");
+    };
+    requested.target_generation = 2;
+    reopened
+        .append_agent_event("target", None, request)
+        .expect("append current-generation request");
+    drop(reopened);
+
+    let reopened = AgentStore::open(&agents_dir).expect("reopen accepted request");
+    assert_eq!(counters(&reopened), (3, 2));
+    assert!(matches!(
+        reopened
+            .agent("target")
+            .expect("target tree")
+            .manual_compaction_recoveries()
+            .as_slice(),
+        [crate::ManualCompactionRecovery::Waiting(request)]
+            if request.request_id.to_string() == "cr-generation"
+    ));
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
 /// Manual request facts must survive a durable cold reopen and remain
 /// queryable as accepted-but-unstarted recovery state.
 #[test]
