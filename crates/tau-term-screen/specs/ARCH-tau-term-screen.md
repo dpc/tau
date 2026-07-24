@@ -8,15 +8,28 @@ crate to lay out or render.
 `PriorityLine` provides reusable single-row progressive layout for styled
 presentation elements. It measures terminal display columns, preserves stable
 item order within left/right edge groups, emits the left group before the right,
-and removes larger integer priorities until retained whole items, one-cell
-intra-group separators, and minimum inter-group padding fit. Equal priorities
-remove later inserted items first, and empty items are ignored. If the
+and removes larger integer priorities until retained items, separators, and
+minimum inter-group padding fit. An item may instead opt into bounded middle
+truncation with inclusive minimum and maximum display widths. The allocator
+reserves every truncatable survivor's minimum, drops whole items by priority
+when those minima do not fit, then assigns remaining columns toward configured
+maxima in ascending priority and insertion order. Truncation preserves complete
+graphemes and styles around the exact `┄` marker. Equal priorities remove later
+inserted items first, empty items are ignored, and explicitly attached fragments
+omit their normal intra-group separator.
+
+A caller may require an essential priority band to survive together; if any
+accepted item in that band cannot fit, the line stays empty instead of showing
+an incomplete meaning. The same empty fallback applies when the
 highest-importance survivor cannot fit after less-important items are removed,
-the line stays empty rather than resurrecting one of those items, wrapping, or
-clipping content. `StyledBlock::priority_line` selects this layout instead of
-ordinary and right-adornment content. Ordinary `StyledBlock::right_content`
-remains the atomic right-adornment mechanism used by the multi-line-capable
-prompt.
+rather than resurrecting a smaller item, wrapping, or clipping content.
+`StyledBlock::priority_line` selects this layout instead of ordinary and
+right-adornment content. Its optional priority-line body supports related
+ordinary detail rows without letting the adaptive header wrap; when an
+essential header band cannot fit, the owned body hides with it so detail rows
+never lose their identity/status context. Ordinary
+`StyledBlock::right_content` remains the atomic right-adornment mechanism used
+by the multi-line-capable prompt.
 
 ## Terminal output trust boundary
 

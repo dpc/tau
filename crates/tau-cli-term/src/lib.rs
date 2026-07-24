@@ -28,7 +28,7 @@ pub use completion::{
 pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
 pub use tau_cli_term_raw::{
     Align, BlockId, Cell, Color, CursorShape, OutputSnapshot, PriorityLine, PriorityLineAlignment,
-    PriorityLinePriority, Span, Style, StyledBlock, StyledText, TermHandle,
+    PriorityLinePriority, PriorityLineTruncation, Span, Style, StyledBlock, StyledText, TermHandle,
 };
 use tau_cli_term_raw::{Candidate, Event as RawEvent};
 use tau_term_screen::{display_width, truncate_to_width};

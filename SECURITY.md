@@ -19,6 +19,22 @@ is WebSocket-only, and all built-in provider egress shares the immutable policy
 documented in
 [`tau-provider/SECURITY.md`](crates/tau-provider/SECURITY.md).
 
+## Terminal presentation boundary
+
+Tool, provider, extension, and user-derived presentation text is not trusted
+terminal control. Themes resolve to structured styles rather than inline escape
+bytes, and terminal cell conversion sanitizes control characters before output.
+Adaptive one-row layout measures complete Unicode graphemes by terminal display
+columns and middle-truncates only at grapheme boundaries. Tool headers treat
+identity and explicit lifecycle/result status as one essential set: a terminal
+too narrow for that set shows neither the header nor its owned payload/diff body
+rather than exposing anonymous details or obscuring success versus failure.
+Re-check control sanitization, zero- and multi-column graphemes, exact
+minimum/maximum boundaries, tiny widths, owned-body suppression, and resize
+restoration whenever terminal layout or tool presentation changes. See
+[`ARCH-tau-term-screen`](crates/tau-term-screen/specs/ARCH-tau-term-screen.md)
+and [`ARCH-tau-cli`](crates/tau-cli/specs/ARCH-tau-cli.md).
+
 ## Command-mode and prompt boundary
 
 First-non-whitespace `:` selects non-provider command authority. Unknown or

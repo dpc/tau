@@ -222,6 +222,8 @@ pub(crate) enum ToolStatus {
     Error,
     Pending,
     Info,
+    Agent,
+    Counter,
     Progress,
     DiffAdded,
     DiffRemoved,
@@ -350,6 +352,10 @@ fn info_suffix(text: String) -> ToolSuffixSegment {
     tool_suffix(text, ToolStatus::Info)
 }
 
+fn counter_suffix(text: String) -> ToolSuffixSegment {
+    tool_suffix(text, ToolStatus::Counter)
+}
+
 /// Build a streaming block whose body uses `body_name` styling and
 /// whose trailing `…` indicator uses [`names::PROGRESS_INDICATOR`], so
 /// the indicator can be themed independently. The leading space before
@@ -433,7 +439,7 @@ fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
 fn abbreviate_inline_text(text: &str) -> String {
     const EDGE_CHARS: usize = 20;
 
-    let one_line = text.lines().collect::<Vec<_>>().join(" ");
+    let one_line = normalize_inline_text(text);
     let chars: Vec<char> = one_line.chars().collect();
     if chars.len() <= EDGE_CHARS * 2 {
         return one_line;
@@ -448,6 +454,12 @@ fn abbreviate_inline_text(text: &str) -> String {
     format!("{head}┄{tail}")
 }
 
+/// Replaces line boundaries with spaces using the historical compact-field
+/// normalization shared by tool headers and shell summaries.
+fn normalize_inline_text(text: &str) -> String {
+    text.lines().collect::<Vec<_>>().join(" ")
+}
+
 /// Render a [`ToolUseState`] descriptor directly to a
 /// [`ToolCallDisplay`]. The generic path the renderer takes when the
 /// tool side attached a display descriptor to its result/error event —
@@ -455,6 +467,25 @@ fn abbreviate_inline_text(text: &str) -> String {
 /// [`format_tool_completion`] for older events that didn't carry a
 /// descriptor.
 pub(crate) fn render_tool_use_state(tool_name: &str, display: &ToolUseState) -> ToolCallDisplay {
+    render_tool_use_state_inner(tool_name, display, true)
+}
+
+/// Renders shared tool-like fields without fabricating a lifecycle status.
+///
+/// This is reserved for presentation-only rows, such as watched-agent
+/// activity, that reuse tool counters but are not tool invocations.
+pub(crate) fn render_tool_use_state_without_status(
+    tool_name: &str,
+    display: &ToolUseState,
+) -> ToolCallDisplay {
+    render_tool_use_state_inner(tool_name, display, false)
+}
+
+fn render_tool_use_state_inner(
+    tool_name: &str,
+    display: &ToolUseState,
+    include_status: bool,
+) -> ToolCallDisplay {
     let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
     let (added, removed) = display
         .payload
@@ -479,24 +510,40 @@ pub(crate) fn render_tool_use_state(tool_name: &str, display: &ToolUseState) -> 
         suffixes.push(format_progress_counter(counter));
     }
     for chip in &display.info_chips {
-        suffixes.push(info_suffix(chip.clone()));
+        suffixes.push(tool_suffix(
+            chip.clone(),
+            if is_agent_id_chip(chip) {
+                ToolStatus::Agent
+            } else {
+                ToolStatus::Info
+            },
+        ));
     }
-    let status_kind = match display.status {
-        ToolUseStatus::Success => ToolStatus::Success,
-        ToolUseStatus::Warning => ToolStatus::Warning,
-        ToolUseStatus::Error => ToolStatus::Error,
-        ToolUseStatus::InProgress => ToolStatus::Progress,
-    };
-    let mut status_text =
-        if display.status_text.is_empty() && matches!(display.status, ToolUseStatus::InProgress) {
-            tau_proto::PROGRESS_INDICATOR_TEXT.to_owned()
-        } else {
-            display.status_text.clone()
+    if include_status {
+        let status_kind = match display.status {
+            ToolUseStatus::Success => ToolStatus::Success,
+            ToolUseStatus::Warning => ToolStatus::Warning,
+            ToolUseStatus::Error => ToolStatus::Error,
+            ToolUseStatus::InProgress => ToolStatus::Progress,
         };
-    if matches!(display.status, ToolUseStatus::Error) {
-        status_text = error_status_text(&status_text);
+        let supplied_status = display.status_text.trim();
+        let supplied_status_width =
+            tau_cli_term::StyledText::from(supplied_status.to_owned()).char_count();
+        let mut status_text = if supplied_status_width == 0 {
+            match display.status {
+                ToolUseStatus::Success => "ok".to_owned(),
+                ToolUseStatus::Warning => "warn".to_owned(),
+                ToolUseStatus::Error => "err".to_owned(),
+                ToolUseStatus::InProgress => tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+            }
+        } else {
+            supplied_status.to_owned()
+        };
+        if matches!(display.status, ToolUseStatus::Error) {
+            status_text = error_status_text(&status_text);
+        }
+        suffixes.push(tool_suffix(status_text, status_kind));
     }
-    suffixes.push(tool_suffix(status_text, status_kind));
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
         tool_name_style: None,
@@ -506,6 +553,12 @@ pub(crate) fn render_tool_use_state(tool_name: &str, display: &ToolUseState) -> 
         suffixes,
         payload: display.payload.clone(),
     }
+}
+
+/// Recognizes a complete, syntactically valid `@agent-id` info chip.
+fn is_agent_id_chip(chip: &str) -> bool {
+    chip.strip_prefix('@')
+        .is_some_and(|agent_id| tau_proto::AgentId::parse(agent_id).is_ok())
 }
 
 fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolSuffixSegment {
@@ -532,8 +585,8 @@ fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolSuffixSe
     match counter.label.as_deref() {
         Some("ctx") => tool_suffix(format!("#{body}"), ToolStatus::Context),
         Some("tools") => tool_suffix(format!("%{body}"), ToolStatus::Tools),
-        Some(label) => info_suffix(format!("{label}: {body}")),
-        None => info_suffix(body),
+        Some(label) => counter_suffix(format!("{label}: {body}")),
+        None => counter_suffix(body),
     }
 }
 
@@ -709,81 +762,224 @@ pub(crate) fn render_compaction_block(
     tau_cli_term::StyledBlock::new(themed_text(theme, &themed))
 }
 
-/// Paints a [`ToolCallDisplay`] onto a themed block.
+/// Priority bands for one-line tool-call presentation elements.
+///
+/// The externally requested bands are identity `0`, result status `10`, error
+/// details `20`, arguments `30`, and agent ids `40`. The remaining existing
+/// fields use mode `50`, range `60`, diff/progress counters `70`, generic info
+/// `80`, and duration `90`.
+#[derive(Clone, Copy)]
+pub(crate) enum ToolLineElement {
+    /// Tool name or watched-row identity.
+    Identity,
+    /// Exact success, failure, warning, pending, or progress status.
+    ResultStatus,
+    /// Human-readable text following an exact `err` status.
+    ErrorDetails,
+    /// Primary tool arguments.
+    Arguments,
+    /// Stable `@agent-id` information.
+    AgentId,
+    /// Tool execution or access mode.
+    Mode,
+    /// Structured range associated with the arguments.
+    Range,
+    /// Diff statistics or structured progress counters.
+    Counter,
+    /// Other informational suffix chips.
+    Info,
+    /// Elapsed tool duration.
+    Duration,
+}
+
+impl ToolLineElement {
+    /// Returns the documented priority where zero is most important.
+    pub(crate) const fn priority(self) -> tau_cli_term::PriorityLinePriority {
+        let value = match self {
+            Self::Identity => 0,
+            Self::ResultStatus => 10,
+            Self::ErrorDetails => 20,
+            Self::Arguments => 30,
+            Self::AgentId => 40,
+            Self::Mode => 50,
+            Self::Range => 60,
+            Self::Counter => 70,
+            Self::Info => 80,
+            Self::Duration => 90,
+        };
+        tau_cli_term::PriorityLinePriority::new(value)
+    }
+}
+
+/// Builds one styled fragment with the historical tool-output parent style.
+fn tool_line_text(
+    theme: &tau_themes::Theme,
+    style_name: &str,
+    text: impl Into<String>,
+) -> tau_cli_term::StyledText {
+    use tau_cli_term::resolve::resolve;
+    use tau_cli_term::{Span, StyledText};
+    use tau_themes::names;
+
+    let style = overlay_style(
+        resolve(theme, names::TOOL_OUTPUT),
+        resolve(theme, style_name),
+    );
+    StyledText::from(Span::new(normalize_inline_text(&text.into()), style))
+}
+
+/// Returns the theme token used for one suffix category.
+fn tool_status_style(status: ToolStatus) -> &'static str {
+    use tau_themes::names;
+
+    match status {
+        ToolStatus::Success => names::TOOL_STATUS_SUCCESS,
+        // Warning/Pending have no dedicated tokens yet — share the info
+        // colour so the chip still reads as "non-error" without a theme
+        // migration.
+        ToolStatus::Warning
+        | ToolStatus::Pending
+        | ToolStatus::Info
+        | ToolStatus::Agent
+        | ToolStatus::Counter => names::TOOL_STATUS_INFO,
+        ToolStatus::Error => names::TOOL_STATUS_ERROR,
+        ToolStatus::Progress => names::PROGRESS_INDICATOR,
+        ToolStatus::DiffAdded => names::DIFF_ADDED,
+        ToolStatus::DiffRemoved => names::DIFF_REMOVED,
+        ToolStatus::Context => names::STATUS_CONTEXT,
+        ToolStatus::Tools => names::STATUS_TOOLS,
+        ToolStatus::Time => names::TOOL_STATUS_TIME,
+    }
+}
+
+/// Returns the priority category for a non-error suffix.
+fn tool_suffix_element(status: ToolStatus) -> ToolLineElement {
+    match status {
+        ToolStatus::Success | ToolStatus::Warning | ToolStatus::Pending | ToolStatus::Progress => {
+            ToolLineElement::ResultStatus
+        }
+        ToolStatus::Agent => ToolLineElement::AgentId,
+        ToolStatus::DiffAdded
+        | ToolStatus::DiffRemoved
+        | ToolStatus::Context
+        | ToolStatus::Tools
+        | ToolStatus::Counter => ToolLineElement::Counter,
+        ToolStatus::Info => ToolLineElement::Info,
+        ToolStatus::Time => ToolLineElement::Duration,
+        ToolStatus::Error => ToolLineElement::ResultStatus,
+    }
+}
+
+/// Paints a [`ToolCallDisplay`] as an adaptive one-row themed header.
+///
+/// Identity, error details, arguments, agent ids, mode, and range use bounded
+/// middle truncation. Result status and all numeric/informational chips stay
+/// atomic so truncation cannot turn success into failure or vice versa.
 pub(crate) fn render_tool_block(
     theme: &tau_themes::Theme,
     display: &ToolCallDisplay,
 ) -> tau_cli_term::StyledBlock {
-    use tau_cli_term::StyledBlock;
-    use tau_cli_term::resolve::themed_text;
-    use tau_themes::{SpanTree, ThemedText, names};
+    use tau_cli_term::resolve::resolve;
+    use tau_cli_term::{
+        PriorityLine, PriorityLineAlignment, PriorityLineTruncation, Span, StyledBlock, StyledText,
+    };
+    use tau_themes::names;
 
-    let mut themed = ThemedText::new();
-    let output = themed.add_style(names::TOOL_OUTPUT);
-    let name = themed.add_style(display.tool_name_style.unwrap_or(names::TOOL_NAME));
-    let mode = themed.add_style(names::TOOL_MODE);
-    let args = themed.add_style(names::TOOL_ARGS);
+    const IDENTITY_BOUNDS: PriorityLineTruncation = PriorityLineTruncation::new(4, 32);
+    const ERROR_BOUNDS: PriorityLineTruncation = PriorityLineTruncation::new(5, 48);
+    const ARGUMENT_BOUNDS: PriorityLineTruncation = PriorityLineTruncation::new(5, 48);
+    const AGENT_ID_BOUNDS: PriorityLineTruncation = PriorityLineTruncation::new(5, 32);
+    const MODE_BOUNDS: PriorityLineTruncation = PriorityLineTruncation::new(3, 16);
+    const RANGE_BOUNDS: PriorityLineTruncation = PriorityLineTruncation::new(5, 32);
 
-    let mut children = vec![SpanTree::span(
-        name,
-        vec![SpanTree::text(display.tool_name.clone())],
-    )];
+    let left = PriorityLineAlignment::Left;
+    let mut line = PriorityLine::new();
+    line.require_through(ToolLineElement::ResultStatus.priority());
+    line.set_separator_style(overlay_style(
+        resolve(theme, names::TOOL_OUTPUT),
+        resolve(theme, names::TOOL_ARGS),
+    ));
+    line.push_truncated(
+        ToolLineElement::Identity.priority(),
+        left,
+        tool_line_text(
+            theme,
+            display.tool_name_style.unwrap_or(names::TOOL_NAME),
+            display.tool_name.clone(),
+        ),
+        IDENTITY_BOUNDS,
+    );
     if !display.mode.is_empty() {
-        children.push(SpanTree::span(args, vec![SpanTree::text(" ")]));
-        children.push(SpanTree::span(
-            mode,
-            vec![SpanTree::text(abbreviate_inline_text(&display.mode))],
-        ));
+        line.push_truncated(
+            ToolLineElement::Mode.priority(),
+            left,
+            tool_line_text(theme, names::TOOL_MODE, display.mode.clone()),
+            MODE_BOUNDS,
+        );
     }
     if !display.args.is_empty() {
-        children.push(SpanTree::span(
-            args,
-            vec![
-                SpanTree::text(" "),
-                SpanTree::text(abbreviate_inline_text(&display.args)),
-            ],
-        ));
+        line.push_truncated(
+            ToolLineElement::Arguments.priority(),
+            left,
+            tool_line_text(theme, names::TOOL_ARGS, display.args.clone()),
+            ARGUMENT_BOUNDS,
+        );
     }
     if let Some(range) = &display.range {
-        children.push(SpanTree::span(
-            args,
-            vec![
-                SpanTree::text(" "),
-                SpanTree::text(abbreviate_inline_text(range)),
-            ],
-        ));
+        line.push_truncated(
+            ToolLineElement::Range.priority(),
+            left,
+            tool_line_text(theme, names::TOOL_ARGS, range.clone()),
+            RANGE_BOUNDS,
+        );
     }
     for suffix in &display.suffixes {
-        let status_name = match suffix.status {
-            ToolStatus::Success => names::TOOL_STATUS_SUCCESS,
-            // Warning/Pending have no dedicated tokens yet — share the info
-            // colour so the chip still reads as "non-error" without a
-            // theme migration.
-            ToolStatus::Warning | ToolStatus::Pending | ToolStatus::Info => names::TOOL_STATUS_INFO,
-            ToolStatus::Error => names::TOOL_STATUS_ERROR,
-            ToolStatus::Progress => names::PROGRESS_INDICATOR,
-            ToolStatus::DiffAdded => names::DIFF_ADDED,
-            ToolStatus::DiffRemoved => names::DIFF_REMOVED,
-            ToolStatus::Context => names::STATUS_CONTEXT,
-            ToolStatus::Tools => names::STATUS_TOOLS,
-            ToolStatus::Time => names::TOOL_STATUS_TIME,
-        };
-        let status = themed.add_style(status_name);
-        if !suffix.no_leading_space && !suffix.text.starts_with(':') {
-            children.push(SpanTree::span(args, vec![SpanTree::text(" ")]));
+        let style_name = tool_status_style(suffix.status);
+        if matches!(suffix.status, ToolStatus::Error) {
+            let details = suffix.text.strip_prefix("err:").map(str::trim);
+            line.push(
+                ToolLineElement::ResultStatus.priority(),
+                left,
+                tool_line_text(theme, style_name, "err"),
+            );
+            if let Some(details) = details.filter(|details| !details.is_empty()) {
+                line.push_truncated_attached(
+                    ToolLineElement::ErrorDetails.priority(),
+                    left,
+                    tool_line_text(theme, style_name, format!(": {details}")),
+                    ERROR_BOUNDS,
+                );
+            }
+            continue;
         }
-        children.push(SpanTree::span(
-            status,
-            vec![SpanTree::text(abbreviate_inline_text(&suffix.text))],
-        ));
+        let element = tool_suffix_element(suffix.status);
+        let text = tool_line_text(theme, style_name, suffix.text.clone());
+        let attached = suffix.no_leading_space || suffix.text.starts_with(':');
+        match element {
+            ToolLineElement::AgentId => {
+                if attached {
+                    line.push_truncated_attached(element.priority(), left, text, AGENT_ID_BOUNDS);
+                } else {
+                    line.push_truncated(element.priority(), left, text, AGENT_ID_BOUNDS);
+                }
+            }
+            _ if attached => line.push_attached(element.priority(), left, text),
+            _ => line.push(element.priority(), left, text),
+        }
     }
-    if let Some(ToolUsePayload::Text { text }) = &display.payload {
-        children.push(SpanTree::span(args, vec![SpanTree::text("\n")]));
-        children.push(SpanTree::span(args, vec![SpanTree::text(text.clone())]));
-    }
-    themed.push_tree(SpanTree::span(output, children));
 
-    StyledBlock::new(themed_text(theme, &themed))
+    let mut body = StyledText::new();
+    if let Some(ToolUsePayload::Text { text }) = &display.payload {
+        let style = overlay_style(
+            resolve(theme, names::TOOL_OUTPUT),
+            resolve(theme, names::TOOL_ARGS),
+        );
+        body = StyledText::from(Span::new(text.clone(), style));
+    }
+
+    StyledBlock::new("")
+        .priority_line(line)
+        .priority_line_body(body)
 }
 
 pub(crate) fn diff_payload_counts(payload: &ToolUsePayload) -> (u32, u32) {
@@ -801,11 +997,11 @@ pub(crate) fn diff_payload_counts(payload: &ToolUsePayload) -> (u32, u32) {
     }
 }
 
-/// Like [`render_tool_block`] but appends an expanded unified-diff
-/// body when `expanded` is true and `diff` has hunks. The first line
-/// is the themed tool header (with `+N/-M` chip); the body, if
-/// rendered, comes after a `\n` so `layout_lines` wraps each diff line
-/// independently.
+/// Like [`render_tool_block`] but attaches expanded unified-diff detail rows
+/// when `expanded` is true and `diff` has hunks.
+///
+/// The adaptive priority-line header owns the body, so block layout wraps diff
+/// rows independently and suppresses them if the essential header cannot fit.
 pub(crate) fn render_diff_tool_block(
     theme: &tau_themes::Theme,
     display: &ToolCallDisplay,
@@ -816,14 +1012,14 @@ pub(crate) fn render_diff_tool_block(
     use tau_cli_term::{Span, StyledBlock, StyledText};
     use tau_themes::names;
 
-    // Reuse the header from render_tool_block, then keep its spans so
-    // we can append diff lines below it.
+    // Reuse the adaptive header and attach only the expanded diff detail body.
     let header = render_tool_block(theme, display);
-    let mut spans: Vec<Span> = header.content.spans().to_vec();
 
     if !expanded || diff.hunks.is_empty() {
-        return StyledBlock::new(StyledText::from(spans));
+        return header;
     }
+    let priority_line = header.priority_line.expect("tool block priority header");
+    let mut spans: Vec<Span> = Vec::new();
 
     let added_style = resolve(theme, names::DIFF_ADDED);
     let removed_style = resolve(theme, names::DIFF_REMOVED);
@@ -834,7 +1030,9 @@ pub(crate) fn render_diff_tool_block(
         overlay_style(removed_style, resolve(theme, names::DIFF_REMOVED_INLINE));
 
     for hunk in &diff.hunks {
-        spans.push(Span::new("\n", context_style));
+        if !spans.is_empty() {
+            spans.push(Span::new("\n", context_style));
+        }
         spans.push(Span::new(
             format!(
                 "@@ -{},{} +{},{} @@",
@@ -864,7 +1062,9 @@ pub(crate) fn render_diff_tool_block(
             }
         }
     }
-    StyledBlock::new(StyledText::from(spans))
+    StyledBlock::new("")
+        .priority_line(priority_line)
+        .priority_line_body(StyledText::from(spans))
 }
 
 /// Like [`render_diff_tool_block`] but keeps file boundaries for multi-file
@@ -880,11 +1080,12 @@ pub(crate) fn render_multi_diff_tool_block(
     use tau_themes::names;
 
     let header = render_tool_block(theme, display);
-    let mut spans: Vec<Span> = header.content.spans().to_vec();
 
     if !expanded || files.iter().all(|file| file.diff.hunks.is_empty()) {
-        return StyledBlock::new(StyledText::from(spans));
+        return header;
     }
+    let priority_line = header.priority_line.expect("tool block priority header");
+    let mut spans: Vec<Span> = Vec::new();
 
     let added_style = resolve(theme, names::DIFF_ADDED);
     let removed_style = resolve(theme, names::DIFF_REMOVED);
@@ -898,7 +1099,9 @@ pub(crate) fn render_multi_diff_tool_block(
         if file.diff.hunks.is_empty() {
             continue;
         }
-        spans.push(Span::new("\n", context_style));
+        if !spans.is_empty() {
+            spans.push(Span::new("\n", context_style));
+        }
         spans.push(Span::new(format!("--- {}", file.path), header_style));
         for hunk in &file.diff.hunks {
             spans.push(Span::new("\n", context_style));
@@ -932,7 +1135,9 @@ pub(crate) fn render_multi_diff_tool_block(
             }
         }
     }
-    StyledBlock::new(StyledText::from(spans))
+    StyledBlock::new("")
+        .priority_line(priority_line)
+        .priority_line_body(StyledText::from(spans))
 }
 
 fn push_segments(

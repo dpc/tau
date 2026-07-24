@@ -11,7 +11,9 @@ pub mod screen;
 /// Styled text, block, and cell data model.
 pub mod style;
 
-pub use priority_line::{PriorityLine, PriorityLineAlignment, PriorityLinePriority};
+pub use priority_line::{
+    PriorityLine, PriorityLineAlignment, PriorityLinePriority, PriorityLineTruncation,
+};
 pub use screen::{Screen, emit_styled_cells, layout_block, layout_lines};
 pub use style::{
     Align, BlockId, Cell, Color, Span, Style, StyledBlock, StyledText, display_width,

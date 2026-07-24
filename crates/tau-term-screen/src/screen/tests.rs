@@ -423,6 +423,34 @@ fn layout_block_uses_priority_line_content() {
     assert_eq!(lines[0][5].style.bg, Some(Color::DarkBlue));
 }
 
+/// Detail rows owned by an adaptive header must disappear when an essential
+/// header band cannot fit, preventing anonymous output at tiny widths.
+#[test]
+fn priority_line_body_hides_when_required_header_fails_closed() {
+    let mut priority_line = crate::PriorityLine::new();
+    priority_line.require_through(crate::PriorityLinePriority::new(10));
+    priority_line.push_truncated(
+        crate::PriorityLinePriority::new(0),
+        crate::PriorityLineAlignment::Left,
+        "identity",
+        crate::PriorityLineTruncation::new(4, 8),
+    );
+    priority_line.push(
+        crate::PriorityLinePriority::new(10),
+        crate::PriorityLineAlignment::Left,
+        "ok",
+    );
+    let block = StyledBlock::new("ignored")
+        .priority_line(priority_line)
+        .priority_line_body("owned detail");
+
+    assert_eq!(
+        line_chars(&layout_block(&block, 7)),
+        vec!["id┄y ok", "owned d", "etail  "]
+    );
+    assert_eq!(line_chars(&layout_block(&block, 6)), vec!["      "]);
+}
+
 /// Block backgrounds should paint content and padding, but not margins, so
 /// margins remain transparent separators.
 #[test]

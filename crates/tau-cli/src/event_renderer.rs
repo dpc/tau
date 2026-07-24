@@ -31,9 +31,9 @@ use crate::tool_render::{
     extension_status_block, extract_diff, format_token_count, pending_tool_call_display,
     render_compaction_block, render_diff_tool_block, render_harness_notice,
     render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_turn_stats_block, session_status_block, streaming_block,
-    streaming_block_with_indicator_suffix, synthesize_fallback_display, system_loaded_block,
-    tool_duration_suffix, ui_dir_block,
+    render_tool_use_state_without_status, render_turn_stats_block, session_status_block,
+    streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
+    system_loaded_block, tool_duration_suffix, ui_dir_block,
 };
 use crate::watch_activity::WatchActivityProjection;
 
@@ -1308,14 +1308,13 @@ pub(crate) fn watched_agent_tool_display(
         WatchedAgentActivity::Running => ("running", None),
         WatchedAgentActivity::Watching { witness } => ("watching", Some(witness)),
     };
-    let mut rendered = render_tool_use_state(name, &display);
+    let mut rendered = render_tool_use_state_without_status(name, &display);
     rendered.tool_name_style = Some(tau_themes::names::WATCHING_NAME);
-    rendered.suffixes.retain(|suffix| !suffix.text.is_empty());
     rendered.suffixes.insert(
         0,
         ToolSuffixSegment {
             text: format!("@{agent_id}"),
-            status: ToolStatus::Info,
+            status: ToolStatus::Agent,
             no_leading_space: false,
         },
     );
@@ -1324,7 +1323,7 @@ pub(crate) fn watched_agent_tool_display(
             1,
             ToolSuffixSegment {
                 text: format!("-> @{witness}"),
-                status: ToolStatus::Info,
+                status: ToolStatus::Agent,
                 no_leading_space: false,
             },
         );

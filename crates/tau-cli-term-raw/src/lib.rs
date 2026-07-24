@@ -28,8 +28,8 @@ use crossterm::event::{
 use crossterm::style::Print;
 use crossterm::{QueueableCommand, terminal};
 pub use tau_term_screen::{
-    Align, BlockId, Cell, Color, PriorityLine, PriorityLineAlignment, PriorityLinePriority, Span,
-    Style, StyledBlock, StyledText,
+    Align, BlockId, Cell, Color, PriorityLine, PriorityLineAlignment, PriorityLinePriority,
+    PriorityLineTruncation, Span, Style, StyledBlock, StyledText,
 };
 use tau_term_screen::{
     Screen, display_width, emit_styled_cells, layout_block, layout_lines, next_grapheme_boundary,

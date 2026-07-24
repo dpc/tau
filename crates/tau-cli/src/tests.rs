@@ -76,12 +76,35 @@ fn marker_test_renderer(handle: TermHandle) -> EventRenderer {
 fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
 }
+
+/// Returns the adaptive header cells selected for a tool block at `width`.
+fn priority_header_cells(
+    block: &tau_cli_term::StyledBlock,
+    width: usize,
+) -> Vec<tau_cli_term::Cell> {
+    block
+        .priority_line
+        .as_ref()
+        .expect("priority header")
+        .layout(width)
+}
+
+/// Returns the plain adaptive header selected for a tool block at `width`.
+fn priority_header_text(block: &tau_cli_term::StyledBlock, width: usize) -> String {
+    priority_header_cells(block, width)
+        .iter()
+        .map(|cell| cell.ch)
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
 use super::tool_render::{
-    CompactionStatus, ToolStatus, build_delegate_completion_display, cache_hit_percent,
-    format_turn_stats_line, render_action_error_block, render_action_output_block,
-    render_compaction_block, render_diff_tool_block, render_harness_notice,
-    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_turn_stats_block, streaming_block, synthesize_fallback_display,
+    CompactionStatus, ToolLineElement, ToolStatus, build_delegate_completion_display,
+    cache_hit_percent, format_turn_stats_line, render_action_error_block,
+    render_action_output_block, render_compaction_block, render_diff_tool_block,
+    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
+    render_tool_use_state, render_turn_stats_block, streaming_block, synthesize_fallback_display,
 };
 
 #[test]
@@ -9893,8 +9916,8 @@ fn show_tools_compact_hides_payload_body() {
     assert!(!vt.screen_contains(80, "fn main()"));
 }
 
-/// A truncated one-line tool header keeps its compact form, status, and timing
-/// while full mode reveals the exact Unicode payload and compact mode hides it.
+/// A bounded one-line tool header keeps its identity, status, and timing while
+/// full mode reveals the exact Unicode payload and compact mode hides it.
 #[test]
 fn show_tools_full_reveals_truncated_one_line_payload() {
     let (_term, handle, vt) = setup(100, 24);
@@ -9958,7 +9981,14 @@ fn show_tools_full_reveals_truncated_one_line_payload() {
     );
     sync(&handle);
 
-    assert!(vt.screen_contains(100, &format!("shell {args} 1s ok")));
+    let header = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("shell "))
+        .expect("bounded shell header");
+    assert!(header.contains('┄'), "{header:?}");
+    assert!(header.contains(" 1s ok"), "{header:?}");
+    assert!(!header.contains(args), "{header:?}");
     assert!(
         vt.screen_text(100).iter().any(|row| row.trim() == payload),
         "full Unicode payload should render beneath the compact header"
@@ -9966,7 +9996,13 @@ fn show_tools_full_reveals_truncated_one_line_payload() {
 
     renderer.apply_setting("show-tools", "compact");
     sync(&handle);
-    assert!(vt.screen_contains(100, &format!("shell {args} 1s ok")));
+    let header = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("shell "))
+        .expect("bounded compact shell header");
+    assert!(header.contains('┄'), "{header:?}");
+    assert!(header.contains(" 1s ok"), "{header:?}");
     assert!(
         !vt.screen_text(100).iter().any(|row| row.trim() == payload),
         "compact mode should continue hiding payload bodies"
@@ -10142,6 +10178,310 @@ fn render_tool_use_state_assembles_chips_in_order() {
     ));
 }
 
+/// Every structured progress counter keeps counter priority, including custom
+/// and unlabelled counters, while free-form info remains independently lower.
+#[test]
+fn structured_counters_outrank_generic_info() {
+    use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStatus};
+
+    let display = render_tool_use_state(
+        "tool",
+        &ToolUseState {
+            progress_counters: vec![
+                ProgressCounter {
+                    label: Some("count".into()),
+                    unit: ProgressUnit::Count,
+                    complete: Some(1),
+                    total: None,
+                },
+                ProgressCounter {
+                    label: None,
+                    unit: ProgressUnit::Count,
+                    complete: Some(2),
+                    total: None,
+                },
+            ],
+            info_chips: vec!["optional".into()],
+            status: ToolUseStatus::Success,
+            status_text: "ok".into(),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(display.suffixes[0].status, ToolStatus::Counter));
+    assert!(matches!(display.suffixes[1].status, ToolStatus::Counter));
+    assert!(matches!(display.suffixes[2].status, ToolStatus::Info));
+
+    let header = priority_header_text(&render_tool_block(&cli_test_theme(), &display), 18);
+    assert_eq!(header, "tool count: 1 2 ok");
+}
+
+/// Only a complete syntactically valid agent reference receives the agent-id
+/// priority; arbitrary free-form `@` chips retain generic-info semantics.
+#[test]
+fn info_chip_agent_classification_is_strict() {
+    use tau_proto::{ToolUseState, ToolUseStatus};
+
+    let display = render_tool_use_state(
+        "tool",
+        &ToolUseState {
+            info_chips: vec!["@engineer_child".into(), "@not an agent".into()],
+            status: ToolUseStatus::Success,
+            status_text: "ok".into(),
+            ..Default::default()
+        },
+    );
+
+    assert!(matches!(display.suffixes[0].status, ToolStatus::Agent));
+    assert!(matches!(display.suffixes[1].status, ToolStatus::Info));
+}
+
+/// Every tool-line element must keep the requested ten-point priority bands,
+/// including documented best-guess bands for all pre-existing optional fields.
+#[test]
+fn tool_line_priorities_cover_every_element() {
+    let priorities = [
+        (ToolLineElement::Identity, 0),
+        (ToolLineElement::ResultStatus, 10),
+        (ToolLineElement::ErrorDetails, 20),
+        (ToolLineElement::Arguments, 30),
+        (ToolLineElement::AgentId, 40),
+        (ToolLineElement::Mode, 50),
+        (ToolLineElement::Range, 60),
+        (ToolLineElement::Counter, 70),
+        (ToolLineElement::Info, 80),
+        (ToolLineElement::Duration, 90),
+    ];
+
+    for (element, expected) in priorities {
+        assert_eq!(element.priority().get(), expected);
+    }
+}
+
+/// Exact narrow boundaries must retain minimum middle-truncated arguments and
+/// agent ids, then drop them by priority while keeping `err` atomic and
+/// visible.
+#[test]
+fn tool_error_line_degrades_at_exact_priority_boundaries() {
+    use tau_proto::{ToolUseRange, ToolUseState, ToolUseStatus};
+
+    let display = render_tool_use_state(
+        "extraordinarily_long_tool",
+        &ToolUseState {
+            mode: "read-write-mode".into(),
+            args: "arguments-abcdefghijklmnopqrstuvwxyz".into(),
+            range: Some(ToolUseRange {
+                start: Some("2026-01-01".into()),
+                end: Some("2026-12-31".into()),
+            }),
+            info_chips: vec![
+                "@agent-abcdefghijklmnopqrstuvwxyz".into(),
+                "optional-information".into(),
+            ],
+            status: ToolUseStatus::Error,
+            status_text: "permission denied for a very long resource name".into(),
+            ..Default::default()
+        },
+    );
+    let block = render_tool_block(&cli_test_theme(), &display);
+
+    let at_all_minima = priority_header_text(&block, 25);
+    assert_eq!(at_all_minima, "ex┄l ar┄yz @a┄yz err: ┄me");
+
+    let without_agent = priority_header_text(&block, 24);
+    assert!(without_agent.contains("ar┄yz"), "{without_agent:?}");
+    assert!(!without_agent.contains('@'), "{without_agent:?}");
+    assert!(without_agent.contains("err:"), "{without_agent:?}");
+
+    let without_arguments = priority_header_text(&block, 18);
+    assert!(
+        !without_arguments.contains("ar┄yz"),
+        "{without_arguments:?}"
+    );
+    assert!(!without_arguments.contains('@'), "{without_arguments:?}");
+    assert!(without_arguments.contains("err:"), "{without_arguments:?}");
+
+    let status_only_detail_drop = priority_header_text(&block, 12);
+    assert!(status_only_detail_drop.ends_with(" err"));
+    assert!(!status_only_detail_drop.contains("permission"));
+
+    assert_eq!(priority_header_text(&block, 7), "");
+}
+
+/// Every documented truncatable tool category must enforce its configured
+/// maximum at a wide terminal rather than reverting to unbounded content.
+#[test]
+fn tool_line_truncation_maxima_cover_every_category() {
+    use tau_proto::{ToolUseRange, ToolUseState, ToolUseStatus};
+
+    let display = render_tool_use_state(
+        &"i".repeat(40),
+        &ToolUseState {
+            mode: "m".repeat(30),
+            args: "a".repeat(60),
+            range: Some(ToolUseRange {
+                start: Some("r".repeat(40)),
+                end: None,
+            }),
+            info_chips: vec![format!("@agent_{}", "g".repeat(40))],
+            status: ToolUseStatus::Error,
+            status_text: "d".repeat(60),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(display.suffixes[0].status, ToolStatus::Agent));
+    let header = priority_header_text(&render_tool_block(&cli_test_theme(), &display), 300);
+    let fields: Vec<&str> = header.split_whitespace().collect();
+
+    assert_eq!(fields[0].chars().count(), 32, "{header:?}");
+    assert_eq!(fields[1].chars().count(), 16, "{header:?}");
+    assert_eq!(fields[2].chars().count(), 48, "{header:?}");
+    assert_eq!(fields[3].chars().count(), 32, "{header:?}");
+    assert_eq!(fields[4].chars().count(), 32, "{header:?}");
+    assert_eq!(fields[5], "err:");
+    assert_eq!(fields[6].chars().count(), 46, "{header:?}");
+    for field in [
+        &fields[0], &fields[1], &fields[2], &fields[3], &fields[4], &fields[6],
+    ] {
+        assert!(field.contains('┄'), "{field:?} in {header:?}");
+    }
+}
+
+/// Mode and range retain their exact configured minima together, then the
+/// lower-priority range disappears cleanly one column below that boundary.
+#[test]
+fn tool_line_mode_and_range_minimum_boundaries_are_exact() {
+    use tau_proto::{ToolUseRange, ToolUseState, ToolUseStatus};
+
+    let display = render_tool_use_state(
+        "tool",
+        &ToolUseState {
+            mode: "mode-value".into(),
+            range: Some(ToolUseRange {
+                start: Some("range-value".into()),
+                end: None,
+            }),
+            status: ToolUseStatus::Success,
+            status_text: "ok".into(),
+            ..Default::default()
+        },
+    );
+    let block = render_tool_block(&cli_test_theme(), &display);
+    let at_minima = priority_header_text(&block, 17);
+    assert_eq!(at_minima, "tool m┄e ra┄.. ok");
+
+    let without_range = priority_header_text(&block, 16);
+    assert!(without_range.contains("mode"));
+    assert!(!without_range.contains("range"));
+    assert!(without_range.ends_with(" ok"));
+}
+
+/// Success and failure labels must both remain exact essential elements: a
+/// terminal too narrow for identity plus status renders no ambiguous tool row.
+#[test]
+fn tool_result_status_never_truncates_or_disappears_alone() {
+    use tau_proto::{ToolUseState, ToolUseStatus};
+
+    for (status, status_text, exact_width, expected) in [
+        (ToolUseStatus::Success, "ok", 7, "ab┄z ok"),
+        (ToolUseStatus::Error, "failure", 8, "ab┄z err"),
+    ] {
+        let display = render_tool_use_state(
+            "abcdefghijklmnopqrstuvwxyz",
+            &ToolUseState {
+                status,
+                status_text: status_text.into(),
+                ..Default::default()
+            },
+        );
+        let block = render_tool_block(&cli_test_theme(), &display);
+        assert_eq!(priority_header_text(&block, exact_width), expected);
+        assert_eq!(priority_header_text(&block, exact_width - 1), "");
+    }
+}
+
+/// Empty protocol labels must still produce explicit truthful lifecycle
+/// statuses so the essential status band cannot silently vanish.
+#[test]
+fn empty_tool_status_labels_receive_unambiguous_defaults() {
+    use tau_proto::{ToolUseState, ToolUseStatus};
+
+    for (status, expected) in [
+        (ToolUseStatus::Success, "ok"),
+        (ToolUseStatus::Warning, "warn"),
+        (ToolUseStatus::Error, "err"),
+        (
+            ToolUseStatus::InProgress,
+            tau_proto::PROGRESS_INDICATOR_TEXT,
+        ),
+    ] {
+        for supplied in [" \t ", "\u{200b}\u{200d}\u{fe0f}"] {
+            let display = render_tool_use_state(
+                "tool",
+                &ToolUseState {
+                    status,
+                    status_text: supplied.into(),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                display.suffixes.last().map(|suffix| suffix.text.as_str()),
+                Some(expected)
+            );
+            let header = priority_header_text(&render_tool_block(&cli_test_theme(), &display), 80);
+            assert_eq!(header, format!("tool {expected}"));
+        }
+    }
+}
+
+/// Tool-line truncation must measure wide graphemes in terminal columns and
+/// recompute from full immutable content when the same block is resized.
+#[test]
+fn tool_line_unicode_resize_restores_bounded_content() {
+    use tau_proto::{ToolUseState, ToolUseStatus};
+
+    let display = render_tool_use_state(
+        "read",
+        &ToolUseState {
+            args: "ab界cd界efghijklmnopqrstuvwxyz".into(),
+            status: ToolUseStatus::Success,
+            status_text: "ok".into(),
+            ..Default::default()
+        },
+    );
+    let block = render_tool_block(&cli_test_theme(), &display);
+    let wide = priority_header_text(&block, 40);
+    let narrow = priority_header_text(&block, 13);
+    assert!(wide.contains('界'));
+    assert!(narrow.contains('┄'));
+    assert!(narrow.ends_with(" ok"));
+    assert_eq!(priority_header_text(&block, 40), wide);
+}
+
+/// Untrusted tool fields must remain one row and pass through the terminal
+/// cell sanitizer while the adaptive header removes embedded line breaks.
+#[test]
+fn tool_line_preserves_control_character_safety() {
+    use tau_proto::{ToolUseState, ToolUseStatus};
+
+    let display = render_tool_use_state(
+        "unsafe\nname",
+        &ToolUseState {
+            args: "alpha\tbeta\u{1b}[2J\nomega".into(),
+            status: ToolUseStatus::Success,
+            status_text: "ok".into(),
+            ..Default::default()
+        },
+    );
+    let header = priority_header_text(&render_tool_block(&cli_test_theme(), &display), 80);
+
+    assert!(!header.contains('\n'));
+    assert!(!header.contains('\t'));
+    assert!(!header.contains('\u{1b}'));
+    assert!(header.contains("unsafe name"));
+    assert!(header.contains("alpha beta�[2J omega"));
+    assert!(header.ends_with(" ok"));
+}
+
 #[test]
 fn render_tool_use_state_keeps_range_separate_from_args() {
     use tau_proto::{ToolUseRange, ToolUseState, ToolUseStatus};
@@ -10179,31 +10519,20 @@ fn workdir_result_modes_render_consistently() {
     let rendered = render_tool_use_state("project_a__workdir", &display);
     let theme = cli_test_theme();
     let block = render_tool_block(&theme, &rendered);
-    let spans = block.content.spans();
-    let plain = spans
-        .iter()
-        .map(|span| span.text.as_str())
-        .collect::<String>();
-
+    let cells = priority_header_cells(&block, 120);
+    let plain: String = cells.iter().map(|cell| cell.ch).collect();
+    let mode_start = plain.find(" set ").expect("structural set mode") + 1;
+    let mode_style = cells[mode_start].style;
+    assert!(plain.contains("/segment/"));
+    assert!(plain.contains('┄'));
+    assert!(plain.trim_end().ends_with(" ok"));
     assert_eq!(
-        plain,
-        "project_a__workdir set /segment/segment/seg┄ent/segment/segment/ ok"
-    );
-    let mode_span = spans
-        .iter()
-        .find(|span| span.text == "set")
-        .expect("structural set mode");
-    assert_eq!(
-        mode_span.style,
+        mode_style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_MODE)
     );
     assert_ne!(
-        mode_span.style,
-        spans
-            .iter()
-            .find(|span| span.text.contains("/segment"))
-            .expect("compacted path")
-            .style
+        mode_style,
+        cells[plain.find("/segment").expect("compacted path")].style
     );
 }
 
@@ -10222,14 +10551,11 @@ fn running_shell_display_keeps_mode_separate_for_dedicated_style() {
     assert_eq!(rendered.args, "printf hello");
 
     let block = render_tool_block(&theme, &rendered);
-    let mode_span = block
-        .content
-        .spans()
-        .iter()
-        .find(|span| span.text == "rw")
-        .expect("mode span");
+    let cells = priority_header_cells(&block, 80);
+    let text: String = cells.iter().map(|cell| cell.ch).collect();
+    let mode_start = text.find(" rw ").expect("mode span") + 1;
     assert_eq!(
-        mode_span.style,
+        cells[mode_start].style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_MODE)
     );
 }
@@ -10252,14 +10578,11 @@ fn render_tool_block_paints_mode_with_dedicated_style() {
     assert_eq!(rendered.args, "printf hello");
 
     let block = render_tool_block(&theme, &rendered);
-    let mode_span = block
-        .content
-        .spans()
-        .iter()
-        .find(|span| span.text == "rw")
-        .expect("mode span");
+    let cells = priority_header_cells(&block, 80);
+    let text: String = cells.iter().map(|cell| cell.ch).collect();
+    let mode_start = text.find(" rw ").expect("mode span") + 1;
     assert_eq!(
-        mode_span.style,
+        cells[mode_start].style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_MODE)
     );
 }
@@ -10411,12 +10734,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     assert_eq!(texts, vec!["@engineer_1", "%2/3", "#133.4k/200k"]);
 
     let block = render_tool_block(&theme, &display);
-    let running = block
-        .content
-        .spans()
-        .iter()
-        .find(|span| span.text == "running")
-        .expect("running tool-name span");
+    let running = priority_header_cells(&block, 100)[0];
     assert_eq!(
         running.style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME),
@@ -10442,12 +10760,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     assert_eq!(display.tool_name, "watching");
     assert_eq!(texts, vec!["@engineer_1", "-> @leaf", "%2/3", "#67%"]);
     let block = render_tool_block(&theme, &display);
-    let watching = block
-        .content
-        .spans()
-        .iter()
-        .find(|span| span.text == "watching")
-        .expect("watching tool-name span");
+    let watching = priority_header_cells(&block, 100)[0];
     assert_eq!(
         watching.style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME)
@@ -10551,20 +10864,20 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
 
     let block = render_diff_tool_block(&cli_test_theme(), &display, &diff, true);
     let text: String = block
-        .content
+        .priority_line_body
         .spans()
         .iter()
         .map(|span| span.text.as_str())
         .collect();
 
-    assert!(text.contains("\n     unchanged();"));
+    assert!(text.starts_with("@@ -10,2 +10,2 @@\n     unchanged();"));
     assert!(text.contains("\n-    old();"));
     assert!(text.contains("\n+    new();"));
     assert!(text.contains("\n-let x = 1;\n+let x = 2;"));
     assert!(!text.contains("\n-     old();"));
     assert!(!text.contains("\n+     new();"));
     let removed_line = block
-        .content
+        .priority_line_body
         .spans()
         .iter()
         .find(|span| span.text == "-    old();")
@@ -10572,7 +10885,7 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
     assert_eq!(removed_line.style.fg, Some(tau_cli_term::Color::DarkRed));
 
     let added_line = block
-        .content
+        .priority_line_body
         .spans()
         .iter()
         .find(|span| span.text == "+    new();")
@@ -10580,7 +10893,7 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
     assert_eq!(added_line.style.fg, Some(tau_cli_term::Color::DarkGreen));
 
     let changed_removed = block
-        .content
+        .priority_line_body
         .spans()
         .iter()
         .find(|span| span.text == "1")
@@ -10589,7 +10902,7 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
     assert!(changed_removed.style.bold);
 
     let changed_added = block
-        .content
+        .priority_line_body
         .spans()
         .iter()
         .find(|span| span.text == "2")
@@ -10658,13 +10971,13 @@ fn render_multi_diff_tool_block_preserves_file_boundaries() {
     assert_eq!(suffixes, vec!["+1", "-1", "ok"]);
     let block = render_multi_diff_tool_block(&cli_test_theme(), &display, &files, true);
     let text: String = block
-        .content
+        .priority_line_body
         .spans()
         .iter()
         .map(|span| span.text.as_str())
         .collect();
 
-    assert!(text.contains("\n--- a.txt"));
+    assert!(text.starts_with("--- a.txt"));
     assert!(text.contains("\n+alpha"));
     assert!(text.contains("\n--- b.txt"));
     assert!(text.contains("\n-beta"));
@@ -10694,12 +11007,7 @@ fn fallback_error_status_is_abbreviated_only_by_renderer() {
 
     let rendered = render_tool_use_state("ls", &display);
     let block = render_tool_block(&cli_test_theme(), &rendered);
-    let text: String = block
-        .content
-        .spans()
-        .iter()
-        .map(|span| span.text.as_str())
-        .collect();
+    let text = priority_header_text(&block, 80);
 
     assert!(text.contains('┄'));
     assert!(!text.contains('…'));
@@ -10746,18 +11054,22 @@ fn render_tool_block_abbreviates_inline_args_and_error_but_preserves_payload() {
     };
     let rendered = render_tool_use_state("grep", &display);
     let block = render_tool_block(&cli_test_theme(), &rendered);
-    let text: String = block
-        .content
+    let header = priority_header_text(&block, 200);
+    let body: String = block
+        .priority_line_body
         .spans()
         .iter()
         .map(|span| span.text.as_str())
         .collect();
 
-    assert!(text.contains("LOG_MODULE_WALLETV2|┄-walletv2-client/src"));
-    assert!(text.contains("err: ripgrep error: ┄ error for operation"));
-    assert!(!text.contains(&display.args));
-    assert!(!text.contains(&display.status_text));
-    assert!(text.contains(&payload));
+    assert!(header.contains("LOG_MODULE_WALLETV2|"));
+    assert!(header.contains("walletv2-client/src"));
+    assert!(header.contains("err: ripgrep error:"));
+    assert!(header.contains("IO error for operation"));
+    assert_eq!(header.matches('┄').count(), 2);
+    assert!(!header.contains(&display.args));
+    assert!(!header.contains(&display.status_text));
+    assert!(body.contains(&payload));
 }
 
 #[test]

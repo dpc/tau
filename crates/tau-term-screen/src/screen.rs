@@ -689,14 +689,26 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
     };
     let fill = Cell::new(' ', fill_style);
 
-    let mut content_lines = if let Some(priority_line) = &block.priority_line {
-        vec![priority_line.layout(content_width, fill)]
+    let mut content_lines = Vec::new();
+    if let Some(priority_line) = &block.priority_line {
+        let priority_layout = priority_line.layout_with_fill(content_width, fill);
+        content_lines.push(priority_layout.row);
+        if priority_layout.required_items_fit && !block.priority_line_body.is_empty() {
+            content_lines.extend(
+                layout_lines()
+                    .content(&block.priority_line_body)
+                    .width(content_width)
+                    .call(),
+            );
+        }
     } else {
-        layout_lines()
-            .content(&block.content)
-            .width(content_width)
-            .call()
-    };
+        content_lines.extend(
+            layout_lines()
+                .content(&block.content)
+                .width(content_width)
+                .call(),
+        );
+    }
     if block.priority_line.is_none()
         && block.align == Align::Left
         && !block.right_content.is_empty()

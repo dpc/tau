@@ -405,6 +405,12 @@ pub struct StyledBlock {
     /// When present, `layout_block` uses this instead of [`Self::content`] and
     /// [`Self::right_content`].
     pub priority_line: Option<crate::PriorityLine>,
+    /// Optional ordinary body rendered after [`Self::priority_line`].
+    ///
+    /// This stays empty unless a one-line adaptive header owns related
+    /// multi-line detail content. Layout also hides this body when the
+    /// priority line's configured essential band cannot fit.
+    pub priority_line_body: StyledText,
     /// Optional background color for the content area and its padding.
     pub bg: Option<Color>,
     /// Horizontal alignment applied to primary content.
@@ -428,6 +434,7 @@ impl StyledBlock {
             content: content.into(),
             right_content: StyledText::new(),
             priority_line: None,
+            priority_line_body: StyledText::new(),
             bg: None,
             align: Align::Left,
             margin_left: 0,
@@ -472,6 +479,15 @@ impl StyledBlock {
     /// Returns this block with priority-based single-line content.
     pub fn priority_line(mut self, line: crate::PriorityLine) -> Self {
         self.priority_line = Some(line);
+        self
+    }
+
+    /// Returns this block with ordinary body content below its priority line.
+    ///
+    /// The body has no effect unless [`Self::priority_line`] is present, and
+    /// it remains hidden whenever that line's essential band fails closed.
+    pub fn priority_line_body(mut self, body: impl Into<StyledText>) -> Self {
+        self.priority_line_body = body.into();
         self
     }
 
