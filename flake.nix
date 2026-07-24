@@ -469,55 +469,6 @@
           cp -r ${./site}/* $out/share/tau-agent-site/
         '';
 
-        tauPrebuiltVersion = "0.1.0";
-
-        tauPrebuiltSources = {
-          x86_64-linux = {
-            target = "x86_64-unknown-linux-gnu";
-            hash = "sha256-PfBeiNCY5jTF8ekZeyBdm8tcYm2FBuJm1c455V+CrUU=";
-          };
-          aarch64-linux = {
-            target = "aarch64-unknown-linux-gnu";
-            hash = "sha256-0mcyl4jcdRVwzr79xlTpRlWP3G0x/Le2neEcsa/GhIo=";
-          };
-        };
-
-        tauPrebuilt =
-          let
-            source = tauPrebuiltSources.${system};
-          in
-          pkgs.stdenv.mkDerivation {
-            pname = projectName;
-            version = tauPrebuiltVersion;
-
-            src = pkgs.fetchurl {
-              url = "https://github.com/maan2003/tau/releases/download/nightly/tau-${tauPrebuiltVersion}-${source.target}.tar.gz";
-              inherit (source) hash;
-            };
-
-            dontBuild = true;
-
-            nativeBuildInputs = [ pkgs.autoPatchelfHook ];
-            buildInputs = [
-              pkgs.glibc
-              pkgs.stdenv.cc.cc.lib
-            ];
-
-            installPhase = ''
-              runHook preInstall
-
-              tau_binary=$(find . -type f -name tau -perm -0100 | head -n 1)
-              if [ -z "$tau_binary" ]; then
-                echo "error: tau binary not found in prebuilt archive" >&2
-                exit 1
-              fi
-
-              install -Dm755 "$tau_binary" $out/bin/tau
-
-              runHook postInstall
-            '';
-          };
-
         release-archives =
           pkgs.runCommand "${projectName}-release-archives"
             {
@@ -563,9 +514,6 @@
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           inherit release-archives;
-        }
-        // pkgs.lib.optionalAttrs (builtins.hasAttr system tauPrebuiltSources) {
-          prebuilt = tauPrebuilt;
         };
 
         ci = {
