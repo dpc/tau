@@ -1223,15 +1223,29 @@ pub fn run_harness_daemon_with_internal_tools(
     options: ServeOptions,
     internal_tool_handlers: crate::InternalToolHandlers,
 ) -> Result<(), HarnessError> {
+    let runtime_instance_id = runtime_dir::HarnessInstanceId::mint();
     run_harness_daemon_with_internal_tools_and_initial_client(
         project_root,
         config,
         eager_session_id,
         options,
         internal_tool_handlers,
-        None,
-        None,
+        RuntimeHarnessLaunch {
+            runtime_instance_id,
+            initial_client: None,
+            initial_client_error_stream: None,
+        },
     )
+}
+
+/// Runtime-path identity and optional initial-client transport for one daemon.
+struct RuntimeHarnessLaunch {
+    /// Random discriminator shared with a spawning CLI when present.
+    runtime_instance_id: runtime_dir::HarnessInstanceId,
+    /// Initial UI accepted directly over inherited stdio when present.
+    initial_client: Option<InitialClient>,
+    /// Best-effort startup error transport for the initial UI.
+    initial_client_error_stream: Option<InitialClientStartupErrorOutput>,
 }
 
 fn run_harness_daemon_with_internal_tools_and_initial_client(
@@ -1240,15 +1254,23 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     eager_session_id: &str,
     options: ServeOptions,
     internal_tool_handlers: crate::InternalToolHandlers,
-    initial_client: Option<InitialClient>,
-    mut initial_client_error_stream: Option<InitialClientStartupErrorOutput>,
+    launch: RuntimeHarnessLaunch,
 ) -> Result<(), HarnessError> {
+    let RuntimeHarnessLaunch {
+        runtime_instance_id,
+        initial_client,
+        mut initial_client_error_stream,
+    } = launch;
     let project_root = canonical_project_root(project_root)?;
     validate_pre_resolved_serve_options(&options, config)?;
     let startup_started_at = Instant::now();
     tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), eager_session_id, "starting harness daemon");
     let mut harness_paths = notify_startup_error(
-        runtime_dir::prepare_harness_paths(&project_root, eager_session_id),
+        runtime_dir::prepare_harness_paths_for_instance(
+            &project_root,
+            eager_session_id,
+            &runtime_instance_id,
+        ),
         &mut initial_client_error_stream,
     )?;
     tracing::debug!(target: "tau_harness::startup", harness_path = %harness_paths.path().display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "prepared harness paths");
@@ -1381,6 +1403,27 @@ impl ComponentLaunch {
             }
         }
     }
+
+    /// Resolves the runtime identity used by this component launch.
+    fn runtime_instance_id(
+        &self,
+        transport: Option<std::ffi::OsString>,
+    ) -> Result<runtime_dir::HarnessInstanceId, std::io::Error> {
+        match self {
+            Self::Direct(_) => Ok(runtime_dir::HarnessInstanceId::mint()),
+            Self::SpawnedInitialUiStdio => match transport {
+                Some(value) => {
+                    runtime_dir::HarnessInstanceId::parse(value.into_string().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "harness runtime instance id is not UTF-8",
+                        )
+                    })?)
+                }
+                None => Ok(runtime_dir::HarnessInstanceId::mint()),
+            },
+        }
+    }
 }
 
 fn run_component_with_internal_tools_and_initial_client(
@@ -1433,6 +1476,8 @@ fn run_component_with_internal_tools_and_initial_client(
         } else {
             tau_core::SessionPersistenceMode::Durable
         };
+        let runtime_instance_id =
+            launch.runtime_instance_id(std::env::var_os(runtime_dir::HARNESS_INSTANCE_ID_ENV))?;
         run_harness_daemon_with_internal_tools_and_initial_client(
             &project_root,
             &config,
@@ -1447,8 +1492,11 @@ fn run_component_with_internal_tools_and_initial_client(
                 ..Default::default()
             },
             internal_tool_handlers,
-            initial_client,
-            initial_client_error_output.take(),
+            RuntimeHarnessLaunch {
+                runtime_instance_id,
+                initial_client,
+                initial_client_error_stream: initial_client_error_output.take(),
+            },
         )
         .map_err(Into::into)
     })();

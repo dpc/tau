@@ -40,8 +40,8 @@ Tau follows the XDG directory layout on Linux:
   - `policy.cbor` — persisted socket-client policy decisions.
   - `auth.d/<provider>.json` — provider credentials; `auth.json` may exist as legacy credentials.
 - Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`.
-  - `<pid>.sock` — daemon socket.
-  - `<pid>.json` — discovery metadata with pid, project root, version, and the
+  - `<pid>-<instance>.sock` — daemon socket.
+  - `<pid>-<instance>.json` — discovery metadata with pid, project root, version, and the
     daemon's current active `session_id` (updated after successful `:session new`).
 
 Use `tau init` to create starter `cli.yaml` and `harness.yaml` files.

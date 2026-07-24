@@ -20,8 +20,8 @@ Common startup flow:
 
 1. The CLI chooses or resumes a session id.
 2. The CLI creates a child `tau component harness` process and passes session metadata through `TAU_SESSION_ID` and `TAU_SESSION_STATUS`.
-3. The harness creates a per-process runtime socket at `${XDG_RUNTIME_DIR}/tau/harnesses/<pid>.sock` (or the `/tmp/tau-$USER/harnesses/` fallback).
-4. After startup is ready for discovery, the harness writes `${XDG_RUNTIME_DIR}/tau/harnesses/<pid>.json` metadata: pid, project root, Tau version, and current active session id.
+3. The harness creates a per-process runtime socket at `${XDG_RUNTIME_DIR}/tau/harnesses/<pid>-<instance>.sock` (or the `/tmp/tau-$USER/harnesses/` fallback). The random instance suffix prevents collisions when separate PID namespaces share one runtime directory.
+4. After startup is ready for discovery, the harness writes `${XDG_RUNTIME_DIR}/tau/harnesses/<pid>-<instance>.json` metadata: pid, project root, Tau version, and current active session id.
 5. Later UI clients discover the daemon through that metadata and connect to the runtime-dir Unix socket. When `:session new` succeeds inside the same daemon, the metadata `session_id` is updated to the new active session.
 
 The runtime-dir harness path always binds its generated socket path itself. It does not use socket activation, because Tau attach/discovery expects the socket to exist at the generated runtime-dir path.

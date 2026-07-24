@@ -405,6 +405,10 @@ features must not be expanded into slowloris, connection-flood, or sandbox
 hardening without an approved threat-model design.
 
 Runtime discovery is non-destructive under the cooperative local boundary.
+Daemon runtime pairs use `<pid>-<16-lowercase-hex-instance>` stems so separate
+PID namespaces sharing one runtime directory cannot collide on an active path.
+A CLI-owned launch mints one instance value, passes its validated form to the
+child, and derives the same path itself; direct launches mint locally.
 Checking a metadata PID, socket reachability, and pathname identity cannot be
 atomic with PID reuse and a daemon replacing that pathname, so scanners must
 not unlink apparently stale lifecycle pairs. Owned CLI shutdown closes the
@@ -412,8 +416,8 @@ initial transport first so the daemon normally removes its own pair, with
 bounded forced termination retained as a last-resort availability safeguard.
 Targeted session lookup bounds raw traversal, matching candidates, metadata
 bytes, and total time and fails closed when uniqueness remains unproven,
-including unreadable conventional metadata owned by a live or
-liveness-unknown PID.
+including unreadable current PID-prefixed or legacy numeric metadata owned by
+a live or liveness-unknown PID.
 Local running-session listing isolates bounded raw traversal from its caller and
 uses runtime paths only as socket candidates. Each responsive daemon returns its
 in-memory current session id and immutable canonical startup project root

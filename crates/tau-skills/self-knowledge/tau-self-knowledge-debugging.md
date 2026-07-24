@@ -39,8 +39,8 @@ Tau follows the XDG directories:
   - `meta.json` — agent metadata such as cwd, creation time, and latest prompt preview.
   - `lock` — flock used while the daemon has the agent loaded for writing.
 - Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`
-  - `<pid>.sock` — Unix socket for clients.
-  - `<pid>.json` — daemon discovery metadata containing pid, project root,
+  - `<pid>-<instance>.sock` — Unix socket for clients.
+  - `<pid>-<instance>.json` — daemon discovery metadata containing pid, project root,
     Tau version, and the daemon's current active `session_id`; `:session new`
     updates this field after the daemon switches sessions successfully.
 

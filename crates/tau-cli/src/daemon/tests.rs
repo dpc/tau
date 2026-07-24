@@ -216,6 +216,40 @@ fn daemon_command_clears_socket_activation_env() {
     }
 }
 
+/// Ensures a CLI-managed harness spawn receives the exact random instance id
+/// that the parent uses to predict its later-attach runtime socket path.
+#[test]
+fn daemon_command_and_parent_path_share_runtime_instance_id() {
+    let mut command = build_daemon_command(DaemonCommandSpec {
+        tau_binary: Path::new("tau"),
+        session_id: "session-1",
+        session_status: SessionLaunchStatus::New,
+        stdout: Stdio::null(),
+        stderr: Stdio::null(),
+        stdin: Stdio::null(),
+        startup_role: None,
+        cli_overrides: DaemonCliOverrides {
+            role: &[],
+            extension: &[],
+            extension_environment: None,
+            harness_config: &[],
+        },
+        ephemeral: false,
+    });
+
+    let instance_id = configure_runtime_instance(&mut command);
+    assert!(command.get_envs().any(|(key, value)| {
+        key == tau_harness::runtime_dir::HARNESS_INSTANCE_ID_ENV
+            && value.and_then(std::ffi::OsStr::to_str) == Some(instance_id.as_str())
+    }));
+    assert!(
+        tau_harness::runtime_dir::harness_path_for_process(205, &instance_id)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| name == format!("205-{}", instance_id.as_str()))
+    );
+}
+
 /// Guards both sides of the ephemeral child-process environment contract: an
 /// ephemeral launch opts the harness child in, while a normal launch explicitly
 /// clears any inherited marker.

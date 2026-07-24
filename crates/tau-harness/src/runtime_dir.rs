@@ -3,8 +3,8 @@
 //! Each discoverable harness daemon gets one socket plus one adjacent metadata
 //! file under `$XDG_RUNTIME_DIR/tau/harnesses/`:
 //!
-//! - `<pid>.sock` — Unix socket for client connections
-//! - `<pid>.json` — daemon metadata used for discovery
+//! - `<pid>-<instance>.sock` — Unix socket for client connections
+//! - `<pid>-<instance>.json` — daemon metadata used for discovery
 //!
 //! Metadata-based discovery enumerates `*.sock`, reads matching `*.json`, then
 //! verifies liveness. Running-session listing instead treats sockets as
@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 const HARNESSES_DIR: &str = "harnesses";
 const SOCK_EXTENSION: &str = "sock";
 const METADATA_EXTENSION: &str = "json";
+const HARNESS_INSTANCE_ID_HEX_LEN: usize = 16;
 const SESSION_DISCOVERY_MAX_CANDIDATES: usize = 128;
 const SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES: usize = 4_096;
 const SESSION_DISCOVERY_MAX_METADATA_BYTES: u64 = 16 * 1024;
@@ -35,7 +36,58 @@ const DAEMON_METADATA_VERSION: u32 = 0;
 /// Maximum number of sessions returned by one discovery request.
 pub const SESSION_DISCOVERY_MAX_RESULTS: usize = 50;
 
+/// Private CLI-to-harness transport for the minted runtime instance id.
+pub const HARNESS_INSTANCE_ID_ENV: &str = "TAU_HARNESS_INSTANCE_ID";
+
 static ACTIVE_DISCOVERY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Random process-instance discriminator used in one daemon runtime path.
+///
+/// The process id remains in the path for diagnostics, while this discriminator
+/// prevents unrelated PID namespaces that share an XDG runtime directory from
+/// selecting the same socket pathname.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarnessInstanceId {
+    /// Fixed-width lowercase hexadecimal discriminator.
+    value: String,
+}
+
+impl HarnessInstanceId {
+    /// Mints a new random runtime instance discriminator.
+    #[must_use]
+    pub fn mint() -> Self {
+        Self {
+            value: format!("{:016x}", rand::random::<u64>()),
+        }
+    }
+
+    /// Parses the private instance-id transport supplied by a spawning CLI.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid input when the value is not exactly 16 lowercase
+    /// hexadecimal ASCII characters.
+    pub(crate) fn parse(value: impl Into<String>) -> Result<Self, std::io::Error> {
+        let value = value.into();
+        if value.len() != HARNESS_INSTANCE_ID_HEX_LEN
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid harness runtime instance id",
+            ));
+        }
+        Ok(Self { value })
+    }
+
+    /// Returns the serialized instance discriminator.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+}
 
 /// Authoritative current identity reported by one responsive harness.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -218,6 +270,12 @@ thread_local! {
 #[must_use]
 pub fn harnesses_dir() -> PathBuf {
     root_runtime_dir().join(HARNESSES_DIR)
+}
+
+/// Returns the runtime path stem for one PID and process instance.
+#[must_use]
+pub fn harness_path_for_process(pid: u32, instance_id: &HarnessInstanceId) -> PathBuf {
+    harnesses_dir().join(format!("{pid}-{}", instance_id.as_str()))
 }
 
 /// Returns the socket path for a harness path stem.
@@ -692,12 +750,21 @@ pub fn prepare_harness_paths(
     project_root: &Path,
     session_id: &str,
 ) -> Result<HarnessPaths, std::io::Error> {
+    prepare_harness_paths_for_instance(project_root, session_id, &HarnessInstanceId::mint())
+}
+
+/// Creates paths and metadata for one explicitly identified process instance.
+pub(crate) fn prepare_harness_paths_for_instance(
+    project_root: &Path,
+    session_id: &str,
+    instance_id: &HarnessInstanceId,
+) -> Result<HarnessPaths, std::io::Error> {
     let pid = std::process::id();
     let root_dir = root_runtime_dir();
     ensure_private_runtime_dir(&root_dir)?;
     let harnesses_dir = root_dir.join(HARNESSES_DIR);
     ensure_private_runtime_dir(&harnesses_dir)?;
-    let path = harnesses_dir.join(pid.to_string());
+    let path = harness_path_for_process(pid, instance_id);
     Ok(HarnessPaths {
         path,
         metadata: DaemonMetadata {
@@ -1088,7 +1155,7 @@ pub(crate) fn find_harness_for_session_until(
                     return Err(incomplete_or_ambiguous(session_id, &matches));
                 }
                 None => {
-                    if numeric_stem_liveness(&harness_path)
+                    if harness_stem_liveness(&harness_path)
                         .is_some_and(|liveness| liveness != ProcessLiveness::Dead)
                     {
                         unresolved_match = true;
@@ -1173,12 +1240,17 @@ fn incomplete_or_ambiguous(
     }
 }
 
-/// Returns liveness only for a conventional numeric daemon path stem.
-fn numeric_stem_liveness(harness_path: &Path) -> Option<ProcessLiveness> {
+/// Returns liveness only for a conventional PID-prefixed daemon path stem.
+fn harness_stem_liveness(harness_path: &Path) -> Option<ProcessLiveness> {
     harness_path
         .file_name()
         .and_then(|stem| stem.to_str())
-        .and_then(|stem| stem.parse::<u32>().ok())
+        .and_then(|stem| {
+            stem.split_once('-')
+                .map_or(stem, |(pid, _)| pid)
+                .parse::<u32>()
+                .ok()
+        })
         .filter(|pid| *pid > 0)
         .map(process_liveness)
 }
@@ -1710,6 +1782,39 @@ mod tests {
         );
     }
 
+    /// Models two daemons that report the same PID from separate PID namespaces
+    /// and ensures their shared runtime directory still receives distinct
+    /// sockets.
+    #[test]
+    fn process_instance_ids_disambiguate_equal_pid_socket_paths() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let first_instance =
+            HarnessInstanceId::parse("0000000000000001").expect("first instance id");
+        let second_instance =
+            HarnessInstanceId::parse("0000000000000002").expect("second instance id");
+
+        let first = prepare_harness_paths_for_instance(&project_root, "first", &first_instance)
+            .expect("first paths");
+        let second = prepare_harness_paths_for_instance(&project_root, "second", &second_instance)
+            .expect("second paths");
+        let _first_listener =
+            UnixListener::bind(first.socket_path()).expect("first same-PID socket");
+        let _second_listener =
+            UnixListener::bind(second.socket_path()).expect("second same-PID socket");
+
+        assert_ne!(first.path(), second.path());
+        assert!(
+            first
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&format!("{}-", std::process::id())))
+        );
+    }
+
     /// Ensures running-session listing derives lifecycle from responsive daemon
     /// memory rather than persisted sessions, runtime metadata, or stale paths.
     #[test]
@@ -2189,8 +2294,8 @@ mod tests {
         ));
     }
 
-    /// A partial live-PID metadata rewrite may hide a second claimant, so one
-    /// valid live match is not enough to claim uniqueness.
+    /// A partial metadata rewrite under a canonical live-PID instance stem may
+    /// hide a second claimant, so one valid live match cannot prove uniqueness.
     #[test]
     fn find_harness_for_session_fails_closed_for_malformed_live_metadata() {
         let temp = TempDir::new().expect("temp runtime");
@@ -2201,7 +2306,8 @@ mod tests {
         let _reachable_listener =
             UnixListener::bind(socket_path(&reachable)).expect("reachable socket");
         write_peer_metadata(&reachable, "same-session", temp.path(), true);
-        let unresolved = dir.join(std::process::id().to_string());
+        let instance = HarnessInstanceId::parse("0123456789abcdef").expect("canonical instance id");
+        let unresolved = harness_path_for_process(std::process::id(), &instance);
         let _unresolved_listener =
             UnixListener::bind(socket_path(&unresolved)).expect("unresolved socket");
         std::fs::write(metadata_path(&unresolved), b"{\"session_id\":").expect("partial metadata");
@@ -2214,8 +2320,8 @@ mod tests {
         assert!(metadata_path(&unresolved).exists());
     }
 
-    /// A symlinked live-PID metadata record is never followed or ignored when
-    /// doing so could hide a second session claimant.
+    /// A symlinked legacy numeric live-PID metadata record is never followed or
+    /// ignored when doing so could hide a second session claimant.
     #[cfg(unix)]
     #[test]
     fn find_harness_for_session_fails_closed_for_symlinked_live_metadata() {

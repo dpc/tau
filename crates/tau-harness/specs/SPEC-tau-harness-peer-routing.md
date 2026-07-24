@@ -35,9 +35,11 @@ metadata PID is live or liveness-unknown, ambiguous catalogs, matching-candidate
 exhaustion, raw-entry-budget exhaustion, and deadline expiry fail closed; two
 successfully probed claimants establish ambiguity even if the scan is otherwise
 incomplete. Unreadable, malformed, non-regular, symlinked, or oversized metadata
-at a conventional numeric stem leaves uniqueness unresolved when that PID is
-live or liveness-unknown. Definitely-dead numeric stems and non-lifecycle-shaped
-filenames may be ignored non-destructively. Outbound and inbound socket jobs use
+at a PID-prefixed stem (`<pid>-...`, canonically `<pid>-<instance>`) or a legacy
+numeric `<pid>` stem leaves uniqueness unresolved when that PID is live or
+liveness-unknown. Definitely-dead PID-prefixed and legacy numeric stems, plus
+non-lifecycle-shaped filenames, may be ignored non-destructively. Outbound and
+inbound socket jobs use
 bounded global admission and absolute deadlines. Potentially blocking runtime lookup is
 isolated behind a separate 16-job non-queued lease; a stalled storage worker
 retains that lease after caller timeout so repeated stalls remain bounded. A 64

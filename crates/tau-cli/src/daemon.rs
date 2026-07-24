@@ -327,7 +327,7 @@ fn start_daemon(
     let tau_binary = std::env::current_exe()?;
     tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
 
-    let spawn_result = build_daemon_command(DaemonCommandSpec {
+    let mut command = build_daemon_command(DaemonCommandSpec {
         tau_binary: &tau_binary,
         session_id,
         session_status,
@@ -337,13 +337,14 @@ fn start_daemon(
         startup_role,
         cli_overrides,
         ephemeral,
-    })
-    .spawn();
+    });
+    let runtime_instance_id = configure_runtime_instance(&mut command);
+    let spawn_result = command.spawn();
 
     let mut child = spawn_result?;
 
     tracing::debug!(target: "tau_cli::startup", pid = child.id(), "harness daemon spawned");
-    let harness_path = runtime_dir::harnesses_dir().join(child.id().to_string());
+    let harness_path = runtime_dir::harness_path_for_process(child.id(), &runtime_instance_id);
     let stdin = child
         .stdin
         .take()
@@ -357,6 +358,13 @@ fn start_daemon(
         harness_path,
         initial_ui: Some(InitialUiStdio { stdin, stdout }),
     })
+}
+
+/// Assigns one random runtime identity to both sides of a CLI-managed spawn.
+fn configure_runtime_instance(command: &mut Command) -> runtime_dir::HarnessInstanceId {
+    let instance_id = runtime_dir::HarnessInstanceId::mint();
+    command.env(runtime_dir::HARNESS_INSTANCE_ID_ENV, instance_id.as_str());
+    instance_id
 }
 
 struct DaemonCommandSpec<'a> {
