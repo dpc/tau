@@ -966,6 +966,9 @@ impl Harness {
         if !matches!(state, Some(crate::agent::ActivationDispatchState::None)) {
             return;
         }
+        if !self.agent_can_start_deferred_inference_dispatch(cid) {
+            return;
+        }
         if !self.validate_prompt_render_for_dispatch(cid) {
             return;
         }
@@ -1047,6 +1050,66 @@ impl Harness {
                 activation_through: None,
                 committed_activation: false,
             });
+    }
+
+    /// Whether an ordinary deferred obligation may create its durable
+    /// checkpoint.
+    ///
+    /// A committed provider response can synchronously activate a continuation
+    /// before its outer handler changes the live turn projection from
+    /// `AgentThinking`; that response has already released dispatch ownership,
+    /// so requiring a projected `Idle` state here would strand valid
+    /// message and tool-completion continuations. A foreground tool round
+    /// is different: `send_prompt_to_agent_for` explicitly refuses it, so
+    /// checkpointing would create a durable dispatch with no possible
+    /// provider request.
+    fn agent_can_start_deferred_inference_dispatch(&self, cid: &AgentId) -> bool {
+        self.agent_context_ready_for(cid)
+            && self.agents.get(cid).is_some_and(|agent| {
+                !agent.terminating
+                    && matches!(
+                        agent.activation_dispatch,
+                        crate::agent::ActivationDispatchState::None
+                    )
+                    && !matches!(
+                        agent.turn_state,
+                        crate::agent::AgentTurnState::ToolsRunning { .. }
+                    )
+                    && !self.agent_has_open_foreground_tool_round(cid)
+            })
+    }
+
+    fn same_deferred_prompt_dispatch(
+        left: &DeferredPromptDispatch,
+        right: &DeferredPromptDispatch,
+    ) -> bool {
+        left.cid == right.cid
+            && left.activation_cut == right.activation_cut
+            && left.activation_through == right.activation_through
+            && left.committed_activation == right.committed_activation
+    }
+
+    fn deferred_prompt_dispatch_is_actionable(&self, deferred: &DeferredPromptDispatch) -> bool {
+        let selected =
+            !deferred.committed_activation || self.deferred_activation_is_selected(deferred);
+        if !selected {
+            return false;
+        }
+        if !self.agents.contains_key(&deferred.cid) {
+            return true;
+        }
+        let owner_can_advance = self.agents.get(&deferred.cid).is_some_and(|agent| {
+            (matches!(
+                agent.activation_dispatch,
+                crate::agent::ActivationDispatchState::Running { .. }
+            ) && !agent.terminating
+                && self.agent_context_ready_for(&deferred.cid))
+                || self.agent_can_start_deferred_inference_dispatch(&deferred.cid)
+        });
+        owner_can_advance
+            && !self
+                .pending_agent_publish_completions
+                .contains_key(&deferred.cid)
     }
 
     /// Returns the runtime-selected durable head for one loaded agent.
@@ -1593,11 +1656,14 @@ impl Harness {
     /// idle.
     ///
     /// Dormant sibling obligations remain queued. Not-ready agents, blocked
-    /// ownership, and checkpoint ownership stop draining without consumption.
+    /// ownership, and checkpoint ownership remain queued without consumption,
+    /// while runnable obligations for other agents continue in the same bounded
+    /// scan.
     /// A committed activation remains queued until its checkpoint or standalone
     /// start commits and acknowledges every covered selected-branch watermark;
     /// a rejected successor therefore remains retryable.
     pub(crate) fn drain_publish_idle_dispatches(&mut self) {
+        let mut attempted = Vec::new();
         while self.publish_chain_is_idle() {
             for index in 0..self.pending_publish_idle_dispatches.len() {
                 let needs_binding = self.pending_publish_idle_dispatches[index]
@@ -1617,8 +1683,16 @@ impl Harness {
             let Some(index) = self
                 .pending_publish_idle_dispatches
                 .iter()
-                .position(|deferred| {
-                    !deferred.committed_activation || self.deferred_activation_is_selected(deferred)
+                .enumerate()
+                .find_map(|(index, deferred)| {
+                    if attempted
+                        .iter()
+                        .any(|prior| Self::same_deferred_prompt_dispatch(prior, deferred))
+                    {
+                        return None;
+                    }
+                    self.deferred_prompt_dispatch_is_actionable(deferred)
+                        .then_some(index)
                 })
             else {
                 break;
@@ -1628,21 +1702,6 @@ impl Harness {
             if !self.agents.contains_key(&cid) {
                 self.pending_publish_idle_dispatches.remove(index);
                 continue;
-            }
-            if self.agents.get(&cid).is_some_and(|agent| {
-                agent.terminating
-                    || matches!(
-                        agent.activation_dispatch,
-                        crate::agent::ActivationDispatchState::AwaitingCheckpoint { .. }
-                            | crate::agent::ActivationDispatchState::Blocked { .. }
-                            | crate::agent::ActivationDispatchState::DispatchUncertain { .. }
-                    )
-            }) || self.pending_agent_publish_completions.contains_key(&cid)
-            {
-                break;
-            }
-            if !self.agent_context_ready_for(&cid) {
-                break;
             }
             if !deferred.committed_activation {
                 self.pending_publish_idle_dispatches.remove(index);
@@ -1670,13 +1729,15 @@ impl Harness {
             }
             self.checkpoint_or_send_prompt(&cid, deferred.activation_cut);
             if deferred.committed_activation
-                && self.pending_publish_idle_dispatches.iter().any(|queued| {
-                    queued.cid == cid
-                        && queued.committed_activation
-                        && queued.activation_through == deferred.activation_through
-                })
+                && self
+                    .pending_publish_idle_dispatches
+                    .iter()
+                    .any(|queued| Self::same_deferred_prompt_dispatch(queued, &deferred))
             {
-                break;
+                if self.semantic_storage_fault.is_some() {
+                    break;
+                }
+                attempted.push(deferred);
             }
         }
     }

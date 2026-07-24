@@ -4316,6 +4316,54 @@ fn wait_input_call(call_id: &str) -> AgentToolCall {
     }
 }
 
+fn provider_input_wait_response(
+    prompt: &tau_proto::AgentPromptCreated,
+    call_id: &str,
+    timeout_minutes: u64,
+) -> ProviderResponseFinished {
+    provider_tool_response(
+        prompt,
+        call_id,
+        "wait",
+        CborValue::Map(vec![(
+            CborValue::Text("timeout_minutes".to_owned()),
+            CborValue::Integer(timeout_minutes.into()),
+        )]),
+    )
+}
+
+fn provider_tool_response(
+    prompt: &tau_proto::AgentPromptCreated,
+    call_id: &str,
+    tool_name: &str,
+    arguments: CborValue,
+) -> ProviderResponseFinished {
+    ProviderResponseFinished {
+        agent_prompt_id: prompt.agent_prompt_id.clone(),
+        agent_id: prompt.agent_id.clone(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: call_id.into(),
+            name: ToolName::new(tool_name),
+            tool_type: tau_proto::ToolType::Function,
+            arguments,
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
 /// Builds a terminal error fixture for dispatch and interception tests.
 pub(super) fn tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
@@ -13806,6 +13854,309 @@ fn readiness_deferred_linear_activations_share_one_checkpoint() {
     assert!(h.pending_publish_idle_dispatches.is_empty());
 }
 
+/// One selected deferred obligation with uncertain ownership must not become a
+/// global agent slot that blocks a later runnable agent.
+#[test]
+fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let blocked_cid = ensure_test_user_agent(&mut h);
+    let runnable_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let blocked_agent_id = durable_agent_id_for_conversation(&h, &blocked_cid);
+    let runnable_agent_id = durable_agent_id_for_conversation(&h, &runnable_cid);
+    let context_provider = tau_proto::ConnectionId::from("deferred-fairness-context");
+    for agent_id in [&blocked_agent_id, &runnable_agent_id] {
+        h.pending_agent_context_ready.insert(
+            agent_id.clone(),
+            std::collections::HashSet::from([context_provider.clone()]),
+        );
+    }
+
+    h.dispatch_prompt_for_agent(
+        &blocked_cid,
+        PendingPrompt::user("blocked activation".to_owned()),
+    )
+    .expect("defer blocked activation");
+    h.dispatch_prompt_for_agent(
+        &runnable_cid,
+        PendingPrompt::user("runnable activation".to_owned()),
+    )
+    .expect("defer runnable activation");
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
+    assert_eq!(h.pending_publish_idle_dispatches[0].cid, blocked_cid);
+    assert_eq!(h.pending_publish_idle_dispatches[1].cid, runnable_cid);
+    let blocked_obligation = h.pending_publish_idle_dispatches[0].clone();
+    let runnable_obligation = h.pending_publish_idle_dispatches[1].clone();
+    h.pending_agent_context_ready.remove(&blocked_agent_id);
+    h.pending_agent_context_ready.remove(&runnable_agent_id);
+    h.agents
+        .get_mut(&blocked_cid)
+        .expect("blocked agent")
+        .activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
+        owner: crate::agent::InferenceCheckpointOwner::Inference,
+        agent_prompt_id: "ap-blocked-uncertain".into(),
+        through: blocked_obligation
+            .activation_through
+            .expect("blocked activation watermark"),
+        model: Some("test/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: blocked_obligation.activation_cut,
+    };
+
+    h.drain_publish_idle_dispatches();
+
+    let events = event_log_events(&h);
+    assert!(
+        events.iter().all(
+            |event| !matches!(event, Event::AgentInferenceDispatchStarted(started)
+                if started.agent_id == blocked_agent_id)
+        ),
+        "blocked agent must not receive another checkpoint"
+    );
+    let runnable_checkpoints = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_id == runnable_agent_id =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(runnable_checkpoints.len(), 1);
+    let runnable_checkpoint = runnable_checkpoints[0];
+    assert_eq!(
+        runnable_checkpoint.through,
+        runnable_obligation
+            .activation_through
+            .expect("runnable activation watermark")
+    );
+    assert_eq!(
+        runnable_checkpoint.activation_cut,
+        runnable_obligation.activation_cut
+    );
+    assert_eq!(runnable_checkpoint.model, Some("test/model".into()));
+    assert_eq!(
+        runnable_checkpoint.operation,
+        Some(tau_proto::PromptOperation::Inference)
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentPromptStarted(started)
+            if started.agent_prompt_id == runnable_checkpoint.agent_prompt_id
+                && started.agent_id == runnable_agent_id
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(created)
+            if created.agent_prompt_id == runnable_checkpoint.agent_prompt_id
+                && created.agent_id == runnable_agent_id
+    )));
+    assert_eq!(
+        h.pending_publish_idle_dispatches
+            .iter()
+            .filter(|deferred| deferred.cid == blocked_cid)
+            .count(),
+        1
+    );
+    assert!(
+        h.pending_publish_idle_dispatches
+            .iter()
+            .all(|deferred| deferred.cid != runnable_cid)
+    );
+
+    h.agents
+        .get_mut(&blocked_cid)
+        .expect("release blocked agent")
+        .activation_dispatch = crate::agent::ActivationDispatchState::None;
+    h.drain_publish_idle_dispatches();
+
+    let events = event_log_events(&h);
+    let blocked_checkpoints = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_id == blocked_agent_id =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(blocked_checkpoints.len(), 1);
+    assert_eq!(
+        blocked_checkpoints[0].through,
+        blocked_obligation
+            .activation_through
+            .expect("blocked activation watermark")
+    );
+    assert_eq!(
+        blocked_checkpoints[0].activation_cut,
+        blocked_obligation.activation_cut
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(created)
+            if created.agent_prompt_id == blocked_checkpoints[0].agent_prompt_id
+                && created.agent_id == blocked_agent_id
+    )));
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
+/// A selected obligation that remains queued after preflight must be attempted
+/// at most once per drain invocation and must not block a later runnable agent.
+#[test]
+fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let unroutable_cid = ensure_test_user_agent(&mut h);
+    let runnable_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let unroutable_agent_id = durable_agent_id_for_conversation(&h, &unroutable_cid);
+    let runnable_agent_id = durable_agent_id_for_conversation(&h, &runnable_cid);
+    h.available_roles.insert(
+        "unroutable-test-role".to_owned(),
+        tau_config::settings::AgentRole {
+            model: Some("missing/model".into()),
+            ..Default::default()
+        },
+    );
+    h.agents
+        .get_mut(&unroutable_cid)
+        .expect("unroutable agent")
+        .role = Some("unroutable-test-role".to_owned());
+    let context_provider = tau_proto::ConnectionId::from("unroutable-fairness-context");
+    for agent_id in [&unroutable_agent_id, &runnable_agent_id] {
+        h.pending_agent_context_ready.insert(
+            agent_id.clone(),
+            std::collections::HashSet::from([context_provider.clone()]),
+        );
+    }
+    h.dispatch_prompt_for_agent(
+        &unroutable_cid,
+        PendingPrompt::user("unroutable activation".to_owned()),
+    )
+    .expect("defer unroutable activation");
+    h.dispatch_prompt_for_agent(
+        &runnable_cid,
+        PendingPrompt::user("runnable activation".to_owned()),
+    )
+    .expect("defer runnable activation");
+    h.pending_agent_context_ready.remove(&unroutable_agent_id);
+    h.pending_agent_context_ready.remove(&runnable_agent_id);
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
+    let unroutable_obligation = h.pending_publish_idle_dispatches[0].clone();
+
+    h.drain_publish_idle_dispatches();
+
+    let runnable_prompt = event_log_events(&h)
+        .iter()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(created) if created.agent_id == runnable_agent_id => {
+                Some(created.clone())
+            }
+            _ => None,
+        })
+        .expect("later runnable agent prompt");
+    let provider = h.pending_provider_prompts[&runnable_prompt.agent_prompt_id].clone();
+    h.handle_extension_event_inner(
+        provider.as_str(),
+        Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
+            agent_prompt_id: runnable_prompt.agent_prompt_id.clone(),
+            originator: runnable_prompt.originator.clone(),
+        }),
+    )
+    .expect("record runnable provider submission");
+    let runnable_sequence = event_log_events(&h)
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_prompt_id == runnable_prompt.agent_prompt_id =>
+            {
+                Some("checkpoint")
+            }
+            Event::AgentPromptStarted(started)
+                if started.agent_prompt_id == runnable_prompt.agent_prompt_id =>
+            {
+                Some("started")
+            }
+            Event::AgentPromptCreated(created)
+                if created.agent_prompt_id == runnable_prompt.agent_prompt_id =>
+            {
+                Some("created")
+            }
+            Event::ProviderPromptSubmitted(submitted)
+                if submitted.agent_prompt_id == runnable_prompt.agent_prompt_id =>
+            {
+                Some("submitted")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        runnable_sequence,
+        ["checkpoint", "started", "created", "submitted"]
+    );
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    let retained = &h.pending_publish_idle_dispatches[0];
+    assert_eq!(retained.cid, unroutable_obligation.cid);
+    assert_eq!(
+        retained.activation_cut,
+        unroutable_obligation.activation_cut
+    );
+    assert_eq!(
+        retained.activation_through,
+        unroutable_obligation.activation_through
+    );
+    assert_eq!(
+        retained.committed_activation,
+        unroutable_obligation.committed_activation
+    );
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.agent_id == unroutable_agent_id
+    )));
+
+    h.drain_publish_idle_dispatches();
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.agent_id == unroutable_agent_id
+    )));
+
+    h.available_roles
+        .get_mut("unroutable-test-role")
+        .expect("test role")
+        .model = Some("test/model".into());
+    h.drain_publish_idle_dispatches();
+    let events = event_log_events(&h);
+    let unroutable_checkpoints = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_id == unroutable_agent_id =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(unroutable_checkpoints.len(), 1);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(created)
+            if created.agent_prompt_id == unroutable_checkpoints[0].agent_prompt_id
+                && created.agent_id == unroutable_agent_id
+    )));
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
 /// Readiness coalescing keeps incomparable branch activations as distinct
 /// obligations; dispatching the selected sibling does not consume the dormant
 /// branch, which becomes runnable after the sibling turn finishes and
@@ -18553,6 +18904,196 @@ fn input_wait_timeout_completes_once_inside_running_turn() {
     h.process_runtime_deadlines_at(deadline);
     h.activate_waits_for(&cid);
     assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// A stale generic publish-idle obligation must not checkpoint a continuation
+/// while the owning provider turn is still blocked in a foreground input wait.
+///
+/// The historical failure committed such a checkpoint, then refused to send its
+/// prompt because the foreground round was open. That left an unrecoverable
+/// `DispatchUncertain` owner with no corresponding provider request.
+#[test]
+fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("enter input wait".to_owned()))
+        .expect("dispatch initial inference");
+    let initial_prompt = read_nth_prompt_created(&h, 0);
+    let initial_provider = h.pending_provider_prompts[&initial_prompt.agent_prompt_id].clone();
+    h.handle_extension_event_inner(
+        initial_provider.as_str(),
+        Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
+            agent_prompt_id: initial_prompt.agent_prompt_id.clone(),
+            originator: initial_prompt.originator.clone(),
+        }),
+    )
+    .expect("record initial provider submission");
+
+    let wait_call_id = ToolCallId::from("wait-deferred-open-round");
+    h.handle_provider_response_finished(provider_input_wait_response(
+        &initial_prompt,
+        wait_call_id.as_str(),
+        10,
+    ))
+    .expect("provider opens foreground input wait");
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolStarted(started) if started.call_id == wait_call_id
+    )));
+    assert!(h.input_wait_pending_for(&cid));
+    assert!(matches!(
+        h.agents[&cid].turn_state,
+        AgentTurnState::ToolsRunning { .. }
+    ));
+    assert!(h.agent_has_open_foreground_tool_round(&cid));
+    let open_round_activation_cut = h
+        .activation_cut_before_current_head(&cid)
+        .expect("closed prefix before open-round response");
+
+    let events_before_drain = event_log_events(&h);
+    let checkpoints_before = events_before_drain
+        .iter()
+        .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+        .count();
+    let starts_before = events_before_drain
+        .iter()
+        .filter(|event| matches!(event, Event::AgentPromptStarted(_)))
+        .count();
+    let prompts_before = events_before_drain
+        .iter()
+        .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+        .count();
+    let submissions_before = events_before_drain
+        .iter()
+        .filter(|event| matches!(event, Event::ProviderPromptSubmitted(_)))
+        .count();
+    h.pending_publish_idle_dispatches.push_back(
+        crate::harness::interception::DeferredPromptDispatch {
+            cid: cid.clone(),
+            activation_cut: None,
+            activation_through: None,
+            committed_activation: false,
+        },
+    );
+
+    h.drain_publish_idle_dispatches();
+
+    let events_while_waiting = event_log_events(&h);
+    assert_eq!(
+        events_while_waiting
+            .iter()
+            .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+            .count(),
+        checkpoints_before,
+        "an open foreground round must block checkpoint creation"
+    );
+    assert_eq!(
+        events_while_waiting
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptStarted(_)))
+            .count(),
+        starts_before
+    );
+    assert_eq!(
+        events_while_waiting
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        prompts_before
+    );
+    assert_eq!(
+        events_while_waiting
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderPromptSubmitted(_)))
+            .count(),
+        submissions_before
+    );
+    assert!(matches!(
+        h.agents[&cid].turn_state,
+        AgentTurnState::ToolsRunning { .. }
+    ));
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
+    assert_eq!(
+        h.pending_publish_idle_dispatches
+            .iter()
+            .filter(|deferred| deferred.cid == cid && !deferred.committed_activation)
+            .count(),
+        1,
+        "the stale generic obligation remains queued exactly once"
+    );
+
+    let deadline = h.next_input_wait_deadline().expect("input-wait deadline");
+    h.process_runtime_deadlines_at(deadline);
+    assert!(!h.input_wait_pending_for(&cid));
+    assert!(!h.agent_has_open_foreground_tool_round(&cid));
+    let through = tau_proto::AgentHead::Node(h.agents[&cid].head.expect("wait terminal"));
+    let continuation = read_nth_prompt_created(&h, 1);
+    let continuation_provider = h.pending_provider_prompts[&continuation.agent_prompt_id].clone();
+    h.handle_extension_event_inner(
+        continuation_provider.as_str(),
+        Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
+            agent_prompt_id: continuation.agent_prompt_id.clone(),
+            originator: continuation.originator.clone(),
+        }),
+    )
+    .expect("record continuation provider submission");
+
+    let events = event_log_events(&h);
+    let checkpoints = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_prompt_id == continuation.agent_prompt_id =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].through, through);
+    assert_eq!(checkpoints[0].model, Some("test/model".into()));
+    assert_eq!(
+        checkpoints[0].operation,
+        Some(tau_proto::PromptOperation::Inference)
+    );
+    assert_eq!(
+        checkpoints[0].activation_cut,
+        Some(open_round_activation_cut)
+    );
+    let sequence = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_prompt_id == continuation.agent_prompt_id =>
+            {
+                Some("checkpoint")
+            }
+            Event::AgentPromptStarted(started)
+                if started.agent_prompt_id == continuation.agent_prompt_id =>
+            {
+                Some("started")
+            }
+            Event::AgentPromptCreated(created)
+                if created.agent_prompt_id == continuation.agent_prompt_id =>
+            {
+                Some("created")
+            }
+            Event::ProviderPromptSubmitted(submitted)
+                if submitted.agent_prompt_id == continuation.agent_prompt_id =>
+            {
+                Some("submitted")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sequence, ["checkpoint", "started", "created", "submitted"]);
+    assert!(h.pending_publish_idle_dispatches.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -27285,6 +27826,257 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
     );
     assert!(session_agent_message_received_events(&resumed).is_empty());
     resumed.shutdown().expect("shutdown resumed");
+}
+
+/// A sender's real inline `message` completion may wake a recipient's sole
+/// activating-input `wait` while the sender projection remains parked in a
+/// non-idle publication batch. Both durable terminals must schedule exactly one
+/// successor after the batch, leave no deferred dispatch ownership behind, and
+/// preserve later activation dispatchability.
+#[test]
+fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
+    const BODY: &str = "nested publication wake";
+    const MESSAGE_CALL_ID: &str = "message-nested-wake";
+    const WAIT_CALL_ID: &str = "wait-nested-wake";
+
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    let sender_cid = ensure_test_user_agent(&mut h);
+    let role = h.selected_role.clone();
+    let recipient_cid = h.create_durable_user_agent(h.current_session_id.clone(), &role);
+    let sender_id = durable_agent_id_for_conversation(&h, &sender_cid);
+    let recipient_id = durable_agent_id_for_conversation(&h, &recipient_cid);
+    h.pending_agent_context_ready.remove(&recipient_id);
+
+    h.dispatch_prompt_for_agent(
+        &recipient_cid,
+        PendingPrompt::user("wait for activating input".to_owned()),
+    )
+    .expect("dispatch recipient setup");
+    let recipient_setup = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_input_wait_response(
+        &recipient_setup,
+        WAIT_CALL_ID,
+        10,
+    ))
+    .expect("register recipient input wait");
+    assert!(h.input_wait_pending_for(&recipient_cid));
+    assert!(matches!(
+        h.agents[&recipient_cid].turn_state,
+        AgentTurnState::ToolsRunning { .. }
+    ));
+
+    h.dispatch_prompt_for_agent(
+        &sender_cid,
+        PendingPrompt::user("send the nested wake".to_owned()),
+    )
+    .expect("dispatch sender setup");
+    let sender_setup = read_nth_prompt_created(&h, 1);
+    let checkpoints_before = event_log_count(&h, |event| {
+        matches!(event, Event::AgentInferenceDispatchStarted(_))
+    });
+    let interceptor = connect_test_tool(&mut h, "nested-message-interceptor");
+    h.handle_extension_event(
+        "nested-message-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_SENT,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register sender projection interceptor");
+
+    h.handle_provider_response_finished(provider_tool_response(
+        &sender_setup,
+        MESSAGE_CALL_ID,
+        crate::harness::subagents_tool::MESSAGE_TOOL_NAME,
+        message_tool_call(MESSAGE_CALL_ID, recipient_id.as_str(), BODY).arguments,
+    ))
+    .expect("run sender message tool");
+    assert!(h.pending_intercept.is_some());
+    assert!(!h.deferred_publishes.is_empty());
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    h.handle_extension_event(
+        "nested-message-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit nested publication batch");
+    drop(interceptor);
+
+    assert!(!h.input_wait_pending_for(&recipient_cid));
+    assert!(h.pending_intercept.is_none());
+    assert!(h.deferred_publishes.is_empty());
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    let checkpoints = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), checkpoints_before + 2);
+    assert_eq!(
+        checkpoints
+            .iter()
+            .skip(checkpoints_before)
+            .filter(|checkpoint| checkpoint.agent_id == sender_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        checkpoints
+            .iter()
+            .skip(checkpoints_before)
+            .filter(|checkpoint| checkpoint.agent_id == recipient_id)
+            .count(),
+        1
+    );
+
+    let sender_successor_id = h.agents[&sender_cid]
+        .in_flight_prompt
+        .clone()
+        .expect("sender successor");
+    let recipient_successor_id = h.agents[&recipient_cid]
+        .in_flight_prompt
+        .clone()
+        .expect("recipient successor");
+    let sender_successor = read_prompt_created(&h, &sender_successor_id);
+    let recipient_successor = read_prompt_created(&h, &recipient_successor_id);
+    let recipient_context = recipient_successor.context.flatten();
+    assert_eq!(
+        recipient_context
+            .iter()
+            .filter(|item| {
+                text_part(item).is_some_and(|text| {
+                    text.contains(&format!(
+                        "[tau-internal]: You have received a message from {sender_id}"
+                    )) && text.contains(BODY)
+                })
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        recipient_context
+            .iter()
+            .filter(|item| tool_result_id(item) == Some(WAIT_CALL_ID))
+            .count(),
+        1
+    );
+    assert_eq!(
+        sender_successor
+            .context
+            .flatten()
+            .iter()
+            .filter(|item| tool_result_id(item) == Some(MESSAGE_CALL_ID))
+            .count(),
+        1
+    );
+
+    let recipient_events = h
+        .agent_store
+        .agent_events(recipient_id.as_str())
+        .expect("recipient journal");
+    assert_eq!(
+        recipient_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentMessageReceived(message)
+                    if message.sender_id == sender_id && message.message == BODY
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        recipient_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderToolResult(result)
+                    if result.call_id.as_str() == WAIT_CALL_ID
+                        && result.result == CborValue::Map(vec![(
+                            CborValue::Text("input_available".to_owned()),
+                            CborValue::Bool(true),
+                        )])
+            ))
+            .count(),
+        1
+    );
+    let sender_events = h
+        .agent_store
+        .agent_events(sender_id.as_str())
+        .expect("sender journal");
+    assert_eq!(
+        sender_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentMessageSent(message)
+                    if message.recipient
+                        == tau_proto::AgentMessageRecipient::Agent {
+                            agent_id: recipient_id.clone(),
+                        }
+                        && message.message == BODY
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        sender_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderToolResult(result)
+                    if result.call_id.as_str() == MESSAGE_CALL_ID
+                        && result.result == CborValue::Text("Message sent".to_owned())
+            ))
+            .count(),
+        1
+    );
+
+    h.handle_provider_response_finished(provider_text_response(
+        &recipient_successor.agent_prompt_id,
+        recipient_id.clone(),
+        "recipient successor complete",
+    ))
+    .expect("finish recipient successor");
+    h.handle_provider_response_finished(provider_text_response(
+        &sender_successor.agent_prompt_id,
+        sender_id,
+        "sender successor complete",
+    ))
+    .expect("finish sender successor");
+    let recipient_prompts_before_timer = event_log_count(&h, |event| {
+        matches!(
+            event,
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == recipient_id
+        )
+    });
+    assert_eq!(
+        h.submit_prompt_to_agent(
+            h.current_session_id.clone(),
+            recipient_id.as_str(),
+            PendingPrompt::internal("later timer activation".to_owned()),
+        )
+        .expect("submit later timer activation"),
+        PromptSubmission::Dispatched
+    );
+    assert_eq!(
+        event_log_count(&h, |event| {
+            matches!(
+                event,
+                Event::AgentPromptCreated(prompt) if prompt.agent_id == recipient_id
+            )
+        }),
+        recipient_prompts_before_timer + 1
+    );
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    h.shutdown().expect("shutdown");
 }
 
 /// Terminal teardown keeps routes until unload commits but must reject every
