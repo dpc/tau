@@ -99,6 +99,7 @@
             root = builtins.path {
               name = projectName;
               path = ./.;
+              filter = path: type: type != "directory" || builtins.baseNameOf path != "specs";
             };
             paths = buildPaths;
           };
