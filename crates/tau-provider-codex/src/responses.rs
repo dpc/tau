@@ -740,12 +740,14 @@ fn load_vcr_config() -> Result<Option<tau_vcr::VcrConfig>, LlmError> {
     Ok(tau_vcr::VcrConfig::from_env())
 }
 
-pub(super) fn load_provider_stream_cassette(
+/// Loads a provider cassette whose request exactly matches any supplied
+/// candidate.
+pub(super) fn load_provider_stream_cassette_candidates(
     vcr_config: &tau_vcr::VcrConfig,
     request: &PromptPayload<'_>,
     agent_prompt_id: &str,
     transport: tau_proto::ProviderBackendTransport,
-    request_body: &serde_json::Value,
+    request_bodies: &[serde_json::Value],
 ) -> Result<Option<ProviderStreamCassette>, LlmError> {
     let store = vcr_config.store();
     let key = provider_vcr_key(request, agent_prompt_id, transport);
@@ -758,7 +760,7 @@ pub(super) fn load_provider_stream_cassette(
             Err(LlmError::Vcr(tau_vcr::VcrError::Missing { key }))
         }
         (tau_vcr::VcrMode::ReplayOnly | tau_vcr::VcrMode::RecordIfMissing, Some(cassette)) => {
-            validate_provider_stream_cassette(&key, &cassette, request_body)?;
+            validate_provider_stream_cassette_candidates(&key, &cassette, request_bodies)?;
             Ok(Some(cassette))
         }
         (tau_vcr::VcrMode::RecordIfMissing, None) => Ok(None),
@@ -778,10 +780,10 @@ pub(super) fn provider_vcr_key(
     )
 }
 
-fn validate_provider_stream_cassette(
+fn validate_provider_stream_cassette_candidates(
     key: &str,
     cassette: &ProviderStreamCassette,
-    request_body: &serde_json::Value,
+    request_bodies: &[serde_json::Value],
 ) -> Result<(), LlmError> {
     if cassette.version != PROVIDER_STREAM_CASSETTE_VERSION {
         return Err(LlmError::Vcr(tau_vcr::VcrError::UnsupportedVersion {
@@ -789,11 +791,15 @@ fn validate_provider_stream_cassette(
             version: cassette.version,
         }));
     }
-    if cassette.request != *request_body {
+    if !request_bodies.contains(&cassette.request) {
+        let request_body = request_bodies
+            .first()
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         return Err(LlmError::Vcr(tau_vcr::request_mismatch(
             key,
             &cassette.request,
-            request_body,
+            &request_body,
         )));
     }
     validate_provider_stream_resources(key, &cassette.stream)?;
@@ -1616,10 +1622,79 @@ struct ContextManagementRequest {
     compact_threshold: Option<u64>,
 }
 
+/// Connection-local response id plus proof of the exact context it represents.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CachedResponseAnchor {
+    /// Provider response id valid on the socket that produced it.
+    response_id: String,
+    /// Domain-separated BLAKE3 over the LE-`u64` item count followed by each
+    /// item's LE-`u64` byte length and type-preserving Tau CBOR bytes.
+    represented_prefix_fingerprint: blake3::Hash,
+}
+
+impl CachedResponseAnchor {
+    /// Versioned domain for count- and length-framed CBOR item fingerprints.
+    const FINGERPRINT_DOMAIN: &'static [u8] = b"tau-provider-codex:response-prefix:cbor:v1\0";
+
+    /// Captures one response id and the exact canonical prefix represented by
+    /// it.
+    ///
+    /// Encoding failure makes the response ineligible for chaining; callers
+    /// keep serving the prompt by sending full context instead.
+    fn new(response_id: String, represented_prefix: &[ContextItem]) -> Option<Self> {
+        Some(Self {
+            response_id,
+            represented_prefix_fingerprint: Self::fingerprint(represented_prefix)?,
+        })
+    }
+
+    /// Reconstructs the latest transcript-derived anchor for VCR matching.
+    fn latest_from_context(context: &tau_proto::PromptContext) -> Option<Self> {
+        let context_items = context.flatten();
+        let mut prefix_len = context_items.len();
+        for block in context.blocks.iter().rev() {
+            match block {
+                tau_proto::ContextBlock::AssistantResponse(response) => {
+                    if let Some(response_id) = response.provider_response_id.clone() {
+                        return Self::new(response_id, &context_items[..prefix_len]);
+                    }
+                    prefix_len = prefix_len.saturating_sub(response.output_items.len());
+                }
+                tau_proto::ContextBlock::UserInput(block) => {
+                    prefix_len = prefix_len.saturating_sub(block.items.len());
+                }
+                tau_proto::ContextBlock::ToolResults(block) => {
+                    prefix_len = prefix_len.saturating_sub(block.items.len());
+                }
+            }
+        }
+        None
+    }
+
+    /// Checks an exact ordered prefix using type-preserving CBOR item encoding.
+    fn matches(&self, represented_prefix: &[ContextItem]) -> bool {
+        Self::fingerprint(represented_prefix)
+            .is_some_and(|fingerprint| fingerprint == self.represented_prefix_fingerprint)
+    }
+
+    /// Digests item count followed by each CBOR item's byte length and bytes.
+    fn fingerprint(items: &[ContextItem]) -> Option<blake3::Hash> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::FINGERPRINT_DOMAIN);
+        hasher.update(&u64::try_from(items.len()).ok()?.to_le_bytes());
+        for item in items {
+            let encoded = tau_proto::encode_message_to_vec(item).ok()?;
+            hasher.update(&u64::try_from(encoded.len()).ok()?.to_le_bytes());
+            hasher.update(&encoded);
+        }
+        Some(hasher.finalize())
+    }
+}
+
 fn build_request(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
-    cached_response_id: Option<&str>,
+    cached_response_anchor: Option<&CachedResponseAnchor>,
 ) -> ResponsesRequest {
     let instructions = if request.system_prompt.is_empty() {
         None
@@ -1627,19 +1702,18 @@ fn build_request(
         Some(request.system_prompt.to_owned())
     };
 
-    // Stateful chaining: when a previous response is available, slice the
-    // messages to just what's new since that response. The OpenAI
-    // Responses API picks up the prior conversation from the stored
-    // response — replaying its prefix would duplicate it. A defensive
-    // cap to `messages.len()` covers the impossible-by-invariant case
-    // of a stale index.
+    // Stateful chaining is valid only when the current canonical prefix through
+    // the cached response is exactly what that response represented upstream.
+    // Async input may commit before an in-flight response even though the
+    // response did not observe it, so response-id identity alone is insufficient.
     let context_items: Vec<_> = request.context.flatten_iter().collect();
-    let previous_response = cached_response_id.and_then(|id| {
+    let previous_response = cached_response_anchor.and_then(|anchor| {
         let mut next_item_index = context_items.len();
         for block in request.context.blocks.iter().rev() {
             match block {
                 tau_proto::ContextBlock::AssistantResponse(response) => {
-                    if response.provider_response_id.as_deref() == Some(id) {
+                    if response.provider_response_id.as_deref() == Some(anchor.response_id.as_str())
+                    {
                         // workaround for server side bug:
                         // server incorrectly build history if previous response id from
                         // compaction
@@ -1655,7 +1729,10 @@ fn build_request(
                         {
                             return None;
                         }
-                        return Some((id, next_item_index));
+                        if !anchor.matches(&context_items[..next_item_index]) {
+                            return None;
+                        }
+                        return Some((anchor.response_id.as_str(), next_item_index));
                     }
                     next_item_index = next_item_index.saturating_sub(response.output_items.len());
                 }
@@ -1848,10 +1925,10 @@ pub struct WsResponseCreate {
 pub(super) fn build_ws_envelope(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
-    cached_response_id: Option<&str>,
+    cached_response_anchor: Option<&CachedResponseAnchor>,
     generate: Option<bool>,
 ) -> WsResponseCreate {
-    let mut body = build_request(config, request, cached_response_id);
+    let mut body = build_request(config, request, cached_response_anchor);
     if config.mode.is_lite_compatibility() {
         body.client_metadata = Some(ResponsesClientMetadata {
             responses_lite: "true",

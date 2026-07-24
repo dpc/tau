@@ -66,6 +66,10 @@ fn context(items: &[ContextItem]) -> &'static tau_proto::PromptContext {
     }))
 }
 
+fn block_context(blocks: Vec<tau_proto::ContextBlock>) -> &'static tau_proto::PromptContext {
+    Box::leak(Box::new(tau_proto::PromptContext { blocks }))
+}
+
 fn context_after_response(
     response_id: &str,
     output_items: Vec<ContextItem>,
@@ -1114,6 +1118,169 @@ fn ws_turn_captures_response_id_for_chain_continuation() {
     );
 }
 
+/// Regression for Clank k2hu: input accepted while a response is in flight
+/// precedes that response canonically, but is absent from its upstream history.
+/// The next same-socket turn must full-replay both inputs, then re-anchor the
+/// successful replay so a later compatible continuation can send only its
+/// suffix.
+#[test]
+fn response_anchor_replays_async_input_before_in_flight_response() {
+    let (addr, server) = spawn_fake_codex_server();
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let response_gate = Arc::new(ResponseGate::new());
+    server.lock_state().response_gate = Some(Arc::clone(&response_gate));
+
+    let initial = user_msg("initial context");
+    let first_context = context(std::slice::from_ref(&initial));
+    let first_config = config.clone();
+    let first_turn = thread::spawn(move || {
+        let mut pool = WsPool::new();
+        let state = run_context_turn(
+            &mut pool,
+            &first_config,
+            "session-causal-anchor",
+            "sp-first",
+            first_context,
+        );
+        (pool, state)
+    });
+
+    response_gate.wait_for_arrival();
+    let async_inputs = vec![
+        user_msg("reviewer architecture: PASS"),
+        user_msg("reviewer reliability: PASS"),
+    ];
+    response_gate.release_one();
+    let (mut pool, first_state) = first_turn.join().expect("join first turn");
+    server.lock_state().response_gate = None;
+
+    let first_response_id = first_state.response_id.clone().expect("first response id");
+    let first_output = first_state.into_output_items();
+    let second_context = block_context(vec![
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![initial.clone()],
+        }),
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: async_inputs.clone(),
+        }),
+        tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+            provider_response_id: Some(first_response_id),
+            backend: None,
+            output_items: first_output,
+            usage: None,
+        }),
+    ]);
+    let second_state = run_context_turn(
+        &mut pool,
+        &config,
+        "session-causal-anchor",
+        "sp-second",
+        second_context,
+    );
+
+    {
+        let state = server.lock_state();
+        assert_eq!(state.upgrade_count, 1, "both turns must share one socket");
+        let request = &state.requests[1];
+        assert!(
+            request.get("previous_response_id").is_none(),
+            "causally incompatible response id must not anchor a delta",
+        );
+        let input = request["input"].as_array().expect("full replay input");
+        assert_eq!(input.len(), 4, "C, both async inputs, and R must replay");
+        assert_eq!(
+            input[1]["content"][0]["text"],
+            "reviewer architecture: PASS"
+        );
+        assert_eq!(input[2]["content"][0]["text"], "reviewer reliability: PASS");
+    }
+
+    let second_response_id = second_state
+        .response_id
+        .clone()
+        .expect("second response id");
+    let second_output = second_state.into_output_items();
+    let mut third_blocks = second_context.blocks.clone();
+    third_blocks.push(tau_proto::ContextBlock::AssistantResponse(
+        tau_proto::AssistantResponseBlock {
+            provider_response_id: Some(second_response_id.clone()),
+            backend: None,
+            output_items: second_output,
+            usage: None,
+        },
+    ));
+    third_blocks.push(tau_proto::ContextBlock::UserInput(
+        tau_proto::UserInputBlock {
+            items: vec![user_msg("continue after reviews")],
+        },
+    ));
+    run_context_turn(
+        &mut pool,
+        &config,
+        "session-causal-anchor",
+        "sp-third",
+        block_context(third_blocks),
+    );
+
+    let state = server.lock_state();
+    let request = &state.requests[2];
+    assert_eq!(
+        request["previous_response_id"], second_response_id,
+        "successful full replay must publish a new compatible anchor",
+    );
+    let input = request["input"].as_array().expect("delta input");
+    assert_eq!(input.len(), 1, "re-anchored turn must send only its suffix");
+    assert_eq!(input[0]["content"][0]["text"], "continue after reviews");
+}
+
+/// A normal same-socket `C, R, suffix` continuation must retain incremental
+/// reuse; causal-prefix validation must not turn every request into a full
+/// replay.
+#[test]
+fn response_anchor_keeps_compatible_incremental_reuse() {
+    let (addr, server) = spawn_fake_codex_server();
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let mut pool = WsPool::new();
+    let initial = user_msg("initial context");
+    let first_state = run_context_turn(
+        &mut pool,
+        &config,
+        "session-compatible-anchor",
+        "sp-first",
+        context(std::slice::from_ref(&initial)),
+    );
+    let response_id = first_state.response_id.clone().expect("response id");
+    let second_context = block_context(vec![
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![initial],
+        }),
+        tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+            provider_response_id: Some(response_id.clone()),
+            backend: None,
+            output_items: first_state.into_output_items(),
+            usage: None,
+        }),
+        tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![user_msg("ordinary suffix")],
+        }),
+    ]);
+    run_context_turn(
+        &mut pool,
+        &config,
+        "session-compatible-anchor",
+        "sp-second",
+        second_context,
+    );
+
+    let state = server.lock_state();
+    assert_eq!(state.upgrade_count, 1, "both turns must share one socket");
+    let request = &state.requests[1];
+    assert_eq!(request["previous_response_id"], response_id);
+    let input = request["input"].as_array().expect("delta input");
+    assert_eq!(input.len(), 1);
+    assert_eq!(input[0]["content"][0]["text"], "ordinary suffix");
+}
+
 /// ChatGPT requires the WebSocket upgrade to identify the upstream session and
 /// thread before any `response.create` frame is sent. Those headers must use
 /// the exact same UUID as the request body's `prompt_cache_key`; otherwise a
@@ -1481,14 +1648,18 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
         &mut on_update,
     )
     .expect("first turn ok");
-    let prev_id = state1.response_id.expect("first turn yielded response_id");
+    let prev_id = state1
+        .response_id
+        .clone()
+        .expect("first turn yielded response_id");
+    let first_output = state1.into_output_items();
 
     // Turn 2: harness wants to chain via `prev_id`. The cached socket dies
     // mid-stream; pool must reopen cold WS and strip the chain id rather
     // than sticky-disabling WS for the session.
     let req2 = PromptPayload {
         system_prompt: "sys",
-        context: context_after_response(&prev_id, Vec::new(), vec![user_msg("second turn")]),
+        context: context_after_response(&prev_id, first_output, vec![user_msg("second turn")]),
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1599,11 +1770,15 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
         &mut on_update,
     )
     .expect("first shared turn ok");
-    let prev_id = state1.response_id.expect("first turn yielded response_id");
+    let prev_id = state1
+        .response_id
+        .clone()
+        .expect("first turn yielded response_id");
+    let first_output = state1.into_output_items();
 
     let req2 = PromptPayload {
         system_prompt: "sys",
-        context: context_after_response(&prev_id, Vec::new(), vec![user_msg("second turn")]),
+        context: context_after_response(&prev_id, first_output, vec![user_msg("second turn")]),
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -2157,6 +2332,39 @@ fn run_turn(
     on_update: &mut impl FnMut(&crate::common::StreamState),
 ) {
     run_turn_for_agent(pool, config, session, "test-agent", on_update);
+}
+
+fn run_context_turn(
+    pool: &mut WsPool,
+    config: &ResponsesConfig,
+    session: &str,
+    agent_prompt_id: &str,
+    prompt_context: &'static tau_proto::PromptContext,
+) -> crate::common::StreamState {
+    let session_id = tau_proto::SessionId::new(session);
+    let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: prompt_context,
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    run_turn_through_pool(
+        pool,
+        config,
+        session,
+        agent_prompt_id,
+        &request,
+        &mut |_| {},
+    )
+    .expect("turn ok")
 }
 
 fn run_turn_for_agent(

@@ -63,7 +63,7 @@ fn test_ws_conn() -> (
             writer_abort,
             opened_at: Instant::now(),
             bearer: "test-token".to_owned(),
-            cached_response_id: None,
+            cached_response_anchor: None,
             prewarm_baseline: None,
             carried_response_bytes: 0,
         },

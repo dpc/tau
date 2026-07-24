@@ -44,9 +44,10 @@ use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 use tokio_tungstenite::{WebSocketStream, tungstenite};
 
 use super::{
-    DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT, ProviderRawEventStream, ResponsesConfig,
-    apply_raw_json_event, build_ws_envelope, load_provider_stream_cassette,
-    record_provider_raw_event_after, stream_idle_timeout_error,
+    CachedResponseAnchor, DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT, ProviderRawEventStream,
+    ResponsesConfig, apply_raw_json_event, build_ws_envelope,
+    load_provider_stream_cassette_candidates, record_provider_raw_event_after,
+    stream_idle_timeout_error,
 };
 use crate::TurnAbort;
 use crate::common::{LlmError, PromptPayload, StreamState};
@@ -174,10 +175,8 @@ pub struct WsConn {
     /// mismatch means OAuth refreshed and this socket's auth is
     /// stale, so it gets dropped and reopened.
     pub bearer: String,
-    /// Cached response id returned on this live socket. It is only sent as
-    /// `previous_response_id` if request building finds it in the prompt
-    /// context.
-    cached_response_id: Option<String>,
+    /// Cached response id and exact represented prefix for this live socket.
+    cached_response_anchor: Option<CachedResponseAnchor>,
     /// Successful cache-only response that may anchor one compatible real turn.
     prewarm_baseline: Option<Box<PrewarmBaseline>>,
     /// Bytes retained from the one discarded transport-repair attempt.
@@ -285,7 +284,7 @@ impl WsConn {
             writer_abort,
             opened_at: Instant::now(),
             bearer,
-            cached_response_id: None,
+            cached_response_anchor: None,
             prewarm_baseline: None,
             carried_response_bytes: 0,
         })
@@ -316,8 +315,8 @@ impl WsConn {
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<WsTurnResult, LlmError> {
         let mut envelope =
-            build_ws_envelope(config, request, self.cached_response_id.as_deref(), None);
-        if self.cached_response_id.is_none()
+            build_ws_envelope(config, request, self.cached_response_anchor.as_ref(), None);
+        if self.cached_response_anchor.is_none()
             && let Some(baseline) = self.prewarm_baseline.take()
         {
             let full = build_ws_envelope(config, request, None, None);
@@ -343,7 +342,11 @@ impl WsConn {
             on_dispatched,
             on_update,
         )?;
-        self.cached_response_id = state.response_id.clone();
+        self.cached_response_anchor = state.response_id.clone().and_then(|response_id| {
+            let mut represented_prefix = request.context.flatten();
+            represented_prefix.extend(state.output_items_snapshot());
+            CachedResponseAnchor::new(response_id, &represented_prefix)
+        });
         Ok(WsTurnResult {
             state,
             request_body,
@@ -386,7 +389,7 @@ impl WsConn {
             &mut |_| {},
             &mut |_| {},
         )?;
-        self.cached_response_id = None;
+        self.cached_response_anchor = None;
         self.prewarm_baseline = state.response_id.clone().map(|response_id| {
             Box::new(PrewarmBaseline {
                 response_id,
@@ -723,56 +726,39 @@ pub(super) fn run_vcr_replay_turn(
     request: &PromptPayload<'_>,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<Option<StreamState>, LlmError> {
-    let mut conn = WsReplayConn {
-        cached_response_id: latest_response_id(request).map(str::to_owned),
+    // VCR has no live socket proof. Try the only two historical live shapes:
+    // causal mismatch/fresh socket sent full context, while a compatible warm
+    // socket sent a transcript-derived chained delta.
+    let full = build_replay_request_body(config, request, None)?;
+    let replay_anchor = CachedResponseAnchor::latest_from_context(request.context);
+    let chained = build_replay_request_body(config, request, replay_anchor.as_ref())?;
+    let request_bodies = if chained == full {
+        vec![full]
+    } else {
+        vec![full, chained]
     };
-    conn.run_turn(vcr_config, config, agent_prompt_id, request, on_update)
+    let Some(cassette) = load_provider_stream_cassette_candidates(
+        vcr_config,
+        request,
+        agent_prompt_id,
+        tau_proto::ProviderBackendTransport::Websocket,
+        &request_bodies,
+    )?
+    else {
+        return Ok(None);
+    };
+    run_replay(&cassette.stream, on_update).map(Some)
 }
 
-struct WsReplayConn {
-    cached_response_id: Option<String>,
-}
-impl WsReplayConn {
-    pub(super) fn run_turn(
-        &mut self,
-        vcr_config: &tau_vcr::VcrConfig,
-        config: &ResponsesConfig,
-        agent_prompt_id: &str,
-        request: &PromptPayload<'_>,
-        on_update: &mut impl FnMut(&StreamState),
-    ) -> Result<Option<StreamState>, LlmError> {
-        let cached_response_id = self.cached_response_id.as_deref();
-        let envelope = build_ws_envelope(config, request, cached_response_id, None);
-        let mut request_body = serde_json::to_value(&envelope).map_err(LlmError::Json)?;
-        super::redact_image_data_urls(&mut request_body);
-        let Some(cassette) = load_provider_stream_cassette(
-            vcr_config,
-            request,
-            agent_prompt_id,
-            tau_proto::ProviderBackendTransport::Websocket,
-            &request_body,
-        )?
-        else {
-            return Ok(None);
-        };
-        let state = run_replay(&cassette.stream, on_update)?;
-        self.cached_response_id = state.response_id.clone();
-        Ok(Some(state))
-    }
-}
-
-fn latest_response_id<'a>(request: &'a PromptPayload<'_>) -> Option<&'a str> {
-    request
-        .context
-        .blocks
-        .iter()
-        .rev()
-        .find_map(|block| match block {
-            tau_proto::ContextBlock::AssistantResponse(response) => {
-                response.provider_response_id.as_deref()
-            }
-            tau_proto::ContextBlock::UserInput(_) | tau_proto::ContextBlock::ToolResults(_) => None,
-        })
+fn build_replay_request_body(
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+    anchor: Option<&CachedResponseAnchor>,
+) -> Result<serde_json::Value, LlmError> {
+    let envelope = build_ws_envelope(config, request, anchor, None);
+    let mut request_body = serde_json::to_value(&envelope).map_err(LlmError::Json)?;
+    super::redact_image_data_urls(&mut request_body);
+    Ok(request_body)
 }
 pub(super) fn run_replay(
     stream: &ProviderRawEventStream,

@@ -1001,21 +1001,20 @@ impl StreamState {
         })
     }
 
-    /// Returns the final assistant output items in provider item order.
+    /// Clones the final assistant output items for transport bookkeeping.
     ///
-    /// Tool-call accumulators with an empty `name` are dropped as stream
-    /// artifacts. The streaming paths eagerly create slots from
-    /// argument-delta events so the index stays addressable; if the
-    /// matching name-carrying event never arrives, shipping it
-    /// downstream would surface as an `invalid_tool` rejection in the
-    /// harness even though the model never committed a valid call.
-    pub fn into_output_items(self) -> Vec<ContextItem> {
+    /// This uses the same materialization as [`Self::into_output_items`] so a
+    /// response-chain anchor fingerprints exactly what the harness persists.
+    pub(crate) fn output_items_snapshot(&self) -> Vec<ContextItem> {
         let mut items = Vec::new();
         let thinking_index = self.thinking_output_index.unwrap_or(0);
-        let thinking = self.thinking.filter(|thinking| !thinking.is_empty());
+        let thinking = self
+            .thinking
+            .as_ref()
+            .filter(|thinking| !thinking.is_empty());
         let output_items = self
             .output_items
-            .into_iter()
+            .iter()
             .map(|item| item.context_item())
             .collect::<Vec<_>>();
         let thinking_len = thinking.as_ref().map(|_| thinking_index + 1).unwrap_or(0);
@@ -1027,7 +1026,7 @@ impl StreamState {
             {
                 items.push(ContextItem::ReasoningText(ReasoningTextItem {
                     kind: ReasoningTextKind::Summary,
-                    text: thinking.clone(),
+                    text: (*thinking).clone(),
                 }));
             }
             if let Some(item) = output_items.get(index).and_then(Option::as_ref) {
@@ -1036,10 +1035,22 @@ impl StreamState {
         }
 
         if items.is_empty() && !self.text.is_empty() {
-            items.push(assistant_text_item(self.text));
+            items.push(assistant_text_item(self.text.clone()));
         }
 
         items
+    }
+
+    /// Returns the final assistant output items in provider item order.
+    ///
+    /// Tool-call accumulators with an empty `name` are dropped as stream
+    /// artifacts. The streaming paths eagerly create slots from
+    /// argument-delta events so the index stays addressable; if the
+    /// matching name-carrying event never arrives, shipping it
+    /// downstream would surface as an `invalid_tool` rejection in the
+    /// harness even though the model never committed a valid call.
+    pub fn into_output_items(self) -> Vec<ContextItem> {
+        self.output_items_snapshot()
     }
 
     pub fn usage(&self) -> Option<ProviderTokenUsage> {

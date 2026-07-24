@@ -59,6 +59,12 @@ repair, while tentative semantic output causes the error to surface without an
 automatic replay. The extension clears that transient output before scheduling
 later required work.
 
+Ordinary response ids are socket-local and carry no independent proof that
+concurrently committed canonical input exists in their upstream history. Tau
+reuses one only when a type-preserving fingerprint proves the current canonical
+prefix through that response is exact. A mismatch removes the id and full-replays
+context on the same socket; only a successful response publishes a new anchor.
+
 Prewarm response ids are usable only with the same socket, opaque
 profile/mode/cache identity, exact lowered-request fingerprint, and prefix
 continuation. Cancellation and invalidation generations are rechecked at socket

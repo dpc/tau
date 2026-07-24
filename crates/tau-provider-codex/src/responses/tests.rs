@@ -357,6 +357,54 @@ fn context_with_response_id(
     }))
 }
 
+fn response_anchor_from_context(
+    context: &tau_proto::PromptContext,
+    response_id: &str,
+) -> Option<CachedResponseAnchor> {
+    let context_items = context.flatten();
+    let mut prefix_len = context_items.len();
+    for block in context.blocks.iter().rev() {
+        match block {
+            tau_proto::ContextBlock::AssistantResponse(response) => {
+                if response.provider_response_id.as_deref() == Some(response_id) {
+                    return CachedResponseAnchor::new(
+                        response_id.to_owned(),
+                        &context_items[..prefix_len],
+                    );
+                }
+                prefix_len = prefix_len.saturating_sub(response.output_items.len());
+            }
+            tau_proto::ContextBlock::UserInput(block) => {
+                prefix_len = prefix_len.saturating_sub(block.items.len());
+            }
+            tau_proto::ContextBlock::ToolResults(block) => {
+                prefix_len = prefix_len.saturating_sub(block.items.len());
+            }
+        }
+    }
+    None
+}
+
+fn terminal_vcr_stream(response_id: &str) -> ProviderRawEventStream {
+    ProviderRawEventStream {
+        raw_events: vec![ProviderRawEvent {
+            delta_micros: 0,
+            raw: serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "input_tokens_details": {"cached_tokens": 0},
+                    },
+                },
+            })
+            .to_string(),
+        }],
+    }
+}
+
 #[test]
 fn debug_provider_request_dir_requires_existing_session_dir() {
     // Provider diagnostics are allowed to create their own debug subdirectory,
@@ -820,8 +868,10 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
         debug_provider_requests: false,
     };
 
-    let body = serde_json::to_value(build_request(&config, &request, Some("resp_abc")))
-        .expect("serialize");
+    let anchor =
+        response_anchor_from_context(request.context, "resp_abc").expect("response anchor");
+    let body =
+        serde_json::to_value(build_request(&config, &request, Some(&anchor))).expect("serialize");
 
     assert_eq!(
         body["store"], false,
@@ -835,6 +885,108 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
         "only messages after the anchor should be sent"
     );
     assert_eq!(input[0]["content"][0]["text"], "second turn");
+}
+
+/// Canonical CBOR with a non-string map key is valid provider context and must
+/// never panic or suppress full replay while an anchor fingerprint is
+/// published.
+#[test]
+fn response_anchor_fingerprint_accepts_non_string_cbor_map_keys() {
+    let item = assistant_tool_call(
+        "call-array-key",
+        "tool",
+        tau_proto::ToolType::Function,
+        tau_proto::CborValue::Map(vec![(
+            tau_proto::CborValue::Array(vec![tau_proto::CborValue::Integer(1.into())]),
+            tau_proto::CborValue::Text("value".to_owned()),
+        )]),
+    );
+
+    assert!(
+        CachedResponseAnchor::new("resp_cbor".to_owned(), &[item]).is_some(),
+        "type-preserving CBOR encoding must accept non-string keys",
+    );
+}
+
+/// Integer and text CBOR map keys that JSON aliases to the same object key must
+/// produce distinct response-prefix proofs.
+#[test]
+fn response_anchor_fingerprint_distinguishes_cbor_map_key_types() {
+    let item_with_key = |key| {
+        assistant_tool_call(
+            "call-key-type",
+            "tool",
+            tau_proto::ToolType::Function,
+            tau_proto::CborValue::Map(vec![(key, tau_proto::CborValue::Text("value".to_owned()))]),
+        )
+    };
+    let integer_key = CachedResponseAnchor::new(
+        "resp_key".to_owned(),
+        &[item_with_key(tau_proto::CborValue::Integer(1.into()))],
+    )
+    .expect("integer-key fingerprint");
+    let text_key = CachedResponseAnchor::new(
+        "resp_key".to_owned(),
+        &[item_with_key(tau_proto::CborValue::Text("1".to_owned()))],
+    )
+    .expect("text-key fingerprint");
+
+    assert_ne!(
+        integer_key.represented_prefix_fingerprint,
+        text_key.represented_prefix_fingerprint,
+    );
+}
+
+/// A response containing provider compaction output must remain ineligible as a
+/// chain anchor even when its causal-prefix fingerprint matches. This preserves
+/// the established workaround for Codex rebuilding compaction history wrongly.
+#[test]
+fn build_request_compaction_response_anchor_falls_back_to_full_replay() {
+    let config = chain_test_config();
+    let compaction =
+        ContextItem::Compaction(OpaqueProviderItem::new(json_to_cbor(&serde_json::json!({
+            "type": "compaction",
+            "summary": "older context",
+        }))));
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: Box::leak(Box::new(tau_proto::PromptContext {
+            blocks: vec![
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![user_text("first turn")],
+                }),
+                tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+                    provider_response_id: Some("resp_compacted".to_owned()),
+                    backend: None,
+                    output_items: vec![compaction],
+                    usage: None,
+                }),
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![user_text("after compaction")],
+                }),
+            ],
+        })),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let anchor = response_anchor_from_context(request.context, "resp_compacted")
+        .expect("compaction response anchor");
+
+    let body =
+        serde_json::to_value(build_request(&config, &request, Some(&anchor))).expect("serialize");
+    assert!(body.get("previous_response_id").is_none());
+    assert_eq!(
+        body["input"].as_array().map(Vec::len),
+        Some(3),
+        "compaction response must force the complete transcript onto the wire",
+    );
 }
 
 /// Defensive: a cached response id missing from the prompt context must NOT
@@ -858,8 +1010,9 @@ fn build_request_cached_response_missing_from_context_falls_back_to_full_replay(
         debug_provider_requests: false,
     };
 
+    let anchor = CachedResponseAnchor::new("missing".to_owned(), &[]).expect("empty prefix");
     let body =
-        serde_json::to_value(build_request(&config, &request, Some("missing"))).expect("serialize");
+        serde_json::to_value(build_request(&config, &request, Some(&anchor))).expect("serialize");
 
     assert_eq!(body["store"], false);
     assert!(
@@ -870,6 +1023,120 @@ fn build_request_cached_response_missing_from_context_falls_back_to_full_replay(
     );
     let input = body["input"].as_array().expect("input array");
     assert_eq!(input.len(), 1);
+}
+
+/// Replay-only matching must accept a recorded full request for `C, A, R` even
+/// though the transcript alone could also fabricate a chained response anchor.
+#[test]
+fn websocket_vcr_replays_recorded_causal_mismatch_full_request() {
+    let config = chain_test_config();
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: Box::leak(Box::new(tau_proto::PromptContext {
+            blocks: vec![
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![user_text("C")],
+                }),
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![user_text("A committed in flight")],
+                }),
+                tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+                    provider_response_id: Some("resp_old".to_owned()),
+                    backend: None,
+                    output_items: vec![assistant_text("R")],
+                    usage: None,
+                }),
+            ],
+        })),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("vcr-causal-full"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let agent_prompt_id = "prompt-causal-full";
+    let recorded_request = serde_json::to_value(build_ws_envelope(&config, &request, None, None))
+        .expect("full request");
+    let temp = tempfile::tempdir().expect("VCR tempdir");
+    let vcr = tau_vcr::VcrConfig::new(tau_vcr::VcrMode::ReplayOnly, temp.path());
+    let key = provider_vcr_key(
+        &request,
+        agent_prompt_id,
+        tau_proto::ProviderBackendTransport::Websocket,
+    );
+    vcr.store()
+        .put(
+            &key,
+            &ProviderStreamCassette {
+                version: PROVIDER_STREAM_CASSETTE_VERSION,
+                request: recorded_request,
+                stream: terminal_vcr_stream("resp_replayed_full"),
+            },
+        )
+        .expect("store full-request cassette");
+
+    let state = ws::run_vcr_replay_turn(&vcr, &config, agent_prompt_id, &request, &mut |_| {})
+        .expect("replay full request")
+        .expect("matching cassette");
+    assert_eq!(state.response_id.as_deref(), Some("resp_replayed_full"));
+}
+
+/// Replay-only matching must retain an ordinary recorded `C, R, suffix`
+/// `previous_response_id` delta rather than requiring the full-request
+/// candidate.
+#[test]
+fn websocket_vcr_replays_recorded_compatible_chained_request() {
+    let config = chain_test_config();
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context_with_response_id(
+            "resp_old",
+            vec![user_text("C")],
+            vec![assistant_text("R")],
+            vec![user_text("suffix")],
+        ),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("vcr-compatible-chain"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let anchor =
+        response_anchor_from_context(request.context, "resp_old").expect("response anchor");
+    let agent_prompt_id = "prompt-compatible-chain";
+    let recorded_request =
+        serde_json::to_value(build_ws_envelope(&config, &request, Some(&anchor), None))
+            .expect("chained request");
+    let temp = tempfile::tempdir().expect("VCR tempdir");
+    let vcr = tau_vcr::VcrConfig::new(tau_vcr::VcrMode::ReplayOnly, temp.path());
+    let key = provider_vcr_key(
+        &request,
+        agent_prompt_id,
+        tau_proto::ProviderBackendTransport::Websocket,
+    );
+    vcr.store()
+        .put(
+            &key,
+            &ProviderStreamCassette {
+                version: PROVIDER_STREAM_CASSETTE_VERSION,
+                request: recorded_request,
+                stream: terminal_vcr_stream("resp_replayed_chain"),
+            },
+        )
+        .expect("store chained-request cassette");
+
+    let state = ws::run_vcr_replay_turn(&vcr, &config, agent_prompt_id, &request, &mut |_| {})
+        .expect("replay chained request")
+        .expect("matching cassette");
+    assert_eq!(state.response_id.as_deref(), Some("resp_replayed_chain"));
 }
 
 /// Regression: `prompt_cache_key` must still ride along on chained
@@ -903,8 +1170,10 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
         debug_provider_requests: false,
     };
 
-    let body = serde_json::to_value(build_request(&config, &request, Some("resp_abc")))
-        .expect("serialize");
+    let anchor =
+        response_anchor_from_context(request.context, "resp_abc").expect("response anchor");
+    let body =
+        serde_json::to_value(build_request(&config, &request, Some(&anchor))).expect("serialize");
     assert_eq!(body["previous_response_id"], "resp_abc");
     assert!(body["prompt_cache_key"].is_string());
 }
@@ -1062,10 +1331,13 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
         debug_provider_requests: false,
     };
 
-    let user_body =
-        serde_json::to_value(build_request(&config, &user_request, Some("resp_parent")))
-            .expect("serialize");
-    let ext_body = serde_json::to_value(build_request(&config, &ext_request, Some("resp_parent")))
+    let user_anchor =
+        response_anchor_from_context(user_request.context, "resp_parent").expect("user anchor");
+    let ext_anchor =
+        response_anchor_from_context(ext_request.context, "resp_parent").expect("extension anchor");
+    let user_body = serde_json::to_value(build_request(&config, &user_request, Some(&user_anchor)))
+        .expect("serialize");
+    let ext_body = serde_json::to_value(build_request(&config, &ext_request, Some(&ext_anchor)))
         .expect("serialize");
 
     assert_eq!(ext_body, user_body);
@@ -1103,8 +1375,10 @@ fn build_request_lite_chain_omits_owned_developer_prefix() {
         debug_provider_requests: false,
     };
 
-    let body = serde_json::to_value(build_request(&config, &request, Some("resp_parent")))
-        .expect("serialize");
+    let anchor =
+        response_anchor_from_context(request.context, "resp_parent").expect("response anchor");
+    let body =
+        serde_json::to_value(build_request(&config, &request, Some(&anchor))).expect("serialize");
     let input = body["input"].as_array().expect("input");
     assert_eq!(body["previous_response_id"], "resp_parent");
     assert!(input.iter().all(|item| item["role"] != "developer"));
@@ -1791,10 +2065,18 @@ fn provider_cassette_validation_separates_responses_modes() {
         stream,
     };
 
-    validate_provider_stream_cassette("mode-test", &cassette, &standard_body)
-        .expect("matching mode");
+    validate_provider_stream_cassette_candidates(
+        "mode-test",
+        &cassette,
+        std::slice::from_ref(&standard_body),
+    )
+    .expect("matching mode");
     assert!(matches!(
-        validate_provider_stream_cassette("mode-test", &cassette, &lite_body),
+        validate_provider_stream_cassette_candidates(
+            "mode-test",
+            &cassette,
+            std::slice::from_ref(&lite_body),
+        ),
         Err(LlmError::Vcr(tau_vcr::VcrError::RequestMismatch { .. }))
     ));
 }
@@ -1844,7 +2126,11 @@ fn provider_cassette_validation_rejects_resource_limit_violations() {
             stream,
         };
         assert!(matches!(
-            validate_provider_stream_cassette("limits", &cassette, &request),
+            validate_provider_stream_cassette_candidates(
+                "limits",
+                &cassette,
+                std::slice::from_ref(&request),
+            ),
             Err(LlmError::Vcr(tau_vcr::VcrError::InvalidCassette { .. }))
         ));
     }
@@ -2960,6 +3246,8 @@ fn apply_event_accumulates_custom_tool_input_deltas() {
     );
 }
 
+/// A compatible tool-calling response anchor must keep its function result as
+/// the only incremental input rather than forcing a full transcript replay.
 #[test]
 fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
     let config = chain_test_config();
@@ -3001,8 +3289,10 @@ fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
         debug_provider_requests: false,
     };
 
-    let body = serde_json::to_value(build_request(&config, &request, Some("resp_custom")))
-        .expect("serialize");
+    let anchor =
+        response_anchor_from_context(request.context, "resp_custom").expect("response anchor");
+    let body =
+        serde_json::to_value(build_request(&config, &request, Some(&anchor))).expect("serialize");
     let input = body["input"].as_array().expect("input");
     assert_eq!(
         input.len(),

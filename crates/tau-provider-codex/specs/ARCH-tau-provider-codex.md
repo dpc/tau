@@ -83,6 +83,13 @@ connection bound. After the first prewarm request is sent, its response wait and
 any immediate repair connection/response share one absolute 30-second response
 deadline. Failed work cannot publish a socket or response id.
 
+Ordinary `previous_response_id` reuse likewise requires the current canonical
+prefix through that response to exactly match the prefix represented on its live
+socket. Input committed while a response was in flight can precede that response
+canonically without existing in its upstream history; such a mismatch drops the
+anchor and full-replays on the same socket. A successful replay publishes a new
+anchor, while an exact match retains suffix-only incremental reuse.
+
 ## GPT-5.6 Responses modes
 
 The surface choice follows

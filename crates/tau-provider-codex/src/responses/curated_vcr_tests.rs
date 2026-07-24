@@ -158,12 +158,12 @@ fn curated_provider_vcr_replay_only_lane() {
             provider_vcr_key(&request, "success", transport),
             declaration.key
         );
-        let cassette = load_provider_stream_cassette(
+        let cassette = load_provider_stream_cassette_candidates(
             &vcr_config,
             &request,
             "success",
             transport,
-            &request_projection,
+            std::slice::from_ref(&request_projection),
         )
         .expect("production replay-only load")
         .expect("replay-only must never fall back to live");
