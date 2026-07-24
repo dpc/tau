@@ -14699,6 +14699,433 @@ fn install_scheduler_compaction_tools(harness: &mut Harness) {
     harness.internal_tool_handlers.push(handler);
 }
 
+/// Build a synchronous provider terminal that asks the test adapter to drive
+/// the production scheduler and compaction-host path.
+fn provider_compact_call(
+    prompt: &AgentPromptCreated,
+    call_id: &ToolCallId,
+) -> ProviderResponseFinished {
+    ProviderResponseFinished {
+        agent_prompt_id: prompt.agent_prompt_id.clone(),
+        agent_id: prompt.agent_id.clone(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: call_id.clone(),
+            name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
+/// A real scheduler-owned self-compaction must advance through its ordinary
+/// continuation, survive joined shutdown and cold replay without changing
+/// prompt counters or duplicating correlated facts, and admit a second real
+/// `compact` call only after a newer ordinary provider generation exists.
+#[test]
+fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let first_call_id = ToolCallId::from("scheduler-compact-first");
+    let second_call_id = ToolCallId::from("scheduler-compact-second");
+
+    let mut h = echo_harness(&state).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    install_scheduler_compaction_tools(&mut h);
+    h.submit_user_prompt("s1".into(), "first ordinary turn".to_owned())
+        .expect("submit first ordinary turn");
+    let caller_cid = test_user_agent(&h);
+    let caller_id = durable_agent_id_for_conversation(&h, &caller_cid);
+    let first_inference = read_nth_prompt_created(&h, 0);
+
+    h.handle_provider_response_finished(provider_compact_call(&first_inference, &first_call_id))
+        .expect("accept first compact call");
+
+    assert_eq!(
+        h.tool_agents.get(&first_call_id),
+        Some(&caller_cid),
+        "scheduler must commit the real call's caller ownership"
+    );
+    let first_records = h
+        .agent_store
+        .agent_events(caller_id.as_str())
+        .expect("caller records");
+    let first_response_index = first_records
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == first_inference.agent_prompt_id
+                        && response.output_items.iter().any(|item| matches!(
+                            item,
+                            ContextItem::ToolCall(call) if call.call_id == first_call_id
+                        ))
+            )
+        })
+        .expect("durable provider tool call");
+    let first_placeholder_indices = first_records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            matches!(
+                &record.event,
+                Event::ProviderToolResult(result)
+                    if result.call_id == first_call_id
+                        && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(first_placeholder_indices.len(), 1);
+    assert!(first_response_index < first_placeholder_indices[0]);
+
+    let first_requests = first_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentManualCompactionRequested(request)
+                if request.initiating_tool_call_id == first_call_id =>
+            {
+                Some(request.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(first_requests.len(), 1);
+    let first_request = &first_requests[0];
+    assert_eq!(first_request.caller_agent_id, caller_id);
+    assert_eq!(first_request.target_agent_id, caller_id);
+    assert_eq!(
+        first_request.initiating_agent_prompt_id,
+        first_inference.agent_prompt_id
+    );
+    let first_starts = first_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentStandaloneCompactionStarted(started)
+                if matches!(
+                    &started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+                        request_id,
+                        caller_agent_id,
+                        initiating_tool_call_id,
+                    } if request_id == &first_request.request_id
+                        && caller_agent_id == &caller_id
+                        && initiating_tool_call_id == &first_call_id
+                ) =>
+            {
+                Some(started.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(first_starts.len(), 1);
+    let first_start = &first_starts[0];
+    let first_compaction = h
+        .read_agent_prompt_created(&h.current_session_id, &first_start.compact_prompt_id)
+        .expect("first standalone prompt");
+    assert_eq!(
+        first_compaction.operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+
+    h.handle_provider_response_finished(provider_text_response(
+        &first_compaction.agent_prompt_id,
+        first_compaction.agent_id,
+        "first compacted summary",
+    ))
+    .expect("finish first standalone compaction");
+
+    let first_continuation = read_nth_prompt_created(&h, 2);
+    assert_eq!(
+        first_continuation.operation,
+        tau_proto::PromptOperation::Inference
+    );
+    let first_records = h
+        .agent_store
+        .agent_events(caller_id.as_str())
+        .expect("caller records after compaction");
+    let prompt_operations = first_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptCreated(prompt) => Some(prompt.operation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prompt_operations,
+        vec![
+            tau_proto::PromptOperation::Inference,
+            tau_proto::PromptOperation::StandaloneCompaction,
+            tau_proto::PromptOperation::Inference,
+        ]
+    );
+    let first_tree = h
+        .agent_store
+        .agent(caller_id.as_str())
+        .expect("caller tree");
+    assert_eq!(first_tree.materialized_prompt_count(), 3);
+    assert_eq!(first_tree.ordinary_inference_generation(), 2);
+
+    let first_background_index = first_records
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::ToolBackgroundResult(result) if result.call_id == first_call_id
+            )
+        })
+        .expect("first background result");
+    let first_checkpoint_index = first_records
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.transaction_id.as_ref()
+                        == Some(&first_start.transaction_id)
+            )
+        })
+        .expect("first continuation checkpoint");
+    let first_checkpoint = match &first_records[first_checkpoint_index].event {
+        Event::AgentInferenceDispatchStarted(checkpoint) => checkpoint,
+        _ => unreachable!("matched checkpoint"),
+    };
+    let first_continuation_index = first_records
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.agent_prompt_id == first_checkpoint.agent_prompt_id
+                        && prompt.operation == tau_proto::PromptOperation::Inference
+            )
+        })
+        .expect("first continuation dispatch");
+    assert!(first_background_index < first_checkpoint_index);
+    assert!(first_checkpoint_index < first_continuation_index);
+    assert_eq!(
+        first_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ToolBackgroundResult(result) if result.call_id == first_call_id
+            ))
+            .count(),
+        1
+    );
+
+    h.handle_provider_response_finished(provider_text_response(
+        &first_continuation.agent_prompt_id,
+        first_continuation.agent_id,
+        "ordinary continuation complete",
+    ))
+    .expect("finish ordinary continuation");
+    let first_request_id = first_request.request_id.clone();
+    let first_transaction_id = first_start.transaction_id.clone();
+    h.shutdown().expect("joined shutdown");
+    drop(h);
+    assert!(
+        !tau_core::session_is_locked(&tau_config::settings::sessions_dir_of(&state), "s1")
+            .expect("session lock probe"),
+        "joined shutdown and drop must release the session lock"
+    );
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("cold reopen");
+    resumed
+        .provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    install_scheduler_compaction_tools(&mut resumed);
+    let resumed_cid = resumed
+        .agent_routes
+        .get(caller_id.as_str())
+        .cloned()
+        .expect("restored caller");
+    let reopened_records = resumed
+        .agent_store
+        .agent_events(caller_id.as_str())
+        .expect("reopened caller records");
+    let durable_materialized = reopened_records
+        .iter()
+        .filter(|record| matches!(record.event, Event::AgentPromptCreated(_)))
+        .count() as u64;
+    let durable_ordinary = reopened_records
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::Inference
+            )
+        })
+        .count() as u64;
+    let reopened_tree = resumed
+        .agent_store
+        .agent(caller_id.as_str())
+        .expect("reopened caller tree");
+    assert_eq!(
+        reopened_tree.materialized_prompt_count(),
+        durable_materialized
+    );
+    assert_eq!(
+        reopened_tree.ordinary_inference_generation(),
+        durable_ordinary
+    );
+    assert_eq!((durable_materialized, durable_ordinary), (3, 2));
+
+    resumed
+        .submit_user_prompt(
+            "s1".into(),
+            "new ordinary turn after cold reopen".to_owned(),
+        )
+        .expect("submit post-reopen ordinary turn");
+    let second_inference = read_nth_prompt_created(&resumed, 0);
+    assert_eq!(
+        second_inference.operation,
+        tau_proto::PromptOperation::Inference
+    );
+    resumed
+        .handle_provider_response_finished(provider_compact_call(
+            &second_inference,
+            &second_call_id,
+        ))
+        .expect("accept second compact call");
+
+    let final_records = resumed
+        .agent_store
+        .agent_events(caller_id.as_str())
+        .expect("final caller records");
+    let second_requests = final_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentManualCompactionRequested(request)
+                if request.initiating_tool_call_id == second_call_id =>
+            {
+                Some(request)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(second_requests.len(), 1);
+    let second_request = second_requests[0];
+    assert_eq!(second_request.caller_agent_id, caller_id);
+    assert_eq!(second_request.target_agent_id, caller_id);
+    assert_eq!(
+        second_request.initiating_agent_prompt_id,
+        second_inference.agent_prompt_id
+    );
+    assert!(second_request.target_generation > durable_ordinary);
+    assert_ne!(second_request.request_id, first_request_id);
+    let second_starts = final_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentStandaloneCompactionStarted(started)
+                if matches!(
+                    &started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+                        request_id,
+                        initiating_tool_call_id,
+                        ..
+                    } if request_id == &second_request.request_id
+                        && initiating_tool_call_id == &second_call_id
+                ) =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(second_starts.len(), 1);
+    assert_ne!(second_starts[0].transaction_id, first_transaction_id);
+    assert_eq!(
+        final_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ProviderToolResult(result)
+                    if result.call_id == second_call_id
+                        && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+            ))
+            .count(),
+        1
+    );
+    assert!(!event_log_events(&resumed).iter().any(|event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id == second_call_id && error.message == "not_needed"
+    )));
+
+    assert_eq!(
+        final_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentManualCompactionRequested(request)
+                    if request.request_id == first_request_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        final_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if started.transaction_id == first_transaction_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        final_records
+            .iter()
+            .filter(|record| match &record.event {
+                Event::AgentCompacted(compacted) => {
+                    compacted.transaction_id.as_ref() == Some(&first_transaction_id)
+                }
+                Event::AgentStandaloneCompactionFailed(failed) => {
+                    failed.transaction_id == first_transaction_id
+                }
+                _ => false,
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        final_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ToolBackgroundResult(result) if result.call_id == first_call_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(resumed.tool_agents.get(&second_call_id), Some(&resumed_cid));
+    resumed.shutdown().expect("shutdown");
+}
+
 /// The real scheduler path for `compact` must consume the built-in tool's
 /// custom placeholder reservation instead of publishing a second placeholder,
 /// keep foreground and wait state pending while interception parks that
