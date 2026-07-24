@@ -96,4 +96,6 @@ The compact accessible chip is bright-green `Q-` for far under, green `Q=` for
 aligned, orange/yellow `Q+` for over, red `Q!` for danger, and neutral `Q?` for
 stale or unknown state. Text carries the meaning in no-color and limited-color
 terminals. The status bar drops this optional chip before essential identity on
-narrow displays. No playful or “tokenmaxxing” copy is part of this design.
+narrow displays; its status priority is `50`, below identity, context, activity,
+description, and watcher elements and above optional debug elements. No playful
+or “tokenmaxxing” copy is part of this design.

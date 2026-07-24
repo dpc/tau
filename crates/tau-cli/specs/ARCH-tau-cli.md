@@ -25,9 +25,19 @@ local code execution inputs rather than untrusted data.
 The prompt's right-side context renders `<cwd> <&session-id>` as one
 `prompt.cwd`-styled unit. If prompt input needs that space, terminal overflow
 hides the complete unit. The bottom status line identifies the selected role or
-agent but does not repeat the session id. Authoritative `session.started`
-events reconcile the displayed context and the input loop's routing session,
-including transitions initiated by another attached UI.
+agent but does not repeat the session id. Its independently hideable elements
+use ascending importance bands: identity `0`, context `10`, tool and active
+side-agent activity `20`, agent description and model adjustments `30`,
+watchers `40`, weekly quota `50`, UI-I/O diagnostics `60`, and the redraw
+counter `70`. Larger priorities disappear first at narrow widths; equal
+priorities disappear in reverse visual declaration order. Retained elements
+keep their normal left/right placement and spacing. If identity itself cannot
+fit, the status line stays empty rather than wrapping or clipping it.
+The reusable fitting and grouping behavior comes from
+[ARCH-tau-term-screen](../../tau-term-screen/specs/ARCH-tau-term-screen.md).
+Authoritative `session.started` events reconcile the displayed context and the
+input loop's routing session, including transitions initiated by another
+attached UI.
 
 Prompt completion may read the local filesystem and query `git` for tracked and
 unignored files. These operations should stay bounded and best-effort: failures

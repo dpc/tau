@@ -5,6 +5,19 @@ not own terminal input, process spawning, networking, persistence, or background
 tasks; callers own those boundaries and must bound the amount of text they ask the
 crate to lay out or render.
 
+`PriorityLine` provides reusable single-row progressive layout for styled
+presentation elements. It measures terminal display columns, preserves stable
+item order within left/right edge groups, emits the left group before the right,
+and removes larger integer priorities until retained whole items, one-cell
+intra-group separators, and minimum inter-group padding fit. Equal priorities
+remove later inserted items first, and empty items are ignored. If the
+highest-importance survivor cannot fit after less-important items are removed,
+the line stays empty rather than resurrecting one of those items, wrapping, or
+clipping content. `StyledBlock::priority_line` selects this layout instead of
+ordinary and right-adornment content. Ordinary `StyledBlock::right_content`
+remains the atomic right-adornment mechanism used by the multi-line-capable
+prompt.
+
 ## Terminal output trust boundary
 
 Caller-provided text is untrusted with respect to terminal control sequences.

@@ -27,6 +27,30 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
     )
 }
 
+/// Every bottom-status element must keep the ten-point band documented by
+/// `ARCH-tau-cli`, including shared operational and optional debug bands.
+#[test]
+fn status_element_priorities_cover_every_element() {
+    use super::StatusElement;
+
+    let priorities = [
+        (StatusElement::Identity, 0),
+        (StatusElement::Context, 10),
+        (StatusElement::Tools, 20),
+        (StatusElement::ActiveAgents, 20),
+        (StatusElement::Description, 30),
+        (StatusElement::ModelAdjustment, 30),
+        (StatusElement::Watchers, 40),
+        (StatusElement::WeeklyQuota, 50),
+        (StatusElement::UiIoDebug, 60),
+        (StatusElement::RedrawDebug, 70),
+    ];
+
+    for (element, expected) in priorities {
+        assert_eq!(element.priority().get(), expected, "{element:?}");
+    }
+}
+
 fn watch_turn_state_event(
     message_id: &str,
     state: tau_proto::AgentRuntimeState,

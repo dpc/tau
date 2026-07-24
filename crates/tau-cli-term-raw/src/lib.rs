@@ -27,7 +27,10 @@ use crossterm::event::{
 };
 use crossterm::style::Print;
 use crossterm::{QueueableCommand, terminal};
-pub use tau_term_screen::{Align, BlockId, Cell, Color, Span, Style, StyledBlock, StyledText};
+pub use tau_term_screen::{
+    Align, BlockId, Cell, Color, PriorityLine, PriorityLineAlignment, PriorityLinePriority, Span,
+    Style, StyledBlock, StyledText,
+};
 use tau_term_screen::{
     Screen, display_width, emit_styled_cells, layout_block, layout_lines, next_grapheme_boundary,
     previous_grapheme_boundary, truncate_to_width,
@@ -1181,7 +1184,7 @@ impl TermHandle {
         let id = st.alloc_id();
         let debug_id = debug_id.into();
         let block = block.into();
-        let content_empty = block.content.is_empty();
+        let content_empty = block.is_empty();
         st.blocks.insert(id, block);
         st.block_debug_ids.insert(id, debug_id.clone());
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, debug_id, content_empty, "new block");
@@ -1193,7 +1196,7 @@ impl TermHandle {
     pub fn set_block(&self, id: BlockId, block: impl Into<StyledBlock>) {
         let _transaction = self.output_transaction_barrier();
         let block = block.into();
-        let content_empty = block.content.is_empty();
+        let content_empty = block.is_empty();
         let mut st = self.lock();
         let affects_history = st.block_in_history(id);
         st.blocks.insert(id, block);
@@ -1343,7 +1346,7 @@ impl TermHandle {
         let id = st.alloc_id();
         let debug_id = debug_id.into();
         let block = block.into();
-        let content_empty = block.content.is_empty();
+        let content_empty = block.is_empty();
         st.blocks.insert(id, block);
         st.block_debug_ids.insert(id, debug_id.clone());
         st.append_history(id);
@@ -2807,7 +2810,7 @@ fn layout_id_list(
 ) {
     for id in ids {
         if let Some(block) = blocks.get(id) {
-            if block.content.is_empty() {
+            if block.is_empty() {
                 continue;
             }
             let lines = layout_block(block, width);

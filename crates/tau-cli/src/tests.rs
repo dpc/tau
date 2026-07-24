@@ -5559,6 +5559,107 @@ fn model_status_uses_symbol_prefixed_chips() {
     assert!(!vt.screen_contains(80, "ctx:"));
 }
 
+/// Exact status boundaries must use terminal display width and drop the context
+/// chip atomically before the identity, including for a wide Unicode role name.
+#[test]
+fn model_status_progressively_hides_at_ascii_and_unicode_boundaries() {
+    let cases = [
+        (17, "engineer", "+engineer", Some("#-/200k")),
+        (16, "engineer", "+engineer", None),
+        (11, "界", "+界", Some("#-/200k")),
+        (10, "界", "+界", None),
+    ];
+
+    for (width, role, identity, context) in cases {
+        let (_term, handle, vt) = setup(width, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
+            model: Some("test/model".into()),
+            context_window: Some(200_000),
+            role: role.into(),
+            baseline_params: None,
+            model_params: tau_proto::ModelParams::default(),
+        }));
+        sync(&handle);
+
+        let status_row = vt
+            .screen_text(width)
+            .into_iter()
+            .find(|row| row.contains(identity))
+            .unwrap_or_else(|| panic!("missing {identity:?} status row at width {width}"));
+        assert_eq!(
+            status_row.contains("#-/200k"),
+            context.is_some(),
+            "unexpected status row at width {width}: {status_row:?}"
+        );
+        assert_eq!(
+            status_row.trim(),
+            context.map_or_else(
+                || identity.to_owned(),
+                |context| format!("{identity} {context}")
+            )
+        );
+    }
+}
+
+/// Optional diagnostics must stay absent when disabled and, when enabled, hide
+/// the lower-value redraw counter before the more useful UI-I/O rates.
+#[test]
+fn model_status_debug_elements_follow_config_and_priority() {
+    for width in [20, 22] {
+        let (_term, handle, vt) = setup(width, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
+            model: Some("test/model".into()),
+            context_window: None,
+            role: "engineer".into(),
+            baseline_params: None,
+            model_params: tau_proto::ModelParams::default(),
+        }));
+        sync(&handle);
+        let status_row = vt
+            .screen_text(width)
+            .into_iter()
+            .find(|row| row.contains("+engineer"))
+            .expect("status row without diagnostics");
+        assert!(!status_row.contains("io "));
+
+        renderer.apply_setting("show-ui-io", "true");
+        renderer.apply_setting("redraw-counter", "true");
+        handle.invalidate_screen();
+        sync(&handle);
+        renderer.handle_ui_io_sample(super::event_renderer::UiIoStats {
+            uplink_max_bytes_per_sec: 1024,
+            downlink_max_bytes_per_sec: 2048,
+        });
+        sync(&handle);
+
+        let full_render_count = handle.full_render_count();
+        let status_row = vt
+            .screen_text(width)
+            .into_iter()
+            .find(|row| row.contains("+engineer"))
+            .expect("status row with diagnostics");
+        assert!(
+            status_row.contains("io ↑1K ↓2K"),
+            "UI-I/O diagnostics missing at width {width}: {status_row:?}"
+        );
+        assert_eq!(
+            status_row.ends_with(&format!(" {full_render_count}")),
+            width == 22,
+            "unexpected redraw-counter retention at width {width}: {status_row:?}"
+        );
+    }
+}
+
 /// The compact quota status uses redundant ASCII text for every pacing state,
 /// so no-color and narrow terminal users do not have to infer meaning from hue.
 #[test]

@@ -683,12 +683,25 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
     let remaining_after_ml = width.saturating_sub(ml);
     let mr = requested_mr.min(remaining_after_ml.saturating_sub(1));
     let content_width = width.saturating_sub(ml + mr).max(1);
+    let fill_style = Style {
+        bg: block.bg,
+        ..Style::default()
+    };
+    let fill = Cell::new(' ', fill_style);
 
-    let mut content_lines = layout_lines()
-        .content(&block.content)
-        .width(content_width)
-        .call();
-    if block.align == Align::Left && !block.right_content.is_empty() && content_lines.len() == 1 {
+    let mut content_lines = if let Some(priority_line) = &block.priority_line {
+        vec![priority_line.layout(content_width, fill)]
+    } else {
+        layout_lines()
+            .content(&block.content)
+            .width(content_width)
+            .call()
+    };
+    if block.priority_line.is_none()
+        && block.align == Align::Left
+        && !block.right_content.is_empty()
+        && content_lines.len() == 1
+    {
         let right_cells = block.right_content.to_cells();
         let left_cols = cols(&content_lines[0]);
         let right_cols = cols(&right_cells);
@@ -698,12 +711,6 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
             content_lines[0].extend(right_cells);
         }
     }
-
-    let fill_style = Style {
-        bg: block.bg,
-        ..Style::default()
-    };
-    let fill = Cell::new(' ', fill_style);
 
     content_lines
         .iter()

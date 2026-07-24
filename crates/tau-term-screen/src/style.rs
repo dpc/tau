@@ -400,6 +400,11 @@ pub struct StyledBlock {
     /// [`Align::Left`], primary content lays out to one row, and both sides
     /// fit with separator padding.
     pub right_content: StyledText,
+    /// Optional priority-based content rendered as exactly one adaptive line.
+    ///
+    /// When present, `layout_block` uses this instead of [`Self::content`] and
+    /// [`Self::right_content`].
+    pub priority_line: Option<crate::PriorityLine>,
     /// Optional background color for the content area and its padding.
     pub bg: Option<Color>,
     /// Horizontal alignment applied to primary content.
@@ -422,11 +427,25 @@ impl StyledBlock {
         Self {
             content: content.into(),
             right_content: StyledText::new(),
+            priority_line: None,
             bg: None,
             align: Align::Left,
             margin_left: 0,
             margin_right: 0,
         }
+    }
+
+    /// Returns `true` when the selected layout's effective primary content is
+    /// empty.
+    ///
+    /// A priority line supersedes ordinary primary content. Right content
+    /// remains an adornment and is excluded from this primary-content
+    /// predicate.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.priority_line
+            .as_ref()
+            .map_or_else(|| self.content.is_empty(), crate::PriorityLine::is_empty)
     }
 
     /// Returns this block with a content-area background color.
@@ -447,6 +466,12 @@ impl StyledBlock {
     /// content when both sides fit with separator padding.
     pub fn right_content(mut self, content: impl Into<StyledText>) -> Self {
         self.right_content = content.into();
+        self
+    }
+
+    /// Returns this block with priority-based single-line content.
+    pub fn priority_line(mut self, line: crate::PriorityLine) -> Self {
+        self.priority_line = Some(line);
         self
     }
 

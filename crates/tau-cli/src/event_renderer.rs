@@ -1015,17 +1015,58 @@ struct ShellBlockState {
     output: String,
 }
 
-fn push_status_chip(
-    themed: &mut tau_themes::ThemedText,
-    style: tau_themes::StyleIdx,
-    needs_space: &mut bool,
-    text: impl Into<String>,
-) {
-    if *needs_space {
-        themed.push_default(" ");
+/// Independently hideable bottom-status elements in priority order.
+///
+/// `ARCH-tau-cli` defines the ten-point bands. Active side-agent activity
+/// shares the tool-activity band, while model adjustments share the
+/// agent-description band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusElement {
+    /// Agent, role, model, or no-selection identity.
+    Identity,
+    /// Selected model's context usage and capacity.
+    Context,
+    /// Main-agent tool progress.
+    Tools,
+    /// Count of active side agents.
+    ActiveAgents,
+    /// Selected agent's human-readable description.
+    Description,
+    /// Effective effort, verbosity, or service-tier adjustment.
+    ModelAdjustment,
+    /// Agents watching the selected agent.
+    Watchers,
+    /// Weekly provider quota pacing.
+    WeeklyQuota,
+    /// Optional UI-to-harness throughput diagnostics.
+    UiIoDebug,
+    /// Optional full-redraw counter.
+    RedrawDebug,
+}
+
+impl StatusElement {
+    /// Returns the priority where zero is most important.
+    const fn priority(self) -> tau_cli_term::PriorityLinePriority {
+        let value = match self {
+            Self::Identity => 0,
+            Self::Context => 10,
+            Self::Tools | Self::ActiveAgents => 20,
+            Self::Description | Self::ModelAdjustment => 30,
+            Self::Watchers => 40,
+            Self::WeeklyQuota => 50,
+            Self::UiIoDebug => 60,
+            Self::RedrawDebug => 70,
+        };
+        tau_cli_term::PriorityLinePriority::new(value)
     }
-    themed.push(style, text.into());
-    *needs_space = true;
+}
+
+fn status_chip(
+    theme: &tau_themes::Theme,
+    style: &str,
+    text: impl Into<String>,
+) -> tau_cli_term::StyledText {
+    tau_cli_term::Span::new(text, tau_cli_term::resolve::resolve(theme, style)).into()
 }
 
 pub(crate) fn unix_time_millis() -> u64 {
@@ -1036,42 +1077,18 @@ pub(crate) fn unix_time_millis() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-fn push_ui_io_status_chip(
-    themed: &mut tau_themes::ThemedText,
-    needs_space: &mut bool,
-    stats: UiIoStats,
-    low_style: tau_themes::StyleIdx,
-    medium_style: tau_themes::StyleIdx,
-    high_style: tau_themes::StyleIdx,
-) {
-    let style = ui_io_status_style(stats, low_style, medium_style, high_style);
-    push_status_chip(
-        themed,
-        style,
-        needs_space,
-        format!(
-            "io ↑{} ↓{}",
-            format_ui_io_rate(stats.uplink_max_bytes_per_sec),
-            format_ui_io_rate(stats.downlink_max_bytes_per_sec)
-        ),
-    );
-}
+fn ui_io_status_style(stats: UiIoStats) -> &'static str {
+    use tau_themes::names;
 
-fn ui_io_status_style(
-    stats: UiIoStats,
-    low_style: tau_themes::StyleIdx,
-    medium_style: tau_themes::StyleIdx,
-    high_style: tau_themes::StyleIdx,
-) -> tau_themes::StyleIdx {
     let max_bytes_per_sec = stats
         .uplink_max_bytes_per_sec
         .max(stats.downlink_max_bytes_per_sec);
     if max_bytes_per_sec < UI_IO_MEDIUM_BYTES_PER_SEC {
-        low_style
+        names::STATUS_UI_IO_LOW
     } else if max_bytes_per_sec < UI_IO_HIGH_BYTES_PER_SEC {
-        medium_style
+        names::STATUS_UI_IO_MEDIUM
     } else {
-        high_style
+        names::STATUS_UI_IO_HIGH
     }
 }
 
@@ -2160,15 +2177,14 @@ impl EventRenderer {
         self.agent_activity = state.agent_activity;
     }
 
-    fn agent_display_label(&self, agent_id: &str) -> String {
+    fn agent_status_description(&self, agent_id: &str) -> Option<String> {
         self.agent_display_names
             .lock()
             .ok()
             .and_then(|names| names.get(agent_id).cloned())
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty() && name != agent_id)
-            .map(|name| format!("{agent_id} ({name})"))
-            .unwrap_or_else(|| agent_id.to_owned())
+            .map(|name| format!("({name})"))
     }
 
     /// Builds a message-safe label from current local presentation metadata.
@@ -2978,32 +2994,13 @@ impl EventRenderer {
     }
 
     fn render_model_status(&mut self) {
-        use tau_cli_term::StyledBlock;
-        use tau_cli_term::resolve::{convert_color, themed_text};
-        use tau_themes::{StyleName, ThemedText, names};
+        use tau_cli_term::resolve::convert_color;
+        use tau_cli_term::{PriorityLine, PriorityLineAlignment, StyledBlock};
+        use tau_themes::{StyleName, names};
 
-        let mut themed = ThemedText::new();
-        let mut right_themed = ThemedText::new();
-        let status_style = themed.add_style(names::MODEL_STATUS);
-        let model_style = themed.add_style(names::STATUS_MODEL);
-        let role_style = themed.add_style(names::STATUS_ROLE);
-        let effort_style = themed.add_style(names::STATUS_EFFORT);
-        let verbosity_style = themed.add_style(names::STATUS_VERBOSITY);
-        let service_tier_style = themed.add_style(names::STATUS_SERVICE_TIER);
-        let tools_style = right_themed.add_style(names::STATUS_TOOLS);
-        let agents_style = right_themed.add_style(names::STATUS_AGENTS);
-        let context_style = right_themed.add_style(names::STATUS_CONTEXT);
-        let quota_under_style = right_themed.add_style(names::STATUS_QUOTA_UNDER);
-        let quota_aligned_style = right_themed.add_style(names::STATUS_QUOTA_ALIGNED);
-        let quota_over_style = right_themed.add_style(names::STATUS_QUOTA_OVER);
-        let quota_danger_style = right_themed.add_style(names::STATUS_QUOTA_DANGER);
-        let quota_unknown_style = right_themed.add_style(names::STATUS_QUOTA_UNKNOWN);
-        let ui_io_low_style = right_themed.add_style(names::STATUS_UI_IO_LOW);
-        let ui_io_medium_style = right_themed.add_style(names::STATUS_UI_IO_MEDIUM);
-        let ui_io_high_style = right_themed.add_style(names::STATUS_UI_IO_HIGH);
-        let redraw_style = right_themed.add_style(names::REDRAW_COUNTER);
-        let mut needs_space = false;
-        let mut right_needs_space = false;
+        let mut line = PriorityLine::new();
+        let left = PriorityLineAlignment::Left;
+        let right = PriorityLineAlignment::Right;
 
         match (
             self.current_agent_id.as_deref(),
@@ -3011,33 +3008,40 @@ impl EventRenderer {
             self.current_model.as_ref(),
         ) {
             (Some(agent_id), _, _) => {
-                push_status_chip(
-                    &mut themed,
-                    role_style,
-                    &mut needs_space,
-                    format!("@{}", self.agent_display_label(agent_id)),
+                line.push(
+                    StatusElement::Identity.priority(),
+                    left,
+                    status_chip(&self.theme, names::STATUS_ROLE, format!("@{agent_id}")),
                 );
+                if let Some(description) = self.agent_status_description(agent_id) {
+                    line.push(
+                        StatusElement::Description.priority(),
+                        left,
+                        status_chip(&self.theme, names::STATUS_ROLE, description),
+                    );
+                }
                 if let Some(watched_by) = self.watched_by_status(agent_id) {
-                    push_status_chip(&mut themed, status_style, &mut needs_space, watched_by);
+                    line.push(
+                        StatusElement::Watchers.priority(),
+                        left,
+                        status_chip(&self.theme, names::MODEL_STATUS, watched_by),
+                    );
                 }
             }
-            (None, Some(role), _) => push_status_chip(
-                &mut themed,
-                role_style,
-                &mut needs_space,
-                format!("+{role}"),
+            (None, Some(role), _) => line.push(
+                StatusElement::Identity.priority(),
+                left,
+                status_chip(&self.theme, names::STATUS_ROLE, format!("+{role}")),
             ),
-            (None, None, Some(model)) => push_status_chip(
-                &mut themed,
-                model_style,
-                &mut needs_space,
-                format!("={model}"),
+            (None, None, Some(model)) => line.push(
+                StatusElement::Identity.priority(),
+                left,
+                status_chip(&self.theme, names::STATUS_MODEL, format!("={model}")),
             ),
-            (None, None, None) if self.current_session_id.is_none() => push_status_chip(
-                &mut themed,
-                status_style,
-                &mut needs_space,
-                "no role selected".to_owned(),
+            (None, None, None) if self.current_session_id.is_none() => line.push(
+                StatusElement::Identity.priority(),
+                left,
+                status_chip(&self.theme, names::MODEL_STATUS, "no role selected"),
             ),
             (None, None, None) => {}
         }
@@ -3051,11 +3055,14 @@ impl EventRenderer {
             |default| self.model_params.effort != default.effort,
         );
         if show_effort {
-            push_status_chip(
-                &mut themed,
-                effort_style,
-                &mut needs_space,
-                format!("^{}", self.model_params.effort.as_str()),
+            line.push(
+                StatusElement::ModelAdjustment.priority(),
+                left,
+                status_chip(
+                    &self.theme,
+                    names::STATUS_EFFORT,
+                    format!("^{}", self.model_params.effort.as_str()),
+                ),
             );
         }
         let show_verbosity = self.baseline_params.map_or_else(
@@ -3068,11 +3075,14 @@ impl EventRenderer {
             |default| self.model_params.verbosity != default.verbosity,
         );
         if show_verbosity {
-            push_status_chip(
-                &mut themed,
-                verbosity_style,
-                &mut needs_space,
-                format!("~{}", self.model_params.verbosity.as_str()),
+            line.push(
+                StatusElement::ModelAdjustment.priority(),
+                left,
+                status_chip(
+                    &self.theme,
+                    names::STATUS_VERBOSITY,
+                    format!("~{}", self.model_params.verbosity.as_str()),
+                ),
             );
         }
         let show_service_tier = self
@@ -3086,46 +3096,55 @@ impl EventRenderer {
                 .service_tier
                 .map(|tier| tier.as_str())
                 .unwrap_or("off");
-            push_status_chip(
-                &mut themed,
-                service_tier_style,
-                &mut needs_space,
-                format!("!{service_tier}"),
+            line.push(
+                StatusElement::ModelAdjustment.priority(),
+                left,
+                status_chip(
+                    &self.theme,
+                    names::STATUS_SERVICE_TIER,
+                    format!("!{service_tier}"),
+                ),
             );
         }
         if let Some(tools) = self.main_tools_status_chip() {
-            push_status_chip(
-                &mut right_themed,
-                tools_style,
-                &mut right_needs_space,
-                format!("%{tools}"),
+            line.push(
+                StatusElement::Tools.priority(),
+                right,
+                status_chip(&self.theme, names::STATUS_TOOLS, format!("%{tools}")),
             );
         }
         let active_agents = self.active_side_agent_count();
         if 0 < active_agents {
-            push_status_chip(
-                &mut right_themed,
-                agents_style,
-                &mut right_needs_space,
-                format!("@{active_agents}"),
+            line.push(
+                StatusElement::ActiveAgents.priority(),
+                right,
+                status_chip(
+                    &self.theme,
+                    names::STATUS_AGENTS,
+                    format!("@{active_agents}"),
+                ),
             );
         }
         if let Some(context) = self.context_status_chip() {
-            push_status_chip(
-                &mut right_themed,
-                context_style,
-                &mut right_needs_space,
-                format!("#{context}"),
+            line.push(
+                StatusElement::Context.priority(),
+                right,
+                status_chip(&self.theme, names::STATUS_CONTEXT, format!("#{context}")),
             );
         }
         if self.show_ui_io {
-            push_ui_io_status_chip(
-                &mut right_themed,
-                &mut right_needs_space,
-                self.ui_io_stats,
-                ui_io_low_style,
-                ui_io_medium_style,
-                ui_io_high_style,
+            line.push(
+                StatusElement::UiIoDebug.priority(),
+                right,
+                status_chip(
+                    &self.theme,
+                    ui_io_status_style(self.ui_io_stats),
+                    format!(
+                        "io ↑{} ↓{}",
+                        format_ui_io_rate(self.ui_io_stats.uplink_max_bytes_per_sec),
+                        format_ui_io_rate(self.ui_io_stats.downlink_max_bytes_per_sec)
+                    ),
+                ),
             );
         }
 
@@ -3139,11 +3158,14 @@ impl EventRenderer {
                 .last_full_render_at
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(5 * 60));
         if show_redraw_counter {
-            push_status_chip(
-                &mut right_themed,
-                redraw_style,
-                &mut right_needs_space,
-                full_render_count.to_string(),
+            line.push(
+                StatusElement::RedrawDebug.priority(),
+                right,
+                status_chip(
+                    &self.theme,
+                    names::REDRAW_COUNTER,
+                    full_render_count.to_string(),
+                ),
             );
         }
 
@@ -3155,17 +3177,16 @@ impl EventRenderer {
             quota_model.and_then(|model| self.quota_pacing.classify(&model, unix_time_millis()));
         if let Some(quota) = quota {
             let style = match quota {
-                crate::provider_quota::QuotaPacing::FarUnder => quota_under_style,
-                crate::provider_quota::QuotaPacing::Aligned => quota_aligned_style,
-                crate::provider_quota::QuotaPacing::Over => quota_over_style,
-                crate::provider_quota::QuotaPacing::Danger => quota_danger_style,
-                crate::provider_quota::QuotaPacing::Unknown => quota_unknown_style,
+                crate::provider_quota::QuotaPacing::FarUnder => names::STATUS_QUOTA_UNDER,
+                crate::provider_quota::QuotaPacing::Aligned => names::STATUS_QUOTA_ALIGNED,
+                crate::provider_quota::QuotaPacing::Over => names::STATUS_QUOTA_OVER,
+                crate::provider_quota::QuotaPacing::Danger => names::STATUS_QUOTA_DANGER,
+                crate::provider_quota::QuotaPacing::Unknown => names::STATUS_QUOTA_UNKNOWN,
             };
-            push_status_chip(
-                &mut right_themed,
-                style,
-                &mut right_needs_space,
-                quota.chip().to_owned(),
+            line.push(
+                StatusElement::WeeklyQuota.priority(),
+                right,
+                status_chip(&self.theme, style, quota.chip()),
             );
         }
         if let Some(timer) = &self.tool_timer {
@@ -3176,8 +3197,7 @@ impl EventRenderer {
             .theme
             .resolve_style(&StyleName::new(names::MODEL_STATUS))
             .bg;
-        let mut block = StyledBlock::new(themed_text(&self.theme, &themed))
-            .right_content(themed_text(&self.theme, &right_themed));
+        let mut block = StyledBlock::new("").priority_line(line);
         if let Some(bg) = bg {
             block = block.bg(convert_color(bg));
         }
