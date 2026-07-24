@@ -2,6 +2,8 @@
 
 Authority: confirmed, 2026-07-13, dpc
 
+## Decision
+
 Each configured extension instance may receive one immutable, narrowly
 structural tool prefix before declarations and readiness. The prefix qualifies
 internal names, model-visible aliases, and groups, but never rewrites tags,

@@ -32,9 +32,6 @@ One semantic append already provides the atomic completion point. Treating its
 provider and renderer views as a publication transaction adds global retry and
 lifecycle coordination without improving that authority boundary.
 
-The user approved the research recommendation with: “Follow researchers
-recommendations then. No big changes, just incremental fixed and improvements.”
-
 This decision is governed by
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md)
 and constrains

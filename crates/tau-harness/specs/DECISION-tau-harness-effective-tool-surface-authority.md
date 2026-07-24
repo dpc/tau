@@ -2,6 +2,8 @@
 
 Authority: unconfirmed
 
+## Decision
+
 For each provider prompt, the harness owns one immutable effective tool snapshot
 after role policy and provider capability filtering. That snapshot is the single
 authority for provider definitions, capability claims, authorization, and
