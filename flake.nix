@@ -193,6 +193,20 @@
                 echo "       (likely the compiler optimized it out — check crates/tau-harness/src/version.rs)" >&2
                 exit 1
               fi
+              ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+                # Wild keeps x86_64 Linux links for this large binary fast. Fail
+                # rather than allowing a shared build override to disable it again.
+                if ${pkgs.binutils}/bin/readelf --file-header "$out/bin/tau" |
+                  grep -qF 'Advanced Micro Devices X86-64'
+                then
+                  if ! ${pkgs.binutils}/bin/readelf --string-dump .comment "$out/bin/tau" |
+                    grep -qF 'Linker: Wild '
+                  then
+                    echo "error: x86_64 Linux $out/bin/tau was not linked with Wild" >&2
+                    exit 1
+                  fi
+                fi
+              ''}
             '';
           };
 
