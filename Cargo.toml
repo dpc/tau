@@ -275,6 +275,11 @@ incremental = false
 inherits = "dev"
 lto = "off"
 
+[profile.ci.package."*"]
+# Keep useful file and line information for workspace test failures without
+# paying the artifact-size cost for every third-party dependency.
+debug = false
+
 [profile.release]
 # Keep the universal binary's whole-program optimization parallel. Fat LTO with
 # one codegen unit made the final source-release build take several minutes.
