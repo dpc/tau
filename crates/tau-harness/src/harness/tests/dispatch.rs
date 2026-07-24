@@ -15560,6 +15560,760 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
     );
 }
 
+/// Cold recovery from a retained manual self-compaction success whose caller
+/// background result already committed must preserve that terminal, fold its
+/// one internal completion notification, checkpoint continuation before
+/// dispatch, and leave a second response-less reopen dispatch-uncertain without
+/// another append.
+#[test]
+fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let agent_id = tau_proto::AgentId::parse("manual-completed-prefix").expect("durable agent id");
+    let request_id =
+        tau_proto::CompactionRequestId::parse("cr-manual-completed-prefix").expect("request id");
+    let transaction_id = tau_proto::CompactionTransactionId::parse("ct-manual-completed-prefix")
+        .expect("transaction id");
+    let initiating_prompt_id = tau_proto::AgentPromptId::from("ap-manual-completed-prefix-0");
+    let compact_prompt_id = tau_proto::AgentPromptId::from("ap-manual-completed-prefix-1");
+    let call_id = ToolCallId::from("call-manual-completed-prefix");
+    let tool_name = ToolName::new("compact");
+    let model: tau_proto::ModelId = "test/model".into();
+    let originating_text = "compact the retained prefix".to_owned();
+    let notification_text = background_completion_prompt(&call_id);
+    let is_correlation = |event: &Event| match event {
+        Event::AgentPromptSubmitted(event) => {
+            event.agent_id == agent_id && event.text == originating_text
+        }
+        Event::ProviderResponseFinished(event) => {
+            event.agent_prompt_id == initiating_prompt_id
+                && event.output_items.iter().any(
+                    |item| matches!(item, ContextItem::ToolCall(call) if call.call_id == call_id),
+                )
+        }
+        Event::ProviderToolResult(event) | Event::ToolResult(event) => event.call_id == call_id,
+        Event::ProviderToolError(event) | Event::ToolError(event) => event.call_id == call_id,
+        Event::ToolCancelled(event) => event.call_id == call_id,
+        Event::ToolBackgroundResult(event) => event.call_id == call_id,
+        Event::ToolBackgroundError(event) => event.call_id == call_id,
+        Event::AgentManualCompactionRequested(event) => event.request_id == request_id,
+        Event::AgentManualCompactionRequestFailed(event) => event.request_id == request_id,
+        Event::AgentStandaloneCompactionStarted(event) => {
+            event.transaction_id == transaction_id
+                || matches!(
+                    &event.trigger,
+                    tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+                        request_id: event_request_id,
+                        ..
+                    } if event_request_id == &request_id
+                )
+        }
+        Event::AgentStandaloneCompactionFailed(event) => event.transaction_id == transaction_id,
+        Event::AgentCompacted(event) => event.transaction_id.as_ref() == Some(&transaction_id),
+        Event::AgentInferenceDispatchStarted(event) => {
+            event.transaction_id.as_ref() == Some(&transaction_id)
+                || (event.transaction_id.is_none() && event.agent_prompt_id == initiating_prompt_id)
+        }
+        Event::AgentPromptCreated(event) => {
+            event.agent_prompt_id == compact_prompt_id
+                || (event.agent_id == agent_id
+                    && event.operation == tau_proto::PromptOperation::Inference)
+        }
+        Event::AgentPromptSteered(event) => {
+            event.agent_id == agent_id && event.text == notification_text
+        }
+        _ => false,
+    };
+
+    seed_agent_loaded(&state, "s1", agent_id.as_str());
+    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: true,
+                agent_id: agent_id.clone(),
+                text: originating_text.clone(),
+                message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+                display_name: None,
+                ctx_id: None,
+            }),
+            tau_proto::UnixMicros::new(2),
+        )
+        .expect("append originating user prompt");
+    let originating_through = store
+        .agent(agent_id.as_str())
+        .and_then(tau_core::AgentTree::head)
+        .map(tau_proto::AgentHead::Node)
+        .expect("originating prompt head");
+    let originating_checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id.clone(),
+        transaction_id: None,
+        agent_prompt_id: initiating_prompt_id.clone(),
+        through: originating_through,
+        model: Some(model.clone()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(tau_proto::AgentHead::Root),
+    };
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentInferenceDispatchStarted(originating_checkpoint.clone()),
+            tau_proto::UnixMicros::new(3),
+        )
+        .expect("append originating inference checkpoint");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentPromptCreated(AgentPromptCreated {
+                agent_prompt_id: initiating_prompt_id.clone(),
+                agent_id: agent_id.clone(),
+                session_id: "s1".into(),
+                system_prompt: String::new(),
+                context: tau_proto::PromptContext {
+                    blocks: vec![tau_proto::ContextBlock::UserInput(
+                        tau_proto::UserInputBlock {
+                            items: vec![ContextItem::Message(MessageItem {
+                                role: ContextRole::User,
+                                content: vec![ContentPart::Text {
+                                    text: format!("<user>{originating_text}</user>"),
+                                }],
+                                phase: None,
+                                responses_raw_json: None,
+                            })],
+                        },
+                    )],
+                },
+                tools: Vec::new(),
+                tools_ref: None,
+                model: model.clone(),
+                model_params: Default::default(),
+                tool_choice: Default::default(),
+                originator: tau_proto::PromptOriginator::User,
+                share_user_cache_key: false,
+                ctx_id: None,
+                compaction: None,
+                operation: tau_proto::PromptOperation::Inference,
+            }),
+            tau_proto::UnixMicros::new(4),
+        )
+        .expect("append originating inference prompt");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderResponseFinished(ProviderResponseFinished {
+                agent_prompt_id: initiating_prompt_id.clone(),
+                agent_id: agent_id.clone(),
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: call_id.clone(),
+                    name: tool_name.clone(),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: CborValue::Map(Vec::new()),
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })],
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                error: None,
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+            tau_proto::UnixMicros::new(5),
+        )
+        .expect("append initiating tool call");
+    let requested_target_head = store
+        .agent(agent_id.as_str())
+        .and_then(tau_core::AgentTree::head)
+        .map(tau_proto::AgentHead::Node)
+        .expect("tool-calling assistant head");
+    let requested = tau_proto::AgentManualCompactionRequested {
+        request_id: request_id.clone(),
+        caller_agent_id: agent_id.clone(),
+        target_agent_id: agent_id.clone(),
+        initiating_agent_prompt_id: initiating_prompt_id.clone(),
+        initiating_tool_call_id: call_id.clone(),
+        initiating_tool_name: tau_proto::ManualCompactionTool::Compact,
+        visible_tool_name: tool_name.clone(),
+        requested_target_head,
+        target_generation: store
+            .agent(agent_id.as_str())
+            .expect("request target tree")
+            .ordinary_inference_generation(),
+        model: model.clone(),
+        resume_inference: true,
+    };
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentManualCompactionRequested(requested.clone()),
+            tau_proto::UnixMicros::new(6),
+        )
+        .expect("append accepted manual request");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderToolResult(ToolResult {
+                call_id: call_id.clone(),
+                tool_name: tool_name.clone(),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Map(Vec::new()),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            tau_proto::UnixMicros::new(7),
+        )
+        .expect("append background placeholder");
+    let compact_cut = store
+        .agent(agent_id.as_str())
+        .and_then(tau_core::AgentTree::head)
+        .map(tau_proto::AgentHead::Node)
+        .expect("complete tool-round head");
+    let started = tau_proto::AgentStandaloneCompactionStarted {
+        agent_id: agent_id.clone(),
+        transaction_id: transaction_id.clone(),
+        compact_prompt_id: compact_prompt_id.clone(),
+        cut: compact_cut,
+        resume_through: Some(compact_cut),
+        model: model.clone(),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        originator: tau_proto::PromptOriginator::User,
+        supersedes: None,
+        trigger: tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+            request_id: request_id.clone(),
+            caller_agent_id: agent_id.clone(),
+            initiating_tool_call_id: call_id.clone(),
+        },
+    };
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentStandaloneCompactionStarted(started.clone()),
+            tau_proto::UnixMicros::new(8),
+        )
+        .expect("append standalone start");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentPromptCreated(AgentPromptCreated {
+                agent_prompt_id: compact_prompt_id.clone(),
+                agent_id: agent_id.clone(),
+                session_id: "s1".into(),
+                system_prompt: String::new(),
+                context: tau_proto::PromptContext::default(),
+                tools: Vec::new(),
+                tools_ref: None,
+                model: model.clone(),
+                model_params: Default::default(),
+                tool_choice: Default::default(),
+                originator: tau_proto::PromptOriginator::User,
+                share_user_cache_key: false,
+                ctx_id: None,
+                compaction: None,
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+            }),
+            tau_proto::UnixMicros::new(9),
+        )
+        .expect("append standalone provider prompt");
+    let compacted = tau_proto::AgentCompacted {
+        agent_id: agent_id.clone(),
+        transaction_id: Some(transaction_id.clone()),
+        cut: Some(compact_cut),
+        suffix_end: Some(compact_cut),
+        compact_prompt_id: Some(compact_prompt_id.clone()),
+        model: Some(model.clone()),
+        operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+        replacement_window: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "retained compact summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+    };
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentCompacted(compacted.clone()),
+            tau_proto::UnixMicros::new(10),
+        )
+        .expect("append standalone success");
+    let seeded_through = store
+        .agent(agent_id.as_str())
+        .and_then(tau_core::AgentTree::head)
+        .map(tau_proto::AgentHead::Node)
+        .expect("compacted head");
+    let background_result = tau_proto::ToolBackgroundResult {
+        call_id: call_id.clone(),
+        tool_name: tool_name.clone(),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Map(vec![
+            (
+                CborValue::Text("request_id".into()),
+                CborValue::Text(request_id.to_string()),
+            ),
+            (
+                CborValue::Text("status".into()),
+                CborValue::Text("compacted".into()),
+            ),
+            (
+                CborValue::Text("target_agent_id".into()),
+                CborValue::Text(agent_id.to_string()),
+            ),
+            (
+                CborValue::Text("transaction_id".into()),
+                CborValue::Text(transaction_id.to_string()),
+            ),
+        ]),
+        originator: tau_proto::PromptOriginator::User,
+        display: None,
+    };
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ToolBackgroundResult(background_result.clone()),
+            tau_proto::UnixMicros::new(11),
+        )
+        .expect("append retained caller background result");
+    let seeded_records = store
+        .agent_events(agent_id.as_str())
+        .expect("seeded records");
+    let seeded_record_count = seeded_records.len();
+    let seeded_correlation_count = seeded_records
+        .iter()
+        .filter(|record| is_correlation(&record.event))
+        .count();
+    assert_eq!(seeded_correlation_count, 10);
+    assert_eq!(requested.target_generation, 1);
+    assert_eq!(
+        seeded_records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::ToolBackgroundResult(result) if result == &background_result
+                )
+            })
+            .count(),
+        1
+    );
+    assert!(!seeded_records.iter().any(|record| matches!(
+        &record.event,
+        Event::AgentPromptSteered(steered)
+            if steered.agent_id == agent_id && steered.text == notification_text
+    )));
+    assert!(!seeded_records.iter().any(|record| matches!(
+        &record.event,
+        Event::AgentInferenceDispatchStarted(checkpoint)
+            if checkpoint.transaction_id.as_ref() == Some(&transaction_id)
+    )));
+    assert!(matches!(
+        store
+            .agent(agent_id.as_str())
+            .expect("seeded agent tree")
+            .manual_compaction_recoveries()
+            .as_slice(),
+        [tau_core::ManualCompactionRecovery::Started {
+            requested: durable_request,
+            started: durable_start,
+            outcome: Some(durable_outcome),
+        }] if durable_request == &requested
+            && durable_start.as_ref() == &started
+            && matches!(
+                durable_outcome.as_ref(),
+                tau_core::ManualCompactionOutcome::Succeeded(durable_success)
+                    if durable_success == &compacted
+            )
+    ));
+    assert!(matches!(
+        store
+            .agent(agent_id.as_str())
+            .and_then(tau_core::AgentTree::standalone_compaction_recovery),
+        Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint {
+            transaction_id: durable_transaction_id,
+            cut,
+            model: durable_model,
+            through,
+        }) if durable_transaction_id == transaction_id
+            && cut == compact_cut
+            && durable_model == model
+            && through == seeded_through
+    ));
+    drop(store);
+
+    let mut first =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("first cold reopen");
+    assert!(
+        first.provider_model_routes.contains_key(&model),
+        "captured inference model must have an observed route"
+    );
+    let first_records = first
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("first reopened records");
+    assert_eq!(first_records.len(), seeded_record_count + 3);
+    assert_eq!(
+        first_records
+            .iter()
+            .filter(|record| is_correlation(&record.event))
+            .count(),
+        seeded_correlation_count + 3
+    );
+    let correlated_positions = |matches_event: &dyn Fn(&Event) -> bool| {
+        first_records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| matches_event(&record.event).then_some(index))
+            .collect::<Vec<_>>()
+    };
+    let submitted_positions = correlated_positions(&|event| {
+        matches!(
+            event,
+            Event::AgentPromptSubmitted(prompt)
+                if prompt.agent_id == agent_id && prompt.text == originating_text
+        )
+    });
+    let originating_checkpoint_positions = correlated_positions(&|event| {
+        matches!(
+            event,
+            Event::AgentInferenceDispatchStarted(checkpoint)
+                if checkpoint == &originating_checkpoint
+        )
+    });
+    let originating_prompt_positions = correlated_positions(&|event| {
+        matches!(
+            event,
+            Event::AgentPromptCreated(prompt)
+                if prompt.agent_prompt_id == initiating_prompt_id
+                    && prompt.agent_id == agent_id
+                    && prompt.model == model
+                    && prompt.operation == tau_proto::PromptOperation::Inference
+        )
+    });
+    let response_positions = correlated_positions(&|event| {
+        matches!(
+            event,
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == initiating_prompt_id
+        )
+    });
+    let request_positions = correlated_positions(&|event| {
+        matches!(
+            event,
+            Event::AgentManualCompactionRequested(event) if event == &requested
+        )
+    });
+    let placeholder_positions = correlated_positions(&|event| {
+        matches!(
+            event,
+            Event::ProviderToolResult(result)
+                if result.call_id == call_id
+                    && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+        )
+    });
+    let start_positions = correlated_positions(&|event| {
+        matches!(
+            event,
+            Event::AgentStandaloneCompactionStarted(event) if event == &started
+        )
+    });
+    let compact_prompt_positions = correlated_positions(&|event| {
+        matches!(
+            event,
+            Event::AgentPromptCreated(prompt)
+                if prompt.agent_prompt_id == compact_prompt_id
+                    && prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+        )
+    });
+    let success_positions = correlated_positions(&|event| {
+        matches!(
+            event,
+            Event::AgentCompacted(event) if event == &compacted
+        )
+    });
+    let background_positions = correlated_positions(&|event| {
+        matches!(
+            event,
+            Event::ToolBackgroundResult(event) if event == &background_result
+        )
+    });
+    let notifications = first_records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| match &record.event {
+            Event::AgentPromptSteered(steered)
+                if steered.agent_id == agent_id && steered.text == notification_text =>
+            {
+                Some((index, steered))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let checkpoints = first_records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| match &record.event {
+            Event::AgentInferenceDispatchStarted(checkpoint)
+                if checkpoint.transaction_id.as_ref() == Some(&transaction_id) =>
+            {
+                Some((index, checkpoint))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(submitted_positions.len(), 1);
+    assert_eq!(originating_checkpoint_positions.len(), 1);
+    assert_eq!(originating_prompt_positions.len(), 1);
+    assert_eq!(response_positions.len(), 1);
+    assert_eq!(request_positions.len(), 1);
+    assert_eq!(placeholder_positions.len(), 1);
+    assert_eq!(start_positions.len(), 1);
+    assert_eq!(compact_prompt_positions.len(), 1);
+    assert_eq!(success_positions.len(), 1);
+    assert_eq!(background_positions.len(), 1);
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(checkpoints.len(), 1);
+    assert!(submitted_positions[0] < originating_checkpoint_positions[0]);
+    assert!(originating_checkpoint_positions[0] < originating_prompt_positions[0]);
+    assert!(originating_prompt_positions[0] < response_positions[0]);
+    assert!(response_positions[0] < request_positions[0]);
+    assert!(request_positions[0] < placeholder_positions[0]);
+    assert!(placeholder_positions[0] < start_positions[0]);
+    assert!(start_positions[0] < compact_prompt_positions[0]);
+    assert!(compact_prompt_positions[0] < success_positions[0]);
+    assert!(success_positions[0] < background_positions[0]);
+    assert!(background_positions[0] < notifications[0].0);
+    assert!(notifications[0].0 < checkpoints[0].0);
+    assert_eq!(
+        notifications[0].1.submission_source,
+        tau_proto::PromptSubmissionSource::HarnessInternal
+    );
+    assert_eq!(
+        notifications[0].1.message_class,
+        tau_proto::PromptMessageClass::Internal
+    );
+    assert!(notifications[0].1.inference_activation);
+    assert_eq!(notifications[0].1.internal_kind, None);
+    assert_eq!(notifications[0].1.ctx_id, None);
+    let checkpoint = checkpoints[0].1;
+    assert_eq!(checkpoint.agent_id, agent_id);
+    assert_eq!(checkpoint.model.as_ref(), Some(&model));
+    assert_eq!(
+        checkpoint.operation,
+        Some(tau_proto::PromptOperation::Inference)
+    );
+    assert_eq!(checkpoint.activation_cut, Some(compact_cut));
+    assert_ne!(checkpoint.agent_prompt_id, initiating_prompt_id);
+    assert_ne!(checkpoint.agent_prompt_id, compact_prompt_id);
+    let inference_prompts = first_records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| match &record.event {
+            Event::AgentPromptCreated(prompt)
+                if prompt.agent_prompt_id == checkpoint.agent_prompt_id
+                    && prompt.agent_id == agent_id
+                    && prompt.operation == tau_proto::PromptOperation::Inference =>
+            {
+                Some((index, prompt))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inference_prompts.len(), 1);
+    assert!(checkpoints[0].0 < inference_prompts[0].0);
+    assert_eq!(
+        inference_prompts[0].1.agent_prompt_id,
+        checkpoint.agent_prompt_id
+    );
+    assert_eq!(inference_prompts[0].1.model, model);
+    assert_eq!(
+        context_text_count(inference_prompts[0].1, &notification_text),
+        1
+    );
+    assert_eq!(
+        event_log_events(&first)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.agent_prompt_id == checkpoint.agent_prompt_id
+                        && prompt.agent_id == agent_id
+                        && prompt.model == model
+                        && prompt.operation == tau_proto::PromptOperation::Inference
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        first
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("first reopened tree")
+            .has_user_input_text_on_branch(checkpoint.through.as_option(), &notification_text)
+    );
+    assert_eq!(
+        first
+            .agent_store
+            .agent(agent_id.as_str())
+            .expect("first reopened tree")
+            .ordinary_inference_generation(),
+        requested.target_generation + 1
+    );
+    assert!(matches!(
+        first
+            .agent_store
+            .agent(agent_id.as_str())
+            .and_then(tau_core::AgentTree::standalone_compaction_recovery),
+        Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(
+            ref durable_checkpoint
+        )) if durable_checkpoint == checkpoint
+    ));
+
+    let durable_checkpoint = checkpoint.clone();
+    first.shutdown().expect("first shutdown");
+    drop(first);
+    assert!(
+        !tau_core::session_is_locked(&tau_config::settings::sessions_dir_of(&state), "s1")
+            .expect("session lock probe"),
+        "joined shutdown must release the session lock"
+    );
+    let mut second =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("second cold reopen");
+    let second_records = second
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("second reopened records");
+    assert_eq!(second_records.len(), first_records.len());
+    assert_eq!(
+        second_records
+            .iter()
+            .filter(|record| is_correlation(&record.event))
+            .count(),
+        first_records
+            .iter()
+            .filter(|record| is_correlation(&record.event))
+            .count()
+    );
+    assert_eq!(
+        second_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ToolBackgroundResult(result) if result == &background_result
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        second_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptSteered(steered)
+                    if steered.agent_id == agent_id && steered.text == notification_text
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        second_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint == &durable_checkpoint
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        second_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.agent_prompt_id == durable_checkpoint.agent_prompt_id
+                        && prompt.operation == tau_proto::PromptOperation::Inference
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        !event_log_events(&second)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_))),
+        "a response-less second reopen must not send any provider prompt"
+    );
+    assert!(matches!(
+        second
+            .agent_store
+            .agent(agent_id.as_str())
+            .and_then(tau_core::AgentTree::standalone_compaction_recovery),
+        Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(
+            ref durable
+        )) if durable == &durable_checkpoint
+    ));
+    let second_cid = second.agent_routes[agent_id.as_str()].clone();
+    assert!(matches!(
+        second.agents[&second_cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::DispatchUncertain {
+            owner: crate::agent::InferenceCheckpointOwner::Standalone { ref id },
+            ref agent_prompt_id,
+            through,
+            model: Some(ref durable_model),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(cut),
+        } if id == &transaction_id
+            && agent_prompt_id == &durable_checkpoint.agent_prompt_id
+            && through == durable_checkpoint.through
+            && durable_model == &model
+            && cut == compact_cut
+    ));
+    let status = &second.agent_watch_provider_status[agent_id.as_str()];
+    assert_eq!(status.agent_prompt_id, durable_checkpoint.agent_prompt_id);
+    assert!(matches!(
+        status.state,
+        tau_proto::AgentWatchProviderState::DispatchUncertain {
+            category: tau_proto::AgentWatchProviderCategory::Compaction
+        }
+    ));
+    second.shutdown().expect("second shutdown");
+}
+
 /// Cold recovery of a validated manual-tool start without an outcome must
 /// terminalize the target as interrupted, complete the caller's background call
 /// with one error, and never resend or repeat either repair.
