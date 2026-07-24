@@ -457,16 +457,16 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     assert_eq!(s.bind.get("C-k").expect("C-k").action, "agent-previous");
     assert_eq!(s.bind.get("C-j").expect("C-j").action, "agent-next");
     assert_eq!(s.bind.get("C-b").expect("C-b").action, "agent-pick");
-    assert_eq!(s.bind.get("M-a").expect("M-a").action, "agent-pick-all");
+    assert!(!s.bind.contains_key("M-a"));
     assert!(!built_in.bind.contains_key("C-B"));
     assert_eq!(s.bind.get("C-p").expect("C-p").action, "prompt-previous");
     assert_eq!(s.bind.get("C-n").expect("C-n").action, "prompt-next");
 }
 
-/// Ensures a user Meta binding survives YAML parsing and overrides the
-/// lower-precedence built-in action for the same spelling.
+/// Ensures a user Meta binding survives YAML parsing even though Tau does not
+/// ship a built-in Meta chord.
 #[test]
-fn cli_settings_user_meta_binding_overrides_built_in() {
+fn cli_settings_user_meta_binding_is_configurable() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(

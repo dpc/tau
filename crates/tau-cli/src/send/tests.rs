@@ -38,6 +38,19 @@ fn quit_and_detach_are_no_ops() {
     assert_eq!(event(":detach"), None);
 }
 
+/// Headless send must accept exact interactive picker commands as explicit
+/// no-ops while rejecting argument-bearing variants locally.
+#[test]
+fn agent_picker_commands_are_exact_headless_no_ops() {
+    for command in [":pick-agent", ":pick-agent-all"] {
+        run_send("definitely-not-running", command).expect("exact picker command must be a no-op");
+        let malformed = format!("{command} unexpected");
+        let error = run_send("definitely-not-running", &malformed)
+            .expect_err("picker arguments must fail before daemon lookup");
+        assert!(error.to_string().contains("unknown or unsupported command"));
+    }
+}
+
 /// `:cancel` maps to the broadcast cancel form; the harness may later
 /// retarget it.
 #[test]

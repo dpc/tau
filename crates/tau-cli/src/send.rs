@@ -170,7 +170,15 @@ fn valid_headless_noop(text: &str) -> bool {
     let args = text.split_whitespace().collect::<Vec<_>>();
     matches!(
         args.as_slice(),
-        [":quit" | ":detach" | ":fast" | ":suspend" | ":resume" | ":version" | ":role"]
+        [":quit"
+            | ":detach"
+            | ":fast"
+            | ":suspend"
+            | ":resume"
+            | ":version"
+            | ":role"
+            | ":pick-agent"
+            | ":pick-agent-all"]
             | [":new"]
             | [":new", _]
             | [":name", _, ..]

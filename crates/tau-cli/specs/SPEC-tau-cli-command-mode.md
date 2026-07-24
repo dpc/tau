@@ -3,9 +3,9 @@
 ## Record justification
 
 Command-mode behavior spans input parsing and completion, local CLI state,
-protocol request construction, harness-owned execution, and renderer feedback.
-No single owning module can state command ownership and cross-boundary behavior
-coherently.
+protocol request construction, harness-owned execution, and renderer feedback,
+so no single owning module can state command ownership and cross-boundary
+behavior coherently.
 
 The terminal input loop has multiple command owners. CLI-owned commands
 such as `:quit`, `:session`, `:agent`, `:name`, `:role`, `:model`, `:set`, and
@@ -14,6 +14,11 @@ current published action schema and dispatched as `ActionInvoke` events.
 Harness-owned prompt commands, currently `:skill <name> ...` and
 `:skill:<name> ...`, are completed and echoed by the CLI but must still be
 submitted as prompts so the harness can resolve skills and inject their content.
+
+The CLI-owned `:pick-agent` and `:pick-agent-all` commands invoke the same
+active-agent and all-live-agent picker paths as the configurable `agent-pick`
+and `agent-pick-all` binding actions. `agent-pick` remains bound to C-b by
+default; the all-agent action has no built-in key binding.
 
 `:retry` is a static CLI-owned command whose work is harness-routed. The CLI
 captures the current session and selected agent; it never resubmits prompt text.

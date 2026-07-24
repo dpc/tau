@@ -50,24 +50,24 @@ pipe is treated as normal command completion.
 
 ## Attached picker
 
-In the terminal UI, C-b opens `fzf` over currently active rows: unconditional
-`active` agents plus `active_auto` agents whose runtime is running. M-a opens it
-over all current live rows, including idle `active_auto` and explicitly
-suspended agents. This eligibility filter remains separate from the runtime
+In the terminal UI, C-b and `:pick-agent` open `fzf` over currently active
+rows: unconditional `active` agents plus `active_auto` agents whose runtime is
+running. `:pick-agent-all` opens it over all current live rows, including idle
+`active_auto` and explicitly suspended agents. The underlying `agent-pick` and
+`agent-pick-all` actions remain configurable; the all-agent action has no
+default key binding. This eligibility filter remains separate from the runtime
 column, which continues to show `running` or `idle` in both pickers.
-M-a uses the traditional Meta encoding (`ESC a`) on legacy paths and does not
-depend on terminals preserving Shift on Ctrl letters.
 
-`fzf` is optional and is started only when a picker binding is used. Tau passes
-rows through stdin and invokes `fzf` directly rather than interpolating agent
-data into a shell command. The picker shows agent id, role, display name,
-lifecycle, and runtime in space-padded, terminal-width-aware columns. Long
-values are truncated for display only; the selected stable id and original
-escaped TSV row remain unchanged.
+`fzf` is optional and is started only when a picker command or configured
+binding action is used. Tau passes rows through stdin and invokes `fzf` directly
+rather than interpolating agent data into a shell command. The picker shows
+agent id, role, display name, lifecycle, and runtime in space-padded,
+terminal-width-aware columns. Long values are truncated for display only; the
+selected stable id and original escaped TSV row remain unchanged.
 
 Canceling the picker, a missing `fzf`, malformed output, or a stale selection
 does not change the selected transcript or prompt draft. Before switching, Tau
 rechecks the session, live lifecycle, and the selected picker's eligibility
-rule. Selecting through M-a does not resume a suspended agent. The picker never
-loads or resumes an unloaded agent. A later successfully admitted visible prompt
-to that selected existing agent does make it `active`.
+rule. Selecting through the all-agent picker does not resume a suspended agent.
+The picker never loads or resumes an unloaded agent. A later successfully
+admitted visible prompt to that selected existing agent does make it `active`.

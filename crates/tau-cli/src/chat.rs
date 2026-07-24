@@ -851,6 +851,23 @@ const DRAFT_DEBOUNCE: Duration = Duration::from_secs(1);
 const EOF_DURING_AGENT_NOTICE: &str =
     "An agent is still running; use :quit to terminate the session in progress.";
 const TREE_NAVIGATION_USAGE: &str = ":tree: use a prompt anchor, `root`, or explicit `node <id>`";
+
+fn parse_agent_picker_command(
+    text: &str,
+) -> Option<Result<crate::list_agents::AgentPickerFilter, &'static str>> {
+    let mut args = text.split_whitespace();
+    let filter = match args.next()? {
+        ":pick-agent" => crate::list_agents::AgentPickerFilter::Active,
+        ":pick-agent-all" => crate::list_agents::AgentPickerFilter::All,
+        _ => return None,
+    };
+    Some(if args.next().is_none() {
+        Ok(filter)
+    } else {
+        Err("agent picker commands take no arguments")
+    })
+}
+
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     (":quit", "Exit the chat session"),
     (":cancel", "Cancel the current in-flight prompt"),
@@ -861,6 +878,14 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     (
         ":detach",
         "Leave the UI but keep the harness running for later reattach",
+    ),
+    (
+        ":pick-agent",
+        "Pick a currently active agent with optional fzf",
+    ),
+    (
+        ":pick-agent-all",
+        "Pick any current live agent with optional fzf",
     ),
     (
         ":model",
@@ -2512,6 +2537,13 @@ impl<'a> TerminalInputSession<'a> {
         if self.handle_debug_utility_command(text) {
             return true;
         }
+        if let Some(command) = parse_agent_picker_command(text) {
+            match command {
+                Ok(filter) => self.pick_agent(filter),
+                Err(message) => self.output.system_info(message),
+            }
+            return true;
+        }
         if text == ":version" {
             self.output.system_info(&crate::version_label());
             return true;
@@ -3806,6 +3838,8 @@ pub(crate) fn is_known_static_command(text: &str) -> bool {
             | ":cancel"
             | ":retry"
             | ":detach"
+            | ":pick-agent"
+            | ":pick-agent-all"
             | ":session"
             | ":tree"
             | ":compact"

@@ -153,6 +153,42 @@ fn retry_is_static_exact_and_never_falls_through_to_prompt_submission() {
     );
 }
 
+/// Both attached picker variants must remain discoverable static commands so
+/// users can invoke them without reserving another terminal key chord.
+#[test]
+fn agent_pickers_are_static_commands_with_matching_filters() {
+    for (name, description_fragment, expected_filter) in [
+        (
+            ":pick-agent",
+            "currently active",
+            crate::list_agents::AgentPickerFilter::Active,
+        ),
+        (
+            ":pick-agent-all",
+            "current live",
+            crate::list_agents::AgentPickerFilter::All,
+        ),
+    ] {
+        assert!(BUILTIN_COMMANDS.iter().any(|(candidate, description)| {
+            *candidate == name && description.contains(description_fragment)
+        }));
+        assert!(is_known_static_command(name));
+        assert_eq!(
+            parse_agent_picker_command(name),
+            Some(Ok(expected_filter)),
+            "{name} must retain its matching picker category"
+        );
+        assert!(
+            is_known_static_command(&format!("{name} unexpected")),
+            "argument errors stay local instead of becoming prompts"
+        );
+        assert_eq!(
+            parse_agent_picker_command(&format!("{name} unexpected")),
+            Some(Err("agent picker commands take no arguments"))
+        );
+    }
+}
+
 /// A correlated retry result is rendered as requester-visible output rather
 /// than being silently consumed as provider-control plumbing.
 #[test]

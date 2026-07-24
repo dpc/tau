@@ -26,7 +26,6 @@ sample `config/cli.yaml`.
 | `Up`, `Down` | `cursor-up`, `cursor-down` | Cycle completion candidates, move/scroll within capped multiline input, then step prompt history at the input edges. |
 | `Esc` | `escape` | Dismiss the completion menu if open, otherwise surface Escape. |
 | `C-b` | `agent-pick` | Pick a currently active agent with optional `fzf`. |
-| `M-a` | `agent-pick-all` | Pick any current live agent, including automatically or manually suspended agents. |
 | `C-f` | `shell-prompt-insert` | Pick a file with `fzf`, preview the highlighted file, and insert it at the cursor. |
 | `C-k` | `agent-previous` | Cycle to the previous active agent or overview. |
 | `C-j` | `agent-next` | Cycle to the next active agent or overview. |
@@ -87,10 +86,8 @@ without Shift, while `C-B` means Ctrl+Shift+B. Canonical
 `M-a` means Alt+A and works with both Crossterm Alt events and the legacy
 terminal `ESC a` encoding.
 
-The all-live picker default moved from `C-B` to `M-a` because common terminal
-and multiplexer paths may collapse Ctrl+Shift+B into Ctrl+B. Explicit user
-bindings still override built-ins, including explicit `C-B` bindings on paths
-that preserve Shift.
+Tau does not reserve a Meta chord by default. Explicit user bindings may use
+Meta chords or `C-B` on terminal paths that preserve Shift.
 
 - `submit-prompt` — submit the current prompt, or accept a previewed completion without submitting.
 - `insert-newline` — insert a newline at the cursor.
@@ -125,7 +122,10 @@ that preserve Shift.
   Cancel, failure, and stale selections preserve the current transcript and
   prompt draft. Selection alone preserves navigation mode; a later accepted
   visible prompt to that selected existing agent makes it `active`. See
-  [Listing and picking agents](list-agents.md).
+   [Listing and picking agents](list-agents.md).
+  `agent-pick` is bound to `C-b` by default; `agent-pick-all` is unbound by
+  default. The same actions are available without a binding as
+  `:pick-agent` and `:pick-agent-all`.
 - `prompt-history-search` — feed indexed prompt-history rows
   (`<index>\t<single-line summary>`) to `command`; bounded original-prompt
   previews are also written under `$TAU_PROMPT_HISTORY_DIR/<index>`. Replace the
