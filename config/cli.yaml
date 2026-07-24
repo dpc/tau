@@ -6,6 +6,7 @@
 # submitted_prompt_symbol: "⬤"
 # notice_level: info  # critical|warning|info|debug|trace
 # redraw_history_size: 2000  # rendered history lines replayed on full redraw
+# osc8_links: true  # false shows inline-link targets for terminal URL detection
 # Optional prompt completion rules keyed by word prefix.
 # First-non-whitespace `:` command completion is intrinsic and cannot be
 # overridden here.

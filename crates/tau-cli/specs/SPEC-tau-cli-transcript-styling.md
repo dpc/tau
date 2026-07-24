@@ -1,5 +1,8 @@
 # SPEC-tau-cli-transcript-styling: Transcript styling
 
+## Record justification
+
+This contract spans CLI configuration, Markdown parsing, theme resolution, and terminal layout/emission, so no single local artifact can own it coherently.
 
 Tau applies Markdown-lite formatting in the terminal UI only. The harness,
 protocol events, durable agent logs, prompt previews, model context, and other
@@ -19,6 +22,18 @@ blocks, and indented code-like lines get code styling and suppress nested
 Markdown-lite styling; escaped marker sequences get escape styling. This keeps
 live terminal wrapping, scrollback, and copy/paste behavior stable outside
 intentional table padding.
+
+Inline links (`[label](target)`), HTTP(S) autolinks (`<url>`), and recognized
+bare HTTP(S) URLs are the other intentional text transformation. With
+`osc8_links: true`, inline links display only their clickable label to conserve
+terminal space; autolinks and bare URLs display the clickable URL. Their visible
+text uses the `markdown.link` theme style, which built-in themes make bold and
+red, and carries structured OSC 8 metadata through layout and wrapping.
+`cli.yaml` enables this behavior by default. Setting `osc8_links: false` removes
+OSC 8 metadata and renders inline links as `label (target)`, allowing terminal
+URL detection to remain useful; autolinks and bare URLs continue to display the
+URL once. Link targets and labels remain subject to the terminal renderer
+control-character sanitization boundary.
 
 Headings and list markers are structural emphasis: built-in themes make them
 bold without assigning a foreground, so they retain the surrounding user,

@@ -338,17 +338,25 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     let dir = td.path();
     std::fs::write(
         dir.join("cli.yaml"),
-        r#"{ greeting: false, show_thinking: false, show_tools: "compact", show_messages: "self-summary", show_status: "minimal" }"#,
+        r#"{ greeting: false, show_thinking: false, osc8_links: false, show_tools: "compact", show_messages: "self-summary", show_status: "minimal" }"#,
     )
     .expect("write");
 
     let s = load_cli_settings_in(&dirs_with_config(dir)).expect("load");
     assert!(!s.greeting);
     assert!(!s.show_thinking);
+    assert!(!s.osc8_links);
     assert_eq!(s.show_tools, ShowTools::Compact);
     assert_eq!(s.show_messages, ShowMessages::SelfSummary);
     assert_eq!(s.show_status, ShowStatus::Minimal);
     assert_eq!(s.theme, CliTheme::Named("tau-plain-dark".to_owned()));
+}
+
+/// OSC 8 Markdown links are enabled when no user layer overrides the built-in
+/// CLI configuration.
+#[test]
+fn cli_settings_enable_osc8_links_by_default() {
+    assert!(CliSettings::built_in().osc8_links);
 }
 
 /// Ensures cli.yaml can select a built-in theme by name.

@@ -529,12 +529,12 @@ fn middle_truncated_cells(item: &PriorityLineItemCells, width: usize) -> Vec<Cel
 fn item_cells(content: &StyledText) -> PriorityLineItemCells {
     let mut cells = Vec::new();
     let mut graphemes = Vec::new();
-    visit_styled_graphemes(content.spans(), |grapheme, style| {
+    visit_styled_graphemes(content.spans(), |grapheme, style, hyperlink| {
         if is_line_break_grapheme(grapheme) {
             return;
         }
         let start = cells.len();
-        push_grapheme_cells(&mut cells, grapheme, style);
+        push_grapheme_cells(&mut cells, grapheme, style, hyperlink);
         graphemes.push(start..cells.len());
     });
     PriorityLineItemCells { cells, graphemes }

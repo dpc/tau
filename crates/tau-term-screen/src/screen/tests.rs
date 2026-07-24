@@ -261,6 +261,71 @@ fn layout_sanitizes_non_newline_control_characters() {
         "sanitized content must not emit raw ESC: {buf:?}"
     );
 }
+
+/// OSC 8 emission opens immediately before linked cells, closes immediately
+/// after them, and rejects control-bearing targets.
+#[test]
+fn hyperlink_emission_has_exact_safe_boundaries() {
+    let text = StyledText::from(vec![
+        Span::plain("before "),
+        Span::plain("link").hyperlink("https://example.test/路"),
+        Span::plain(" after"),
+    ]);
+    let cells = text.to_cells();
+    let mut buf = Vec::new();
+    emit_styled_cells(&mut buf, &cells).expect("hyperlink cells should emit");
+    assert_eq!(
+        String::from_utf8(buf).expect("terminal output is UTF-8"),
+        "before \u{1b}]8;;https://example.test/路\u{1b}\\link\u{1b}]8;;\u{1b}\\ after"
+    );
+
+    let unsafe_text = StyledText::from(Span::plain("safe").hyperlink("https://bad.test/\u{1b}]8"));
+    assert!(unsafe_text.spans()[0].hyperlink.is_none());
+
+    let unsafe_cells = [Cell {
+        ch: 'x',
+        style: Style::default(),
+        width: 1,
+        hyperlink: Some(std::sync::Arc::from("https://bad.test/\u{1b}]8")),
+    }];
+    let mut unsafe_buf = Vec::new();
+    emit_styled_cells(&mut unsafe_buf, &unsafe_cells).expect("unsafe target falls back safely");
+    assert_eq!(unsafe_buf, b"x");
+}
+
+/// The shared one-shot OSC 8 writer sanitizes provider-facing link labels
+/// independently of structured styled-text layout.
+#[test]
+fn osc8_writer_sanitizes_control_bearing_labels() {
+    let mut output = Vec::new();
+    write_osc8_hyperlink(
+        &mut output,
+        "open\u{1b}]8;;evil\u{7}label",
+        "https://example.test",
+    )
+    .expect("safe link target should emit");
+
+    assert_eq!(
+        String::from_utf8(output).expect("writer output is UTF-8"),
+        "\u{1b}]8;;https://example.test\u{1b}\\open�]8;;evil�label\u{1b}]8;;\u{1b}\\"
+    );
+}
+
+/// Bounding targets prevents narrow wrapping from repeating an unbounded target
+/// once per physical row.
+#[test]
+fn hyperlink_targets_have_a_bounded_emission_size() {
+    let maximum = "x".repeat(crate::style::MAX_HYPERLINK_TARGET_BYTES);
+    let oversized = "x".repeat(crate::style::MAX_HYPERLINK_TARGET_BYTES + 1);
+
+    assert!(Span::plain("ok").hyperlink(&maximum).hyperlink.is_some());
+    assert!(
+        Span::plain("plain")
+            .hyperlink(&oversized)
+            .hyperlink
+            .is_none()
+    );
+}
 /// Public cell construction and emission both apply the screen sanitization
 /// policy so callers cannot accidentally bypass styled-text control filtering.
 #[test]
@@ -272,6 +337,7 @@ fn cell_api_sanitizes_controls() {
         ch: '\x1b',
         style: Style::default(),
         width: 0,
+        hyperlink: None,
     }];
     let mut buf = Vec::new();
     emit_styled_cells(&mut buf, &cells).expect("cell emission should succeed");
@@ -286,6 +352,7 @@ fn screen_update_normalizes_public_cells_before_caching() {
         ch: '\x1b',
         style: Style::default(),
         width: 0,
+        hyperlink: None,
     }]];
     let mut buf = Vec::new();
     term.screen

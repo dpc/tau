@@ -5,9 +5,14 @@
 //! computable from the text alone — no ANSI escape codes are stored
 //! in the data model.
 
+use std::sync::Arc;
+
 pub use crossterm::style::Color;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Maximum OSC 8 target length accepted by Tau's terminal renderer.
+pub const MAX_HYPERLINK_TARGET_BYTES: usize = 4096;
 
 /// Display width of a string in terminal columns, measured by grapheme cluster.
 ///
@@ -86,28 +91,40 @@ pub(crate) fn screen_grapheme_width(grapheme: &str) -> usize {
     }
 }
 
-pub(crate) fn push_grapheme_cells(cells: &mut Vec<Cell>, grapheme: &str, style: Style) {
+pub(crate) fn push_grapheme_cells(
+    cells: &mut Vec<Cell>,
+    grapheme: &str,
+    style: Style,
+    hyperlink: Option<&Arc<str>>,
+) {
     if grapheme == "\t" {
-        cells.push(Cell::new(' ', style));
+        cells.push(Cell::new(' ', style).with_hyperlink(hyperlink.cloned()));
         return;
     }
     if grapheme.chars().any(char::is_control) {
-        cells.push(Cell::new('�', style));
+        cells.push(Cell::new('�', style).with_hyperlink(hyperlink.cloned()));
         return;
     }
     let grapheme_width = screen_grapheme_width(grapheme);
     for (idx, ch) in grapheme.chars().enumerate() {
         let width = if idx == 0 { grapheme_width } else { 0 };
-        cells.push(Cell::new(ch, style).with_width(width));
+        cells.push(
+            Cell::new(ch, style)
+                .with_width(width)
+                .with_hyperlink(hyperlink.cloned()),
+        );
     }
 }
 
-pub(crate) fn visit_styled_graphemes(spans: &[Span], mut f: impl FnMut(&str, Style)) {
+pub(crate) fn visit_styled_graphemes(
+    spans: &[Span],
+    mut f: impl FnMut(&str, Style, Option<&Arc<str>>),
+) {
     let mut text = String::new();
     let mut char_styles = Vec::new();
     for span in spans {
         for ch in span.text.chars() {
-            char_styles.push((text.len(), span.style));
+            char_styles.push((text.len(), span.style, span.hyperlink.as_ref()));
             text.push(ch);
         }
     }
@@ -119,9 +136,10 @@ pub(crate) fn visit_styled_graphemes(spans: &[Span], mut f: impl FnMut(&str, Sty
         }
         let style = char_styles
             .get(style_idx)
-            .map(|(_, style)| *style)
+            .map(|(_, style, _)| *style)
             .unwrap_or_default();
-        f(grapheme, style);
+        let hyperlink = char_styles.get(style_idx).and_then(|(_, _, link)| *link);
+        f(grapheme, style, hyperlink);
     }
 }
 
@@ -181,7 +199,7 @@ impl Style {
 }
 
 /// A terminal cell: one character, its visual style, and display width.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Cell {
     /// Character emitted for this cell.
     pub ch: char,
@@ -189,6 +207,8 @@ pub struct Cell {
     pub style: Style,
     /// Display width in terminal columns.
     pub width: usize,
+    /// Sanitized OSC 8 target active for this cell.
+    pub hyperlink: Option<Arc<str>>,
 }
 
 impl Cell {
@@ -209,6 +229,7 @@ impl Cell {
             ch,
             style,
             width: ch.width().unwrap_or(0),
+            hyperlink: None,
         }
     }
 
@@ -219,18 +240,20 @@ impl Cell {
             ch,
             style: Style::default(),
             width: ch.width().unwrap_or(0),
+            hyperlink: None,
         }
     }
 
-    pub(crate) fn normalized(self) -> Self {
+    pub(crate) fn normalized(&self) -> Self {
         let ch = Self::sanitized_char(self.ch);
         if ch == self.ch {
-            self
+            self.clone()
         } else {
             Self {
                 ch,
                 style: self.style,
                 width: ch.width().unwrap_or(0),
+                hyperlink: self.hyperlink.clone(),
             }
         }
     }
@@ -238,6 +261,12 @@ impl Cell {
     /// Returns a copy of this cell with an explicit display width.
     pub fn with_width(mut self, width: usize) -> Self {
         self.width = width;
+        self
+    }
+
+    /// Associates this cell with an OSC 8 hyperlink target.
+    pub fn with_hyperlink(mut self, hyperlink: Option<Arc<str>>) -> Self {
+        self.hyperlink = hyperlink.filter(|target| sanitize_hyperlink_target(target).is_some());
         self
     }
 
@@ -262,6 +291,8 @@ pub struct Span {
     /// If a rendered grapheme cluster crosses span boundaries, [`StyledText`]
     /// uses the style at the cluster's first scalar value.
     pub style: Style,
+    /// Sanitized OSC 8 target for this span, when present.
+    pub hyperlink: Option<Arc<str>>,
 }
 
 impl Span {
@@ -270,6 +301,7 @@ impl Span {
         Self {
             text: text.into(),
             style,
+            hyperlink: None,
         }
     }
 
@@ -278,7 +310,14 @@ impl Span {
         Self {
             text: text.into(),
             style: Style::default(),
+            hyperlink: None,
         }
+    }
+
+    /// Returns this span with an OSC 8 target when the target is safe.
+    pub fn hyperlink(mut self, target: impl AsRef<str>) -> Self {
+        self.hyperlink = sanitize_hyperlink_target(target.as_ref()).map(Arc::from);
+        self
     }
 }
 
@@ -311,6 +350,11 @@ impl StyledText {
         &self.spans
     }
 
+    /// Returns mutable access to the spans in this text sequence.
+    pub fn spans_mut(&mut self) -> &mut [Span] {
+        &mut self.spans
+    }
+
     /// Total display width in terminal columns.
     ///
     /// Wide characters and emoji grapheme clusters count as terminal columns,
@@ -331,13 +375,21 @@ impl StyledText {
     /// Converts to a flat sequence of [`Cell`]s (newlines excluded).
     pub fn to_cells(&self) -> Vec<Cell> {
         let mut cells = Vec::new();
-        visit_styled_graphemes(&self.spans, |grapheme, style| {
+        visit_styled_graphemes(&self.spans, |grapheme, style, hyperlink| {
             if !is_line_break_grapheme(grapheme) {
-                push_grapheme_cells(&mut cells, grapheme, style);
+                push_grapheme_cells(&mut cells, grapheme, style, hyperlink);
             }
         });
         cells
     }
+}
+
+/// Rejects targets that could terminate OSC 8 or inject terminal controls.
+pub fn sanitize_hyperlink_target(target: &str) -> Option<&str> {
+    (!target.is_empty()
+        && target.len() <= MAX_HYPERLINK_TARGET_BYTES
+        && !target.chars().any(char::is_control))
+    .then_some(target)
 }
 
 impl From<&str> for StyledText {

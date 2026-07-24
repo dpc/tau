@@ -43,6 +43,12 @@ Newline graphemes are layout separators, not inline cells. Hand-built public
 `Cell` values are normalized again before diffing/caching and before emission so
 callers cannot bypass the styled-text sanitizer by constructing cells directly.
 
+OSC 8 hyperlinks are structured span/cell metadata rather than inline text.
+Layout preserves that metadata across wrapping, while emission opens and closes
+each contiguous linked cell range. Targets containing control characters are
+rejected, targets longer than 4096 bytes are omitted to keep wrapped output
+amplification bounded, and link labels pass through the ordinary text sanitizer.
+
 Important safeguard tests live in `src/screen/tests.rs`, especially the layout
 control-character sanitization, public-cell sanitization, and normalized-cache
 regression tests.

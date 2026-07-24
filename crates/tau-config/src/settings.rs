@@ -147,6 +147,8 @@ pub struct CliSettings {
     /// Maximum number of rendered history lines to replay to the terminal on a
     /// full redraw by default.
     pub redraw_history_size: usize,
+    /// Whether Markdown links use clickable OSC 8 terminal hyperlinks.
+    pub osc8_links: bool,
     /// Whether to render UI↔harness socket throughput in the model
     /// status bar by default.
     pub show_ui_io: bool,

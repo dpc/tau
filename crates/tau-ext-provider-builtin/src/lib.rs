@@ -940,7 +940,8 @@ fn run_openai_codex_login(
 
     eprintln!("\nOpen this URL in your browser:\n");
     eprintln!("{auth_url}");
-    eprintln!("\x1b]8;;{auth_url}\x1b\\Or click here.\x1b]8;;\x1b\\");
+    tau_term_screen::write_osc8_hyperlink(&mut std::io::stderr(), "Or click here.", &auth_url)?;
+    eprintln!();
     eprintln!();
     eprintln!("After logging in, you'll be redirected to a page that won't load.");
     eprintln!("Copy the full URL from your browser's address bar and paste it here:\n");

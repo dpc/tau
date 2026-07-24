@@ -8,7 +8,8 @@
 //! Supported syntax is intentionally small: ATX headings (`# Heading`),
 //! unordered (`-`, `*`, `+`) and ordered (`1.`/`1)`) list markers,
 //! `*strong*`/`**strong**`, `_emphasis_`, combined `***strong emphasis***`,
-//! `~~strikethrough~~`, backslash escapes, and leading-pipe tables.
+//! `~~strikethrough~~`, links, HTTP(S) autolinks and bare URLs, backslash
+//! escapes, and leading-pipe tables.
 //! Triple-asterisk runs compose strong and emphasis styles, while
 //! strikethrough uses its own semantic style; this remains
 //! delimiter-preserving Markdown-lite, not a general CommonMark parser. Most
@@ -126,12 +127,14 @@ enum MarkdownStyle {
     PromptMarker,
     Code,
     Escape,
+    Link,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct MarkdownRun {
     text: String,
     style: MarkdownStyle,
+    hyperlink: Option<String>,
 }
 
 /// Append-aware cache for Markdown-lite live response/thinking rendering.
@@ -202,48 +205,86 @@ impl MarkdownStreamCache {
     }
 }
 
-/// Render final/static transcript text with Markdown-lite semantic styles.
+#[cfg(test)]
 pub(crate) fn markdown_block(
     theme: &tau_themes::Theme,
     base_style_name: &str,
     text: &str,
 ) -> tau_cli_term::StyledBlock {
-    markdown_prefixed_block(theme, base_style_name, "", text)
+    markdown_block_with_osc8(theme, base_style_name, text, true)
 }
 
-/// Render final/static transcript text with a base-styled state marker before
-/// the Markdown-lite body.
-pub(crate) fn markdown_prefixed_block(
+#[cfg(test)]
+fn markdown_prefixed_block(
     theme: &tau_themes::Theme,
     base_style_name: &str,
     prefix_text: &str,
     text: &str,
 ) -> tau_cli_term::StyledBlock {
-    let prefix = [MarkdownRun {
-        text: prefix_text.to_owned(),
-        style: MarkdownStyle::Base,
-    }];
-    let mut in_fence = None;
-    styled_block_from_runs(
-        theme,
-        base_style_name,
-        &prefix,
-        &parse_markdown_with_state(text, &mut in_fence),
-        false,
-    )
+    markdown_prefixed_block_with_osc8(theme, base_style_name, prefix_text, text, true)
 }
 
-/// Render a configured prompt-state marker followed by Markdown-lite prompt
-/// text.
-pub(crate) fn markdown_prompt_block(
+#[cfg(test)]
+fn markdown_prompt_block(
     theme: &tau_themes::Theme,
     base_style_name: &str,
     marker_text: String,
     text: &str,
 ) -> tau_cli_term::StyledBlock {
+    markdown_prompt_block_with_osc8(theme, base_style_name, marker_text, text, true)
+}
+
+#[cfg(test)]
+fn markdown_streaming_block(
+    theme: &tau_themes::Theme,
+    base_style_name: &str,
+    text: &str,
+    cache: &mut MarkdownStreamCache,
+) -> tau_cli_term::StyledBlock {
+    markdown_streaming_block_with_osc8(theme, base_style_name, text, cache, true)
+}
+
+#[cfg(test)]
+fn markdown_prefixed_streaming_block(
+    theme: &tau_themes::Theme,
+    base_style_name: &str,
+    prefix_text: &str,
+    text: &str,
+    cache: &mut MarkdownStreamCache,
+) -> tau_cli_term::StyledBlock {
+    markdown_prefixed_streaming_block_with_osc8(
+        theme,
+        base_style_name,
+        prefix_text,
+        text,
+        cache,
+        true,
+    )
+}
+
+/// Render final/static transcript text with Markdown-lite semantic styles.
+pub(crate) fn markdown_block_with_osc8(
+    theme: &tau_themes::Theme,
+    base_style_name: &str,
+    text: &str,
+    osc8_links: bool,
+) -> tau_cli_term::StyledBlock {
+    markdown_prefixed_block_with_osc8(theme, base_style_name, "", text, osc8_links)
+}
+
+/// Render final/static transcript text with a base-styled state marker before
+/// the Markdown-lite body.
+pub(crate) fn markdown_prefixed_block_with_osc8(
+    theme: &tau_themes::Theme,
+    base_style_name: &str,
+    prefix_text: &str,
+    text: &str,
+    osc8_links: bool,
+) -> tau_cli_term::StyledBlock {
     let prefix = [MarkdownRun {
-        text: marker_text,
-        style: MarkdownStyle::PromptMarker,
+        text: prefix_text.to_owned(),
+        style: MarkdownStyle::Base,
+        hyperlink: None,
     }];
     let mut in_fence = None;
     styled_block_from_runs(
@@ -252,29 +293,57 @@ pub(crate) fn markdown_prompt_block(
         &prefix,
         &parse_markdown_with_state(text, &mut in_fence),
         false,
+        osc8_links,
+    )
+}
+
+/// Render a configured prompt-state marker followed by Markdown-lite prompt
+/// text.
+pub(crate) fn markdown_prompt_block_with_osc8(
+    theme: &tau_themes::Theme,
+    base_style_name: &str,
+    marker_text: String,
+    text: &str,
+    osc8_links: bool,
+) -> tau_cli_term::StyledBlock {
+    let prefix = [MarkdownRun {
+        text: marker_text,
+        style: MarkdownStyle::PromptMarker,
+        hyperlink: None,
+    }];
+    let mut in_fence = None;
+    styled_block_from_runs(
+        theme,
+        base_style_name,
+        &prefix,
+        &parse_markdown_with_state(text, &mut in_fence),
+        false,
+        osc8_links,
     )
 }
 
 /// Render live append-only text with sealed paragraphs cached, completed lines
 /// in the current block formatted provisionally, and only the current
 /// incomplete line left plain.
-pub(crate) fn markdown_streaming_block(
+pub(crate) fn markdown_streaming_block_with_osc8(
     theme: &tau_themes::Theme,
     base_style_name: &str,
     text: &str,
     cache: &mut MarkdownStreamCache,
+    osc8_links: bool,
 ) -> tau_cli_term::StyledBlock {
-    markdown_prefixed_streaming_block(theme, base_style_name, "", text, cache)
+    markdown_prefixed_streaming_block_with_osc8(theme, base_style_name, "", text, cache, osc8_links)
 }
 
 /// Render live append-only text with a stable base-styled state marker before
 /// the incrementally formatted Markdown-lite body.
-pub(crate) fn markdown_prefixed_streaming_block(
+pub(crate) fn markdown_prefixed_streaming_block_with_osc8(
     theme: &tau_themes::Theme,
     base_style_name: &str,
     prefix_text: &str,
     text: &str,
     cache: &mut MarkdownStreamCache,
+    osc8_links: bool,
 ) -> tau_cli_term::StyledBlock {
     if !text.starts_with(&cache.source) {
         cache.reset_for_replacement();
@@ -296,13 +365,15 @@ pub(crate) fn markdown_prefixed_streaming_block(
         runs.push(MarkdownRun {
             text: text[complete_until..].to_owned(),
             style: MarkdownStyle::Base,
+            hyperlink: None,
         });
     }
     let prefix = [MarkdownRun {
         text: prefix_text.to_owned(),
         style: MarkdownStyle::Base,
+        hyperlink: None,
     }];
-    styled_block_from_runs(theme, base_style_name, &prefix, &runs, true)
+    styled_block_from_runs(theme, base_style_name, &prefix, &runs, true, osc8_links)
 }
 
 fn styled_block_from_runs(
@@ -311,6 +382,7 @@ fn styled_block_from_runs(
     prefix: &[MarkdownRun],
     runs: &[MarkdownRun],
     progress: bool,
+    osc8_links: bool,
 ) -> tau_cli_term::StyledBlock {
     use tau_cli_term::resolve::{convert_color, themed_text};
 
@@ -324,6 +396,7 @@ fn styled_block_from_runs(
     let prompt_marker = themed.add_style(names::PROMPT_MARKER_SUBMITTED);
     let code = themed.add_style(names::MARKDOWN_CODE);
     let escape = themed.add_style(names::MARKDOWN_ESCAPE);
+    let link = themed.add_style(names::MARKDOWN_LINK);
     let progress_style = themed.add_style(names::PROGRESS_INDICATOR);
 
     let mut body_children = Vec::new();
@@ -336,9 +409,10 @@ fn styled_block_from_runs(
         prompt_marker,
         code,
         escape,
+        link,
     };
-    push_runs(&mut body_children, prefix, styles);
-    push_runs(&mut body_children, runs, styles);
+    push_runs(&mut body_children, prefix, styles, false);
+    push_runs(&mut body_children, runs, styles, !osc8_links);
 
     let needs_space = progress && body_children_text_ends_non_whitespace(prefix, runs);
 
@@ -358,7 +432,20 @@ fn styled_block_from_runs(
     themed.push_tree(SpanTree::span(StyleIdx::DEFAULT, root_children));
 
     let body_ts = theme.resolve_style(&StyleName::new(base_style_name));
-    let mut block = tau_cli_term::StyledBlock::new(themed_text(theme, &themed));
+    let mut rendered = themed_text(theme, &themed);
+    if osc8_links {
+        let targets = prefix
+            .iter()
+            .chain(runs)
+            .filter(|run| !run.text.is_empty())
+            .map(|run| run.hyperlink.as_deref());
+        for (span, target) in rendered.spans_mut().iter_mut().zip(targets) {
+            span.hyperlink = target
+                .and_then(tau_cli_term::sanitize_hyperlink_target)
+                .map(std::sync::Arc::from);
+        }
+    }
+    let mut block = tau_cli_term::StyledBlock::new(rendered);
     if let Some(bg) = body_ts.bg {
         block = block.bg(convert_color(bg));
     }
@@ -387,12 +474,14 @@ struct MarkdownStyleIndexes {
     prompt_marker: StyleIdx,
     code: StyleIdx,
     escape: StyleIdx,
+    link: StyleIdx,
 }
 
 fn push_runs(
     children: &mut Vec<SpanTree<StyleIdx>>,
     runs: &[MarkdownRun],
     styles: MarkdownStyleIndexes,
+    show_link_target: bool,
 ) {
     for run in runs {
         if run.text.is_empty() {
@@ -456,6 +545,17 @@ fn push_runs(
                     styles.escape,
                     vec![SpanTree::text(run.text.clone())],
                 ));
+            }
+            MarkdownStyle::Link => {
+                let target = run.hyperlink.as_deref().unwrap_or_default();
+                let needs_visible_target =
+                    show_link_target || tau_cli_term::sanitize_hyperlink_target(target).is_none();
+                let text = if needs_visible_target && target != run.text {
+                    format!("{} ({target})", run.text)
+                } else {
+                    run.text.clone()
+                };
+                children.push(SpanTree::span(styles.link, vec![SpanTree::text(text)]));
             }
         }
     }
@@ -748,6 +848,29 @@ fn parse_inline(text: &str, runs: &mut Vec<MarkdownRun>) {
                 index += len;
                 continue;
             }
+            if ch == '['
+                && let Some((label, target, len)) = parse_inline_link(rest)
+            {
+                push_link_run(runs, label, target);
+                index += len;
+                continue;
+            }
+            if ch == '<'
+                && let Some((target, len)) = parse_autolink(rest)
+            {
+                push_link_run(runs, target, target);
+                index += len;
+                continue;
+            }
+            if is_bare_url_start(text, index, rest) {
+                let len = bare_url_len(rest);
+                let target = &rest[..len];
+                if valid_http_target(target) {
+                    push_link_run(runs, target, target);
+                    index += len;
+                    continue;
+                }
+            }
             if rest.starts_with("***")
                 && let Some(end) = find_closing_sequence(text, index, "***")
             {
@@ -793,7 +916,12 @@ fn escaped_len(rest: &str) -> Option<usize> {
     let mut chars = rest.chars();
     (chars.next() == Some('\\'))
         .then_some(chars.next()?)
-        .filter(|c| matches!(c, '*' | '_' | '~' | '#' | '-' | '\\' | '`'))
+        .filter(|c| {
+            matches!(
+                c,
+                '*' | '_' | '~' | '#' | '-' | '\\' | '`' | '[' | ']' | '(' | ')' | '<' | '>'
+            )
+        })
         .map(|c| 1 + c.len_utf8())
 }
 
@@ -866,6 +994,7 @@ fn push_run(runs: &mut Vec<MarkdownRun>, text: &str, style: MarkdownStyle) {
     }
     if let Some(last) = runs.last_mut()
         && last.style == style
+        && last.hyperlink.is_none()
     {
         last.text.push_str(text);
         return;
@@ -873,7 +1002,68 @@ fn push_run(runs: &mut Vec<MarkdownRun>, text: &str, style: MarkdownStyle) {
     runs.push(MarkdownRun {
         text: text.to_owned(),
         style,
+        hyperlink: None,
     });
+}
+
+fn push_link_run(runs: &mut Vec<MarkdownRun>, text: &str, target: &str) {
+    runs.push(MarkdownRun {
+        text: text.to_owned(),
+        style: MarkdownStyle::Link,
+        hyperlink: Some(target.to_owned()),
+    });
+}
+
+fn parse_inline_link(text: &str) -> Option<(&str, &str, usize)> {
+    let close_label = find_unescaped(&text[1..], ']')? + 1;
+    let open_target = close_label + 1;
+    if text.as_bytes().get(open_target) != Some(&b'(') {
+        return None;
+    }
+    let close_target = find_unescaped(&text[open_target + 1..], ')')? + open_target + 1;
+    let label = &text[1..close_label];
+    let target = &text[open_target + 1..close_target];
+    (!label.is_empty() && !target.is_empty() && !target.chars().any(char::is_whitespace))
+        .then_some((label, target, close_target + 1))
+}
+
+fn parse_autolink(text: &str) -> Option<(&str, usize)> {
+    let close = text.find('>')?;
+    let target = &text[1..close];
+    valid_http_target(target).then_some((target, close + 1))
+}
+
+fn is_bare_url_start(text: &str, index: usize, rest: &str) -> bool {
+    (rest.starts_with("https://") || rest.starts_with("http://"))
+        && text[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| ch.is_whitespace() || matches!(ch, '(' | '[' | '{'))
+}
+
+fn valid_http_target(target: &str) -> bool {
+    let body = target
+        .strip_prefix("https://")
+        .or_else(|| target.strip_prefix("http://"));
+    body.is_some_and(|body| {
+        !body.is_empty()
+            && !body.starts_with(['/', '?', '#'])
+            && !body.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+    })
+}
+
+fn bare_url_len(text: &str) -> usize {
+    let mut end = text.len();
+    for (idx, ch) in text.char_indices() {
+        if ch.is_whitespace() || ch == '<' || ch == '>' {
+            end = idx;
+            break;
+        }
+    }
+    while text[..end].ends_with(['.', ',', ';', ':', '!', '?', ')', ']']) {
+        end -= text[..end].chars().next_back().map_or(0, char::len_utf8);
+    }
+    end
 }
 
 #[cfg(test)]

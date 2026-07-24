@@ -8,6 +8,7 @@ show_thinking: true
 show_turn_stats: false
 redraw_counter: false
 redraw_history_size: 2000
+osc8_links: true
 show_ui_io: false
 show_tools: full
 show_messages: all-full

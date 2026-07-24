@@ -1288,6 +1288,7 @@ pub(crate) fn run_chat(
         settings.prompt_symbol.clone(),
         settings.submitted_prompt_symbol,
     );
+    renderer.set_osc8_links(settings.osc8_links);
     renderer.set_draft_retargeter(draft_handle.clone(), active_session_state.clone());
     renderer.set_right_prompt_paths(cwd.clone(), home_dir.clone());
     renderer.set_action_state(action_state.clone());

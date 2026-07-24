@@ -31,13 +31,13 @@ use crossterm::terminal::{self, ClearType};
 
 use crate::style::{
     Align, Cell, Style, StyledBlock, StyledText, is_line_break_grapheme, push_grapheme_cells,
-    visit_styled_graphemes,
+    sanitize_hyperlink_target, visit_styled_graphemes,
 };
 
 fn normalize_cell_lines(lines: &[Vec<Cell>]) -> Vec<Vec<Cell>> {
     lines
         .iter()
-        .map(|line| line.iter().copied().map(Cell::normalized).collect())
+        .map(|line| line.iter().map(Cell::normalized).collect())
         .collect()
 }
 
@@ -532,8 +532,22 @@ impl Screen {
 /// calling this function.
 pub fn emit_styled_cells(w: &mut impl Write, cells: &[Cell]) -> io::Result<()> {
     let mut current = Style::default();
+    let mut current_hyperlink: Option<&str> = None;
 
     for cell in cells {
+        let hyperlink = cell
+            .hyperlink
+            .as_deref()
+            .and_then(sanitize_hyperlink_target);
+        if hyperlink != current_hyperlink {
+            if current_hyperlink.is_some() {
+                w.write_all(b"\x1b]8;;\x1b\\")?;
+            }
+            if let Some(target) = hyperlink {
+                write_osc8_open(w, target)?;
+            }
+            current_hyperlink = hyperlink;
+        }
         if cell.style != current {
             // Reset to clean slate, then apply new style.
             if current != Style::default() {
@@ -547,11 +561,38 @@ pub fn emit_styled_cells(w: &mut impl Write, cells: &[Cell]) -> io::Result<()> {
         w.queue(Print(cell.normalized().ch))?;
     }
 
+    if current_hyperlink.is_some() {
+        w.write_all(b"\x1b]8;;\x1b\\")?;
+    }
     // Restore default state.
     if current != Style::default() {
         w.queue(SetAttribute(Attribute::Reset))?;
     }
     Ok(())
+}
+
+fn write_osc8_open(w: &mut impl Write, target: &str) -> io::Result<()> {
+    if let Some(target) = sanitize_hyperlink_target(target) {
+        write!(w, "\x1b]8;;{target}\x1b\\")?;
+    }
+    Ok(())
+}
+
+/// Writes one safely bounded OSC 8 hyperlink.
+///
+/// Unsafe targets are rendered as plain labels so callers cannot inject
+/// terminal controls through either the target or label.
+pub fn write_osc8_hyperlink(w: &mut impl Write, label: &str, target: &str) -> io::Result<()> {
+    let safe_label: String = label
+        .chars()
+        .map(|ch| if ch.is_control() { '�' } else { ch })
+        .collect();
+    if sanitize_hyperlink_target(target).is_none() {
+        return w.write_all(safe_label.as_bytes());
+    }
+    write_osc8_open(w, target)?;
+    w.write_all(safe_label.as_bytes())?;
+    w.write_all(b"\x1b]8;;\x1b\\")
 }
 
 /// Applies non-default style attributes (without resetting first).
@@ -601,14 +642,14 @@ pub fn layout_lines(
 
     // Split into logical lines at newlines.
     let mut logical_lines: Vec<Vec<Cell>> = vec![Vec::new()];
-    visit_styled_graphemes(content.spans(), |grapheme, style| {
+    visit_styled_graphemes(content.spans(), |grapheme, style, hyperlink| {
         if is_line_break_grapheme(grapheme) {
             logical_lines.push(Vec::new());
         } else {
             let line = logical_lines
                 .last_mut()
                 .expect("logical_lines always has at least one entry");
-            push_grapheme_cells(line, grapheme, style);
+            push_grapheme_cells(line, grapheme, style, hyperlink);
         }
     });
 
@@ -640,7 +681,7 @@ pub fn layout_lines(
                         result.push(row);
                         row = Vec::new();
                     }
-                    row.push(Cell::new('�', cell.style));
+                    row.push(Cell::new('�', cell.style).with_hyperlink(cell.hyperlink));
                     result.push(row);
                     row = Vec::new();
                     col = 0;
@@ -691,7 +732,7 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
 
     let mut content_lines = Vec::new();
     if let Some(priority_line) = &block.priority_line {
-        let priority_layout = priority_line.layout_with_fill(content_width, fill);
+        let priority_layout = priority_line.layout_with_fill(content_width, fill.clone());
         content_lines.push(priority_layout.row);
         if priority_layout.required_items_fit && !block.priority_line_body.is_empty() {
             content_lines.extend(
@@ -737,15 +778,15 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
             let padding = content_width.saturating_sub(cw);
             match block.align {
                 Align::Left => {
-                    row.extend(line.iter().copied());
-                    row.extend(std::iter::repeat_n(fill, padding));
+                    row.extend(line.iter().cloned());
+                    row.extend(std::iter::repeat_n(fill.clone(), padding));
                 }
                 Align::Center => {
                     let left = padding / 2;
                     let right = padding - left;
-                    row.extend(std::iter::repeat_n(fill, left));
-                    row.extend(line.iter().copied());
-                    row.extend(std::iter::repeat_n(fill, right));
+                    row.extend(std::iter::repeat_n(fill.clone(), left));
+                    row.extend(line.iter().cloned());
+                    row.extend(std::iter::repeat_n(fill.clone(), right));
                 }
             }
 

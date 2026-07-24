@@ -21,6 +21,8 @@ pub const MARKDOWN_HEADING: &str = "markdown.heading";
 pub const MARKDOWN_LIST_MARKER: &str = "markdown.list.marker";
 pub const MARKDOWN_CODE: &str = "markdown.code";
 pub const MARKDOWN_ESCAPE: &str = "markdown.escape";
+/// Markdown link labels and recognized URL autolinks.
+pub const MARKDOWN_LINK: &str = "markdown.link";
 
 // -- Tool execution --
 //

@@ -15,11 +15,160 @@ fn markdown_test_theme() -> tau_themes::Theme {
                 "markdown.list.marker": { bold: true },
                 "markdown.code": { bg: "#111111" },
                 "markdown.escape": { bg: "#222222" },
+                "markdown.link": { fg: "red", bold: true },
                 "progress.indicator": { fg: "cyan" },
             }
         }"##,
     )
     .expect("valid markdown test theme")
+}
+
+/// Markdown links keep only their labels while inline, autolink, bare,
+/// multiple, and Unicode forms carry their exact destinations as OSC 8
+/// metadata.
+#[test]
+fn markdown_links_render_labels_and_targets() {
+    let theme = markdown_test_theme();
+    let block = markdown_block(
+        &theme,
+        names::AGENT_RESPONSE,
+        "See [docs](https://example.test/a) and <https://例.test/路> or https://two.test/x.",
+    );
+
+    assert_eq!(
+        rendered_text(&block),
+        "See docs and https://例.test/路 or https://two.test/x."
+    );
+    let links: Vec<_> = block
+        .content
+        .spans()
+        .iter()
+        .filter_map(|span| {
+            span.hyperlink
+                .as_deref()
+                .map(|target| (span.text.as_str(), target))
+        })
+        .collect();
+    assert_eq!(
+        links,
+        [
+            ("docs", "https://example.test/a"),
+            ("https://例.test/路", "https://例.test/路"),
+            ("https://two.test/x", "https://two.test/x"),
+        ]
+    );
+    let docs = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "docs")
+        .expect("link label span");
+    assert!(docs.style.bold);
+    assert_eq!(docs.style.fg, Some(tau_cli_term::Color::Red));
+    assert_eq!(
+        docs.style.bg,
+        Some(tau_cli_term::Color::Rgb {
+            r: 0x10,
+            g: 0x10,
+            b: 0x10,
+        })
+    );
+}
+
+/// Disabling OSC 8 exposes the destination for terminal URL detection, removes
+/// hyperlink metadata, and leaves malformed or escaped syntax literal.
+#[test]
+fn markdown_links_can_disable_osc8_and_leave_invalid_syntax_literal() {
+    let theme = markdown_test_theme();
+    let block = markdown_block_with_osc8(
+        &theme,
+        names::AGENT_RESPONSE,
+        "[label](https://example.test) [broken](target \\[escaped](url)",
+        false,
+    );
+
+    assert_eq!(
+        rendered_text(&block),
+        "label (https://example.test) [broken](target \\[escaped](url)"
+    );
+    assert!(
+        block
+            .content
+            .spans()
+            .iter()
+            .all(|span| span.hyperlink.is_none())
+    );
+}
+
+/// Bare URLs require token boundaries and useful bodies, while autolinks reject
+/// whitespace instead of turning malformed angle-bracket text into a link.
+#[test]
+fn markdown_url_recognition_rejects_malformed_and_embedded_forms() {
+    let theme = markdown_test_theme();
+    let source = "abchttps://host http:// <https://host path> (https://valid.test/x)";
+    let block = markdown_block(&theme, names::AGENT_RESPONSE, source);
+
+    assert_eq!(rendered_text(&block), source);
+    let links: Vec<_> = block
+        .content
+        .spans()
+        .iter()
+        .filter_map(|span| span.hyperlink.as_deref())
+        .collect();
+    assert_eq!(links, ["https://valid.test/x"]);
+}
+
+/// Link metadata survives narrow wrapping and never extends to surrounding
+/// text.
+#[test]
+fn markdown_link_boundaries_survive_wrapping() {
+    let theme = markdown_test_theme();
+    let block = markdown_block(
+        &theme,
+        names::AGENT_RESPONSE,
+        "a [long label](https://example.test) z",
+    );
+    let lines = tau_term_screen::layout_lines()
+        .content(&block.content)
+        .width(4)
+        .call();
+    let linked: String = lines
+        .iter()
+        .flatten()
+        .filter(|cell| cell.hyperlink.is_some())
+        .map(|cell| cell.ch)
+        .collect();
+
+    assert_eq!(linked, "long label");
+    let unlinked: String = lines
+        .iter()
+        .flatten()
+        .filter(|cell| cell.hyperlink.is_none())
+        .map(|cell| cell.ch)
+        .collect();
+    assert_eq!(unlinked, "a  z");
+}
+
+/// A linked wide grapheme replaced at terminal width one retains its target.
+#[test]
+fn markdown_unicode_link_survives_one_column_layout() {
+    let theme = markdown_test_theme();
+    let block = markdown_block(
+        &theme,
+        names::AGENT_RESPONSE,
+        "[界](https://example.test/wide)",
+    );
+    let lines = tau_term_screen::layout_lines()
+        .content(&block.content)
+        .width(1)
+        .call();
+
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0][0].ch, '�');
+    assert_eq!(
+        lines[0][0].hyperlink.as_deref(),
+        Some("https://example.test/wide")
+    );
 }
 
 fn rendered_text(block: &tau_cli_term::StyledBlock) -> String {

@@ -21,6 +21,7 @@
     "markdown.heading":     { bold: true },
     "markdown.list.marker": { bold: true },
     "markdown.code":        { fg: "#66aaff" },
+    "markdown.link":        { fg: "red", bold: true },
     "markdown.escape":      { bg: "#2a2030" },
 
     // -- Tool execution --

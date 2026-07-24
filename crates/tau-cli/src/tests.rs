@@ -10817,7 +10817,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     assert_eq!(texts, vec!["@engineer_1", "%2/3", "#133.4k/200k"]);
 
     let block = render_tool_block(&theme, &display);
-    let running = priority_header_cells(&block, 100)[0];
+    let running = priority_header_cells(&block, 100)[0].clone();
     assert_eq!(
         running.style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME),
@@ -10843,7 +10843,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     assert_eq!(display.tool_name, "watching");
     assert_eq!(texts, vec!["@engineer_1", "-> @leaf", "%2/3", "#67%"]);
     let block = render_tool_block(&theme, &display);
-    let watching = priority_header_cells(&block, 100)[0];
+    let watching = priority_header_cells(&block, 100)[0].clone();
     assert_eq!(
         watching.style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME)

@@ -21,8 +21,9 @@ use crate::agent_navigation::AgentNavigation;
 use crate::build_banner;
 use crate::chat::{DraftSlot, invalidate_pending_draft, retarget_prompt_draft_snapshot};
 use crate::markdown_render::{
-    MarkdownStreamCache, markdown_block, markdown_prefixed_block,
-    markdown_prefixed_streaming_block, markdown_prompt_block, markdown_streaming_block,
+    MarkdownStreamCache, markdown_block_with_osc8, markdown_prefixed_block_with_osc8,
+    markdown_prefixed_streaming_block_with_osc8, markdown_prompt_block_with_osc8,
+    markdown_streaming_block_with_osc8,
 };
 use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
@@ -317,6 +318,8 @@ pub(crate) struct EventRenderer {
     redraw_counter: bool,
     /// Maximum number of rendered history lines replayed on full redraw.
     redraw_history_size: usize,
+    /// Whether transcript Markdown links emit OSC 8 hyperlink metadata.
+    osc8_links: bool,
     /// Whether to show UI↔harness socket throughput in the status bar.
     show_ui_io: bool,
     /// Latest rolling UI↔harness socket throughput maxima.
@@ -1449,6 +1452,7 @@ impl EventRenderer {
             main_tools_visible: false,
             redraw_counter: state.redraw_counter,
             redraw_history_size: state.redraw_history_size,
+            osc8_links: true,
             last_full_render_count: 0,
             last_full_render_at: None,
             cumulative_agent_latency: Duration::ZERO,
@@ -1477,6 +1481,11 @@ impl EventRenderer {
             agent_in_progress: Arc::new(AtomicBool::new(false)),
             agent_activity: AgentActivity::default(),
         }
+    }
+
+    /// Configures whether transcript Markdown links carry OSC 8 metadata.
+    pub(crate) fn set_osc8_links(&mut self, enabled: bool) {
+        self.osc8_links = enabled;
     }
 
     pub(crate) fn set_tool_timer(&mut self, timer: ToolTimerNotifier) {
@@ -2520,7 +2529,12 @@ impl EventRenderer {
             };
             self.handle.set_block(
                 entry.block_id,
-                markdown_block(&self.theme, names::AGENT_THINKING, display),
+                markdown_block_with_osc8(
+                    &self.theme,
+                    names::AGENT_THINKING,
+                    display,
+                    self.osc8_links,
+                ),
             );
         }
         for state in self.prompts.values_mut() {
@@ -2529,14 +2543,15 @@ impl EventRenderer {
             };
             let block = if self.show_thinking {
                 let display = state.thinking_text.clone().unwrap_or_default();
-                markdown_streaming_block(
+                markdown_streaming_block_with_osc8(
                     &self.theme,
                     names::AGENT_THINKING,
                     &display,
                     &mut state.thinking_markdown_cache,
+                    self.osc8_links,
                 )
             } else {
-                markdown_block(&self.theme, names::AGENT_THINKING, "")
+                markdown_block_with_osc8(&self.theme, names::AGENT_THINKING, "", self.osc8_links)
             };
             self.handle.set_block(bid, block);
         }
@@ -2790,7 +2805,12 @@ impl EventRenderer {
             };
             self.handle.set_block(
                 entry.block_id,
-                markdown_block(&self.theme, names::AGENT_THINKING, display),
+                markdown_block_with_osc8(
+                    &self.theme,
+                    names::AGENT_THINKING,
+                    display,
+                    self.osc8_links,
+                ),
             );
         }
         for entry in &self.turn_stats_history {
@@ -3476,11 +3496,12 @@ impl EventRenderer {
         body_text: impl Into<String>,
     ) -> tau_cli_term::StyledBlock {
         let body_text = body_text.into();
-        markdown_prompt_block(
+        markdown_prompt_block_with_osc8(
             &self.theme,
             body_name,
             format!("{} ", self.submitted_prompt_symbol),
             &body_text,
+            self.osc8_links,
         )
     }
 
@@ -5119,11 +5140,12 @@ impl EventRenderer {
                 self.last_user_block = Some((id, text));
             }
         }
-        let block = markdown_prompt_block(
+        let block = markdown_prompt_block_with_osc8(
             &self.theme,
             names::USER_PROMPT_QUEUED,
             format!("{} ", self.prompt_symbol),
             &format!("{} (queued)", queued.text),
+            self.osc8_links,
         );
         let queued_id = self.handle.new_block("user-prompt-queued", block);
         self.handle.push_above_sticky(queued_id);
@@ -5450,11 +5472,12 @@ impl EventRenderer {
             return;
         }
         let state = self.prompts.entry(spid.to_owned()).or_default();
-        let block = markdown_streaming_block(
+        let block = markdown_streaming_block_with_osc8(
             &self.theme,
             names::AGENT_THINKING,
             thinking,
             &mut state.thinking_markdown_cache,
+            self.osc8_links,
         );
         let existing_tbid = self.prompts.get(spid).and_then(|s| s.thinking_block_id);
         if let Some(tbid) = existing_tbid {
@@ -5585,12 +5608,13 @@ impl EventRenderer {
                     response_stats_indicator_for_prompt(state),
                 )
             } else {
-                markdown_prefixed_streaming_block(
+                markdown_prefixed_streaming_block_with_osc8(
                     &self.theme,
                     names::AGENT_RESPONSE,
                     STREAMING_AGENT_RESPONSE_PREFIX,
                     text,
                     &mut state.response_markdown_cache,
+                    self.osc8_links,
                 )
             };
             self.handle.set_block(bid, block);
@@ -5658,7 +5682,12 @@ impl EventRenderer {
         {
             let bid = self.handle.print_output(
                 "agent-thinking",
-                markdown_block(&self.theme, names::AGENT_THINKING, &thinking),
+                markdown_block_with_osc8(
+                    &self.theme,
+                    names::AGENT_THINKING,
+                    &thinking,
+                    self.osc8_links,
+                ),
             );
             self.thinking_history.push(ThinkingBlockEntry {
                 block_id: bid,
@@ -5766,11 +5795,12 @@ impl EventRenderer {
 
         self.handle.print_output(
             "agent-response-placeholder",
-            markdown_prefixed_block(
+            markdown_prefixed_block_with_osc8(
                 &self.theme,
                 names::AGENT_RESPONSE,
                 COMPLETED_AGENT_RESPONSE_PREFIX,
                 text,
+                self.osc8_links,
             ),
         );
     }
@@ -5863,11 +5893,12 @@ impl EventRenderer {
                 if let Some(text) = assistant_text_from_message_item(message) {
                     self.handle.print_output(
                         "agent-response",
-                        markdown_prefixed_block(
+                        markdown_prefixed_block_with_osc8(
                             &self.theme,
                             names::AGENT_RESPONSE,
                             COMPLETED_AGENT_RESPONSE_PREFIX,
                             &text,
+                            self.osc8_links,
                         ),
                     );
                 }

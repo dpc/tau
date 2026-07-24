@@ -14,8 +14,9 @@ pub mod style;
 pub use priority_line::{
     PriorityLine, PriorityLineAlignment, PriorityLinePriority, PriorityLineTruncation,
 };
-pub use screen::{Screen, emit_styled_cells, layout_block, layout_lines};
+pub use screen::{Screen, emit_styled_cells, layout_block, layout_lines, write_osc8_hyperlink};
 pub use style::{
     Align, BlockId, Cell, Color, Span, Style, StyledBlock, StyledText, display_width,
-    next_grapheme_boundary, previous_grapheme_boundary, truncate_to_width,
+    next_grapheme_boundary, previous_grapheme_boundary, sanitize_hyperlink_target,
+    truncate_to_width,
 };

@@ -30,6 +30,7 @@ tau-proto.workspace = true
 tau-provider.workspace = true
 tau-provider-chat-completions.workspace = true
 tau-provider-codex.workspace = true
+tau-term-screen.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

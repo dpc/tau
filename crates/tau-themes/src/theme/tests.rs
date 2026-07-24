@@ -260,6 +260,21 @@ fn builtin_watching_name_differs_from_tool_name() {
     }
 }
 
+/// Ensures every built-in theme keeps Markdown links visibly distinct.
+#[test]
+fn builtin_themes_style_markdown_links_bold_red() {
+    for name in BUILTIN_THEME_NAMES {
+        let theme = Theme::builtin_named(name).expect("registered built-in theme");
+        let style = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_LINK));
+        assert!(style.bold, "{name} Markdown links must be bold");
+        assert_eq!(
+            style.fg,
+            Some(Color::Red),
+            "{name} Markdown links must be red"
+        );
+    }
+}
+
 /// Ensures every explicitly configured style in the conservative default theme
 /// stays within the allowed foreground color set and does not set backgrounds.
 #[test]
