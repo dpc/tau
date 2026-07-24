@@ -1858,6 +1858,313 @@ fn intercepted_inference_checkpoint_fails_before_unroutable_send() {
     h.shutdown().expect("shutdown");
 }
 
+/// If compact-fact storage fails, the full request continuation is destroyed
+/// before any provider can observe it.
+#[test]
+fn intercepted_prompt_start_append_failure_prevents_provider_delivery() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut h = echo_harness(&state_dir).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let provider_observer = connect_test_client(
+        &mut h,
+        "append-fault-observer",
+        tau_proto::ClientKind::Provider,
+    );
+    h.bus
+        .set_subscriptions(
+            "append-fault-observer",
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_CREATED,
+            )],
+        )
+        .expect("subscribe provider observer");
+    let interceptor = connect_test_tool(&mut h, "prompt-start-append-owner");
+    h.handle_extension_event(
+        "prompt-start-append-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("append must fail".to_owned()))
+        .expect("dispatch inference");
+    let (parked, _) = intercepted_payload(&interceptor);
+    let Event::AgentPromptStarted(started) = parked else {
+        panic!("compact prompt fact intercepted");
+    };
+    let journal_path = state_dir
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let backup_path = journal_path.with_extension("cbor.prompt-start-backup");
+    std::fs::rename(&journal_path, &backup_path).expect("park agent journal");
+    std::fs::create_dir(&journal_path).expect("reject compact-fact append");
+    h.handle_extension_event(
+        "prompt-start-append-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release compact fact");
+    std::fs::remove_dir(&journal_path).expect("remove append blocker");
+    std::fs::rename(&backup_path, &journal_path).expect("restore agent journal");
+
+    assert!(h.semantic_storage_fault.is_some());
+    assert!(
+        !h.pending_prompt_dispatches
+            .contains(&started.agent_prompt_id)
+    );
+    assert!(
+        !h.agent_store
+            .agent_events(agent_id.as_str())
+            .expect("agent events")
+            .iter()
+            .any(|record| matches!(
+                &record.event,
+                Event::AgentPromptStarted(value)
+                    if value.agent_prompt_id == started.agent_prompt_id
+            ))
+    );
+    assert!(
+        !provider_observer
+            .lock()
+            .expect("provider frames")
+            .iter()
+            .any(|routed| matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::AgentPromptCreated(created))
+                    if created.agent_prompt_id == started.agent_prompt_id
+            )),
+        "a full request must not escape before its compact fact commits"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A parked full request belongs to the exact loaded runtime that materialized
+/// it; replacing that runtime invalidates delivery despite stable semantic ids.
+#[test]
+fn intercepted_prompt_rejects_changed_runtime_incarnation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let provider_observer =
+        connect_test_client(&mut h, "runtime-observer", tau_proto::ClientKind::Provider);
+    h.bus
+        .set_subscriptions(
+            "runtime-observer",
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_CREATED,
+            )],
+        )
+        .expect("subscribe provider observer");
+    let interceptor = connect_test_tool(&mut h, "runtime-prompt-owner");
+    h.handle_extension_event(
+        "runtime-prompt-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_CREATED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("runtime changes".to_owned()))
+        .expect("dispatch inference");
+    let (parked, _) = intercepted_payload(&interceptor);
+    let Event::AgentPromptCreated(prompt) = parked else {
+        panic!("full prompt intercepted");
+    };
+    h.agents.get_mut(&cid).expect("agent").runtime_incarnation += 1;
+    h.handle_extension_event(
+        "runtime-prompt-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release full prompt");
+
+    assert!(
+        !h.pending_prompt_dispatches
+            .contains(&prompt.agent_prompt_id)
+    );
+    assert!(
+        !provider_observer
+            .lock()
+            .expect("provider frames")
+            .iter()
+            .any(|routed| matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::AgentPromptCreated(created))
+                    if created.agent_prompt_id == prompt.agent_prompt_id
+            )),
+        "a stale runtime continuation must not reach any provider"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+fn assert_unload_disposes_parked_prompt(selector: tau_proto::EventName, owner: &str) {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let interceptor = connect_test_tool(&mut h, owner);
+    h.handle_extension_event(
+        owner,
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(selector)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("park before unload".to_owned()))
+        .expect("dispatch inference");
+    let (parked, _) = intercepted_payload(&interceptor);
+    let prompt_id = match parked {
+        Event::AgentPromptStarted(value) => value.agent_prompt_id,
+        Event::AgentPromptCreated(value) => value.agent_prompt_id,
+        other => panic!("unexpected parked event {}", other.name()),
+    };
+    assert_eq!(h.current_session_state.token_usage.total.requests, 1);
+
+    h.remove_agent(&cid);
+
+    assert!(!h.pending_prompt_dispatches.contains(&prompt_id));
+    assert!(!h.prompt_agents.contains_key(prompt_id.as_str()));
+    assert!(!h.prompt_models.contains_key(&prompt_id));
+    assert!(!h.prompt_operations.contains_key(&prompt_id));
+    assert!(!h.pending_provider_prompts.contains_key(&prompt_id));
+    assert_eq!(h.current_session_state.token_usage.total.requests, 0);
+    h.shutdown().expect("shutdown");
+}
+
+/// Unload disposes bookkeeping while the compact materialization fact is
+/// parked.
+#[test]
+fn unload_disposes_parked_prompt_materialization() {
+    assert_unload_disposes_parked_prompt(
+        tau_proto::EventName::AGENT_PROMPT_STARTED,
+        "materialization-unload-owner",
+    );
+}
+
+/// Unload also disposes bookkeeping after the compact fact committed but before
+/// its transient full request left interception.
+#[test]
+fn unload_disposes_parked_prompt_delivery() {
+    assert_unload_disposes_parked_prompt(
+        tau_proto::EventName::AGENT_PROMPT_CREATED,
+        "delivery-unload-owner",
+    );
+}
+
+/// A poisoned semantic epoch disposes a parked full request instead of leaving
+/// prompt tracking and accounting behind.
+#[test]
+fn semantic_fault_disposes_parked_prompt_delivery() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let interceptor = connect_test_tool(&mut h, "semantic-fault-prompt-owner");
+    h.handle_extension_event(
+        "semantic-fault-prompt-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_CREATED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("fault before send".to_owned()))
+        .expect("dispatch inference");
+    let (parked, _) = intercepted_payload(&interceptor);
+    let Event::AgentPromptCreated(prompt) = parked else {
+        panic!("full prompt intercepted");
+    };
+    h.semantic_storage_fault = Some(crate::harness::SemanticStorageFault {
+        event_name: tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+        error: "injected prior append failure".to_owned(),
+    });
+    h.handle_extension_event(
+        "semantic-fault-prompt-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release full prompt");
+
+    assert!(
+        !h.pending_prompt_dispatches
+            .contains(&prompt.agent_prompt_id)
+    );
+    assert!(
+        !h.prompt_agents
+            .contains_key(prompt.agent_prompt_id.as_str())
+    );
+    assert!(!h.prompt_models.contains_key(&prompt.agent_prompt_id));
+    assert_eq!(h.current_session_state.token_usage.total.requests, 0);
+    h.shutdown().expect("shutdown");
+}
+
+/// Deferred prompt envelopes skipped after an earlier semantic fault use the
+/// same idempotent disposal path as directly rejected delivery.
+#[test]
+fn semantic_fault_disposes_deferred_prompt_materialization() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let _interceptor = connect_test_tool(&mut h, "deferred-fault-prompt-owner");
+    h.handle_extension_event(
+        "deferred-fault-prompt-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("defer before fault".to_owned()))
+        .expect("dispatch inference");
+    let pending = h.pending_intercept.as_ref().expect("parked full prompt");
+    let Event::AgentPromptStarted(prompt) = &pending.event else {
+        panic!("compact prompt fact intercepted");
+    };
+    let prompt_id = prompt.agent_prompt_id.clone();
+    h.enqueue_publish(
+        None,
+        pending.event.clone(),
+        false,
+        true,
+        pending.sync_head_for.clone(),
+    );
+    h.semantic_storage_fault = Some(crate::harness::SemanticStorageFault {
+        event_name: tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+        error: "injected prior append failure".to_owned(),
+    });
+    h.handle_extension_event(
+        "deferred-fault-prompt-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release original and drain deferred prompt");
+
+    assert!(!h.pending_prompt_dispatches.contains(&prompt_id));
+    assert!(!h.prompt_agents.contains_key(prompt_id.as_str()));
+    assert!(!h.prompt_models.contains_key(&prompt_id));
+    assert_eq!(h.current_session_state.token_usage.total.requests, 0);
+    h.shutdown().expect("shutdown");
+}
+
 /// A standalone start parked before commit owns the compact request model even
 /// if model selection changes before its post-commit provider dispatch.
 #[test]
@@ -2326,7 +2633,7 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
         pending
             .sync_head_for
             .as_ref()
-            .is_some_and(|sync| sync.suppress_activation_dispatch && sync.completion.is_some())
+            .is_some_and(|sync| sync.suppress_activation_dispatch && sync.completion().is_some())
     }));
 
     h.handle_extension_event(

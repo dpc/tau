@@ -152,12 +152,14 @@ all six absent. Partial groups, unknown transactions, mismatches, and duplicate
 outcomes are rejected identically during live validation and replay. Runtime
 connection ids are deliberately not persisted:
 they identify a daemon incarnation rather than durable provider work.
-Only the start's post-commit reaction sends one cut-local compact request with
-that exact prompt id, provider-qualified model, operation, model parameters,
-tool surface, accounting identity, and synthetic trigger. Mutable `:model`
-selection applies only to future work; it cannot rewrite a committed start.
-If the captured model route disappears, the transaction durably fails
-before any provider request is published. Success installs a
+Only the start's post-commit reaction materializes one cut-local compact request
+with that exact prompt id, provider-qualified model, operation, model parameters,
+tool surface, accounting identity, and synthetic trigger. The harness then
+appends and data-syncs the compact `agent.prompt_started` fact; only that fact's
+one-shot live post-commit continuation may deliver the full request to the
+selected provider. Mutable `:model` selection applies only to future work; it
+cannot rewrite a committed start. If the captured model route disappears, the
+transaction durably fails before any provider request is delivered. Success installs a
 cut/suffix-bearing boundary so facts
 committed during compaction survive after the replacement window. Terminal
 failure records a safe durable category, blocks the owed activation from
@@ -174,15 +176,19 @@ ownership; partial groups are invalid. A continuation for a successful
 standalone transaction is accepted only when its model equals the start model,
 its operation is inference, and its activation cut equals the start cut. Core
 rejects incomplete or transaction-mismatched ownership correlations. The
-post-commit continuation uses that exact model for route, parameters, tools,
-accounting, and prompt creation regardless of later selection changes; an
-unavailable route is durably terminalized before remote send. It acknowledges
+checkpoint post-commit continuation uses that exact model for prompt
+materialization regardless of later selection changes; provider delivery still
+requires the matching data-synced `agent.prompt_started` fact and its one-shot
+live continuation. An unavailable route is durably terminalized before remote
+send. It acknowledges
 only materialized typed-message wakes on that branch, including sequence-keyed
 canonical agent-message wakes governed by
 [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md), through the
 watermark. Replay folds transaction outcomes and inference
 responses in core; an uncompleted checkpoint restores as dispatch-uncertain
 rather than being silently duplicated.
+This materialization gate is governed by
+[DECISION-compact-prompt-materialization-authority](DECISION-compact-prompt-materialization-authority.md).
 
 If persistence rejects a completion-bearing steer after successful compaction,
 the harness retains the exact interceptor-approved failed event, untouched

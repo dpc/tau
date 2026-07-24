@@ -102,7 +102,7 @@ use crate::harness::extensions::{
 };
 use crate::harness::interception::{
     AgentPublishCompletion, ConversationHeadSync, DeferredPublish, InterceptorRegistry,
-    PendingIntercept,
+    PendingIntercept, PostCommitContinuation, PromptDispatchContinuation, PromptDispatchPhase,
 };
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::subagents_tool::SubagentToolState;
@@ -1956,6 +1956,8 @@ pub struct Harness {
     /// completion can acquire current-generation authority even if the
     /// switch later fails.
     pub(crate) current_session_generation: u64,
+    /// Next process-local loaded-agent runtime incarnation.
+    next_agent_runtime_incarnation: u64,
     /// Reason associated with the current session binding. Late UI subscribers
     /// receive a replayed `SessionStarted` snapshot with this reason.
     pub(crate) current_session_start_reason: tau_proto::SessionStartReason,
@@ -2222,6 +2224,8 @@ pub struct Harness {
     /// Incoming provider execution events must match this owner before the
     /// harness will publish streaming updates or accept the final response.
     pub(crate) pending_provider_prompts: HashMap<AgentPromptId, tau_proto::ConnectionId>,
+    /// Prompt ids that already own one live compact-fact continuation.
+    pending_prompt_dispatches: HashSet<AgentPromptId>,
     /// Available agent roles.
     pub(crate) available_roles: std::collections::HashMap<String, tau_config::settings::AgentRole>,
     /// Configured roles disabled because their required skills are unavailable.
@@ -2881,6 +2885,7 @@ impl Harness {
             project_root: parts.project_root,
             current_session_id: parts.current_session_id,
             current_session_generation: 0,
+            next_agent_runtime_incarnation: 1,
             current_session_start_reason: parts.current_session_start_reason,
             agent_id_rng: StdRng::from_entropy(),
             ui_shell_route_rng: StdRng::from_entropy(),
@@ -2961,6 +2966,7 @@ impl Harness {
             provider_model_info: HashMap::new(),
             provider_model_routes: HashMap::new(),
             pending_provider_prompts: HashMap::new(),
+            pending_prompt_dispatches: HashSet::new(),
             available_roles: parts.available_roles,
             disabled_role_reasons: HashMap::new(),
             available_role_groups: parts.available_role_groups,
@@ -4476,6 +4482,15 @@ impl Harness {
             .or_else(|| self.derived_publish_source.clone())
     }
 
+    fn mint_agent_runtime_incarnation(&mut self) -> u64 {
+        let incarnation = self.next_agent_runtime_incarnation;
+        self.next_agent_runtime_incarnation = self
+            .next_agent_runtime_incarnation
+            .checked_add(1)
+            .expect("agent runtime incarnation space exhausted");
+        incarnation
+    }
+
     fn with_derived_publish_source<T>(
         &mut self,
         source: Option<ConnectionId>,
@@ -4539,7 +4554,9 @@ impl Harness {
             agent_id,
             session_generation: self.current_session_generation,
             suppress_activation_dispatch: completion.is_some(),
-            completion,
+            continuation: completion
+                .map(Box::new)
+                .map(PostCommitContinuation::AgentPublish),
             notify_watchers,
         });
         self.enqueue_publish(source.as_deref(), event, persist, false, sync);
@@ -4551,14 +4568,6 @@ impl Harness {
         {
             conv.last_prompt_id = Some(prompt.agent_prompt_id.clone());
         }
-    }
-
-    fn provider_route_for_prompt_request(&self, event: &Event) -> Option<tau_proto::ConnectionId> {
-        let model = match event {
-            Event::AgentPromptCreated(prompt) => Some(&prompt.model),
-            _ => None,
-        }?;
-        self.provider_model_routes.get(model).cloned()
     }
 
     fn track_provider_prompt_request(
@@ -4596,6 +4605,50 @@ impl Harness {
             .insert(agent_prompt_id.clone(), provider_connection_id);
         self.prompt_estimated_cost_rates
             .insert(agent_prompt_id.clone(), rates);
+    }
+
+    /// Idempotently disposes runtime state allocated while materializing a
+    /// prompt that will never reach a provider.
+    fn dispose_prompt_dispatch_bookkeeping(
+        &mut self,
+        agent_prompt_id: &AgentPromptId,
+    ) -> Option<AgentId> {
+        self.pending_prompt_dispatches.remove(agent_prompt_id);
+        let cid = self.prompt_agents.remove(agent_prompt_id.as_str());
+        self.pending_provider_prompts.remove(agent_prompt_id);
+        self.prompt_operations.remove(agent_prompt_id);
+        self.prompt_context_limits.remove(agent_prompt_id);
+        self.prompt_context_size_alerts.remove(agent_prompt_id);
+        self.prompt_estimated_cost_rates.remove(agent_prompt_id);
+        self.clear_prompt_tool_snapshot(agent_prompt_id);
+        if let Some(model) = self.prompt_models.remove(agent_prompt_id) {
+            self.current_session_state.token_usage.total.requests = self
+                .current_session_state
+                .token_usage
+                .total
+                .requests
+                .saturating_sub(1);
+            if let Some(counts) = self
+                .current_session_state
+                .token_usage
+                .by_model
+                .get_mut(&model)
+            {
+                counts.requests = counts.requests.saturating_sub(1);
+            }
+        }
+        if let Some(cid) = cid.as_ref()
+            && let Some(conv) = self.agents.get_mut(cid)
+        {
+            if conv.in_flight_prompt.as_ref() == Some(agent_prompt_id) {
+                conv.in_flight_prompt = None;
+                conv.turn_state = AgentTurnState::Idle;
+            }
+            if conv.last_prompt_id.as_ref() == Some(agent_prompt_id) {
+                conv.last_prompt_id = None;
+            }
+        }
+        cid
     }
 
     fn recover_failed_provider_prompt_route(
@@ -4644,39 +4697,7 @@ impl Harness {
         }
 
         self.remember_ephemeral_provider_prompt(&agent_prompt_id);
-        self.prompt_agents.remove(agent_prompt_id.as_str());
-        self.pending_provider_prompts.remove(&agent_prompt_id);
-        self.prompt_operations.remove(&agent_prompt_id);
-        self.prompt_context_limits.remove(&agent_prompt_id);
-        self.prompt_context_size_alerts.remove(&agent_prompt_id);
-        self.prompt_estimated_cost_rates.remove(&agent_prompt_id);
-        self.clear_prompt_tool_snapshot(&agent_prompt_id);
-        if let Some(model) = self.prompt_models.remove(&agent_prompt_id) {
-            self.current_session_state.token_usage.total.requests = self
-                .current_session_state
-                .token_usage
-                .total
-                .requests
-                .saturating_sub(1);
-            if let Some(counts) = self
-                .current_session_state
-                .token_usage
-                .by_model
-                .get_mut(&model)
-            {
-                counts.requests = counts.requests.saturating_sub(1);
-            }
-        }
-        if let Some(cid) = cid.as_ref()
-            && let Some(conv) = self.agents.get_mut(cid)
-        {
-            if conv.in_flight_prompt.as_ref() == Some(&agent_prompt_id) {
-                conv.in_flight_prompt = None;
-            }
-            if conv.last_prompt_id.as_ref() == Some(&agent_prompt_id) {
-                conv.last_prompt_id = None;
-            }
-        }
+        self.dispose_prompt_dispatch_bookkeeping(&agent_prompt_id);
         self.emit_harness_failure(&format!(
             "provider prompt route failed for `{agent_prompt_id}` via `{provider_connection_id}`: {reason}"
         ));
@@ -4710,6 +4731,130 @@ impl Harness {
         } else {
             self.try_advance_queue();
         }
+    }
+
+    fn prompt_dispatch_runtime_matches(
+        &self,
+        sync: &ConversationHeadSync,
+        continuation: &PromptDispatchContinuation,
+        require_compact_fact: bool,
+    ) -> bool {
+        if self.semantic_storage_fault.is_some()
+            || sync.session_generation != self.current_session_generation
+            || continuation.started.session_id != self.current_session_id
+            || !self
+                .pending_prompt_dispatches
+                .contains(&continuation.started.agent_prompt_id)
+            || self.provider_model_routes.get(&continuation.started.model)
+                != Some(&continuation.provider_connection_id)
+        {
+            return false;
+        }
+        let Some(agent) = self.agents.get(&sync.cid) else {
+            return false;
+        };
+        if agent.terminating
+            || agent.runtime_incarnation != continuation.runtime_incarnation
+            || agent.session_id != self.current_session_id
+            || agent.agent_id.as_deref() != Some(continuation.started.agent_id.as_str())
+            || sync.agent_id.as_ref() != Some(&continuation.started.agent_id)
+        {
+            return false;
+        }
+        let owner_matches = match (continuation.started.operation, &agent.activation_dispatch) {
+            (
+                tau_proto::PromptOperation::Inference,
+                crate::agent::ActivationDispatchState::DispatchUncertain {
+                    agent_prompt_id,
+                    model,
+                    operation,
+                    ..
+                },
+            ) => {
+                agent_prompt_id == &continuation.started.agent_prompt_id
+                    && model.as_ref() == Some(&continuation.started.model)
+                    && *operation == Some(continuation.started.operation)
+            }
+            (
+                tau_proto::PromptOperation::StandaloneCompaction,
+                crate::agent::ActivationDispatchState::Running {
+                    compact_prompt_id,
+                    model,
+                    ..
+                },
+            ) => {
+                compact_prompt_id == &continuation.started.agent_prompt_id
+                    && model == &continuation.started.model
+            }
+            _ => false,
+        };
+        if !owner_matches {
+            return false;
+        }
+        !require_compact_fact
+            || self
+                .agent_store
+                .agent(continuation.started.agent_id.as_str())
+                .is_some_and(|tree| tree.prompt_started_is_dispatchable(&continuation.started))
+    }
+
+    fn prompt_publication_is_authorized(
+        &self,
+        event: &Event,
+        sync: Option<&ConversationHeadSync>,
+    ) -> bool {
+        let prompt_event = matches!(
+            event,
+            Event::AgentPromptStarted(_) | Event::AgentPromptCreated(_)
+        );
+        if !prompt_event {
+            return true;
+        }
+        let Some(sync) = sync else {
+            return false;
+        };
+        let Some(continuation) = sync.prompt_dispatch() else {
+            return false;
+        };
+        let Some(phase) = sync.prompt_dispatch_phase() else {
+            return false;
+        };
+        let phase_matches = match (event, phase) {
+            (Event::AgentPromptStarted(started), PromptDispatchPhase::Materialization) => {
+                started == &continuation.started
+            }
+            (Event::AgentPromptCreated(prompt), PromptDispatchPhase::Delivery) => {
+                prompt == continuation.prompt.as_ref()
+                    && prompt.agent_prompt_id == continuation.started.agent_prompt_id
+                    && prompt.agent_id == continuation.started.agent_id
+                    && prompt.session_id == continuation.started.session_id
+                    && prompt.model == continuation.started.model
+                    && prompt.operation == continuation.started.operation
+            }
+            _ => false,
+        };
+        phase_matches
+            && self.prompt_dispatch_runtime_matches(
+                sync,
+                continuation,
+                phase == PromptDispatchPhase::Delivery,
+            )
+    }
+
+    fn fail_prompt_dispatch_continuation(
+        &mut self,
+        sync: Option<&ConversationHeadSync>,
+        reason: &str,
+    ) {
+        let Some(continuation) = sync.and_then(ConversationHeadSync::prompt_dispatch) else {
+            self.emit_harness_failure(reason);
+            return;
+        };
+        let prompt_id = continuation.started.agent_prompt_id.clone();
+        let prompt = Event::AgentPromptCreated((*continuation.prompt).clone());
+        let provider_connection_id = continuation.provider_connection_id.clone();
+        self.pending_prompt_dispatches.remove(&prompt_id);
+        self.recover_failed_provider_prompt_route(&prompt, &provider_connection_id, reason);
     }
 
     /// Persist one stamped message fact before exposing it to any consumer.
@@ -4883,7 +5028,7 @@ impl Harness {
             "rejecting semantic publication after storage fault"
         );
         if let Some(sync) = sync_head_for
-            && let Some(completion) = sync.completion.as_ref()
+            && let Some(completion) = sync.completion()
         {
             self.discard_deferred_agent_publish_batch(&sync.cid, completion);
             self.pending_agent_publish_completions.remove(&sync.cid);
@@ -4993,6 +5138,13 @@ impl Harness {
         persist: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
+        if !self.prompt_publication_is_authorized(&event, sync_head_for.as_ref()) {
+            self.fail_prompt_dispatch_continuation(
+                sync_head_for.as_ref(),
+                "prompt publication lost its compact-fact delivery authority",
+            );
+            return;
+        }
         if self.semantic_publication_is_fail_stopped(&event, persist, sync_head_for.as_ref()) {
             return;
         }
@@ -5018,7 +5170,7 @@ impl Harness {
             return;
         }
         if sync_head_for.as_ref().is_some_and(|sync| {
-            sync.completion.is_some()
+            sync.completion().is_some()
                 && (sync.session_generation != self.current_session_generation
                     || !self.agents.get(&sync.cid).is_some_and(|agent| {
                         agent.session_id == self.current_session_id
@@ -5110,7 +5262,7 @@ impl Harness {
                 self.rollback_rejected_activation_successor(&event);
                 if self.semantic_storage_fault.is_some() {
                     if let Some(sync) = sync_head_for.as_ref()
-                        && let Some(completion) = sync.completion.as_ref()
+                        && let Some(completion) = sync.completion()
                     {
                         self.discard_deferred_agent_publish_batch(&sync.cid, completion);
                         self.pending_agent_publish_completions.remove(&sync.cid);
@@ -5137,6 +5289,15 @@ impl Harness {
                     &event,
                     "peer receive projection failed to persist",
                 );
+                if sync_head_for
+                    .as_ref()
+                    .is_some_and(|sync| sync.prompt_dispatch().is_some())
+                {
+                    self.fail_prompt_dispatch_continuation(
+                        sync_head_for.as_ref(),
+                        "compact prompt materialization failed to commit",
+                    );
+                }
                 return;
             }
         };
@@ -5242,8 +5403,8 @@ impl Harness {
         let agent_publish_completion = sync_head_for
             .as_ref()
             .and_then(|sync| {
-                sync.completion
-                    .clone()
+                sync.completion()
+                    .cloned()
                     .map(|completion| (sync.cid.clone(), completion))
             })
             .map(|(cid, completion)| {
@@ -5260,9 +5421,27 @@ impl Harness {
             event_without_provider_image_bytes(&event),
         );
         let bus_enqueue_started = Instant::now();
-        if let Some(provider_connection_id) = self.provider_route_for_prompt_request(&event) {
+        let prompt_provider_route = matches!(event, Event::AgentPromptCreated(_))
+            .then(|| {
+                sync_head_for
+                    .as_ref()
+                    .filter(|sync| {
+                        sync.prompt_dispatch_phase() == Some(PromptDispatchPhase::Delivery)
+                    })
+                    .and_then(ConversationHeadSync::prompt_dispatch)
+                    .map(|continuation| continuation.provider_connection_id.clone())
+            })
+            .flatten();
+        if let Some(provider_connection_id) = prompt_provider_route {
+            if !self.prompt_publication_is_authorized(&event, sync_head_for.as_ref()) {
+                self.fail_prompt_dispatch_continuation(
+                    sync_head_for.as_ref(),
+                    "prompt delivery authority changed before provider send",
+                );
+                return;
+            }
             // Provider-owned prompt execution is point-to-point: observers still
-            // see the durable prompt fact, but execution clients do not all race
+            // see the transient work envelope, but execution clients do not all race
             // to consume it. The owning provider gets the exact same delivery
             // payload via a directed route so replay/live delivery metadata
             // matches the subscribed-provider path.
@@ -5333,6 +5512,10 @@ impl Harness {
         } else {
             let _ = self.bus.publish_from(source, observer_frame);
         }
+        if let Event::AgentPromptCreated(prompt) = &event {
+            self.pending_prompt_dispatches
+                .remove(&prompt.agent_prompt_id);
+        }
         commit_timing.bus_enqueue = bus_enqueue_started.elapsed();
         let post_commit_started = Instant::now();
         if let Event::ShellCommandProgress(progress) = &event {
@@ -5365,6 +5548,32 @@ impl Harness {
         }
         if let Some((cid, completion, through)) = agent_publish_completion {
             self.complete_agent_publish(&cid, completion, through);
+        }
+        if let Some(continuation) = sync_head_for
+            .as_ref()
+            .filter(|sync| {
+                sync.prompt_dispatch_phase() == Some(PromptDispatchPhase::Materialization)
+                    && matches!(event, Event::AgentPromptStarted(_))
+            })
+            .and_then(ConversationHeadSync::prompt_dispatch)
+            .cloned()
+        {
+            let prompt = Event::AgentPromptCreated((*continuation.prompt).clone());
+            let sync = sync_head_for.as_ref().expect("prompt sync exists");
+            self.enqueue_publish(
+                None,
+                prompt,
+                false,
+                true,
+                Some(ConversationHeadSync {
+                    cid: sync.cid.clone(),
+                    agent_id: sync.agent_id.clone(),
+                    session_generation: sync.session_generation,
+                    suppress_activation_dispatch: true,
+                    continuation: Some(PostCommitContinuation::PromptDelivery(continuation)),
+                    notify_watchers: false,
+                }),
+            );
         }
         self.complete_pending_external_receive(&event);
         commit_timing.post_commit = post_commit_started.elapsed();
@@ -5529,8 +5738,8 @@ impl Harness {
         event: &Event,
     ) {
         let Some((cid, mut completion)) = sync.and_then(|sync| {
-            sync.completion
-                .clone()
+            sync.completion()
+                .cloned()
                 .map(|completion| (sync.cid.clone(), completion))
         }) else {
             return;
@@ -13122,7 +13331,7 @@ impl Harness {
                     agent_id: Some(crate::parse_agent_id(agent_id)),
                     session_generation: self.current_session_generation,
                     suppress_activation_dispatch: false,
-                    completion: None,
+                    continuation: None,
                     notify_watchers: false,
                 }),
         );
@@ -15208,6 +15417,8 @@ impl Harness {
                 | Event::SessionAgentUnloaded(_)
                 | Event::AgentStatsUpdated(_)
                 | Event::AgentStarted(_)
+                | Event::AgentPromptStarted(_)
+                | Event::AgentPromptCreated(_)
                 | Event::AgentMessageSent(_)
                 | Event::AgentMessageReceived(_)
                 | Event::ProviderModelsUpdated(_)
@@ -16254,8 +16465,10 @@ impl Harness {
             tau_core::AgentEventParent::InheritHead,
             started.clone(),
         )?;
+        let runtime_incarnation = self.mint_agent_runtime_incarnation();
         let mut conv = Agent::new(
             cid.clone(),
+            runtime_incarnation,
             session_id.clone(),
             originator,
             initial_head,
@@ -16296,7 +16509,7 @@ impl Harness {
                 agent_id: Some(crate::parse_agent_id(&agent_id)),
                 session_generation: self.current_session_generation,
                 suppress_activation_dispatch: false,
-                completion: None,
+                continuation: None,
                 notify_watchers: false,
             }),
         );
@@ -18375,6 +18588,7 @@ impl Harness {
         self.ephemeral_provider_prompts.clear();
         self.ephemeral_provider_retry_requests.clear();
         self.pending_provider_prompts.clear();
+        self.pending_prompt_dispatches.clear();
         self.prompt_models.clear();
         self.prompt_estimated_cost_rates.clear();
         self.prompt_context_limits.clear();
@@ -19317,9 +19531,12 @@ impl Harness {
         self.publish_event_for_agent(&cid, None, event);
     }
 
-    /// Convenience wrapper that dispatches a prompt for the first user agent in
-    /// the requested session. Used by tests that want a quick "send the next
-    /// prompt" without going through the full dispatch pipeline.
+    /// Activates already-committed input for the first user agent in the
+    /// requested session.
+    ///
+    /// Tests establish the intended semantic prompt fact before calling this
+    /// helper. It drives the production publish-idle activation boundary
+    /// without appending another transcript entry.
     #[cfg(test)]
     fn send_prompt_to_agent(&mut self, session_id: &str) -> AgentPromptId {
         let cid = self
@@ -19328,8 +19545,11 @@ impl Harness {
             .find(|(_, conv)| conv.session_id.as_str() == session_id && conv.originator.is_user())
             .map(|(cid, _)| cid.clone())
             .expect("test requires an existing user agent");
-        self.send_prompt_to_agent_for(&cid)
-            .expect("test prompt requires a selected model")
+        self.dispatch_activation_after_publish_idle(&cid);
+        self.agents
+            .get(&cid)
+            .and_then(|agent| agent.in_flight_prompt.clone())
+            .expect("test prompt requires a selected model and durable dispatch owner")
     }
 
     fn set_agent_turn_state(&mut self, cid: &AgentId, state: AgentTurnState) {
@@ -19726,8 +19946,10 @@ impl Harness {
                 conv.persistence = persistence;
                 conv.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
             } else {
+                let runtime_incarnation = self.mint_agent_runtime_incarnation();
                 let mut conv = Agent::new(
                     cid.clone(),
+                    runtime_incarnation,
                     self.current_session_id.clone(),
                     originator,
                     head,
@@ -20668,8 +20890,10 @@ impl Harness {
         self.session_ever_loaded_agents
             .insert(crate::parse_agent_id(&agent_id));
         self.precommitted_agent_starts.insert(agent_id.clone());
+        let runtime_incarnation = self.mint_agent_runtime_incarnation();
         let mut conv = Agent::new(
             cid.clone(),
+            runtime_incarnation,
             session_id,
             tau_proto::PromptOriginator::User,
             None,
@@ -20691,7 +20915,7 @@ impl Harness {
                 agent_id: Some(crate::parse_agent_id(&agent_id)),
                 session_generation: self.current_session_generation,
                 suppress_activation_dispatch: false,
-                completion: None,
+                continuation: None,
                 notify_watchers: false,
             }),
         );
@@ -20770,7 +20994,7 @@ impl Harness {
                 agent_id: Some(crate::parse_agent_id(&agent_id)),
                 session_generation: self.current_session_generation,
                 suppress_activation_dispatch: false,
-                completion: None,
+                continuation: None,
                 notify_watchers: false,
             }),
         );
@@ -20856,7 +21080,7 @@ impl Harness {
                     agent_id: Some(crate::parse_agent_id(agent_id)),
                     session_generation: self.current_session_generation,
                     suppress_activation_dispatch: false,
-                    completion: None,
+                    continuation: None,
                     notify_watchers: false,
                 }),
             );
@@ -20946,7 +21170,7 @@ impl Harness {
                         agent_id: Some(agent_id_proto.clone()),
                         session_generation: self.current_session_generation,
                         suppress_activation_dispatch: false,
-                        completion: None,
+                        continuation: None,
                         notify_watchers: false,
                     }),
                 );
@@ -20970,7 +21194,7 @@ impl Harness {
             .into_iter()
             .flatten()
             .filter_map(|record| match record.event {
-                Event::AgentPromptCreated(prompt) => Some(prompt.agent_prompt_id.to_string()),
+                Event::AgentPromptStarted(prompt) => Some(prompt.agent_prompt_id.to_string()),
                 Event::ProviderResponseFinished(response) => {
                     Some(response.agent_prompt_id.to_string())
                 }
@@ -20987,10 +21211,9 @@ impl Harness {
             .map_or(0, |index| index.saturating_add(1))
     }
 
-    /// Mints a new `AgentPromptId`, registers it with `cid`'s conversation,
-    /// publishes lightweight `AgentPromptStarted`, then dispatches full
-    /// `AgentPromptCreated` to the provider. Reads `system_prompt` / `messages`
-    /// / `tools` from the agent's agent tree.
+    /// Mints a new `AgentPromptId`, registers it with `cid`'s conversation, and
+    /// binds the full transient provider request to the durable compact
+    /// `AgentPromptStarted` fact's post-commit continuation.
     ///
     /// Linear-prefix invariant: each subsequent prompt for the same
     /// agent branch must be a strict byte-prefix extension of the prior
@@ -21002,31 +21225,121 @@ impl Harness {
         if self.agent_has_open_foreground_tool_round(cid) {
             return None;
         }
-        let owned_model = self
-            .agents
-            .get(cid)
-            .and_then(|agent| match &agent.activation_dispatch {
-                crate::agent::ActivationDispatchState::Running { model, .. } => {
-                    Some(Some(model.clone()))
-                }
-                crate::agent::ActivationDispatchState::DispatchUncertain { model, .. } => {
-                    Some(model.clone())
-                }
-                _ => None,
-            });
-        if let Some(owned_model) = owned_model {
-            match owned_model {
-                Some(model) if self.provider_model_routes.contains_key(&model) => {}
-                model => {
-                    self.terminalize_unroutable_owned_dispatch(cid, model.as_ref());
-                    return None;
-                }
+        let (
+            owned_prompt_id,
+            owned_model,
+            owned_operation,
+            runtime_incarnation,
+            agent_id,
+            originator,
+        ) = self.agents.get(cid).and_then(|agent| {
+            let (prompt_id, model, operation) = match &agent.activation_dispatch {
+                crate::agent::ActivationDispatchState::Running {
+                    compact_prompt_id,
+                    model,
+                    ..
+                } => (
+                    compact_prompt_id.clone(),
+                    Some(model.clone()),
+                    tau_proto::PromptOperation::StandaloneCompaction,
+                ),
+                crate::agent::ActivationDispatchState::DispatchUncertain {
+                    agent_prompt_id,
+                    model,
+                    operation,
+                    ..
+                } => (
+                    agent_prompt_id.clone(),
+                    model.clone(),
+                    operation.as_ref().copied()?,
+                ),
+                _ => return None,
+            };
+            Some((
+                prompt_id,
+                model,
+                operation,
+                agent.runtime_incarnation,
+                crate::parse_agent_id(agent.agent_id.as_deref()?),
+                agent.originator.clone(),
+            ))
+        })?;
+        if self.pending_prompt_dispatches.contains(&owned_prompt_id) {
+            return None;
+        }
+        let owned_model = match owned_model {
+            Some(model) if self.provider_model_routes.contains_key(&model) => model,
+            model => {
+                self.terminalize_unroutable_owned_dispatch(cid, model.as_ref());
+                return None;
             }
+        };
+        let admission = tau_proto::AgentPromptStarted {
+            agent_prompt_id: owned_prompt_id.clone(),
+            agent_id: agent_id.clone(),
+            session_id: self.current_session_id.clone(),
+            model: owned_model,
+            operation: owned_operation,
+            originator,
+            ctx_id: None,
+        };
+        let Some(tree) = self.agent_store.agent(agent_id.as_str()) else {
+            self.terminalize_owned_dispatch_error(
+                cid,
+                "prompt materialization lacks one unmaterialized durable owner".to_owned(),
+            );
+            return None;
+        };
+        if tree.prompt_started(&owned_prompt_id).is_some() {
+            return None;
+        }
+        if !tree.prompt_started_can_materialize(&admission) {
+            self.terminalize_owned_dispatch_error(
+                cid,
+                "prompt materialization lacks one unmaterialized durable owner".to_owned(),
+            );
+            return None;
         }
         let prompt = self.prepare_agent_prompt_for_dispatch(cid)?;
         let agent_prompt_id = prompt.agent_prompt_id.clone();
-        self.publish_event(None, Event::AgentPromptStarted((&prompt).into()));
-        self.publish_event(None, Event::AgentPromptCreated(prompt));
+        if agent_prompt_id != owned_prompt_id
+            || !self
+                .pending_prompt_dispatches
+                .insert(agent_prompt_id.clone())
+        {
+            self.terminalize_owned_dispatch_error(
+                cid,
+                "prompt materialization did not retain its unique durable owner".to_owned(),
+            );
+            return None;
+        }
+        let started = tau_proto::AgentPromptStarted::from(&prompt);
+        let provider_connection_id = self
+            .provider_model_routes
+            .get(&prompt.model)
+            .cloned()
+            .expect("owned model route was validated before materialization");
+        self.enqueue_publish(
+            None,
+            Event::AgentPromptStarted(started.clone()),
+            false,
+            true,
+            Some(ConversationHeadSync {
+                cid: cid.clone(),
+                agent_id: Some(agent_id),
+                session_generation: self.current_session_generation,
+                suppress_activation_dispatch: true,
+                continuation: Some(PostCommitContinuation::PromptMaterialization(
+                    PromptDispatchContinuation {
+                        started,
+                        prompt: std::sync::Arc::new(prompt),
+                        provider_connection_id,
+                        runtime_incarnation,
+                    },
+                )),
+                notify_watchers: false,
+            }),
+        );
         Some(agent_prompt_id)
     }
 
@@ -21145,8 +21458,8 @@ impl Harness {
 
     /// Builds one prompt request and records the live in-flight bookkeeping
     /// needed to route the corresponding provider response. The prompt payload
-    /// is returned to the caller instead of cached in runtime state; ordinary
-    /// publication persists it as an agent-store semantic fact.
+    /// is returned to the caller and retained only by the compact prompt fact's
+    /// live continuation; semantic persistence never stores it.
     fn prepare_agent_prompt_for_dispatch(&mut self, cid: &AgentId) -> Option<AgentPromptCreated> {
         let _ = self.ensure_agent_id_for_agent(cid);
         let conv = self

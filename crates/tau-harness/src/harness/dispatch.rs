@@ -2,10 +2,10 @@
 //!
 //! Each live agent owns a `pending_prompts` queue. Some internal notices are
 //! passive and do not make an idle agent runnable by themselves. The harness
-//! has no global agent slot — the agent extension serializes its own
-//! consumption of `AgentPromptCreated` from the event log — so the dispatch
-//! logic here just drains one non-passive prompt per *runnable* agent and lets
-//! the agent interleave them on its side.
+//! has no global agent slot: each durable materialization fact owns one
+//! directed live `AgentPromptCreated` provider delivery, and providers
+//! serialize their own work. The dispatch logic here drains one non-passive
+//! prompt per *runnable* agent and lets providers interleave them.
 //!
 //! [`Harness::dispatch_user_prompt`] creates/reuses the session's durable user
 //! agent and dispatches one interactive submission;
@@ -167,10 +167,10 @@ impl Harness {
 
     /// Drains every runnable agent's pending prompt queue.
     ///
-    /// There is no global agent slot — the agent extension serializes
-    /// its own consumption of `AgentPromptCreated`. The harness emits
-    /// one prompt per runnable agent (Idle turn state, non-empty
-    /// queue) and routes responses back via `prompt_agents`.
+    /// There is no global agent slot. The harness materializes one prompt per
+    /// runnable agent (Idle turn state, non-empty queue), durably commits its
+    /// compact fact, directs the transient full request to the selected
+    /// provider, and routes responses back via `prompt_agents`.
     ///
     /// Session initialization still happens before prompt dispatch, so
     /// a fresh `chat-*` session can discover AGENTS.md and skills before

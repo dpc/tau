@@ -431,6 +431,7 @@ fn agent_prompt_started_for_agent(agent_id: &str, agent_prompt_id: &str) -> Even
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         session_id: "s1".into(),
         model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     })

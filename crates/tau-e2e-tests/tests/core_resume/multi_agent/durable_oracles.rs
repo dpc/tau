@@ -109,21 +109,21 @@ fn assert_exact_event_names(
         E::AGENT_USER_INTERACTION_RECORDED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
-        E::AGENT_PROMPT_CREATED,
+        E::AGENT_PROMPT_STARTED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_MESSAGE_RECEIVED,
         E::PROVIDER_TOOL_RESULT,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
-        E::AGENT_PROMPT_CREATED,
+        E::AGENT_PROMPT_STARTED,
         E::AGENT_MESSAGE_RECEIVED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
-        E::AGENT_PROMPT_CREATED,
+        E::AGENT_PROMPT_STARTED,
         E::AGENT_MESSAGE_RECEIVED,
         E::AGENT_MESSAGE_RECEIVED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
-        E::AGENT_PROMPT_CREATED,
+        E::AGENT_PROMPT_STARTED,
         E::PROVIDER_RESPONSE_FINISHED,
     ];
     let worker_expected = [
@@ -131,7 +131,7 @@ fn assert_exact_event_names(
         E::AGENT_DISPLAY_NAME_SET,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
-        E::AGENT_PROMPT_CREATED,
+        E::AGENT_PROMPT_STARTED,
         E::PROVIDER_RESPONSE_FINISHED,
     ];
     for (agent_id, expected) in [
@@ -376,7 +376,7 @@ fn assert_inference_rounds(
         _ => None,
     });
     let prompts = records.iter().filter_map(|record| match &record.event {
-        Event::AgentPromptCreated(prompt) => Some(prompt),
+        Event::AgentPromptStarted(prompt) => Some(prompt),
         _ => None,
     });
     let responses = records.iter().filter_map(|record| match &record.event {
@@ -547,7 +547,7 @@ pub(super) fn assert_snapshot_suffix(
         notice,
         prompt,
         dispatch,
-        created,
+        started,
         response_record,
     ] = suffix
     else {
@@ -590,24 +590,24 @@ pub(super) fn assert_snapshot_suffix(
     let Event::AgentInferenceDispatchStarted(dispatch) = &dispatch.event else {
         return Err("S8 worker durable suffix omitted its dispatch checkpoint".into());
     };
-    let Event::AgentPromptCreated(created) = &created.event else {
-        return Err("S8 worker durable suffix omitted its provider prompt".into());
+    let Event::AgentPromptStarted(started) = &started.event else {
+        return Err("S8 worker durable suffix omitted its prompt-start checkpoint".into());
     };
     let Event::ProviderResponseFinished(response) = &response_record.event else {
         return Err("S8 worker durable suffix omitted its terminal response".into());
     };
     if dispatch.agent_id != identities.worker
-        || created.agent_id != identities.worker
+        || started.agent_id != identities.worker
         || dispatch.agent_prompt_id != response.agent_prompt_id
-        || dispatch.agent_prompt_id != created.agent_prompt_id
+        || dispatch.agent_prompt_id != started.agent_prompt_id
         || dispatch.agent_prompt_id.as_str() != format!("ap-{}-1", identities.worker.as_str())
         || dispatch.transaction_id.is_some()
         || dispatch.through != tau_proto::AgentHead::Node(tau_proto::NodeId::new(3))
         || dispatch.model.as_ref().map(ToString::to_string).as_deref() != Some("fake/test")
         || dispatch.operation != Some(tau_proto::PromptOperation::Inference)
         || dispatch.activation_cut != Some(tau_proto::AgentHead::Node(tau_proto::NodeId::new(2)))
-        || created.model.to_string() != "fake/test"
-        || created.operation != tau_proto::PromptOperation::Inference
+        || started.model.to_string() != "fake/test"
+        || started.operation != tau_proto::PromptOperation::Inference
         || response.agent_id != identities.worker
         || !exact_text_response(
             &response_record.event,

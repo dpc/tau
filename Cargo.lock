@@ -3712,6 +3712,7 @@ dependencies = [
  "tau-harness-tools",
  "tau-proto",
  "tau-socket",
+ "tau-test-support",
  "tau-vcr",
  "tempfile",
  "vt100",

@@ -2,6 +2,8 @@
 
 Authority: confirmed, 2026-07-24, dpc
 
+## Decision
+
 Generic event publication metadata uses `persist: bool`: `true` requests
 ordinary eligible semantic persistence, while `false` requests live-only
 publication. Every former `transient=false` value becomes `persist=true`, and

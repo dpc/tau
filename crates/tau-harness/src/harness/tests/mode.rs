@@ -330,6 +330,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
             agent_id: agent_id.clone(),
             session_id: "s1".into(),
             model: "test/model".parse().expect("model id"),
+            operation: tau_proto::PromptOperation::Inference,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: Some("ephemeral-debug-ctx".to_owned()),
         }),
@@ -699,7 +700,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
         agent_id: Some(agent_id),
         session_generation: h.current_session_generation,
         suppress_activation_dispatch: false,
-        completion: None,
+        continuation: None,
         notify_watchers: false,
     };
 

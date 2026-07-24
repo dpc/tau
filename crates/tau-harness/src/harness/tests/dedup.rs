@@ -669,6 +669,7 @@ fn dedup_is_scoped_to_a_single_branch() {
         side_cid.clone(),
         crate::agent::Agent::new(
             side_cid.clone(),
+            1,
             "s1".into(),
             tau_proto::PromptOriginator::Extension {
                 name: "core-subagents".into(),

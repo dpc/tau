@@ -880,6 +880,13 @@ impl AgentStore {
                 ),
             });
         }
+        if matches!(&event, Event::AgentPromptStarted(_)) && source.is_some() {
+            return Err(AgentStoreError::InvalidEvent {
+                source: AgentEventValidationError::new(
+                    "agent.prompt_started must be a harness-authored source-free record",
+                ),
+            });
+        }
         tree.validate_event_at(parent, &event)
             .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         // Cached: `from_events` populated this from the highest

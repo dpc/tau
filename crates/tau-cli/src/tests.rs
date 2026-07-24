@@ -1239,6 +1239,7 @@ fn agent_prompt_started(agent_prompt_id: &str, session_id: &str) -> tau_proto::A
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         session_id: session_id.into(),
         model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }
@@ -8107,6 +8108,7 @@ fn watched_agent_stats_redraw_active_indicator() {
         agent_id: agent_id("engineer_1"),
         agent_prompt_id: "ap-engineer_1-0".into(),
         model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
             query_id: "delegate-1".to_owned(),
@@ -8172,6 +8174,7 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
             agent_id: agent_id(watched),
             agent_prompt_id: format!("ap-{watched}-0").into(),
             model: "test/model".parse().expect("model id"),
+            operation: tau_proto::PromptOperation::Inference,
             originator: tau_proto::PromptOriginator::Extension {
                 name: "__harness__".into(),
                 query_id: format!("delegate-{watched}"),
@@ -8225,6 +8228,7 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
             agent_id: agent_id(agent),
             agent_prompt_id: format!("ap-{agent}").into(),
             model: "test/model".parse().expect("model id"),
+            operation: tau_proto::PromptOperation::Inference,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         })
@@ -8278,6 +8282,7 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
         agent_id: agent_id("engineer_1"),
         agent_prompt_id: "ap-engineer_1-0".into(),
         model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
             query_id: "delegate-1".to_owned(),
@@ -8364,6 +8369,7 @@ fn watched_agent_response_finished_removes_active_indicator() {
         agent_id: agent_id("engineer_1"),
         agent_prompt_id: "ap-engineer_1-0".into(),
         model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
             query_id: "delegate-1".to_owned(),
@@ -8466,6 +8472,7 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
         agent_id: agent_id("engineer_1"),
         agent_prompt_id: "ap-engineer_1-0".into(),
         model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
             query_id: "delegate-1".to_owned(),
@@ -8712,6 +8719,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         agent_id: agent_id("engineer_1"),
         agent_prompt_id: "ap-engineer_1-0".into(),
         model: "test/model".parse().expect("model id"),
+        operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
             query_id: "delegate-1".to_owned(),

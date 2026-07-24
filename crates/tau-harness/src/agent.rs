@@ -265,6 +265,8 @@ pub(crate) struct Agent {
     /// the id through every call site.
     #[allow(dead_code)]
     pub(crate) id: AgentId,
+    /// Monotonic identity for this loaded runtime instance.
+    pub(crate) runtime_incarnation: u64,
     pub(crate) session_id: SessionId,
     pub(crate) originator: PromptOriginator,
     /// Local cursor — where the *next* transcript event for this agent
@@ -619,6 +621,7 @@ impl Agent {
 
     pub(crate) fn new(
         id: AgentId,
+        runtime_incarnation: u64,
         session_id: SessionId,
         originator: PromptOriginator,
         head: Option<NodeId>,
@@ -626,6 +629,7 @@ impl Agent {
     ) -> Self {
         Self {
             id,
+            runtime_incarnation,
             session_id,
             originator,
             head,

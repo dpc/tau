@@ -424,10 +424,10 @@ fn compact_debug_string_keeps_short_strings() {
     assert_eq!(compact_debug_string(&"x".repeat(100)), "x".repeat(100));
 }
 
-/// Ensures image bytes nested in later prompt contexts are removed before JSON
-/// conversion, rather than expanding into decimal byte arrays in debug logs.
+/// Full provider prompts become a bounded content-free summary before JSON
+/// conversion, so neither text nor image bytes enter the debug mirror.
 #[test]
-fn nested_provider_image_bytes_are_redacted_before_debug_json() {
+fn full_prompt_debug_projection_is_fixed_shape_and_content_free() {
     let sentinel = b"\x89PNG\r\n\x1a\nunique-image-sentinel".to_vec();
     let tool_result = tau_proto::ToolResultItem {
         call_id: "call-image".into(),
@@ -448,15 +448,44 @@ fn nested_provider_image_bytes_are_redacted_before_debug_json() {
         agent_prompt_id: "ap-main-1".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         session_id: SessionId::from("s1"),
-        system_prompt: "system".to_owned(),
+        system_prompt: "unique-system-secret".repeat(1_000),
         context: tau_proto::PromptContext {
-            blocks: vec![tau_proto::ContextBlock::ToolResults(
-                tau_proto::ToolResultsBlock {
+            blocks: vec![
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![
+                        tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                            role: tau_proto::ContextRole::User,
+                            content: vec![tau_proto::ContentPart::Text {
+                                text: "unique-context-secret".to_owned(),
+                            }],
+                            phase: None,
+                            responses_raw_json: None,
+                        }),
+                        tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                            kind: tau_proto::ReasoningTextKind::Summary,
+                            text: "unique-reasoning-secret".to_owned(),
+                        }),
+                        tau_proto::ContextItem::UnknownProviderItem(
+                            tau_proto::OpaqueProviderItem::with_raw_json(
+                                CborValue::Text("unique-opaque-secret".to_owned()),
+                                "unique-raw-json-secret".to_owned(),
+                            ),
+                        ),
+                    ],
+                }),
+                tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
                     items: vec![tool_result],
-                },
-            )],
+                }),
+            ],
         },
-        tools: Vec::new(),
+        tools: vec![tau_proto::ToolDefinition {
+            name: tau_proto::ToolName::new("unique_tool"),
+            model_visible_name: None,
+            description: Some("unique-tool-description-secret".to_owned()),
+            tool_type: tau_proto::ToolType::Function,
+            parameters: Some(serde_json::json!({"unique-schema-secret": {"type": "string"}})),
+            format: None,
+        }],
         tools_ref: None,
         model: "chatgpt/gpt-5.6-sol".parse().expect("model"),
         model_params: tau_proto::ModelParams::default(),
@@ -471,11 +500,71 @@ fn nested_provider_image_bytes_are_redacted_before_debug_json() {
     let json = debug_event_json(&event);
     let rendered = serde_json::to_string(&json).expect("render debug JSON");
     assert!(!rendered.contains("unique-image-sentinel"));
-    assert_eq!(
-        json["payload"]["context"]["blocks"][0]["payload"]["items"][0]["provider_content"][0]["content"]
-            ["data"],
-        serde_json::json!([])
+    assert!(!rendered.contains("unique-system-secret"));
+    for sentinel in [
+        "unique-context-secret",
+        "unique-reasoning-secret",
+        "unique-opaque-secret",
+        "unique-raw-json-secret",
+        "unique_tool",
+        "unique-tool-description-secret",
+        "unique-schema-secret",
+    ] {
+        assert!(!rendered.contains(sentinel), "{sentinel} leaked");
+    }
+    assert!(
+        rendered.len() < 1_024,
+        "prompt debug summary must stay bounded"
     );
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "event": "agent.prompt_created",
+            "payload": {
+                "agent_prompt_id": "ap-main-1",
+                "agent_id": "main",
+                "session_id": "s1",
+                "model": "chatgpt/gpt-5.6-sol",
+                "operation": "inference",
+                "summary": {
+                    "system_prompt_utf8_bytes": "unique-system-secret".len() * 1_000,
+                    "context_blocks": 2,
+                    "context_items": 4,
+                    "context_text_utf8_bytes":
+                        "unique-context-secret".len() + "unique-reasoning-secret".len(),
+                    "provider_images": 1,
+                    "provider_image_bytes": sentinel.len(),
+                    "tools": 1,
+                },
+            },
+        })
+    );
+
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut log = DebugEventLog::open(td.path()).expect("open");
+    log.log_harness_event(&HarnessEvent::FromConnection {
+        connection_id: "interceptor".into(),
+        message: Box::new(HarnessInputMessage::InterceptReply(
+            tau_proto::InterceptReply {
+                action: tau_proto::InterceptAction::Pass(Some(Box::new(event))),
+            },
+        )),
+    })
+    .expect("log intercepted full prompt summary");
+    let raw = std::fs::read_to_string(log.path()).expect("read debug log");
+    for sentinel in [
+        "unique-system-secret",
+        "unique-context-secret",
+        "unique-reasoning-secret",
+        "unique-opaque-secret",
+        "unique-raw-json-secret",
+        "unique_tool",
+        "unique-tool-description-secret",
+        "unique-schema-secret",
+    ] {
+        assert!(!raw.contains(sentinel), "{sentinel} leaked from raw reply");
+    }
+    assert!(raw.contains("\"summary\""));
 }
 
 /// Ensures committed terminal result reports remain observable in debug JSON

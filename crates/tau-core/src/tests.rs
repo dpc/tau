@@ -299,56 +299,79 @@ fn manual_compaction_request(agent_id: &str, request_id: &str) -> Event {
     })
 }
 
-/// Durable replay must preserve prompt-count and ordinary-inference generation
+/// Durable replay must preserve compact-fact ordinary-inference generation
 /// authority, while stale manual compaction admission leaves no journal trace.
 #[test]
 fn manual_compaction_generation_replays_and_guards_durable_admission() {
     let agents_dir = temp_dir("manual-compaction-generation-replay");
+    let checkpoint = |id: &str| {
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: AgentId::parse("target").expect("agent id"),
+            transaction_id: None,
+            agent_prompt_id: id.into(),
+            through: tau_proto::AgentHead::Root,
+            model: Some("provider/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        })
+    };
     let prompt = |id: &str, operation| {
-        Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
+        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
             agent_prompt_id: id.into(),
             agent_id: AgentId::parse("target").expect("agent id"),
             session_id: "session".into(),
-            system_prompt: String::new(),
-            context: tau_proto::PromptContext::default(),
-            tools: Vec::new(),
-            tools_ref: None,
             model: "provider/model".into(),
-            model_params: Default::default(),
-            tool_choice: Default::default(),
-            originator: PromptOriginator::User,
-            share_user_cache_key: false,
-            ctx_id: None,
-            compaction: None,
             operation,
+            originator: PromptOriginator::User,
+            ctx_id: None,
         })
     };
     let counters = |store: &AgentStore| {
         let tree = store.agent("target").expect("target tree");
-        (
-            tree.materialized_prompt_count(),
-            tree.ordinary_inference_generation(),
-        )
+        tree.ordinary_inference_generation()
     };
 
     let mut store = AgentStore::open(&agents_dir).expect("open store");
+    let compaction_transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-generation").expect("transaction id");
     for event in [
+        checkpoint("ap-first"),
         prompt("ap-first", tau_proto::PromptOperation::Inference),
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            agent_id: AgentId::parse("target").expect("agent id"),
+            transaction_id: compaction_transaction_id.clone(),
+            compact_prompt_id: "ap-compact".into(),
+            cut: tau_proto::AgentHead::Root,
+            resume_through: None,
+            model: "provider/model".into(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::AutomaticThreshold,
+        }),
         prompt(
-            "ap-compaction",
+            "ap-compact",
             tau_proto::PromptOperation::StandaloneCompaction,
         ),
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: AgentId::parse("target").expect("agent id"),
+            transaction_id: compaction_transaction_id,
+            cut: tau_proto::AgentHead::Root,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: None,
+        }),
+        checkpoint("ap-second"),
         prompt("ap-second", tau_proto::PromptOperation::Inference),
     ] {
         store
             .append_agent_event("target", None, event)
             .expect("append prompt");
     }
-    assert_eq!(counters(&store), (3, 2));
+    assert_eq!(counters(&store), 2);
 
     drop(store);
     let mut reopened = AgentStore::open(&agents_dir).expect("reopen store");
-    assert_eq!(counters(&reopened), (3, 2));
+    assert_eq!(counters(&reopened), 2);
 
     let sequence_before = reopened
         .agent("target")
@@ -381,7 +404,7 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
             .len(),
         event_count_before
     );
-    assert_eq!(counters(&reopened), (3, 2));
+    assert_eq!(counters(&reopened), 2);
 
     let Event::AgentManualCompactionRequested(requested) = &mut request else {
         unreachable!("helper constructs a manual compaction request");
@@ -393,7 +416,7 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
     drop(reopened);
 
     let reopened = AgentStore::open(&agents_dir).expect("reopen accepted request");
-    assert_eq!(counters(&reopened), (3, 2));
+    assert_eq!(counters(&reopened), 2);
     assert!(matches!(
         reopened
             .agent("target")

@@ -4,9 +4,8 @@
 
 Prompt dispatch combines model and role selection, effective tool policy,
 provider definitions, authorization snapshots, dynamic context, prompt
-fragments, and durable lifecycle events. These responsibilities cross harness
-modules and provider/extension boundaries, so local documentation cannot state
-the complete dispatch contract.
+fragments, and durable lifecycle events across harness modules and
+provider/extension boundaries, so no local owner can state the complete contract.
 
 Every accepted visible UI submission commits a content-free
 `agent.user_interaction_recorded` fact, including an accepted queued prompt that
@@ -148,20 +147,37 @@ created. This implements
 
 ## Prompt dispatch lifecycle split
 
-Prompt dispatch emits a lightweight transient `agent.prompt_started` lifecycle
-fact immediately before the full `agent.prompt_created` provider work request.
+Prompt dispatch first commits and syncs a lightweight, harness-authored durable
+`agent.prompt_started` materialization fact. That fact includes the provider
+operation and must uniquely match one unresolved durable inference checkpoint or
+standalone-compaction start. Its one-shot live post-commit continuation then
+publishes the full transient `agent.prompt_created` provider work request.
 Providers consume `agent.prompt_created`; UIs and side-effect observers should
 subscribe to `agent.prompt_started` so materialized prompt context and tool
-schemas are not sent over UI/control channels unnecessarily.
+schemas are not sent over UI/control channels unnecessarily. Cold replay folds
+prompt-start facts for audit and generation state but never recreates full work
+or includes prompt starts in subscriber catch-up.
+
+Immediately before selected-provider delivery, the harness requires an
+unfaulted semantic epoch, the same session generation and loaded runtime
+incarnation, the exact unresolved owner and compact fact, unchanged
+agent/prompt/model/operation identity, and the route captured from that model.
+Any mismatch fails closed. Persisted full `agent.prompt_created` records are
+unsupported legacy data; operators must discard or reset those journals rather
+than relying on decoding compatibility or migration.
+This authority chain is governed by
+[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
 
 Typed image bytes in provider tool results are never generic UI traffic. Live
 `provider.tool_result` delivery excludes UI clients; they receive the separate
 byte-free `tool.result` event. Historical UI replay projects the durable
 provider event back to that byte-free generic event. Debug and TRACE prompt
-projections recursively remove image buffers before JSON serialization.
+projections recursively remove image buffers before JSON serialization. Debug
+JSONL represents full prompt work as a bounded content-free count summary rather
+than serializing prompt structure or content.
 
 All subscriber broadcasts and historical replay project typed image buffers out
-of provider tool results, prompt-created contexts, compaction windows, and
+of provider tool results, live full-prompt contexts, compaction windows, and
 structurally possible provider-response items. Only durable agent storage and
 the selected provider's point-to-point prompt receive canonical bytes. Pending
 tool-call state retains whether the exact registered tool carried

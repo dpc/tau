@@ -34,6 +34,7 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
     let cid = crate::parse_agent_id(agent_id);
     let mut agent = Agent::new(
         cid.clone(),
+        1,
         h.current_session_id.clone(),
         tau_proto::PromptOriginator::User,
         None,
@@ -193,6 +194,7 @@ fn retry_rejects_invalid_targets_and_duplicate_request_ids() {
     let idle = crate::parse_agent_id("idle-agent");
     let mut idle_agent = Agent::new(
         idle.clone(),
+        2,
         h.current_session_id.clone(),
         tau_proto::PromptOriginator::User,
         None,

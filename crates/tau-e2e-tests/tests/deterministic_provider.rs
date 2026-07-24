@@ -31,7 +31,7 @@ fn deterministic_text_stream_and_final_response() -> Result<(), Box<dyn std::err
     assert_eq!(outcome.response, "hello deterministic tau");
     assert!(outcome.tool_calls.is_empty());
     assert!(outcome.tool_results.is_empty());
-    let events = fixture.durable_events()?;
+    let events = fixture.published_trace_events()?;
     assert_exact_extensions(&events, &["e2e-fake-provider"]);
     assert_text_provider_sequence(&events);
     Ok(())
@@ -63,7 +63,7 @@ fn deterministic_dummy_tool_round() -> Result<(), Box<dyn std::error::Error>> {
         CborValue::Text("restart succeeded".to_owned())
     );
     assert!(outcome.tool_results[0].provider_content.is_empty());
-    let events = fixture.durable_events()?;
+    let events = fixture.published_trace_events()?;
     assert_exact_extensions(&events, &["e2e-fake-provider", "e2e-test-dummy"]);
     assert_tool_provider_sequence(&events);
     Ok(())
@@ -96,17 +96,9 @@ fn deterministic_bad_config_fails_startup() -> Result<(), Box<dyn std::error::Er
             .join("artifacts/harness-config.json")
             .is_file()
     );
-    let events = fixture.durable_events()?;
-    assert!(events.iter().any(
-        |event| matches!(event, tau_proto::Event::ExtensionStarting(starting)
-            if starting.extension_name.as_str() == "e2e-fake-provider")
-    ));
-    assert!(
-        events
-            .iter()
-            .all(|event| !matches!(event, tau_proto::Event::ExtensionReady(_))),
-        "invalid config must fail before Ready"
-    );
+    // The exact provider diagnostic proves startup failed before Ready. Do not
+    // use the best-effort asynchronous debug trace as a fatal-startup oracle:
+    // the daemon may exit before its detached writer creates events.jsonl.
     fixture.acknowledge_expected_failure();
     Ok(())
 }
@@ -327,7 +319,7 @@ fn deterministic_provider_disconnect_is_fatal_and_not_restarted()
         .finish()
         .expect_err("provider disconnect must terminate daemon");
     assert!(error.to_string().contains("provider disconnected"));
-    let events = fixture.durable_events()?;
+    let events = recv_remaining_events(&mut peer)?;
     assert_eq!(
         events
             .iter()

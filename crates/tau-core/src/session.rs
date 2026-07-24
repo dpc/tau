@@ -321,12 +321,10 @@ pub struct AgentTree {
     /// the last sequence (the previous behaviour was O(N) per append,
     /// quadratic over a long agent).
     pub(crate) next_event_seq: PersistedAgentEventSeq,
-    /// Number of materialized agent prompts already present in this
-    /// derived tree. Maintained while replaying/applying events so callers can
-    /// mint the next per-agent prompt id without rescanning the event log.
-    materialized_prompt_count: u64,
     /// Number of ordinary inference prompts, excluding compaction operations.
     ordinary_inference_generation: u64,
+    /// Unique content-free materialization facts keyed by provider prompt id.
+    prompt_starts: HashMap<tau_proto::AgentPromptId, tau_proto::AgentPromptStarted>,
     /// Canonical provider image bytes retained across all durable transcript
     /// events, including branches and compaction replacement windows.
     retained_provider_image_bytes: u64,
@@ -1057,8 +1055,8 @@ impl AgentTree {
             head: None,
             display_name: None,
             next_event_seq: PersistedAgentEventSeq::new(0),
-            materialized_prompt_count: 0,
             ordinary_inference_generation: 0,
+            prompt_starts: HashMap::new(),
             retained_provider_image_bytes: 0,
             pending_tool_rounds: HashMap::new(),
             tool_call_rounds: HashMap::new(),
@@ -1084,12 +1082,6 @@ impl AgentTree {
     #[must_use]
     pub fn next_event_seq(&self) -> PersistedAgentEventSeq {
         self.next_event_seq
-    }
-
-    /// Returns the number of materialized agent prompts folded into this tree.
-    #[must_use]
-    pub fn materialized_prompt_count(&self) -> u64 {
-        self.materialized_prompt_count
     }
 
     /// Returns target-owned ordinary inference progress for manual rate guards.
@@ -1159,6 +1151,11 @@ impl AgentTree {
                 record.seq.get()
             )));
         }
+        if matches!(&record.event, Event::AgentPromptStarted(_)) && record.source.is_some() {
+            return Err(AgentEventValidationError::new(
+                "agent.prompt_started must be a harness-authored source-free record",
+            ));
+        }
         let node_id = if record.event.name().category() == &tau_proto::EventCategory::Message {
             if record.parent != AgentEventParent::InheritHead {
                 return Err(AgentEventValidationError::new(
@@ -1202,7 +1199,6 @@ impl AgentTree {
         self.retained_provider_image_bytes = self
             .retained_provider_image_bytes
             .saturating_add(durable_event_provider_image_bytes(event));
-        self.count_materialized_prompt(event);
         self.apply_compaction_control_event(event);
         if self.apply_side_state_event(event) {
             return None;
@@ -1282,6 +1278,14 @@ impl AgentTree {
                     transaction.checkpoint = Some(checkpoint.clone());
                 }
             }
+            Event::AgentPromptStarted(started) => {
+                self.prompt_starts
+                    .insert(started.agent_prompt_id.clone(), started.clone());
+                if started.operation == tau_proto::PromptOperation::Inference {
+                    self.ordinary_inference_generation =
+                        self.ordinary_inference_generation.saturating_add(1);
+                }
+            }
             Event::ProviderResponseFinished(response) => {
                 if let Some(dispatch) = self.inference_dispatches.get_mut(&response.agent_prompt_id)
                 {
@@ -1297,16 +1301,6 @@ impl AgentTree {
                 }
             }
             _ => {}
-        }
-    }
-
-    fn count_materialized_prompt(&mut self, event: &Event) {
-        if let Event::AgentPromptCreated(created) = event {
-            self.materialized_prompt_count += 1;
-            if created.operation == tau_proto::PromptOperation::Inference {
-                self.ordinary_inference_generation =
-                    self.ordinary_inference_generation.saturating_add(1);
-            }
         }
     }
 
@@ -1789,7 +1783,14 @@ impl AgentTree {
     ) -> Option<Result<(), AgentEventValidationError>> {
         match event {
             Event::AgentPromptSubmitted(prompt) if prompt.agent_id == self.agent_id => Some(Ok(())),
-            Event::AgentPromptCreated(prompt) if prompt.agent_id == self.agent_id => Some(Ok(())),
+            Event::AgentPromptStarted(started) if started.agent_id == self.agent_id => {
+                Some(self.validate_prompt_started(started))
+            }
+            Event::AgentPromptCreated(prompt) if prompt.agent_id == self.agent_id => {
+                Some(Err(AgentEventValidationError::new(
+                    "persisted agent.prompt_created is unsupported; discard or reset this agent journal",
+                )))
+            }
             Event::AgentUserMessageInjected(injected) if injected.agent_id == self.agent_id => {
                 Some(Ok(()))
             }
@@ -1983,6 +1984,93 @@ impl AgentTree {
             }
         }
         Ok(())
+    }
+
+    fn validate_prompt_started(
+        &self,
+        started: &tau_proto::AgentPromptStarted,
+    ) -> Result<(), AgentEventValidationError> {
+        if self.prompt_starts.contains_key(&started.agent_prompt_id) {
+            return Err(AgentEventValidationError::new(
+                "duplicate agent prompt materialization fact",
+            ));
+        }
+
+        match self.prompt_started_owner_matches(started) {
+            None => {
+                return Err(AgentEventValidationError::new(
+                    "agent prompt materialization must uniquely match one unresolved dispatch owner",
+                ));
+            }
+            Some(false) => {
+                return Err(AgentEventValidationError::new(
+                    "agent prompt materialization mismatches its unresolved dispatch owner",
+                ));
+            }
+            Some(true) => {}
+        }
+        Ok(())
+    }
+
+    /// Returns the exact durable materialization fact for one provider prompt.
+    #[must_use]
+    pub fn prompt_started(
+        &self,
+        prompt_id: &tau_proto::AgentPromptId,
+    ) -> Option<&tau_proto::AgentPromptStarted> {
+        self.prompt_starts.get(prompt_id)
+    }
+
+    /// Returns whether a compact materialization fact may acquire its sole live
+    /// continuation before prompt construction mutates runtime bookkeeping.
+    #[must_use]
+    pub fn prompt_started_can_materialize(&self, started: &tau_proto::AgentPromptStarted) -> bool {
+        !self.prompt_starts.contains_key(&started.agent_prompt_id)
+            && self.prompt_started_owner_matches(started) == Some(true)
+    }
+
+    /// Returns whether a folded materialization fact still has its exact
+    /// unresolved durable dispatch owner.
+    #[must_use]
+    pub fn prompt_started_is_dispatchable(&self, started: &tau_proto::AgentPromptStarted) -> bool {
+        self.prompt_starts.get(&started.agent_prompt_id) == Some(started)
+            && self.prompt_started_owner_matches(started) == Some(true)
+    }
+
+    /// Returns `None` unless exactly one owner has this prompt id, otherwise
+    /// whether that owner is unresolved and matches every durable correlation.
+    fn prompt_started_owner_matches(
+        &self,
+        started: &tau_proto::AgentPromptStarted,
+    ) -> Option<bool> {
+        let inference_owner = self.inference_dispatches.get(&started.agent_prompt_id);
+        let mut compaction_owners = self
+            .compaction_transactions
+            .values()
+            .filter(|transaction| transaction.started.compact_prompt_id == started.agent_prompt_id);
+        let compaction_owner = compaction_owners.next();
+        if usize::from(inference_owner.is_some())
+            + usize::from(compaction_owner.is_some())
+            + usize::from(compaction_owners.next().is_some())
+            != 1
+        {
+            return None;
+        }
+        Some(match (inference_owner, compaction_owner) {
+            (Some(dispatch), None) => {
+                !dispatch.finished
+                    && dispatch.checkpoint.model.as_ref() == Some(&started.model)
+                    && dispatch.checkpoint.operation == Some(started.operation)
+                    && started.operation == tau_proto::PromptOperation::Inference
+            }
+            (None, Some(transaction)) => {
+                transaction.outcome.is_none()
+                    && transaction.started.model == started.model
+                    && transaction.started.operation == started.operation
+                    && started.operation == tau_proto::PromptOperation::StandaloneCompaction
+            }
+            _ => false,
+        })
     }
 
     fn validate_manual_compaction_requested(
@@ -2272,6 +2360,7 @@ impl AgentTree {
                 | Event::AgentDisplayNameSet(_)
                 | Event::AgentPromptSubmitted(_)
                 | Event::AgentPromptCreated(_)
+                | Event::AgentPromptStarted(_)
                 | Event::AgentUserMessageInjected(_)
                 | Event::AgentPromptSteered(_)
                 | Event::AgentCompactionTriggered(_)

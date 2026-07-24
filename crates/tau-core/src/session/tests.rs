@@ -1732,34 +1732,148 @@ fn manual_compaction_pre_start_failure_is_exactly_once() {
 fn manual_compaction_generation_excludes_standalone_prompts() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     let prompt = |id: &str, operation| {
-        Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
+        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
             agent_prompt_id: id.into(),
             agent_id: agent_id(),
             session_id: "session".into(),
-            system_prompt: String::new(),
-            context: tau_proto::PromptContext::default(),
-            tools: Vec::new(),
-            tools_ref: None,
             model: "provider/model".into(),
-            model_params: Default::default(),
-            tool_choice: Default::default(),
-            originator: PromptOriginator::User,
-            share_user_cache_key: false,
-            ctx_id: None,
-            compaction: None,
             operation,
+            originator: PromptOriginator::User,
+            ctx_id: None,
         })
     };
-    tree.apply_event(&prompt(
+    let mut compact_owner = compaction_start("ct-generation");
+    compact_owner.compact_prompt_id = "ap-compact".into();
+    compact_owner.model = "provider/model".into();
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(
+        compact_owner.clone(),
+    ))
+    .expect("standalone owner");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(compact_owner));
+    let compact_prompt = prompt(
         "ap-compact",
         tau_proto::PromptOperation::StandaloneCompaction,
-    ));
+    );
+    tree.validate_event(&compact_prompt)
+        .expect("standalone materialization");
+    tree.apply_event(&compact_prompt);
     assert_eq!(tree.ordinary_inference_generation(), 0);
-    tree.apply_event(&prompt(
-        "ap-inference",
-        tau_proto::PromptOperation::Inference,
-    ));
+    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: None,
+        agent_prompt_id: "ap-inference".into(),
+        through: AgentHead::Root,
+        model: Some("provider/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(AgentHead::Root),
+    };
+    tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
+        .expect("inference owner");
+    tree.apply_event(&Event::AgentInferenceDispatchStarted(checkpoint));
+    let inference_prompt = prompt("ap-inference", tau_proto::PromptOperation::Inference);
+    tree.validate_event(&inference_prompt)
+        .expect("inference materialization");
+    tree.apply_event(&inference_prompt);
     assert_eq!(tree.ordinary_inference_generation(), 1);
+}
+
+/// Compact prompt facts require one exact unresolved owner, reject identity
+/// drift and duplicates, and advance ordinary generation exactly once.
+#[test]
+fn prompt_started_requires_unique_matching_owner() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: None,
+        agent_prompt_id: "ap-owned".into(),
+        through: AgentHead::Root,
+        model: Some("provider/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(AgentHead::Root),
+    };
+    let started = tau_proto::AgentPromptStarted {
+        agent_prompt_id: checkpoint.agent_prompt_id.clone(),
+        agent_id: agent_id(),
+        session_id: "session".into(),
+        model: checkpoint.model.clone().expect("model"),
+        operation: tau_proto::PromptOperation::Inference,
+        originator: PromptOriginator::User,
+        ctx_id: None,
+    };
+
+    assert!(
+        validation_error(&tree, Event::AgentPromptStarted(started.clone()))
+            .contains("uniquely match")
+    );
+    tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
+        .expect("checkpoint owner");
+    tree.apply_event(&Event::AgentInferenceDispatchStarted(checkpoint));
+
+    let mut wrong_model = started.clone();
+    wrong_model.model = "other/model".into();
+    assert!(validation_error(&tree, Event::AgentPromptStarted(wrong_model)).contains("mismatches"));
+    assert!(tree.prompt_started_can_materialize(&started));
+    let source_error = tree
+        .apply_persisted_record(&PersistedAgentEvent {
+            seq: tree.next_event_seq(),
+            source: Some("external-author".into()),
+            event: Event::AgentPromptStarted(started.clone()),
+            parent: AgentEventParent::InheritHead,
+            recorded_at: tau_proto::UnixMicros::new(1),
+        })
+        .expect_err("compact facts must be harness-authored");
+    assert!(source_error.to_string().contains("source-free"));
+    tree.validate_event(&Event::AgentPromptStarted(started.clone()))
+        .expect("matching compact fact");
+    tree.apply_event(&Event::AgentPromptStarted(started.clone()));
+    assert_eq!(
+        tree.prompt_started(&started.agent_prompt_id),
+        Some(&started)
+    );
+    assert!(tree.prompt_started_is_dispatchable(&started));
+    assert!(!tree.prompt_started_can_materialize(&started));
+    assert_eq!(tree.ordinary_inference_generation(), 1);
+    assert!(validation_error(&tree, Event::AgentPromptStarted(started)).contains("duplicate"));
+    assert_eq!(tree.ordinary_inference_generation(), 1);
+}
+
+/// Old full prompt records fail strict fold instead of receiving compatibility,
+/// migration, deduplication, or precedence treatment.
+#[test]
+fn persisted_full_prompt_record_is_explicitly_unsupported() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let prompt = tau_proto::AgentPromptCreated {
+        agent_prompt_id: "ap-legacy-full".into(),
+        agent_id: agent_id(),
+        session_id: "session".into(),
+        system_prompt: "legacy full body".to_owned(),
+        context: tau_proto::PromptContext::default(),
+        tools: Vec::new(),
+        tools_ref: None,
+        model: "provider/model".into(),
+        model_params: Default::default(),
+        tool_choice: Default::default(),
+        originator: PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: None,
+        compaction: None,
+        operation: tau_proto::PromptOperation::Inference,
+    };
+
+    let error = tree
+        .apply_persisted_record(&PersistedAgentEvent {
+            seq: PersistedAgentEventSeq::new(0),
+            source: None,
+            event: Event::AgentPromptCreated(prompt),
+            parent: AgentEventParent::InheritHead,
+            recorded_at: tau_proto::UnixMicros::new(1),
+        })
+        .expect_err("cold fold must reject old full prompt records");
+    assert!(
+        error
+            .to_string()
+            .contains("discard or reset this agent journal")
+    );
 }
 
 /// Manual transaction claims fail closed when any immutable request

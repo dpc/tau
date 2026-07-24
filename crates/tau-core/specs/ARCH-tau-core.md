@@ -17,6 +17,12 @@ journal path and rejects later appends without reopening it. Verification
 ownership is documented in
 [Durable journal append tests](../../../docs/testing.md#durable-journal-append-tests).
 
+Agent journals accept one source-free `agent.prompt_started` only when it uniquely
+matches an unresolved durable inference or standalone-compaction owner; they
+reject persisted full prompts. This fold and dispatch-authority boundary is
+governed by
+[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
+
 Prompt facts are the canonical raw-text and typed-provenance authority. Folding
 preserves their `PromptSubmissionSource` in derived user-input entries; provider
 assembly may then apply the source-specific presentation required by

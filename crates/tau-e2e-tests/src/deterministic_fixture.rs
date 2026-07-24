@@ -753,25 +753,17 @@ impl DeterministicFixture {
         Ok(())
     }
 
-    /// Reads typed published events from the durable harness JSONL projection.
-    pub fn durable_events(&self) -> Result<Vec<tau_proto::Event>, Box<dyn std::error::Error>> {
+    /// Reads typed published events from the best-effort harness debug trace.
+    pub fn published_trace_events(
+        &self,
+    ) -> Result<Vec<tau_proto::Event>, Box<dyn std::error::Error>> {
         let path = self
             .harness_state_dir
             .join("sessions")
             .join("deterministic-e2e-session")
             .join("events.jsonl");
         let bytes = std::fs::read_to_string(path)?;
-        let mut events = Vec::new();
-        for line in bytes.lines() {
-            let record: serde_json::Value = serde_json::from_str(line)?;
-            if record.get("type").and_then(serde_json::Value::as_str) != Some("published") {
-                continue;
-            }
-            if let Some(event) = record.get("event") {
-                events.push(serde_json::from_value(event.clone())?);
-            }
-        }
-        Ok(events)
+        Ok(tau_test_support::parse_published_trace_events(&bytes)?)
     }
 }
 

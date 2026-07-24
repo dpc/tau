@@ -2,6 +2,8 @@
 
 Authority: confirmed, 2026-07-17, dpc
 
+## Decision
+
 Every architectural or externally meaningful change to an event log, journal,
 or harness-extension interface must first be described in its own separately
 reviewed `DECISION-*` record and confirmed by a user or maintainer. Approval must

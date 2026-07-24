@@ -779,7 +779,7 @@ fn assert_no_uncertain_termination(
     dispatch: &tau_proto::AgentInferenceDispatchStarted,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let terminations = fixture
-        .durable_events()?
+        .published_trace_events()?
         .into_iter()
         .filter(|event| {
             matches!(

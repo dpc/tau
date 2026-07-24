@@ -22,8 +22,8 @@ use super::*;
 /// lifecycle record and weakening cardinality assertions.
 #[test]
 fn causal_trace_parser_rejects_malformed_line() {
-    let error =
-        parse_published_events("{not-json").expect_err("malformed causal trace must fail closed");
+    let error = parse_published_trace_events("{not-json")
+        .expect_err("malformed causal trace must fail closed");
     assert!(matches!(error, CausalQuotaError::TraceJson { line: 1, .. }));
 }
 
@@ -36,11 +36,26 @@ fn causal_trace_parser_rejects_invalid_published_payload() {
         "{\"type\":\"published\",\"event\":{\"type\":\"not-an-event\"}}\n"
     );
     let error =
-        parse_published_events(raw).expect_err("invalid published payload must fail closed");
+        parse_published_trace_events(raw).expect_err("invalid published payload must fail closed");
     assert!(matches!(
         error,
         CausalQuotaError::TraceEvent { line: 2, .. }
     ));
+}
+
+/// Full prompts use a bounded debug-only summary rather than a round-trippable
+/// protocol event and are intentionally absent from causal event fixtures.
+#[test]
+fn causal_trace_parser_skips_full_prompt_debug_summary() {
+    let raw = concat!(
+        "{\"type\":\"published\",\"event_name\":\"agent.prompt_created\",",
+        "\"event\":{\"event\":\"agent.prompt_created\",\"payload\":{\"summary\":{}}}}\n"
+    );
+    assert!(
+        parse_published_trace_events(raw)
+            .expect("bounded prompt summary")
+            .is_empty()
+    );
 }
 
 /// Valid JSON still requires an object record with a string discriminator.
@@ -49,7 +64,7 @@ fn causal_trace_parser_rejects_missing_or_non_string_type() {
     for raw in ["{}", "null", "{\"type\":7}"] {
         assert!(
             matches!(
-                parse_published_events(raw),
+                parse_published_trace_events(raw),
                 Err(CausalQuotaError::TraceShape { line: 1, .. })
             ),
             "unexpected acceptance for {raw}"

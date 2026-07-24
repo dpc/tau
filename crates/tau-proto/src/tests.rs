@@ -954,6 +954,7 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("engineer_abcd1234"),
             session_id: "session_123".into(),
             model: "test/model".parse().expect("model id"),
+            operation: PromptOperation::Inference,
             originator: PromptOriginator::User,
             ctx_id: None,
         }),

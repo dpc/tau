@@ -64,6 +64,12 @@ event persistence or the harness-extension interface require the separately
 reviewed, human-confirmed decision mandated by
 [DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
 
+Prompt lifecycle deliberately separates the durable, content-free
+`agent.prompt_started` authority fact from the transient, content-bearing
+`agent.prompt_created` provider request. Their ordering, replay, and compatibility
+contract is governed by
+[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
+
 Bounded provider quota reports are transient provider observations.
 
 Provider execution also separates five Provider-authored `_reported` observations from

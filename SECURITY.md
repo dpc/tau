@@ -91,6 +91,19 @@ salvaging a valid-looking suffix. Re-check byte-boundary, commit-sync,
 rollback-failure, retry-sequence, restore-journal, and suffix regressions whenever
 framed I/O changes.
 
+Provider work leaves the harness only after its durable inference or compaction
+owner and one matching source-free `agent.prompt_started` frame have both
+data-synced. The fact's one-shot continuation rechecks the semantic epoch, session,
+loaded runtime incarnation, unresolved owner, exact identity, and captured route
+before directing the transient full prompt; an owner-only or owner-plus-start crash
+cut never resends work. Persisted old full prompts are unsupported. Debug JSONL
+represents full prompts only as bounded content-free summaries. Re-check these cuts
+whenever prompt persistence, interception, replay, routing, or diagnostics change;
+see
+[DECISION-compact-prompt-materialization-authority](specs/DECISION-compact-prompt-materialization-authority.md)
+and
+[SPEC-tau-harness-prompt-dispatch](crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md).
+
 Session debug `events.jsonl` producers redact and serialize a complete line,
 then attempt immediate nonblocking admission to one lazy process-wide FIFO
 bounded at 1,024 retained lines and 64 MiB of line-plus-path bytes including

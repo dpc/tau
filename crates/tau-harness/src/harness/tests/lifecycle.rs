@@ -5327,6 +5327,12 @@ fn tool_unregister_removes_tool_from_future_prompt() {
     let before_spid = h.send_prompt_to_agent("s1");
     let before_prompt = read_prompt_created(&h, &before_spid);
     assert!(prompt_has_tool(&before_prompt, "shell"));
+    h.handle_provider_response_finished(super::dispatch::provider_text_response(
+        &before_spid,
+        before_prompt.agent_id.clone(),
+        "before unregister complete",
+    ))
+    .expect("finish first prompt");
 
     unregister_shell(&mut h);
 
@@ -6142,9 +6148,17 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
         .insert(model.clone(), "missing-provider".into());
     h.agents.get_mut(&cid).expect("agent").model_override = Some(model);
 
-    let agent_prompt_id = h
-        .send_prompt_to_agent_for(&cid)
-        .expect("prompt should be constructed before route failure");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("route failure".to_owned()))
+        .expect("dispatch checkpointed prompt");
+    let agent_prompt_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptStarted(started) if started.model == "test/model".into() => {
+                Some(started.agent_prompt_id)
+            }
+            _ => None,
+        })
+        .expect("compact prompt fact committed before route failure");
 
     assert!(!h.prompt_agents.contains_key(agent_prompt_id.as_str()));
     assert!(!h.prompt_models.contains_key(&agent_prompt_id));

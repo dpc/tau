@@ -128,15 +128,18 @@ pub fn run_causal_quota_fixture(
         .join("s1")
         .join("events.jsonl");
     let raw = std::fs::read_to_string(trace_path)?;
-    let events = parse_published_events(&raw)?;
+    let events = parse_published_trace_events(&raw)?;
     Ok(CausalQuotaOutcome {
         interaction,
         events,
     })
 }
 
-/// Parses every debug-trace line and fails closed on malformed published data.
-fn parse_published_events(raw: &str) -> Result<Vec<tau_proto::Event>, CausalQuotaError> {
+/// Parses round-trippable published events from the best-effort debug trace.
+///
+/// Fixed-shape diagnostic summaries such as `agent.prompt_created` are skipped
+/// because they intentionally are not protocol events.
+pub fn parse_published_trace_events(raw: &str) -> Result<Vec<tau_proto::Event>, CausalQuotaError> {
     let mut events = Vec::new();
     for (index, line) in raw.lines().enumerate() {
         let line_number = index + 1;
@@ -159,6 +162,14 @@ fn parse_published_events(raw: &str) -> Result<Vec<tau_proto::Event>, CausalQuot
                 message: "record must have a string type".to_owned(),
             })?;
         if record_type != "published" {
+            continue;
+        }
+        // Full provider prompts are deliberately represented by a bounded,
+        // content-free summary in events.jsonl. They remain observable live,
+        // but the debug row is not a round-trippable protocol event.
+        if object.get("event_name").and_then(serde_json::Value::as_str)
+            == Some("agent.prompt_created")
+        {
             continue;
         }
         let payload = object

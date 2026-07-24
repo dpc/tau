@@ -3944,11 +3944,10 @@ pub struct PromptToolsRef {
     pub base_agent_prompt_id: AgentPromptId,
 }
 
-/// The harness persisted a normal assistant-generation prompt and
-/// assigned it an ID.
+/// Transient provider work request materialized by the harness.
 ///
 /// Carries the assembled conversation context for the provider's normal
-/// response path.
+/// response path. Semantic journals must never persist this payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptCreated {
     pub agent_prompt_id: AgentPromptId,
@@ -4027,7 +4026,7 @@ impl PromptOperation {
     }
 }
 
-/// Lightweight prompt lifecycle fact for UIs and observers.
+/// Durable, content-free fact that one provider prompt was materialized.
 ///
 /// This mirrors the routing and provenance metadata from
 /// [`AgentPromptCreated`] without carrying the materialized provider prompt
@@ -4035,11 +4034,13 @@ impl PromptOperation {
 /// track in-flight prompt state should subscribe to this event instead of
 /// `agent.prompt_created`.
 ///
-/// The harness emits this transient, non-replayed event immediately before the
-/// matching [`AgentPromptCreated`] provider work request.
+/// The harness commits this fact after the durable dispatch owner and before
+/// the matching transient [`AgentPromptCreated`] provider work request.
+/// Historical subscriber catch-up excludes it even though agent-journal replay
+/// folds it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptStarted {
-    /// Prompt that just started provider dispatch.
+    /// Prompt that was materialized; this does not assert provider receipt.
     pub agent_prompt_id: AgentPromptId,
     /// Agent transcript this prompt belongs to.
     pub agent_id: AgentId,
@@ -4047,6 +4048,8 @@ pub struct AgentPromptStarted {
     pub session_id: SessionId,
     /// Currently selected model as `"provider/model_id"`.
     pub model: ModelId,
+    /// Provider operation materialized for this dispatch.
+    pub operation: PromptOperation,
     /// Who asked for this prompt.
     #[serde(default)]
     pub originator: PromptOriginator,
@@ -4063,6 +4066,7 @@ impl From<&AgentPromptCreated> for AgentPromptStarted {
             agent_id: prompt.agent_id.clone(),
             session_id: prompt.session_id.clone(),
             model: prompt.model.clone(),
+            operation: prompt.operation,
             originator: prompt.originator.clone(),
             ctx_id: prompt.ctx_id.clone(),
         }

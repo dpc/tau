@@ -183,15 +183,19 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   inference or standalone-compaction operation. First-party
   ChatGPT/Codex cache routing is stable per target agent and does not split on
   those provenance fields. This is
-  operational delivery state for the provider; transcript truth is still the
-  accepted prompt, provider response, terminal tool results, and compaction
-  facts.
-- **`agent.prompt_started`** — Lightweight runtime lifecycle companion to
-  `agent.prompt_created`. Carries the prompt id, agent id, session id, model,
-  originator, and optional UI correlation id, but omits provider prompt content.
-  It is emitted immediately before the matching `agent.prompt_created`, is
-  transient, and is not replayed from durable agent logs. UIs and observers
-  should use this when they only need to track in-flight prompt state.
+  transient operational delivery state for the selected provider. The full
+  payload never enters semantic persistence and is emitted only by the matching
+  prompt-start fact's live post-commit continuation. Existing live
+  observer/interceptor visibility remains available, but historical replay and
+  `GetAgentPromptCreated` do not reconstruct it.
+- **`agent.prompt_started`** — Durable, content-free prompt materialization fact.
+  Carries the prompt id, agent id, session id, model, operation, originator, and
+  optional UI correlation id. It commits after the durable dispatch owner and
+  before the matching transient `agent.prompt_created`. Agent-journal replay
+  folds it for exact-one materialization and ordinary-inference generation
+  authority, but subscriber catch-up excludes it and replay never recreates
+  provider work. UIs and observers should use this when they only need to track
+  in-flight prompt state.
 - **`agent.state`** — Transient live runtime snapshot for one agent. Carries
   `agent_id` plus `idle`/`running` state so UIs can show work in progress
   without treating it as transcript history.

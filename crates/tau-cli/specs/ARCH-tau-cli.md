@@ -6,11 +6,14 @@ the fixed weekly pacing classifier from
 It selects only an exact current/viewed `ModelId` binding, preserves provider
 timestamps during catch-up, keeps per-cycle hysteresis locally, and renders the
 accessible compact `Q-`, `Q=`, `Q+`, `Q!`, or `Q?` status chip.
-The lightweight `agent.prompt_started` event supplies the selected agent's
-model. Provider quota current-state is capability evidence for neutral `Q?`;
+The durable, content-free `agent.prompt_started` fact supplies the selected
+agent's model for live lifecycle tracking; historical catch-up excludes it.
+Provider quota current-state is capability evidence for neutral `Q?`;
 only a fresh exact binding and trustworthy weekly timing permit colored pacing.
 Capability lasts for the running harness: a replayed empty snapshot after
 provider clear keeps live and late clients converged on neutral unknown.
+The lifecycle split is governed by
+[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
 
 Terminal bells and OSC user-variable writes are live-only side effects. The CLI
 requests their event names only in its live selector set and independently drops

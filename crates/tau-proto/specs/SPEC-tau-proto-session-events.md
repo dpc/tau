@@ -3,9 +3,8 @@
 ## Record justification
 
 Session-facing event contracts span protocol DTOs, serde names, `EventName`
-constants, harness routing and persistence, and multiple client projections.
-Documentation beside any one implementation area cannot describe their shared
-wire and lifecycle invariants.
+constants, harness routing and persistence, and multiple client projections, so
+no one implementation area can describe their shared wire and lifecycle invariants.
 
 ## Event names and routing
 
@@ -90,10 +89,19 @@ delivery is released.
 
 ## Prompt lifecycle versus provider prompt payloads
 
-`agent.prompt_created` is the full provider work request and may carry large
-system prompts, context, and tool definitions. UI and observer lifecycle
-tracking should use the transient `agent.prompt_started` companion instead of
-subscribing to the full provider payload.
+`agent.prompt_started` is the durable harness-authored materialization fact. It
+carries prompt, agent, session, model, originator, correlation, and operation
+metadata without provider content. Agent-journal replay folds it for uniqueness
+and inference-generation authority, but subscriber historical catch-up excludes
+it.
+
+`agent.prompt_created` is the full transient provider work request and may carry
+large system prompts, context, images, and tool definitions. It is emitted only
+from the matching prompt-start fact's live post-commit continuation and never
+enters semantic persistence. UI and observer lifecycle tracking should subscribe
+to `agent.prompt_started` instead of the full provider payload.
+This split is governed by
+[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
 
 ## Agent watch turn-state wire boundary
 

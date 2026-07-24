@@ -1847,9 +1847,15 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     );
     assert!(
         events.iter().all(|event| {
-            event.defaults_to_persist() || matches!(event, Event::AgentPromptCreated(_))
+            event.defaults_to_persist() || matches!(event, Event::AgentPromptStarted(_))
         }),
-        "only prompt-created transient facts may enter this semantic log"
+        "only compact prompt-start facts may override default persistence"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, Event::AgentPromptCreated(_))),
+        "full provider prompts must never enter the semantic journal"
     );
 
     let (server_end, client_end) = UnixStream::pair().expect("pair");
@@ -2159,6 +2165,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
     let cid = crate::parse_agent_id(agent_id.as_str());
     let mut agent = crate::agent::Agent::new(
         cid.clone(),
+        1,
         h.current_session_id.clone(),
         tau_proto::PromptOriginator::User,
         None,

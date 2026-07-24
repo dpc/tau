@@ -2,6 +2,8 @@
 
 Authority: confirmed, 2026-07-18, dpc
 
+## Decision
+
 Tau provides no backward-compatibility support or migrations for its internal
 serialized protocols and persisted structured data. These formats may contain
 numeric version fields, but their values remain `0` unless this confirmed

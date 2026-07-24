@@ -4,8 +4,8 @@
 
 Session state spans durable session and agent stores, harness cold restoration,
 runtime routing and navigation classification, UI roster projection, and
-extension-owned state. No component-local documentation can describe their
-shared lifecycle and recovery invariants coherently.
+extension-owned state, so no component-local owner can describe their shared
+lifecycle and recovery invariants coherently.
 
 ## Session and agent stores
 
@@ -93,7 +93,10 @@ The debug JSONL mirror is part of this boundary: content-bearing agent, prompt,
 provider, tool, shell, or delegation events for ephemeral agents must be
 classified before logging. New event kinds that carry agent transcript content or
 reference prompt/tool-call ids must update that classifier and its regression
-tests.
+tests. Full `agent.prompt_created` observations are represented by a fixed-shape,
+content-free summary of bounded identifiers and saturating counts; system text,
+context items, tool schemas, and image bytes are never serialized into
+`events.jsonl`.
 
 Each debug JSON object and its trailing newline are serialized before immediate
 nonblocking admission to one bounded process-wide FIFO. The detached writer

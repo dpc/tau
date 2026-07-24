@@ -507,14 +507,14 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
             | Event::ProviderToolError(_)
     )));
     for (source, event) in derived {
-        let expected = if matches!(event, Event::ProviderResponseFinishedReported(_)) {
-            "provider"
-        } else {
-            HARNESS_CONNECTION_ID
+        let expected = match event {
+            Event::ProviderResponseFinishedReported(_) => Some("provider"),
+            Event::AgentPromptStarted(_) | Event::AgentPromptCreated(_) => None,
+            _ => Some(HARNESS_CONNECTION_ID),
         };
         assert_eq!(
             source.as_deref(),
-            Some(expected),
+            expected,
             "terminal report or successor {:?} has wrong authority",
             event.name(),
         );

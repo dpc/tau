@@ -394,6 +394,30 @@ pub(super) fn recv_event(peer: &mut SocketPeer) -> Result<Event, Box<dyn std::er
     Ok(recv_observed(peer)?.event)
 }
 
+/// Drains events already delivered before the daemon closes its socket.
+pub(super) fn recv_remaining_events(
+    peer: &mut SocketPeer,
+) -> Result<Vec<Event>, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut events = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match peer.recv_timeout(remaining)? {
+            SocketReceive::Message {
+                message: HarnessOutputMessage::Deliver(delivery),
+            } => events.push(delivery.into_parts().0),
+            SocketReceive::Message {
+                message: HarnessOutputMessage::Disconnect(_),
+            }
+            | SocketReceive::Closed => return Ok(events),
+            SocketReceive::Message { .. } => {}
+            SocketReceive::Timeout => {
+                return Err("timed out draining terminal daemon events".into());
+            }
+        }
+    }
+}
+
 pub(super) struct DaemonObserved {
     /// Delivered typed event.
     pub event: Event,

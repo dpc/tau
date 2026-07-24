@@ -788,10 +788,6 @@ pub(super) fn project_agent_replay_event(event: Event, is_ui: bool) -> Event {
                 Event::ProviderToolResult(result)
             }
         }
-        Event::AgentPromptCreated(mut prompt) => {
-            prompt.context.clear_provider_image_bytes();
-            Event::AgentPromptCreated(prompt)
-        }
         Event::AgentCompacted(mut compacted) => {
             tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
             Event::AgentCompacted(compacted)

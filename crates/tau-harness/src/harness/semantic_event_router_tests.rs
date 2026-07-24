@@ -498,22 +498,14 @@ fn persist_false_preserves_every_persistence_exception() {
         originator: PromptOriginator::User,
     };
     let exceptions = [
-        Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
+        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
             agent_prompt_id: "prompt-1".into(),
             agent_id: parse_agent_id("agent-1"),
             session_id: "session-1".into(),
-            system_prompt: String::new(),
-            context: tau_proto::PromptContext { blocks: Vec::new() },
-            tools: Vec::new(),
-            tools_ref: None,
             model: "test/model".parse().expect("model id"),
-            model_params: Default::default(),
-            tool_choice: Default::default(),
-            originator: PromptOriginator::User,
-            share_user_cache_key: false,
-            ctx_id: None,
-            compaction: None,
             operation: tau_proto::PromptOperation::Inference,
+            originator: PromptOriginator::User,
+            ctx_id: None,
         }),
         Event::ProviderToolResult(result),
         Event::ProviderToolError(error),

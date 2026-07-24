@@ -92,9 +92,7 @@ impl DebugEventLog {
                     tau_proto::HarnessInputMessage::UiDebugEventStatsRequest(_) => return Ok(()),
                     _ => "<message>".to_owned(),
                 };
-                let mut redacted_message = message.as_ref().clone();
-                redact_harness_input_message_binary_content(&mut redacted_message);
-                let mut frame_json = serde_json::to_value(redacted_message).unwrap_or_default();
+                let mut frame_json = debug_harness_input_json(message.as_ref());
                 compact_debug_json_strings(&mut frame_json);
                 serde_json::json!({
                     "type": "from_connection",
@@ -613,6 +611,48 @@ fn append_line(io: &mut impl LineIo, line: &[u8]) -> Result<LineAppendTiming, Li
     Ok(timing)
 }
 
+fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_json::Value {
+    match message {
+        tau_proto::HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::AgentPromptCreated(_)) =>
+        {
+            let Event::AgentPromptCreated(prompt) = emit.event.as_ref() else {
+                unreachable!();
+            };
+            serde_json::json!({
+                "message": "emit",
+                "payload": {
+                    "event": prompt_created_debug_summary(prompt),
+                    "persist": emit.persist,
+                },
+            })
+        }
+        tau_proto::HarnessInputMessage::InterceptReply(reply) => {
+            if let tau_proto::InterceptAction::Pass(Some(event)) = &reply.action
+                && let Event::AgentPromptCreated(prompt) = event.as_ref()
+            {
+                return serde_json::json!({
+                    "message": "intercept_reply",
+                    "payload": {
+                        "action": {
+                            "kind": "pass",
+                            "value": prompt_created_debug_summary(prompt),
+                        },
+                    },
+                });
+            }
+            let mut redacted = message.clone();
+            redact_harness_input_message_binary_content(&mut redacted);
+            serde_json::to_value(redacted).unwrap_or_default()
+        }
+        _ => {
+            let mut redacted = message.clone();
+            redact_harness_input_message_binary_content(&mut redacted);
+            serde_json::to_value(redacted).unwrap_or_default()
+        }
+    }
+}
+
 fn redact_harness_input_message_binary_content(message: &mut tau_proto::HarnessInputMessage) {
     match message {
         tau_proto::HarnessInputMessage::Emit(emit) => {
@@ -628,9 +668,101 @@ fn redact_harness_input_message_binary_content(message: &mut tau_proto::HarnessI
 }
 
 fn debug_event_json(event: &Event) -> serde_json::Value {
+    if let Event::AgentPromptCreated(prompt) = event {
+        return prompt_created_debug_summary(prompt);
+    }
     let mut redacted = event.clone();
     redact_event_binary_content(&mut redacted);
     serde_json::to_value(redacted).unwrap_or_default()
+}
+
+fn prompt_created_debug_summary(prompt: &tau_proto::AgentPromptCreated) -> serde_json::Value {
+    #[derive(Default)]
+    struct Counts {
+        items: u64,
+        text_bytes: u64,
+        images: u64,
+        image_bytes: u64,
+    }
+
+    fn add_tool_result(counts: &mut Counts, result: &tau_proto::ToolResultItem) {
+        for part in &result.provider_content {
+            let tau_proto::ToolResultContentPart::Image(image) = part;
+            counts.images = counts.images.saturating_add(1);
+            counts.image_bytes = counts
+                .image_bytes
+                .saturating_add(u64::try_from(image.data.len()).unwrap_or(u64::MAX));
+        }
+    }
+
+    fn add_item(counts: &mut Counts, item: &tau_proto::ContextItem) {
+        counts.items = counts.items.saturating_add(1);
+        match item {
+            tau_proto::ContextItem::Message(message) => {
+                for part in &message.content {
+                    let tau_proto::ContentPart::Text { text } = part;
+                    counts.text_bytes = counts
+                        .text_bytes
+                        .saturating_add(u64::try_from(text.len()).unwrap_or(u64::MAX));
+                }
+            }
+            tau_proto::ContextItem::ToolResult(result) => add_tool_result(counts, result),
+            tau_proto::ContextItem::ReasoningText(reasoning) => {
+                counts.text_bytes = counts
+                    .text_bytes
+                    .saturating_add(u64::try_from(reasoning.text.len()).unwrap_or(u64::MAX));
+            }
+            tau_proto::ContextItem::ToolCall(_)
+            | tau_proto::ContextItem::Reasoning(_)
+            | tau_proto::ContextItem::CompactionTrigger
+            | tau_proto::ContextItem::Compaction(_)
+            | tau_proto::ContextItem::UnknownProviderItem(_) => {}
+        }
+    }
+
+    let mut counts = Counts::default();
+    for block in &prompt.context.blocks {
+        match block {
+            tau_proto::ContextBlock::UserInput(block) => {
+                for item in &block.items {
+                    add_item(&mut counts, item);
+                }
+            }
+            tau_proto::ContextBlock::AssistantResponse(block) => {
+                for item in &block.output_items {
+                    add_item(&mut counts, item);
+                }
+            }
+            tau_proto::ContextBlock::ToolResults(block) => {
+                for result in &block.items {
+                    counts.items = counts.items.saturating_add(1);
+                    add_tool_result(&mut counts, result);
+                }
+            }
+        }
+    }
+
+    serde_json::json!({
+        "event": "agent.prompt_created",
+        "payload": {
+            "agent_prompt_id": prompt.agent_prompt_id,
+            "agent_id": prompt.agent_id,
+            "session_id": prompt.session_id,
+            "model": prompt.model,
+            "operation": prompt.operation,
+            "summary": {
+                "system_prompt_utf8_bytes":
+                    u64::try_from(prompt.system_prompt.len()).unwrap_or(u64::MAX),
+                "context_blocks":
+                    u64::try_from(prompt.context.blocks.len()).unwrap_or(u64::MAX),
+                "context_items": counts.items,
+                "context_text_utf8_bytes": counts.text_bytes,
+                "provider_images": counts.images,
+                "provider_image_bytes": counts.image_bytes,
+                "tools": u64::try_from(prompt.tools.len()).unwrap_or(u64::MAX),
+            },
+        },
+    })
 }
 
 fn redact_event_binary_content(event: &mut Event) {

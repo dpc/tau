@@ -74,6 +74,12 @@ logs/journals or interfaces with extensions require the separately reviewed,
 human-confirmed decision mandated by
 [DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
 
+Provider prompt materialization crosses the semantic-store and extension-route
+boundary: a durable dispatch owner permits one content-free prompt-start append,
+and only its data-synced post-commit continuation directs the transient full
+request to the selected provider. The authority and crash cuts are governed by
+[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
+
 Provider account quota is an ephemeral current-state cache. The harness accepts
 it only when every effective model route in the provider namespace has one
 unambiguous extension owner, and every binding names a route won by that owner.

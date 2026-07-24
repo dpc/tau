@@ -24,6 +24,40 @@ use tau_proto::{
     InterceptReply, InterceptRequest, InterceptionPriority,
 };
 
+/// One harness-owned full prompt carried from compact-fact admission through
+/// its one-shot post-commit delivery.
+#[derive(Clone)]
+pub(crate) struct PromptDispatchContinuation {
+    /// Exact compact fact that owns this continuation.
+    pub(crate) started: tau_proto::AgentPromptStarted,
+    /// Full transient provider work envelope.
+    pub(crate) prompt: std::sync::Arc<tau_proto::AgentPromptCreated>,
+    /// Provider route resolved from the captured model at admission.
+    pub(crate) provider_connection_id: tau_proto::ConnectionId,
+    /// Loaded runtime instance that materialized the request.
+    pub(crate) runtime_incarnation: u64,
+}
+
+/// Phase of an envelope-bound prompt continuation.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum PromptDispatchPhase {
+    /// The compact materialization fact has not committed yet.
+    Materialization,
+    /// The compact fact committed and the full transient envelope may deliver.
+    Delivery,
+}
+
+/// Exactly one action that may become runnable after a synchronized append.
+#[derive(Clone)]
+pub(crate) enum PostCommitContinuation {
+    /// Agent publication completion.
+    AgentPublish(Box<AgentPublishCompletion>),
+    /// Compact prompt fact awaiting its authoritative append.
+    PromptMaterialization(PromptDispatchContinuation),
+    /// Full transient prompt awaiting directed provider delivery.
+    PromptDelivery(PromptDispatchContinuation),
+}
+
 use crate::harness::Harness;
 use crate::harness::extensions::ExtensionFrameAdmission;
 
@@ -189,11 +223,43 @@ pub(crate) struct ConversationHeadSync {
     /// Suppress the ordinary activation obligation because a stronger
     /// envelope-bound continuation owns this publication batch.
     pub(crate) suppress_activation_dispatch: bool,
-    /// Exact action that becomes runnable only after this publication commits.
-    pub(crate) completion: Option<AgentPublishCompletion>,
+    /// Mutually exclusive action that becomes runnable only after this append.
+    pub(crate) continuation: Option<PostCommitContinuation>,
     /// Whether successful commit notifies this agent's watchers using the exact
     /// post-interception event text.
     pub(crate) notify_watchers: bool,
+}
+
+impl ConversationHeadSync {
+    /// Returns the exclusive agent-publication completion, when present.
+    pub(crate) fn completion(&self) -> Option<&AgentPublishCompletion> {
+        match self.continuation.as_ref() {
+            Some(PostCommitContinuation::AgentPublish(completion)) => Some(completion.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Returns the prompt continuation for either exclusive prompt phase.
+    pub(crate) fn prompt_dispatch(&self) -> Option<&PromptDispatchContinuation> {
+        match self.continuation.as_ref() {
+            Some(
+                PostCommitContinuation::PromptMaterialization(continuation)
+                | PostCommitContinuation::PromptDelivery(continuation),
+            ) => Some(continuation),
+            _ => None,
+        }
+    }
+
+    /// Returns which exclusive prompt continuation phase is present.
+    pub(crate) fn prompt_dispatch_phase(&self) -> Option<PromptDispatchPhase> {
+        match self.continuation.as_ref() {
+            Some(PostCommitContinuation::PromptMaterialization(_)) => {
+                Some(PromptDispatchPhase::Materialization)
+            }
+            Some(PostCommitContinuation::PromptDelivery(_)) => Some(PromptDispatchPhase::Delivery),
+            _ => None,
+        }
+    }
 }
 
 /// Harness-owned continuation bound to one exact agent publication envelope.
@@ -645,7 +711,7 @@ impl Harness {
         sync: Option<&ConversationHeadSync>,
     ) -> bool {
         sync.is_some_and(|sync| {
-            sync.completion.is_some() || matches!(event, Event::AgentInferenceDispatchStarted(_))
+            sync.continuation.is_some() || matches!(event, Event::AgentInferenceDispatchStarted(_))
         })
     }
 
@@ -667,7 +733,7 @@ impl Harness {
                 .sync_head_for
                 .as_ref()
                 .filter(|sync| &sync.cid == cid)
-                .and_then(|sync| sync.completion.as_ref())
+                .and_then(ConversationHeadSync::completion)
                 .is_none_or(|queued| queued.transaction_id() != transaction_id)
         });
     }
@@ -676,6 +742,7 @@ impl Harness {
     /// agent, suspend an in-flight responder, and resume unrelated FIFO
     /// work.
     pub(crate) fn cancel_agent_synchronized_publications(&mut self, cid: &AgentId) {
+        let mut canceled_prompt_ids = Vec::new();
         let removed_pending = self.pending_intercept.as_ref().is_some_and(|pending| {
             pending
                 .sync_head_for
@@ -691,19 +758,40 @@ impl Harness {
                 .pending_intercept
                 .take()
                 .expect("matched pending intercept");
+            if let Some(prompt_id) = pending
+                .sync_head_for
+                .as_ref()
+                .and_then(ConversationHeadSync::prompt_dispatch)
+                .map(|continuation| continuation.started.agent_prompt_id.clone())
+            {
+                canceled_prompt_ids.push(prompt_id);
+            }
             self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
             self.rollback_rejected_activation_successor(&pending.event);
         }
         self.deferred_publishes.retain(|publish| {
-            !(publish
+            let canceled = publish
                 .sync_head_for
                 .as_ref()
                 .is_some_and(|sync| &sync.cid == cid)
                 && Self::is_synchronized_agent_checkpoint_or_completion(
                     &publish.event,
                     publish.sync_head_for.as_ref(),
-                ))
+                );
+            if canceled
+                && let Some(prompt_id) = publish
+                    .sync_head_for
+                    .as_ref()
+                    .and_then(ConversationHeadSync::prompt_dispatch)
+                    .map(|continuation| continuation.started.agent_prompt_id.clone())
+            {
+                canceled_prompt_ids.push(prompt_id);
+            }
+            !canceled
         });
+        for prompt_id in canceled_prompt_ids {
+            self.dispose_prompt_dispatch_bookkeeping(&prompt_id);
+        }
         if removed_pending {
             // Canceling one agent's intercepted completion unblocks the global
             // FIFO. Preserve and resume every publication not owned by that
@@ -725,6 +813,14 @@ impl Harness {
                 &pending.event,
                 pending.sync_head_for.as_ref(),
             ) {
+                if let Some(prompt_id) = pending
+                    .sync_head_for
+                    .as_ref()
+                    .and_then(ConversationHeadSync::prompt_dispatch)
+                    .map(|continuation| continuation.started.agent_prompt_id.clone())
+                {
+                    self.dispose_prompt_dispatch_bookkeeping(&prompt_id);
+                }
                 self.rollback_rejected_activation_successor(&pending.event);
             } else {
                 // The switch already advanced session generation. Commit the
@@ -788,7 +884,7 @@ impl Harness {
                 agent_id,
                 session_generation: self.current_session_generation,
                 suppress_activation_dispatch: true,
-                completion: Some(completion),
+                continuation: Some(PostCommitContinuation::AgentPublish(Box::new(completion))),
                 notify_watchers,
             }),
         );
@@ -871,8 +967,15 @@ impl Harness {
             event,
             persist: _,
             must_pass: _,
-            sync_head_for: _,
+            sync_head_for,
         } = deferred;
+        if let Some(prompt_id) = sync_head_for
+            .as_ref()
+            .and_then(ConversationHeadSync::prompt_dispatch)
+            .map(|continuation| continuation.started.agent_prompt_id.clone())
+        {
+            self.dispose_prompt_dispatch_bookkeeping(&prompt_id);
+        }
         if Self::pending_external_receive_message_id(&event)
             .is_some_and(|id| self.pending_external_receive_acks.contains_key(id))
         {
@@ -1252,6 +1355,13 @@ impl Harness {
         admission: Option<ExtensionFrameAdmission>,
     ) {
         if self.semantic_publication_is_fail_stopped(&event, persist, sync_head_for.as_ref()) {
+            if let Some(prompt_id) = sync_head_for
+                .as_ref()
+                .and_then(ConversationHeadSync::prompt_dispatch)
+                .map(|continuation| continuation.started.agent_prompt_id.clone())
+            {
+                self.dispose_prompt_dispatch_bookkeeping(&prompt_id);
+            }
             return;
         }
         let shell_report_targets_ephemeral = match &event {
@@ -1646,6 +1756,13 @@ impl Harness {
                 sync_head_for,
             } = deferred;
             if self.semantic_publication_is_fail_stopped(&event, persist, sync_head_for.as_ref()) {
+                if let Some(prompt_id) = sync_head_for
+                    .as_ref()
+                    .and_then(ConversationHeadSync::prompt_dispatch)
+                    .map(|continuation| continuation.started.agent_prompt_id.clone())
+                {
+                    self.dispose_prompt_dispatch_bookkeeping(&prompt_id);
+                }
                 continue;
             }
             self.dispatch_publish_step(source, event, persist, must_pass, sync_head_for, None);
