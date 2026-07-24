@@ -1,5 +1,11 @@
 # SPEC-tau-ext-telegram-stream-owner: Telegram stream ownership
 
+## Record justification
+
+This contract spans registration and poller coordination in `src/lib.rs`,
+advisory ownership and diagnostics in `src/stream_owner.rs`, and gateway stream
+ownership, so no single implementation area can own it coherently.
+
 Before polling or draining one API-base-plus-token update stream, Tau acquires an
 exclusive advisory OS lock scoped to its shared state/extension root. The key is
 a non-secret BLAKE3 fingerprint; metadata may contain process details, API base,
@@ -15,6 +21,13 @@ active registrations. Production requires HTTPS; loopback HTTP is test-only;
 endpoint userinfo, query, and fragment are rejected. A non-secret API base may
 appear in lock metadata and bounded diagnostics; tokens, token-bearing URLs, and
 private text never do.
+
+An in-progress registration reserves stream-owner interest while its
+`getWebhookInfo` preflight runs without the state lock, but that reservation
+alone never authorizes `getUpdates`. The poller retires stream ownership only
+when there are neither registered agents nor pending registrations. Every
+failed or stale registration completion releases its reservation and wakes
+poller coordination.
 
 The first lazy local poll drains backlog without long polling and publishes none
 of the old updates. A stale-generation response cannot advance offset, mark the

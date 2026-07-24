@@ -129,11 +129,28 @@ impl TelegramClient for SlowPollClient {
     }
 }
 
+/// Fixture state for pausing exactly one webhook preflight at a deterministic
+/// point in registration.
+#[derive(Default)]
+enum WebhookCheckGate {
+    /// Webhook checks proceed immediately.
+    #[default]
+    Open,
+    /// The next webhook check must pause before returning.
+    BlockNext,
+    /// A webhook check is paused until the test releases it.
+    Waiting,
+}
+
 struct ControlledPollClient {
     first_response: Mutex<Option<Result<Vec<TgUpdate>, String>>>,
     response_ready: Condvar,
     called: Mutex<usize>,
     called_ready: Condvar,
+    /// State machine controlling one deterministic webhook-check pause.
+    webhook_check_gate: Mutex<WebhookCheckGate>,
+    /// Signals webhook-check gate transitions.
+    webhook_check_changed: Condvar,
 }
 
 impl ControlledPollClient {
@@ -143,7 +160,31 @@ impl ControlledPollClient {
             response_ready: Condvar::new(),
             called: Mutex::new(0),
             called_ready: Condvar::new(),
+            webhook_check_gate: Mutex::new(WebhookCheckGate::Open),
+            webhook_check_changed: Condvar::new(),
         })
+    }
+
+    fn block_next_webhook_check(&self) {
+        let mut gate = self.webhook_check_gate.lock().expect("lock");
+        assert!(matches!(*gate, WebhookCheckGate::Open));
+        *gate = WebhookCheckGate::BlockNext;
+    }
+
+    fn wait_for_blocked_webhook_check(&self) {
+        let gate = self.webhook_check_gate.lock().expect("lock");
+        drop(
+            self.webhook_check_changed
+                .wait_while(gate, |gate| !matches!(*gate, WebhookCheckGate::Waiting))
+                .expect("wait"),
+        );
+    }
+
+    fn release_webhook_check(&self) {
+        let mut gate = self.webhook_check_gate.lock().expect("lock");
+        assert!(matches!(*gate, WebhookCheckGate::Waiting));
+        *gate = WebhookCheckGate::Open;
+        self.webhook_check_changed.notify_all();
     }
 
     fn wait_for_call(&self) {
@@ -178,6 +219,16 @@ impl ControlledPollClient {
 
 impl TelegramClient for ControlledPollClient {
     fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String> {
+        let mut gate = self.webhook_check_gate.lock().expect("lock");
+        if matches!(*gate, WebhookCheckGate::BlockNext) {
+            *gate = WebhookCheckGate::Waiting;
+            self.webhook_check_changed.notify_all();
+            gate = self
+                .webhook_check_changed
+                .wait_while(gate, |gate| matches!(*gate, WebhookCheckGate::Waiting))
+                .expect("wait");
+        }
+        drop(gate);
         Ok(TgWebhookInfo::default())
     }
 
@@ -282,6 +333,19 @@ fn process_update(ext: &Extension, update: TgUpdate) {
 fn expect_tool_finished(rx: &mpsc::Receiver<HarnessInputMessage>) {
     let _progress = rx.recv().expect("progress");
     let _result = rx.recv().expect("result");
+}
+
+fn expect_tool_success(rx: &mpsc::Receiver<HarnessInputMessage>) {
+    let _progress = rx.recv().expect("progress");
+    let result = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = result else {
+        panic!("emit")
+    };
+    assert!(
+        matches!(emit.event.as_ref(), Event::ToolResultReported(_)),
+        "tool call must finish successfully, got {:?}",
+        emit.event
+    );
 }
 
 /// A successful Telegram send must submit `message.sent_reported` before its
@@ -1096,6 +1160,7 @@ fn telegram_register_fails_when_webhook_is_active() {
             .registered_agents
             .contains(&agent_id("agent-1"))
     );
+    assert_eq!(ext.state.lock().pending_local_registrations, 0);
 }
 
 /// If webhook status cannot be checked, registration fails closed so the tool
@@ -1123,6 +1188,7 @@ fn telegram_register_fails_when_webhook_preflight_fails() {
             .registered_agents
             .contains(&agent_id("agent-1"))
     );
+    assert_eq!(ext.state.lock().pending_local_registrations, 0);
 }
 
 /// Once Tau already owns and polls the update stream, additional local agents
@@ -2751,23 +2817,31 @@ fn old_generation_non_empty_poll_response_does_not_route_or_advance_offset() {
 
 /// A period with no registered agents is a stale-backlog boundary: Telegram
 /// messages observed while nobody is listening must advance offsets but must
-/// not route after a later registration.
+/// not route after a later registration. Re-registration deliberately pauses
+/// inside webhook preflight so the old poll must evaluate retirement while the
+/// registration reservation is the stream's only remaining owner interest.
 #[test]
 fn zero_registered_agents_redrains_backlog_before_routing() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
-    let ext = Extension::new(client.clone(), tx);
+    let ext = Arc::new(Extension::new(client.clone(), tx));
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
-    expect_tool_finished(&rx);
+    expect_tool_success(&rx);
 
     client.wait_for_call_count(1);
     client.release_first_response(Vec::new());
     client.wait_for_call_count(2);
 
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(false)));
-    expect_tool_finished(&rx);
+    expect_tool_success(&rx);
+    client.block_next_webhook_check();
+    let registering_ext = Arc::clone(&ext);
+    let registration = std::thread::spawn(move || {
+        registering_ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    });
+    client.wait_for_blocked_webhook_check();
     client.release_first_response(vec![TgUpdate {
         update_id: 20,
         message: Some(TgMessage {
@@ -2778,10 +2852,19 @@ fn zero_registered_agents_redrains_backlog_before_routing() {
             text: Some("stale while unregistered".to_owned()),
         }),
     }]);
-    assert!(rx.try_recv().is_err());
-
-    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
-    expect_tool_finished(&rx);
+    {
+        let mut state = ext.state.lock();
+        assert!(state.registered_agents.is_empty());
+        assert_eq!(state.pending_local_registrations, 1);
+        state.retire_update_stream_lock_if_idle();
+        assert!(
+            state.update_stream_lock.is_some(),
+            "pending registration must retain update-stream ownership"
+        );
+    }
+    client.release_webhook_check();
+    registration.join().expect("registration thread");
+    expect_tool_success(&rx);
     client.wait_for_call_count(3);
     client.release_first_response(Vec::new());
     client.wait_for_call_count(4);
@@ -2803,6 +2886,68 @@ fn zero_registered_agents_redrains_backlog_before_routing() {
         panic!("message.delivered_reported event")
     };
     assert_eq!(report.text, "fresh after reregister");
+}
+
+/// A re-registration made stale by same-stream reconfiguration must release
+/// its pending owner interest and wake poller coordination so the idle stream
+/// lock can retire instead of remaining pinned by a failed tool call.
+#[test]
+fn stale_reregistration_releases_pending_stream_interest() {
+    let (tx, rx) = mpsc::channel();
+    let client = ControlledPollClient::new();
+    let ext = Arc::new(Extension::new(client.clone(), tx));
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_success(&rx);
+    client.wait_for_call_count(1);
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(2);
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(false)));
+    expect_tool_success(&rx);
+
+    client.block_next_webhook_check();
+    let registering_ext = Arc::clone(&ext);
+    let registration = std::thread::spawn(move || {
+        registering_ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    });
+    client.wait_for_blocked_webhook_check();
+
+    let mut reconfigured = cfg();
+    reconfigured.poll_timeout_seconds = 2;
+    ext.apply_config(reconfigured, Some(temp_state_dir()))
+        .expect("apply same-stream config");
+    let observed_generation = ext.state.lock().coordination_generation;
+    let waiting_state = Arc::clone(&ext.state);
+    let (waiting_tx, waiting_rx) = mpsc::channel();
+    let (woke_tx, woke_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let state = waiting_state.lock();
+        waiting_tx.send(()).expect("report waiter ready");
+        let mut state = waiting_state.wait_while(state, |state| {
+            state.coordination_generation == observed_generation
+        });
+        assert_ne!(state.coordination_generation, observed_generation);
+        state.retire_update_stream_lock_if_idle();
+        assert!(state.update_stream_lock.is_none());
+        woke_tx.send(()).expect("report coordination wake");
+    });
+    waiting_rx.recv().expect("coordination waiter ready");
+
+    client.release_first_response(Vec::new());
+    client.release_webhook_check();
+    registration.join().expect("registration thread");
+    let message = expect_tool_error(&rx);
+    assert!(
+        message.contains("configuration changed while checking webhook status"),
+        "{message}"
+    );
+    woke_rx.recv().expect("failed registration wakes poller");
+    waiter.join().expect("coordination waiter");
+    let state = ext.state.lock();
+    assert_eq!(state.pending_local_registrations, 0);
+    assert!(state.registered_agents.is_empty());
+    assert!(state.update_stream_lock.is_none());
 }
 
 /// Error backoff uses the shared-state condvar so a config change wakes it

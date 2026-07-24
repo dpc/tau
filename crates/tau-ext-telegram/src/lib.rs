@@ -340,6 +340,9 @@ struct State {
     state_dir: Option<std::path::PathBuf>,
     config_generation: ConfigGeneration,
     registered_agents: HashSet<AgentId>,
+    /// Local registration calls that have reserved update-stream ownership
+    /// while checking Telegram webhook status without holding the state mutex.
+    pending_local_registrations: usize,
     agent_labels: HashMap<AgentId, String>,
     /// Current local Tau session observed from `session.started`.
     /// Gateway-client mode never announces agent routes until this is
@@ -498,6 +501,20 @@ impl State {
     /// Record a change to config, registration, or shutdown that affects waits.
     fn mark_coordination_changed(&mut self) {
         self.coordination_generation = self.coordination_generation.wrapping_add(1);
+    }
+
+    /// Return whether registered or registering agents still need ownership of
+    /// the local Telegram update stream.
+    fn has_update_stream_interest(&self) -> bool {
+        !self.registered_agents.is_empty() || self.pending_local_registrations != 0
+    }
+
+    /// Release update-stream ownership after all registered and registering
+    /// agents have gone away.
+    fn retire_update_stream_lock_if_idle(&mut self) {
+        if !self.has_update_stream_interest() {
+            self.update_stream_lock = None;
+        }
     }
 
     /// Acquire the advisory stream lock unless this state already holds it.
@@ -864,19 +881,25 @@ impl Extension {
                 if let Err(message) = state.ensure_update_stream_locked(&cfg) {
                     return tool_error(invoke, message);
                 }
+                state.pending_local_registrations += 1;
                 let config_generation = state.config_generation;
                 drop(state);
-                if let Err(message) = self.check_webhook_allows_get_updates(&cfg, config_generation)
-                {
+                let webhook_result = self.check_webhook_allows_get_updates(&cfg, config_generation);
+                state = self.state.lock();
+                state.pending_local_registrations -= 1;
+                if let Err(message) = webhook_result {
+                    state.mark_coordination_changed();
+                    self.state.notify_all();
                     return tool_error(invoke, message);
                 }
-                state = self.state.lock();
                 if state.config_generation != config_generation
                     || state
                         .config
                         .as_ref()
                         .is_none_or(|current| !current.uses_same_update_stream_as(&cfg))
                 {
+                    state.mark_coordination_changed();
+                    self.state.notify_all();
                     return tool_error(
                         invoke,
                         "telegram configuration changed while checking webhook status".to_owned(),
@@ -887,6 +910,8 @@ impl Extension {
                     .as_ref()
                     .is_some_and(|lock| lock.covers(cfg.stream_identity()))
                 {
+                    state.mark_coordination_changed();
+                    self.state.notify_all();
                     return tool_error(
                         invoke,
                         "telegram update-stream lock was lost while checking webhook status"
@@ -1660,13 +1685,9 @@ fn wait_for_poller_ready_or_shutdown(
     shutdown: &AtomicBool,
 ) -> Option<PollRequest> {
     let mut state = state_cell.lock();
-    if state.registered_agents.is_empty() {
-        state.update_stream_lock = None;
-    }
+    state.retire_update_stream_lock_if_idle();
     state = state_cell.wait_while(state, |state| {
-        if state.registered_agents.is_empty() {
-            state.update_stream_lock = None;
-        }
+        state.retire_update_stream_lock_if_idle();
         !state.shutdown_requested
             && (state.config.is_none()
                 || state.registered_agents.is_empty()

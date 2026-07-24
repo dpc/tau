@@ -3,6 +3,8 @@
 Tests are hermetic. Use `FakeClient` for Bot API behavior and loopback Unix
 sockets for gateway/sidecar behavior; never require credentials, public network
 access, or wall-clock sleeps.
+Concurrency regressions use fixture-controlled barriers to force the relevant
+interleaving rather than depending on scheduler timing or stress frequency.
 
 Extension tests own Telegram admission, routing, offset and lease behavior,
 duplicate suppression, transient `message.*_reported` metadata, and serialized
