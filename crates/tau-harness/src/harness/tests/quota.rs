@@ -17,6 +17,9 @@ fn quota_model() -> tau_proto::ProviderModelInfo {
         supports_compaction: false,
         supports_standalone_compaction: false,
         standalone_compaction_threshold: None,
+        est_uncached_input_cost_1m_usd: Default::default(),
+        est_cached_input_cost_1m_usd: Default::default(),
+        est_output_cost_1m_usd: Default::default(),
     }
 }
 

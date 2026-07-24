@@ -168,3 +168,10 @@ published provider/model route can generate multiple direct tool calls in one
 response. It is an effective route capability, not abstract model metadata.
 Legacy publishers that omit it decode as `true`; publishers serialize their
 effective value explicitly.
+
+`ProviderModelInfo` also carries optional fixed-point estimated USD prices per
+million uncached input, provider-reported cached input, and output tokens.
+Omitted categories resolve independently to the central GPT-5.6-equivalent
+fallback. These values are basic equivalent-API comparison metadata, not billing
+facts; provider declarations must reject negative, malformed, or over-precise
+decimals.

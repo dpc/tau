@@ -317,6 +317,13 @@ interception completion, and replay do not reapply the write. Extensions cannot
 mutate this state. Harness-authored `agent.stats_updated` snapshots are must-pass
 and immutable because they carry the complete shared classification.
 
+Those transient snapshots also carry the loaded agent's runtime-only estimated
+equivalent API cost. The harness prices each accepted provider usage record
+incrementally with that record's provider-qualified serving model, conservatively
+treats missing cached-token detail as uncached input, and saturates fixed-point
+accumulation. Loading a fresh runtime agent starts at zero; durable replay does
+not reconstruct or reprice historical usage.
+
 ## Directed agent-roster reads
 
 `get_current_session` is accepted from an attached local socket/control

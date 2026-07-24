@@ -1420,6 +1420,9 @@ fn quiet_provider_harness_for_with_start_reason_and_persistence(
                         supports_compaction: true,
                         supports_standalone_compaction: false,
                         standalone_compaction_threshold: None,
+                        est_uncached_input_cost_1m_usd: Default::default(),
+                        est_cached_input_cost_1m_usd: Default::default(),
+                        est_output_cost_1m_usd: Default::default(),
                     }],
                 },
             )))?;

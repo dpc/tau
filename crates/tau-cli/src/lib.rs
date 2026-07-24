@@ -12,6 +12,7 @@ mod agent_navigation;
 mod chat;
 mod daemon;
 mod dev_tmux;
+mod estimated_cost;
 mod event_renderer;
 mod line_output;
 mod list_agents;

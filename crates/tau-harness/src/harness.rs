@@ -2258,6 +2258,9 @@ pub struct Harness {
     /// attribute the corresponding finished response even if the user
     /// switches models while it is in flight.
     pub(crate) prompt_models: std::collections::HashMap<AgentPromptId, ModelId>,
+    /// Cost rates captured with each exact provider dispatch so later provider
+    /// metadata changes cannot reprice its usage.
+    prompt_estimated_cost_rates: HashMap<AgentPromptId, tau_proto::EstimatedApiCostRates>,
     /// Immutable content-free context projection captured at provider dispatch.
     prompt_context_limits: HashMap<AgentPromptId, PromptContextLimitSnapshot>,
     /// Effective named context-size alerts captured for each provider prompt so
@@ -2448,6 +2451,9 @@ where
                 supports_compaction: true,
                 supports_standalone_compaction: false,
                 standalone_compaction_threshold: None,
+                est_uncached_input_cost_1m_usd: Default::default(),
+                est_cached_input_cost_1m_usd: Default::default(),
+                est_output_cost_1m_usd: Default::default(),
             }],
         }),
         false,
@@ -2970,6 +2976,7 @@ impl Harness {
             selected_model: parts.selected_model,
             current_session_state: CurrentSessionState::default(),
             prompt_models: HashMap::new(),
+            prompt_estimated_cost_rates: HashMap::new(),
             prompt_context_limits: HashMap::new(),
             prompt_context_size_alerts: HashMap::new(),
             prompt_semantic_output: HashSet::new(),
@@ -4559,14 +4566,36 @@ impl Harness {
         event: &Event,
         provider_connection_id: tau_proto::ConnectionId,
     ) {
-        let Some(agent_prompt_id) = (match event {
-            Event::AgentPromptCreated(prompt) => Some(&prompt.agent_prompt_id),
+        let Some((agent_prompt_id, model)) = (match event {
+            Event::AgentPromptCreated(prompt) => Some((&prompt.agent_prompt_id, &prompt.model)),
             _ => None,
         }) else {
             return;
         };
+        let rates = self
+            .provider_models_by_extension
+            .get(provider_connection_id.as_str())
+            .and_then(|models| {
+                models
+                    .iter()
+                    .rfind(|candidate| candidate.id == *model)
+                    .map(ProviderModelInfo::estimated_api_cost_rates)
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    target: "tau_harness",
+                    %provider_connection_id,
+                    %model,
+                    %agent_prompt_id,
+                    "successful provider route has no matching pricing snapshot; \
+                     using estimated API cost fallback"
+                );
+                tau_proto::ESTIMATED_API_COST_FALLBACK
+            });
         self.pending_provider_prompts
             .insert(agent_prompt_id.clone(), provider_connection_id);
+        self.prompt_estimated_cost_rates
+            .insert(agent_prompt_id.clone(), rates);
     }
 
     fn recover_failed_provider_prompt_route(
@@ -4620,6 +4649,7 @@ impl Harness {
         self.prompt_operations.remove(&agent_prompt_id);
         self.prompt_context_limits.remove(&agent_prompt_id);
         self.prompt_context_size_alerts.remove(&agent_prompt_id);
+        self.prompt_estimated_cost_rates.remove(&agent_prompt_id);
         self.clear_prompt_tool_snapshot(&agent_prompt_id);
         if let Some(model) = self.prompt_models.remove(&agent_prompt_id) {
             self.current_session_state.token_usage.total.requests = self
@@ -16348,6 +16378,7 @@ impl Harness {
                 context_window,
                 percent_used: agent.context_percent_used,
             },
+            estimated_api_cost: agent.estimated_api_cost,
         })
     }
 
@@ -18345,6 +18376,7 @@ impl Harness {
         self.ephemeral_provider_retry_requests.clear();
         self.pending_provider_prompts.clear();
         self.prompt_models.clear();
+        self.prompt_estimated_cost_rates.clear();
         self.prompt_context_limits.clear();
         self.prompt_context_size_alerts.clear();
         self.prompt_semantic_output.clear();
@@ -22143,6 +22175,18 @@ impl Harness {
             }
             return Ok(());
         }
+        if active_compaction_response
+            && !self.standalone_compaction_response_matches_current_branch(&cid, &response)
+        {
+            self.fail_standalone_compaction(
+                &cid,
+                &response,
+                tau_proto::StandaloneCompactionFailureReason::StaleBranch,
+                source,
+            );
+            self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+            return Ok(());
+        }
         self.clear_malformed_repetition_output(&mut response);
         let mut tool_calls = tool_calls_from_output_items(&response.output_items);
         let assistant_text = assistant_text_from_output_items(&response.output_items);
@@ -22241,6 +22285,7 @@ impl Harness {
             cached_tokens,
             output_tokens,
         );
+        self.add_finished_response_estimated_cost(&cid, &response, source);
         let (requested_tool_calls, tool_calls_with_non_tool_stop) =
             self.reconcile_finished_response_tool_call_stop(&response, &tool_calls);
         let prompt_operation = self
@@ -22540,6 +22585,20 @@ impl Harness {
             telemetry.recovery_eligible = true;
             telemetry.action = tau_proto::ContextLimitAction::ReactiveCompactionPlanned;
         }
+        let input_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.prompt_sent_tokens);
+        let cached_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.prompt_cached_tokens);
+        let output_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.response_received_tokens);
+        self.attach_finished_response_usage(response, input_tokens, cached_tokens, output_tokens);
+        self.add_finished_response_estimated_cost(cid, response, source);
         self.publish_for_agent_from(
             cid,
             source,
@@ -22744,68 +22803,24 @@ impl Harness {
         response: &ProviderResponseFinished,
         source: Option<&str>,
     ) {
-        let Some((
-            transaction_id,
-            cut,
-            resume_through,
-            model,
-            branch_generation,
-            compact_prompt_id,
-        )) = self
-            .agents
-            .get(cid)
-            .and_then(|agent| match &agent.activation_dispatch {
-                crate::agent::ActivationDispatchState::Running {
-                    id,
-                    cut,
-                    resume_through,
-                    model,
-                    branch_generation,
-                    compact_prompt_id,
-                    ..
-                } => Some((
-                    id.clone(),
-                    *cut,
-                    *resume_through,
-                    model.clone(),
-                    *branch_generation,
-                    compact_prompt_id.clone(),
-                )),
-                _ => None,
-            })
+        let Some((transaction_id, cut, model, compact_prompt_id)) =
+            self.agents
+                .get(cid)
+                .and_then(|agent| match &agent.activation_dispatch {
+                    crate::agent::ActivationDispatchState::Running {
+                        id,
+                        cut,
+                        model,
+                        compact_prompt_id,
+                        ..
+                    } => Some((id.clone(), *cut, model.clone(), compact_prompt_id.clone())),
+                    _ => None,
+                })
         else {
             self.emit_info("ignoring standalone compaction response without an active transaction");
             return;
         };
-        if compact_prompt_id != response.agent_prompt_id {
-            self.emit_info(
-                "ignoring standalone compaction response with mismatched transaction prompt",
-            );
-            return;
-        }
-        let suffix_head = self.agents.get(cid).and_then(|agent| agent.head);
-        let branch_matches = resume_through.is_none_or(|resume| {
-            self.agents
-                .get(cid)
-                .and_then(|agent| agent.agent_id.as_deref())
-                .and_then(|agent_id| self.agent_store.agent(agent_id))
-                .is_some_and(|tree| {
-                    tree.is_ancestor_head(
-                        resume,
-                        suffix_head.map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                    )
-                })
-        });
-        let operation_matches = self
-            .agents
-            .get(cid)
-            .and_then(|agent| self.model_for_agent_role(agent))
-            .is_some_and(|prompt_model| prompt_model == model);
-        let branch_generation_matches = self
-            .agents
-            .get(cid)
-            .is_some_and(|agent| agent.branch_generation == branch_generation);
-        if !branch_matches || !branch_generation_matches || !operation_matches {
+        if !self.standalone_compaction_response_matches_current_branch(cid, response) {
             self.fail_standalone_compaction(
                 cid,
                 response,
@@ -22835,6 +22850,60 @@ impl Harness {
         );
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+    }
+
+    fn standalone_compaction_response_matches_current_branch(
+        &self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+    ) -> bool {
+        let Some((resume_through, model, branch_generation, compact_prompt_id)) = self
+            .agents
+            .get(cid)
+            .and_then(|agent| match &agent.activation_dispatch {
+                crate::agent::ActivationDispatchState::Running {
+                    resume_through,
+                    model,
+                    branch_generation,
+                    compact_prompt_id,
+                    ..
+                } => Some((
+                    *resume_through,
+                    model,
+                    *branch_generation,
+                    compact_prompt_id,
+                )),
+                _ => None,
+            })
+        else {
+            return false;
+        };
+        if compact_prompt_id != &response.agent_prompt_id {
+            return false;
+        }
+        let suffix_head = self.agents.get(cid).and_then(|agent| agent.head);
+        let branch_matches = resume_through.is_none_or(|resume| {
+            self.agents
+                .get(cid)
+                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent_id| self.agent_store.agent(agent_id))
+                .is_some_and(|tree| {
+                    tree.is_ancestor_head(
+                        resume,
+                        suffix_head.map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                    )
+                })
+        });
+        let operation_matches = self
+            .agents
+            .get(cid)
+            .and_then(|agent| self.model_for_agent_role(agent))
+            .is_some_and(|prompt_model| prompt_model == *model);
+        let branch_generation_matches = self
+            .agents
+            .get(cid)
+            .is_some_and(|agent| agent.branch_generation == branch_generation);
+        branch_matches && branch_generation_matches && operation_matches
     }
 
     fn reject_standalone_compaction(
@@ -22925,6 +22994,7 @@ impl Harness {
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(agent_prompt_id);
         self.prompt_models.remove(agent_prompt_id);
+        self.prompt_estimated_cost_rates.remove(agent_prompt_id);
         self.prompt_semantic_output.remove(agent_prompt_id);
         self.prompt_operations.remove(agent_prompt_id);
         self.clear_prompt_tool_snapshot(agent_prompt_id);
@@ -23144,6 +23214,34 @@ impl Harness {
                 stats: self.current_session_state.token_usage.clone(),
             });
         }
+    }
+
+    fn add_finished_response_estimated_cost(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        source: Option<&str>,
+    ) {
+        let captured_rates = self
+            .prompt_estimated_cost_rates
+            .remove(&response.agent_prompt_id);
+        let Some(usage) = response.usage.as_ref() else {
+            return;
+        };
+        let rates = captured_rates.unwrap_or_else(|| {
+            tracing::warn!(
+                target: "tau_harness",
+                agent_prompt_id = %response.agent_prompt_id,
+                model = ?usage.model,
+                "accepted provider response has no dispatch pricing snapshot; \
+                 using estimated API cost fallback"
+            );
+            tau_proto::ESTIMATED_API_COST_FALLBACK
+        });
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.estimated_api_cost.add_usage(usage, rates);
+        }
+        self.emit_agent_stats_updated_from(cid, source);
     }
 
     fn attach_finished_response_compaction_usage(

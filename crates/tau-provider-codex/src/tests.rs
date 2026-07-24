@@ -2,6 +2,30 @@ use std::sync::Arc;
 
 use super::*;
 
+/// Published ChatGPT models carry the basic OpenAI API prices used for
+/// equivalent-cost estimation.
+#[test]
+fn chatgpt_models_publish_provider_owned_basic_prices() {
+    let models = models_for_provider(&ProviderName::new("chatgpt"));
+    let sol = models
+        .iter()
+        .find(|model| model.id.model.as_str() == "gpt-5.6-sol")
+        .expect("sol model")
+        .estimated_api_cost_rates();
+    let mini = models
+        .iter()
+        .find(|model| model.id.model.as_str() == "gpt-5.4-mini")
+        .expect("mini model")
+        .estimated_api_cost_rates();
+
+    assert_eq!(sol.uncached_input.as_micro_usd(), 5_000_000);
+    assert_eq!(sol.cached_input.as_micro_usd(), 500_000);
+    assert_eq!(sol.output.as_micro_usd(), 30_000_000);
+    assert_eq!(mini.uncached_input.as_micro_usd(), 750_000);
+    assert_eq!(mini.cached_input.as_micro_usd(), 75_000);
+    assert_eq!(mini.output.as_micro_usd(), 4_500_000);
+}
+
 #[derive(Default)]
 struct TransportCounts {
     ws_upgrade_requests: std::sync::atomic::AtomicUsize,

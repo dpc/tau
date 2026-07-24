@@ -269,6 +269,9 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
         }),
         tags: Vec::new(),
         supports_parallel_tool_calls: true,
+        est_uncached_input_cost_1m_usd: None,
+        est_cached_input_cost_1m_usd: None,
+        est_output_cost_1m_usd: None,
     })
 }
 

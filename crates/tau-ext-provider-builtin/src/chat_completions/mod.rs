@@ -60,6 +60,15 @@ pub struct ChatCompletionsModel {
     /// Whether this model may produce multiple Function calls in one turn.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_parallel_tool_calls: bool,
+    /// Estimated USD price per million uncached input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_uncached_input_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
+    /// Estimated USD price per million provider-reported cached input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_cached_input_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
+    /// Estimated USD price per million output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_output_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
 }
 
 /// Serialized OpenAI-compatible request controls.

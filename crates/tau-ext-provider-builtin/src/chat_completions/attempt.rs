@@ -46,6 +46,9 @@ pub fn models_for_provider(
                 supports_compaction: false,
                 supports_standalone_compaction: false,
                 standalone_compaction_threshold: None,
+                est_uncached_input_cost_1m_usd: model.est_uncached_input_cost_1m_usd,
+                est_cached_input_cost_1m_usd: model.est_cached_input_cost_1m_usd,
+                est_output_cost_1m_usd: model.est_output_cost_1m_usd,
             }
         })
         .collect()

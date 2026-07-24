@@ -2561,6 +2561,9 @@ pub struct AgentStatsUpdated {
     pub tools: AgentToolStats,
     /// Latest context usage known to the harness.
     pub context: AgentContextStats,
+    /// Runtime-lifetime estimated equivalent API cost for this agent.
+    #[serde(default)]
+    pub estimated_api_cost: crate::EstimatedApiCost,
 }
 /// A modality that a provider route can accept as prompt input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2637,6 +2640,34 @@ pub struct ProviderModelInfo {
     /// compaction. `None` means no provider default is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standalone_compaction_threshold: Option<u64>,
+    /// Estimated USD price per million uncached input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_uncached_input_cost_1m_usd: Option<crate::EstimatedUsdPerMillion>,
+    /// Estimated USD price per million provider-reported cached input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_cached_input_cost_1m_usd: Option<crate::EstimatedUsdPerMillion>,
+    /// Estimated USD price per million output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_output_cost_1m_usd: Option<crate::EstimatedUsdPerMillion>,
+}
+
+impl ProviderModelInfo {
+    /// Resolve explicit basic pricing, using the central GPT-5.6 equivalent for
+    /// each omitted price.
+    #[must_use]
+    pub fn estimated_api_cost_rates(&self) -> crate::EstimatedApiCostRates {
+        crate::EstimatedApiCostRates {
+            uncached_input: self
+                .est_uncached_input_cost_1m_usd
+                .unwrap_or(crate::ESTIMATED_API_COST_FALLBACK.uncached_input),
+            cached_input: self
+                .est_cached_input_cost_1m_usd
+                .unwrap_or(crate::ESTIMATED_API_COST_FALLBACK.cached_input),
+            output: self
+                .est_output_cost_1m_usd
+                .unwrap_or(crate::ESTIMATED_API_COST_FALLBACK.output),
+        }
+    }
 }
 
 /// Provider extension declaration of its currently available models.

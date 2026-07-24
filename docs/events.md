@@ -200,7 +200,8 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   disable; late subscribers receive only current non-empty snapshots.
 - **`agent.stats_updated`** — Transient, content-free operational snapshot for
   one loaded agent: runtime state, current/cumulative tool counters, and latest
-  context usage. It replaces the old delegation-specific progress stream.
+  context usage, plus runtime-only estimated equivalent API cost. It replaces the
+  old delegation-specific progress stream.
 - **`agent.prompt_terminated`** — A prompt ended without an accepted
   `provider.response_finished` (stale or canceled). Runtime lifecycle state.
   Canceling exact ordinary checkpointed inference also releases its runtime

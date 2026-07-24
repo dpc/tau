@@ -31,6 +31,12 @@ an exact configured model in the selected namespace. Missing or invalid mutable
 profile, model, or auth state remains visibly pending and is resolved again for
 later attempts.
 
+Each configured Chat Completions model may publish fixed-point basic USD prices
+per million uncached input, provider-reported cached input, and output tokens.
+Missing categories use the central GPT-5.6-equivalent fallback. ChatGPT models
+publish the corresponding OpenAI basic public API prices; these are comparison
+metadata rather than subscription or private-route billing facts.
+
 The extension also owns the serialized Chat Completions and OpenRouter DTOs,
 OpenRouter discovery/cache behavior, configured-model publication, and conversion
 to the Chat Completions backend's non-serialized finite-attempt inputs. The

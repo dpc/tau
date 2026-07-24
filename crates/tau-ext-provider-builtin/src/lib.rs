@@ -912,6 +912,9 @@ fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<d
             compat: None,
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
+            est_uncached_input_cost_1m_usd: None,
+            est_cached_input_cost_1m_usd: None,
+            est_output_cost_1m_usd: None,
         });
     }
     if models.is_empty() {

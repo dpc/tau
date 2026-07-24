@@ -17,6 +17,99 @@ fn parallel_capability_defaults_true_and_is_omitted() {
     assert!(value.get("supports_parallel_tool_calls").is_none());
 }
 
+/// Explicit compatible-model prices validate as fixed-point decimals and
+/// publish unchanged into provider model metadata.
+#[test]
+fn estimated_cost_prices_validate_and_publish() {
+    let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "priced",
+        "context_window": 4096,
+        "est_uncached_input_cost_1m_usd": "2.5",
+        "est_cached_input_cost_1m_usd": "0.25",
+        "est_output_cost_1m_usd": 15
+    }))
+    .expect("priced model");
+    let provider = ChatCompletionsProvider {
+        models: vec![model],
+        ..ChatCompletionsProvider::default()
+    };
+
+    let published = models_for_provider(&tau_proto::ProviderName::new("remote"), &provider);
+    let rates = published[0].estimated_api_cost_rates();
+    assert_eq!(rates.uncached_input.as_micro_usd(), 2_500_000);
+    assert_eq!(rates.cached_input.as_micro_usd(), 250_000);
+    assert_eq!(rates.output.as_micro_usd(), 15_000_000);
+
+    for invalid in [
+        serde_json::json!({
+            "id": "negative",
+            "est_uncached_input_cost_1m_usd": -1
+        }),
+        serde_json::json!({
+            "id": "malformed",
+            "est_output_cost_1m_usd": "free"
+        }),
+    ] {
+        let error =
+            serde_json::from_value::<ChatCompletionsModel>(invalid).expect_err("invalid price");
+        assert!(error.to_string().contains("estimated USD price"));
+    }
+}
+
+/// Unpriced compatible/local models resolve all categories through the
+/// universal GPT-5.6 equivalent rather than presenting unavailable or free
+/// pricing.
+#[test]
+fn unpriced_local_model_uses_central_fallback() {
+    let provider = ChatCompletionsProvider {
+        models: vec![ChatCompletionsModel {
+            id: ModelName::new("local-free"),
+            display_name: None,
+            context_window: 4096,
+            compat: None,
+            tags: Vec::new(),
+            supports_parallel_tool_calls: true,
+            est_uncached_input_cost_1m_usd: None,
+            est_cached_input_cost_1m_usd: None,
+            est_output_cost_1m_usd: None,
+        }],
+        ..ChatCompletionsProvider::default()
+    };
+
+    let published = models_for_provider(&tau_proto::ProviderName::new("local"), &provider);
+
+    assert_eq!(
+        published[0].estimated_api_cost_rates(),
+        tau_proto::ESTIMATED_API_COST_FALLBACK
+    );
+}
+
+/// Each omitted price category falls back independently without replacing an
+/// explicit category from the profile.
+#[test]
+fn partially_priced_model_uses_per_category_fallbacks() {
+    let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "partial",
+        "context_window": 4096,
+        "est_cached_input_cost_1m_usd": "0.25"
+    }))
+    .expect("partially priced model");
+    let provider = ChatCompletionsProvider {
+        models: vec![model],
+        ..ChatCompletionsProvider::default()
+    };
+
+    let published = models_for_provider(&tau_proto::ProviderName::new("remote"), &provider);
+    let rates = published[0].estimated_api_cost_rates();
+
+    assert_eq!(
+        rates.uncached_input,
+        tau_proto::ESTIMATED_API_COST_FALLBACK.uncached_input
+    );
+    assert_eq!(rates.cached_input.as_micro_usd(), 250_000);
+    assert_eq!(rates.output, tau_proto::ESTIMATED_API_COST_FALLBACK.output);
+}
+
 /// Ensures an explicit false publication capability survives serialization
 /// independently from request-field compatibility.
 #[test]
@@ -32,6 +125,9 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
             }),
             tags: Vec::new(),
             supports_parallel_tool_calls: false,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         }],
         ..ChatCompletionsProvider::default()
     };

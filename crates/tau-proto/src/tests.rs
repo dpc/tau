@@ -827,6 +827,7 @@ fn representative_events() -> Vec<Event> {
                 started_total: 1,
             },
             context: AgentContextStats::default(),
+            estimated_api_cost: Default::default(),
         }),
         Event::SessionStarted(SessionStarted {
             session_id: "s1".into(),
@@ -1185,6 +1186,9 @@ fn representative_events() -> Vec<Event> {
                 supports_compaction: false,
                 supports_standalone_compaction: false,
                 standalone_compaction_threshold: None,
+                est_uncached_input_cost_1m_usd: Default::default(),
+                est_cached_input_cost_1m_usd: Default::default(),
+                est_output_cost_1m_usd: Default::default(),
             }],
         }),
         Event::ProviderQuotaReplaceReported(ProviderQuotaReplace {
@@ -3263,6 +3267,7 @@ fn agent_stats_updated_serde_round_trip() {
             context_window: Some(200_000),
             percent_used: Some(21),
         },
+        estimated_api_cost: Default::default(),
     };
     let value =
         serde_json::to_value(Event::AgentStatsUpdated(update.clone())).expect("serialize stats");

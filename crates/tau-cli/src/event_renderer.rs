@@ -1038,6 +1038,8 @@ enum StatusElement {
     Watchers,
     /// Weekly provider quota pacing.
     WeeklyQuota,
+    /// Runtime estimated equivalent API cost.
+    EstimatedCost,
     /// Optional UI-to-harness throughput diagnostics.
     UiIoDebug,
     /// Optional full-redraw counter.
@@ -1053,7 +1055,7 @@ impl StatusElement {
             Self::Tools | Self::ActiveAgents => 20,
             Self::Description | Self::ModelAdjustment => 30,
             Self::Watchers => 40,
-            Self::WeeklyQuota => 50,
+            Self::WeeklyQuota | Self::EstimatedCost => 50,
             Self::UiIoDebug => 60,
             Self::RedrawDebug => 70,
         };
@@ -3129,6 +3131,23 @@ impl EventRenderer {
                 StatusElement::Context.priority(),
                 right,
                 status_chip(&self.theme, names::STATUS_CONTEXT, format!("#{context}")),
+            );
+        }
+        if let Some(agent_id) = self.current_agent_id.as_deref() {
+            let cost = self
+                .agent_stats
+                .get(agent_id)
+                .map_or_else(tau_proto::EstimatedApiCost::default, |stats| {
+                    stats.estimated_api_cost
+                });
+            line.push(
+                StatusElement::EstimatedCost.priority(),
+                right,
+                status_chip(
+                    &self.theme,
+                    names::STATUS_CONTEXT,
+                    crate::estimated_cost::format_compact(cost),
+                ),
             );
         }
         if self.show_ui_io {

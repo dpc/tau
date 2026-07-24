@@ -282,6 +282,9 @@
         "xhigh",
         "max"
       ],
+      "est_cached_input_cost_1m_usd": "0.5",
+      "est_output_cost_1m_usd": "30",
+      "est_uncached_input_cost_1m_usd": "5",
       "id": "chatgpt/gpt-5.6-sol",
       "input_modalities": [
         "text",
@@ -327,6 +330,9 @@
         "xhigh",
         "max"
       ],
+      "est_cached_input_cost_1m_usd": "0.25",
+      "est_output_cost_1m_usd": "15",
+      "est_uncached_input_cost_1m_usd": "2.5",
       "id": "chatgpt/gpt-5.6-terra",
       "input_modalities": [
         "text",
@@ -372,6 +378,9 @@
         "xhigh",
         "max"
       ],
+      "est_cached_input_cost_1m_usd": "0.1",
+      "est_output_cost_1m_usd": "6",
+      "est_uncached_input_cost_1m_usd": "1",
       "id": "chatgpt/gpt-5.6-luna",
       "input_modalities": [
         "text",
@@ -416,6 +425,9 @@
         "high",
         "xhigh"
       ],
+      "est_cached_input_cost_1m_usd": "0.5",
+      "est_output_cost_1m_usd": "30",
+      "est_uncached_input_cost_1m_usd": "5",
       "id": "chatgpt/gpt-5.5",
       "input_modalities": [
         "text"
@@ -457,6 +469,9 @@
         "high",
         "xhigh"
       ],
+      "est_cached_input_cost_1m_usd": "0.25",
+      "est_output_cost_1m_usd": "15",
+      "est_uncached_input_cost_1m_usd": "2.5",
       "id": "chatgpt/gpt-5.4",
       "input_modalities": [
         "text"
@@ -497,6 +512,9 @@
         "medium",
         "high"
       ],
+      "est_cached_input_cost_1m_usd": "0.075",
+      "est_output_cost_1m_usd": "4.5",
+      "est_uncached_input_cost_1m_usd": "0.75",
       "id": "chatgpt/gpt-5.4-mini",
       "input_modalities": [
         "text"
@@ -538,6 +556,9 @@
         "high",
         "xhigh"
       ],
+      "est_cached_input_cost_1m_usd": "0.175",
+      "est_output_cost_1m_usd": "14",
+      "est_uncached_input_cost_1m_usd": "1.75",
       "id": "chatgpt/gpt-5.3-codex",
       "input_modalities": [
         "text"
@@ -631,6 +652,7 @@
       "account_id_present": true,
       "backend": "responses",
       "base_url": "https://chatgpt.com/backend-api",
+      "credential_present": true,
       "mode": "lite_compatibility",
       "model": "gpt-5.6-sol",
       "raw_context_window": 372000,
@@ -643,8 +665,7 @@
       "supports_reasoning_summary": true,
       "supports_verbosity": true,
       "supports_websocket": true,
-      "surface": "chatgpt",
-      "credential_present": true
+      "surface": "chatgpt"
     },
     {
       "backend": "chat_completions",
@@ -668,13 +689,13 @@
           "prompt_cache_key": true,
           "stream_options": true
         },
+        "credential_present": true,
         "extra_body": {
           "chat_template_kwargs": {
             "enable_thinking": true
           }
         },
-        "max_output_tokens": 4096,
-        "credential_present": true
+        "max_output_tokens": 4096
       },
       "requested": "local/local-model"
     },
@@ -700,9 +721,9 @@
           "reasoning_effort": true,
           "stream_options": true
         },
+        "credential_present": true,
         "extra_body": {},
-        "max_output_tokens": 8192,
-        "credential_present": true
+        "max_output_tokens": 8192
       },
       "requested": "router/vendor/model"
     },

@@ -108,6 +108,10 @@ effective window published to the harness. Standalone compaction thresholds
 derive from the raw window, while UI usage and local context limits use the
 provider's 95-percent effective ceiling.
 
+The same model metadata publishes fixed-point equivalent API prices from
+OpenAI's basic public pricing table. This estimate deliberately excludes tiers,
+cache writes, service variants, subscriptions, and private-route accounting.
+
 ## Prompt-cache identity
 
 First-party ChatGPT/Codex prompt-cache keys are stable per provider base URL, startup-selected Responses mode, and durable

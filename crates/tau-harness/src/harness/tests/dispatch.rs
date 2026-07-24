@@ -4483,6 +4483,9 @@ fn provider_model_info(
         supports_compaction: false,
         supports_standalone_compaction: false,
         standalone_compaction_threshold: None,
+        est_uncached_input_cost_1m_usd: Default::default(),
+        est_cached_input_cost_1m_usd: Default::default(),
+        est_output_cost_1m_usd: Default::default(),
     }
 }
 
@@ -5729,6 +5732,8 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.prompt_estimated_cost_rates
+        .insert(spid.clone(), tau_proto::ESTIMATED_API_COST_FALLBACK);
     h.handle_provider_response_finished(ProviderResponseFinished {
         agent_prompt_id: spid,
         agent_id: crate::parse_agent_id(&target_agent_id),
@@ -5745,7 +5750,10 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        usage: None,
+        usage: Some(tau_proto::ProviderTokenUsage {
+            prompt_sent_tokens: 1_000_000,
+            ..tau_proto::ProviderTokenUsage::default()
+        }),
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
@@ -6532,7 +6540,10 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         failure_kind: None,
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        usage: None,
+        usage: Some(tau_proto::ProviderTokenUsage {
+            prompt_sent_tokens: 1_000_000,
+            ..tau_proto::ProviderTokenUsage::default()
+        }),
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
@@ -6548,6 +6559,13 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         .count();
     assert_eq!(response_count_after, response_count_before);
     assert!(!h.canceled_prompts.contains(&spid));
+    assert_eq!(
+        h.agent_stats_snapshot(&cid)
+            .expect("agent stats")
+            .estimated_api_cost,
+        tau_proto::EstimatedApiCost::default(),
+        "a late canceled terminal must not charge the agent"
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -6730,11 +6748,27 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
                     supports_compaction: false,
                     supports_standalone_compaction: false,
                     standalone_compaction_threshold: None,
+                    est_uncached_input_cost_1m_usd:
+                        tau_proto::EstimatedUsdPerMillion::checked_from_usd(1),
+                    est_cached_input_cost_1m_usd:
+                        tau_proto::EstimatedUsdPerMillion::checked_from_usd(1),
+                    est_output_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(1),
                 }],
             },
         )),
     )
     .expect("provider model snapshot");
+    let mut earlier_duplicate = h.provider_models_by_extension["provider-owner"][0].clone();
+    earlier_duplicate.est_uncached_input_cost_1m_usd =
+        tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
+    earlier_duplicate.est_cached_input_cost_1m_usd =
+        tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
+    earlier_duplicate.est_output_cost_1m_usd =
+        tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
+    h.provider_models_by_extension
+        .get_mut("provider-owner")
+        .expect("provider snapshot")
+        .insert(0, earlier_duplicate);
     h.provider_model_info.insert(
         model_id.clone(),
         tau_proto::ProviderModelInfo {
@@ -6753,6 +6787,9 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(10),
+            est_cached_input_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(10),
+            est_output_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(10),
         },
     );
     h.provider_model_routes
@@ -6765,6 +6802,7 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
 
     append_user_message_via_event(&mut h, "s1", "hello");
     let spid = h.send_prompt_to_agent("s1");
+    let cid = h.prompt_agents[&spid].clone();
 
     let frame_is_prompt = |routed: &RoutedFrame, spid: &AgentPromptId| {
         matches!(
@@ -6797,7 +6835,48 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
         "provider observers should not receive provider-owned prompt execution"
     );
 
+    h.provider_models_by_extension
+        .get_mut("provider-owner")
+        .expect("serving provider snapshot")[0]
+        .est_uncached_input_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
+    h.provider_model_info
+        .get_mut(&"openai/gpt-5.5".into())
+        .expect("flattened model metadata")
+        .est_uncached_input_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
+    let mut response =
+        provider_text_response(&spid, crate::parse_agent_id("main"), "priced response");
+    response.usage = Some(tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 1_000_000,
+        ..tau_proto::ProviderTokenUsage::default()
+    });
+    h.handle_extension_event(
+        "provider-owner",
+        TestProtocolItem::Event(Event::ProviderResponseFinishedReported(response)),
+    )
+    .expect("serving provider terminal");
+    assert_eq!(
+        h.agent_stats_snapshot(&cid)
+            .expect("agent stats")
+            .estimated_api_cost
+            .as_picodollars(),
+        1_000_000_000_000,
+        "the successful provider route must retain its dispatch-time price"
+    );
+
     h.shutdown().expect("shutdown");
+    drop(h);
+    wait_for_session_unlock(&sp, "s1");
+    let mut resumed = echo_harness(&sp).expect("resume");
+    let resumed_cid = ensure_test_user_agent(&mut resumed);
+    assert_eq!(
+        resumed
+            .agent_stats_snapshot(&resumed_cid)
+            .expect("resumed stats")
+            .estimated_api_cost,
+        tau_proto::EstimatedApiCost::default(),
+        "runtime-only estimates must reset after cold reload"
+    );
+    resumed.shutdown().expect("resumed shutdown");
 }
 
 #[test]
@@ -6847,6 +6926,9 @@ fn provider_execution_events_must_come_from_prompt_owner() {
                     supports_compaction: false,
                     supports_standalone_compaction: false,
                     standalone_compaction_threshold: None,
+                    est_uncached_input_cost_1m_usd: Default::default(),
+                    est_cached_input_cost_1m_usd: Default::default(),
+                    est_output_cost_1m_usd: Default::default(),
                 }],
             },
         )),
@@ -6870,6 +6952,9 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
     );
     h.provider_model_routes
@@ -10870,12 +10955,42 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
+    let model: tau_proto::ModelId = "test/model".into();
+    let provider_owner = h.provider_model_routes[&model].clone();
+    let serving_model = h
+        .provider_models_by_extension
+        .get_mut(provider_owner.as_str())
+        .expect("provider-owned model snapshot")
+        .iter_mut()
+        .rfind(|candidate| candidate.id == model)
+        .expect("serving model");
+    serving_model.est_uncached_input_cost_1m_usd =
+        tau_proto::EstimatedUsdPerMillion::checked_from_usd(1);
+    serving_model.est_cached_input_cost_1m_usd =
+        tau_proto::EstimatedUsdPerMillion::checked_from_usd(1);
+    serving_model.est_output_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(1);
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow activation".to_owned()))
         .expect("dispatch inference");
     let inference = read_nth_prompt_created(&h, 0);
+    let serving_model = h
+        .provider_models_by_extension
+        .get_mut(provider_owner.as_str())
+        .expect("provider-owned model snapshot")
+        .iter_mut()
+        .rfind(|candidate| candidate.id == model)
+        .expect("serving model");
+    serving_model.est_uncached_input_cost_1m_usd =
+        tau_proto::EstimatedUsdPerMillion::checked_from_usd(2);
+    serving_model.est_cached_input_cost_1m_usd =
+        tau_proto::EstimatedUsdPerMillion::checked_from_usd(2);
+    serving_model.est_output_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(2);
     let turn_generation = h.agents[&cid].turn_generation;
     let mut rejected = context_overflow_response(&inference);
+    rejected.usage = Some(tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 1_000_000,
+        ..tau_proto::ProviderTokenUsage::default()
+    });
     rejected.context_limit_telemetry = Some(tau_proto::ContextLimitTelemetry {
         model: "evil/forged".parse().expect("model"),
         operation: tau_proto::PromptOperation::StandaloneCompaction,
@@ -10890,8 +11005,26 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
         action: tau_proto::ContextLimitAction::Terminal,
         observation: tau_proto::ContextLimitObservation::RejectedAtOrAboveAdvertisedLimit,
     });
-    h.handle_provider_response_finished(rejected)
+    h.handle_provider_response_finished(rejected.clone())
         .expect("plan reactive recovery");
+    assert_eq!(
+        h.agent_stats_snapshot(&cid)
+            .expect("post-rejection stats")
+            .estimated_api_cost
+            .as_picodollars(),
+        1_000_000_000_000,
+        "accepted overflow usage uses the inference dispatch snapshot"
+    );
+    h.handle_provider_response_finished(rejected)
+        .expect("ignore duplicate overflow terminal");
+    assert_eq!(
+        h.agent_stats_snapshot(&cid)
+            .expect("post-duplicate stats")
+            .estimated_api_cost
+            .as_picodollars(),
+        1_000_000_000_000,
+        "duplicate overflow terminal must not charge twice"
+    );
     let compact = read_nth_prompt_created(&h, 1);
     assert_eq!(
         compact.operation,
@@ -10928,14 +11061,14 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
             .transcript_delta_bytes
             .is_some_and(|bytes| bytes > 0)
     );
-    assert_eq!(telemetry.provider_input_tokens, None);
+    assert_eq!(telemetry.provider_input_tokens, Some(1_000_000));
     assert_eq!(
         telemetry.compaction_policy,
         tau_proto::ContextLimitCompactionPolicy::ProviderDefault
     );
     assert_eq!(
         telemetry.observation,
-        tau_proto::ContextLimitObservation::InsufficientEvidence
+        tau_proto::ContextLimitObservation::RejectedAtOrAboveAdvertisedLimit
     );
     assert!(telemetry.recovery_eligible);
     assert_eq!(
@@ -10974,11 +11107,22 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
         tau_proto::AgentWatchProviderState::RecoveringContext { .. }
     ));
 
-    h.handle_provider_response_finished(
-        strict_fake_compact_response(&compact)
-            .expect("strict fake provider accepts only a balanced compact timeline"),
-    )
-    .expect("accept compact response");
+    let mut compact_response = strict_fake_compact_response(&compact)
+        .expect("strict fake provider accepts only a balanced compact timeline");
+    compact_response.usage = Some(tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 1_000_000,
+        ..tau_proto::ProviderTokenUsage::default()
+    });
+    h.handle_provider_response_finished(compact_response)
+        .expect("accept compact response");
+    assert_eq!(
+        h.agent_stats_snapshot(&cid)
+            .expect("post-compaction stats")
+            .estimated_api_cost
+            .as_picodollars(),
+        3_000_000_000_000,
+        "compaction usage uses its fresh $2 dispatch snapshot"
+    );
     let continuation = read_nth_prompt_created(&h, 2);
     assert_eq!(
         continuation.operation,
@@ -12451,12 +12595,14 @@ fn standalone_compaction_rejects_response_after_head_navigation() {
                 .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
         }),
     );
-    h.handle_provider_response_finished(provider_text_response(
-        &compact.agent_prompt_id,
-        compact.agent_id,
-        "stale summary",
-    ))
-    .expect("handle stale response");
+    let mut stale_response =
+        provider_text_response(&compact.agent_prompt_id, compact.agent_id, "stale summary");
+    stale_response.usage = Some(tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 1_000_000,
+        ..tau_proto::ProviderTokenUsage::default()
+    });
+    h.handle_provider_response_finished(stale_response)
+        .expect("handle stale response");
 
     assert_eq!(
         event_log_events(&h)
@@ -12474,6 +12620,13 @@ fn standalone_compaction_rejects_response_after_head_navigation() {
         !event_log_events(&h)
             .into_iter()
             .any(|event| matches!(event, Event::AgentCompacted(_)))
+    );
+    assert_eq!(
+        h.agent_stats_snapshot(&cid)
+            .expect("agent stats")
+            .estimated_api_cost,
+        tau_proto::EstimatedApiCost::default(),
+        "a stale terminal must not charge the agent"
     );
     h.shutdown().expect("shutdown");
 }
@@ -13969,6 +14122,9 @@ fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             supports_compaction: true,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
     );
 }
@@ -22586,6 +22742,70 @@ fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
             && snapshot.tools.started_total == 1
             && snapshot.context.input_tokens == Some(250)
     }));
+    h.shutdown().expect("shutdown");
+}
+
+/// Harness-owned estimates start at zero for a newly loaded runtime agent and
+/// accumulate each accepted usage record with that serving model's current
+/// explicit or fallback prices.
+#[test]
+fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    assert_eq!(
+        h.agent_stats_snapshot(&cid)
+            .expect("initial stats")
+            .estimated_api_cost,
+        tau_proto::EstimatedApiCost::default()
+    );
+
+    let model_a = tau_proto::ModelId::from("provider-a/model");
+    let mut info_a = provider_model_info(model_a.clone(), 1_000);
+    info_a.est_uncached_input_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(1);
+    info_a.est_cached_input_cost_1m_usd =
+        Some(tau_proto::EstimatedUsdPerMillion::from_micro_usd(500_000));
+    info_a.est_output_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(2);
+    h.provider_model_info.insert(model_a.clone(), info_a);
+    h.prompt_estimated_cost_rates.insert(
+        "cost-prompt".into(),
+        h.provider_model_info[&model_a].estimated_api_cost_rates(),
+    );
+    h.provider_model_info
+        .get_mut(&model_a)
+        .expect("model metadata")
+        .est_uncached_input_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
+    let response = |model: tau_proto::ModelId| tau_proto::ProviderResponseFinished {
+        usage: Some(tau_proto::ProviderTokenUsage {
+            model: Some(model),
+            prompt_sent_tokens: 1_000_000,
+            prompt_cached_tokens: 0,
+            response_received_tokens: 0,
+            stats: Default::default(),
+        }),
+        ..provider_text_response(
+            &tau_proto::AgentPromptId::from("cost-prompt"),
+            crate::parse_agent_id("main"),
+            "ok",
+        )
+    };
+
+    h.add_finished_response_estimated_cost(&cid, &response(model_a), None);
+    h.add_finished_response_estimated_cost(
+        &cid,
+        &response(tau_proto::ModelId::from("local/unpriced")),
+        None,
+    );
+
+    assert_eq!(
+        h.agent_stats_snapshot(&cid)
+            .expect("updated stats")
+            .estimated_api_cost
+            .as_picodollars(),
+        6_000_000_000_000,
+        "dispatch-captured $1 remains unchanged, plus universal fallback $5"
+    );
     h.shutdown().expect("shutdown");
 }
 

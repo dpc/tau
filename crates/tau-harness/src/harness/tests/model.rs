@@ -71,6 +71,9 @@ fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
         supports_compaction: false,
         supports_standalone_compaction: false,
         standalone_compaction_threshold: None,
+        est_uncached_input_cost_1m_usd: Default::default(),
+        est_cached_input_cost_1m_usd: Default::default(),
+        est_output_cost_1m_usd: Default::default(),
     }
 }
 
@@ -1027,6 +1030,9 @@ fn provider_model_metadata_drives_selection_state() {
                 supports_compaction: false,
                 supports_standalone_compaction: false,
                 standalone_compaction_threshold: None,
+                est_uncached_input_cost_1m_usd: Default::default(),
+                est_cached_input_cost_1m_usd: Default::default(),
+                est_output_cost_1m_usd: Default::default(),
             }],
         })),
     )
@@ -1077,6 +1083,9 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1094,6 +1103,9 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
     ]);
 
@@ -1207,6 +1219,9 @@ fn role_without_effort_picks_middle_provider_effort() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1224,6 +1239,9 @@ fn role_without_effort_picks_middle_provider_effort() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
     ]);
     let roles = std::collections::HashMap::from([(
@@ -1387,6 +1405,9 @@ fn role_missing_fields_use_model_defaults() {
         supports_compaction: false,
         supports_standalone_compaction: false,
         standalone_compaction_threshold: None,
+        est_uncached_input_cost_1m_usd: Default::default(),
+        est_cached_input_cost_1m_usd: Default::default(),
+        est_output_cost_1m_usd: Default::default(),
     }]);
     let params = selected_params_for_role(&provider_models, &roles, "plain", &selected);
     assert_eq!(params.effort, Effort::Low);
@@ -1416,6 +1437,9 @@ fn role_without_verbosity_picks_low_when_supported() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1433,6 +1457,9 @@ fn role_without_verbosity_picks_low_when_supported() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
     ]);
     let roles = std::collections::HashMap::from([(
@@ -1925,6 +1952,9 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1942,6 +1972,9 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
     ]);
 
@@ -2008,6 +2041,9 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
         ProviderModelInfo {
             id: locked.clone(),
@@ -2025,6 +2061,9 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
     ]);
 
@@ -2070,6 +2109,9 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -2087,6 +2129,9 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            est_uncached_input_cost_1m_usd: Default::default(),
+            est_cached_input_cost_1m_usd: Default::default(),
+            est_output_cost_1m_usd: Default::default(),
         },
     ]);
 
@@ -2137,6 +2182,9 @@ fn selected_params_use_runtime_role_fields() {
         supports_compaction: false,
         supports_standalone_compaction: false,
         standalone_compaction_threshold: None,
+        est_uncached_input_cost_1m_usd: Default::default(),
+        est_cached_input_cost_1m_usd: Default::default(),
+        est_output_cost_1m_usd: Default::default(),
     }]);
 
     let params = selected_params_for_role(&provider_models, &roles, selected_role, &model);

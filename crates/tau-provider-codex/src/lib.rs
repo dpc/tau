@@ -925,6 +925,7 @@ fn model_info(
     model: &str,
     mode: responses::ResponsesMode,
 ) -> ProviderModelInfo {
+    let prices = estimated_api_prices(model);
     ProviderModelInfo {
         id: ModelId::new(provider.clone(), ModelName::new(model)),
         display_name: None,
@@ -964,6 +965,33 @@ fn model_info(
         supports_standalone_compaction: is_gpt_5_6(model),
         standalone_compaction_threshold: is_gpt_5_6(model)
             .then_some((raw_context_window_for_model(model) * 9 / 10).max(1000)),
+        est_uncached_input_cost_1m_usd: Some(prices.uncached_input),
+        est_cached_input_cost_1m_usd: Some(prices.cached_input),
+        est_output_cost_1m_usd: Some(prices.output),
+    }
+}
+
+/// Basic standard-processing API prices from OpenAI's provider-owned table:
+/// <https://developers.openai.com/api/docs/pricing>.
+///
+/// Tau deliberately ignores tiers, cache writes, batch discounts, and service
+/// variants. These values are estimates for equivalent API use even when the
+/// actual ChatGPT route is subscription-backed.
+fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
+    use tau_proto::{EstimatedApiCostRates, EstimatedUsdPerMillion as Price};
+
+    let (uncached, cached, output) = match model {
+        "gpt-5.6-sol" | "gpt-5.5" => (5_000_000, 500_000, 30_000_000),
+        "gpt-5.6-terra" | "gpt-5.4" => (2_500_000, 250_000, 15_000_000),
+        "gpt-5.6-luna" => (1_000_000, 100_000, 6_000_000),
+        "gpt-5.4-mini" => (750_000, 75_000, 4_500_000),
+        "gpt-5.3-codex" => (1_750_000, 175_000, 14_000_000),
+        _ => return tau_proto::ESTIMATED_API_COST_FALLBACK,
+    };
+    EstimatedApiCostRates {
+        uncached_input: Price::from_micro_usd(uncached),
+        cached_input: Price::from_micro_usd(cached),
+        output: Price::from_micro_usd(output),
     }
 }
 

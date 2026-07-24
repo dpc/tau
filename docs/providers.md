@@ -109,6 +109,9 @@ struct ProviderModelInfo {
     efforts: Vec<Effort>,
     verbosities: Vec<Verbosity>,
     thinking_summaries: Vec<ThinkingSummary>,
+    est_uncached_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
+    est_cached_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
+    est_output_cost_1m_usd: Option<EstimatedUsdPerMillion>,
 }
 ```
 
@@ -120,6 +123,31 @@ lists contain `image`; omitted lists preserve legacy text-only behavior.
 `supports_parallel_tool_calls` is the effective route capability used to make
 system-prompt guidance truthful; it is not merely abstract model metadata.
 Publishing a model means it is available; no separate `enabled` flag is needed initially.
+
+The three optional `est_*_cost_1m_usd` fields publish basic USD prices per
+million tokens. Decimal strings preserve fixed-point values on the provider wire;
+the built-in Chat Completions profile parser also accepts non-negative integer
+JSON numbers. Fractional configured prices must use decimal strings with at most
+six fractional digits so validation never rounds through binary floating point.
+Missing fields use the central
+GPT-5.6-equivalent fallback: `$5` uncached input, `$.50` cached input, and `$30`
+output per million tokens. This fallback intentionally applies to local and free
+models too.
+
+The harness applies the serving model's prices to each accepted usage record and
+accumulates a runtime-only estimate per loaded agent. If a provider reports total
+input without cached-token detail, Tau treats all input as uncached. The status
+chip is an **estimated equivalent API cost**, not a bill: it ignores cache writes,
+long-context and other tiers, batch or service discounts, regional and negotiated
+pricing, subscriptions, and private-route accounting. It resets when the agent is
+loaded into a new harness runtime and is not reconstructed from durable history.
+The display rounds aggressively to fit `$` plus three characters (`$.03`, `$2.1`,
+`$23`, `$12k`).
+
+Hardcoded ChatGPT/Codex model prices come from OpenAI's provider-owned
+[API pricing table](https://developers.openai.com/api/docs/pricing). Configured
+compatible providers own their explicit values; refresh those profile fields from
+that provider's basic public pricing table.
 
 The harness records which extension sent the snapshot and uses that as routing state.
 If multiple snapshots advertise the same provider-qualified `ModelId`, the

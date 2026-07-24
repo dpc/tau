@@ -61,6 +61,15 @@ API-key OpenAI Responses provider.
 The extension has no ordinary `extensions.provider-builtin.config` schema for provider credentials; credentials belong in provider auth/profile storage, not harness config.
 ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.
 
+Compatible model entries may also set
+`est_uncached_input_cost_1m_usd`, `est_cached_input_cost_1m_usd`, and
+`est_output_cost_1m_usd` to non-negative decimal USD prices per million
+tokens. Use quoted decimal strings for fractional prices; integer JSON numbers
+are also accepted. Missing values use the central GPT-5.6-equivalent `$5`/`$.50`/`$30`
+fallback, including local and free models. Hardcoded ChatGPT model values follow
+OpenAI's basic public API pricing table. The harness accumulates this deliberately
+rough equivalent-API estimate per agent for the current runtime only.
+
 ChatGPT's full account quota snapshot is acquired best-effort from `/wham/usage`
 and reconciled with sparse in-band WebSocket `codex.rate_limits` observations
 without delaying model work. Tau shows neutral `Q?` for a selected model when provider quota
