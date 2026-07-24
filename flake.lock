@@ -174,11 +174,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1781893196,
-        "narHash": "sha256-Zx0NliwKh6F+szPnG3Qk4F9GbskyZzXccL3zkz/4R4U=",
+        "lastModified": 1784873470,
+        "narHash": "sha256-OUmoYQZuLV+GFMhFYjSVwYjNAHXhNRvBJ8Mq7z8S/bs=",
         "ref": "refs/heads/master",
-        "rev": "1475d4d5a992892e902e5ef1b9956afd0237fe4c",
-        "revCount": 20,
+        "rev": "63173e634ae963af6771d0f59ae7ef9013442447",
+        "revCount": 73,
         "type": "git",
         "url": "https://radicle.dpc.pw/z2HR882B4c4mTdAgdt4SozpdeTuMf.git"
       },
@@ -421,16 +421,32 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1781216227,
-        "narHash": "sha256-9mUW6gNwoN2SWc/l0fW4svPNOulXLl8ijqKyeSOGgJE=",
+        "lastModified": 1784707089,
+        "narHash": "sha256-2V/6imsUgB7mPZlHY54oeVBRDoZbPKnvzwkAHUSSufk=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "a0374025a863d007d98e3297f6aa46cc3141c2f0",
+        "rev": "b3fe9581c9061c749abef42b6d4ee7b7c05c33fa",
         "type": "github"
       },
       "original": {
         "owner": "NixOS",
         "ref": "nixos-26.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs-unstable": {
+      "locked": {
+        "lastModified": 1783776592,
+        "narHash": "sha256-UgCQzxeWI75XM8G+hPrPh+MKzEPjG3SpAj7dtqSbksA=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
         "repo": "nixpkgs",
         "type": "github"
       }
@@ -518,14 +534,15 @@
         "flakebox": "flakebox_2",
         "nixpkgs": [
           "nixpkgs"
-        ]
+        ],
+        "nixpkgs-unstable": "nixpkgs-unstable"
       },
       "locked": {
-        "lastModified": 1781636864,
-        "narHash": "sha256-ENHVYKVqsoVwadFWwuuiPFqI1jebSUdmTkCvnb6/K3s=",
+        "lastModified": 1784067993,
+        "narHash": "sha256-WG+nqPXh2jSKSoALvAxJzjSrsNDtL7rPPsPecLOACqo=",
         "ref": "refs/heads/master",
-        "rev": "030c74a59d2325a669926d1ac4d7438e9621d30f",
-        "revCount": 129,
+        "rev": "b1847724e182ad5dee276aed80f6bc6b4e0cddf4",
+        "revCount": 133,
         "type": "git",
         "url": "https://radicle.dpc.pw/z2tDzYbAXxTQEKTGFVwiJPajkbeDU.git"
       },
