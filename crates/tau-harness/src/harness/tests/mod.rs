@@ -1918,5 +1918,6 @@ mod retry;
 mod strict_compaction_provider;
 
 use strict_compaction_provider::{
-    strict_compaction_provider_harness, validate_closed_tool_timeline,
+    strict_compaction_provider_harness, strict_compaction_provider_harness_with_start_reason,
+    validate_closed_tool_timeline,
 };

@@ -234,6 +234,17 @@ fn run_provider(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::
 pub(super) fn strict_compaction_provider_harness(
     state_dir: impl Into<PathBuf>,
 ) -> Result<Harness, HarnessError> {
+    strict_compaction_provider_harness_with_start_reason(
+        state_dir,
+        tau_proto::SessionStartReason::Initial,
+    )
+}
+
+/// Creates the strict compaction-provider harness for a selected session start.
+pub(super) fn strict_compaction_provider_harness_with_start_reason(
+    state_dir: impl Into<PathBuf>,
+    start_reason: tau_proto::SessionStartReason,
+) -> Result<Harness, HarnessError> {
     fn runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         run_provider(r, w).map_err(|error| error.to_string())
     }
@@ -248,7 +259,7 @@ pub(super) fn strict_compaction_provider_harness(
         runner,
         Vec::new(),
         "s1",
-        tau_proto::SessionStartReason::Initial,
+        start_reason,
         tau_core::SessionPersistenceMode::Durable,
     )?;
     h.agent_id_rng = super::super::deterministic_agent_id_rng();

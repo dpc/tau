@@ -15560,6 +15560,429 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
     );
 }
 
+/// Cold recovery of a validated manual-tool start without an outcome must
+/// terminalize the target as interrupted, complete the caller's background call
+/// with one error, and never resend or repeat either repair.
+#[test]
+fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let caller_id =
+        tau_proto::AgentId::parse("caller-interrupted-prefix").expect("caller agent id");
+    let target_id =
+        tau_proto::AgentId::parse("target-interrupted-prefix").expect("target agent id");
+    let request_id =
+        tau_proto::CompactionRequestId::parse("cr-interrupted-prefix").expect("request id");
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-interrupted-prefix").expect("transaction id");
+    let initiating_prompt_id = tau_proto::AgentPromptId::from("ap-caller-interrupted-prefix");
+    let compact_prompt_id = tau_proto::AgentPromptId::from("ap-target-interrupted-prefix-compact");
+    let call_id = ToolCallId::from("call-interrupted-prefix");
+    let tool_name = ToolName::new("agent_compact");
+    let is_target_correlation = |event: &Event| match event {
+        Event::AgentManualCompactionRequested(event) => event.request_id == request_id,
+        Event::AgentManualCompactionRequestFailed(event) => event.request_id == request_id,
+        Event::AgentStandaloneCompactionStarted(event) => {
+            event.transaction_id == transaction_id
+                || matches!(
+                    &event.trigger,
+                    tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+                        request_id: event_request_id,
+                        ..
+                    } if event_request_id == &request_id
+                )
+        }
+        Event::AgentStandaloneCompactionFailed(event) => event.transaction_id == transaction_id,
+        Event::AgentCompacted(event) => event.transaction_id.as_ref() == Some(&transaction_id),
+        Event::AgentInferenceDispatchStarted(event) => {
+            event.transaction_id.as_ref() == Some(&transaction_id)
+        }
+        Event::AgentPromptCreated(event) => event.agent_prompt_id == compact_prompt_id,
+        Event::ProviderResponseFinished(event) => event.agent_prompt_id == compact_prompt_id,
+        _ => false,
+    };
+    let is_caller_correlation =
+        |event: &Event| match event {
+            Event::ProviderResponseFinished(event) => event.agent_prompt_id == initiating_prompt_id
+                && event.output_items.iter().any(
+                    |item| matches!(item, ContextItem::ToolCall(call) if call.call_id == call_id),
+                ),
+            Event::ProviderToolResult(event) | Event::ToolResult(event) => event.call_id == call_id,
+            Event::ProviderToolError(event) | Event::ToolError(event) => event.call_id == call_id,
+            Event::ToolCancelled(event) => event.call_id == call_id,
+            Event::ToolBackgroundResult(event) => event.call_id == call_id,
+            Event::ToolBackgroundError(event) => event.call_id == call_id,
+            _ => false,
+        };
+
+    seed_agent_loaded(&state, "s1", caller_id.as_str());
+    seed_agent_loaded(&state, "s1", target_id.as_str());
+    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    store
+        .append_agent_event_at(
+            caller_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderResponseFinished(ProviderResponseFinished {
+                agent_prompt_id: initiating_prompt_id.clone(),
+                agent_id: caller_id.clone(),
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: call_id.clone(),
+                    name: tool_name.clone(),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: CborValue::Map(Vec::new()),
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })],
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                error: None,
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+            tau_proto::UnixMicros::new(2),
+        )
+        .expect("append initiating tool call");
+    store
+        .append_agent_event_at(
+            caller_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderToolResult(ToolResult {
+                call_id: call_id.clone(),
+                tool_name: tool_name.clone(),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Map(Vec::new()),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            tau_proto::UnixMicros::new(3),
+        )
+        .expect("append background placeholder");
+    let requested = tau_proto::AgentManualCompactionRequested {
+        request_id: request_id.clone(),
+        caller_agent_id: caller_id.clone(),
+        target_agent_id: target_id.clone(),
+        initiating_agent_prompt_id: initiating_prompt_id.clone(),
+        initiating_tool_call_id: call_id.clone(),
+        initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+        visible_tool_name: tool_name.clone(),
+        requested_target_head: tau_proto::AgentHead::Root,
+        target_generation: 0,
+        model: "strict/model".into(),
+        resume_inference: false,
+    };
+    store
+        .append_agent_event_at(
+            target_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentManualCompactionRequested(requested.clone()),
+            tau_proto::UnixMicros::new(4),
+        )
+        .expect("append manual request");
+    let started = tau_proto::AgentStandaloneCompactionStarted {
+        agent_id: target_id.clone(),
+        transaction_id: transaction_id.clone(),
+        compact_prompt_id: compact_prompt_id.clone(),
+        cut: tau_proto::AgentHead::Root,
+        resume_through: None,
+        model: "strict/model".into(),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        originator: tau_proto::PromptOriginator::User,
+        supersedes: None,
+        trigger: tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+            request_id: request_id.clone(),
+            caller_agent_id: caller_id.clone(),
+            initiating_tool_call_id: call_id.clone(),
+        },
+    };
+    store
+        .append_agent_event_at(
+            target_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentStandaloneCompactionStarted(started.clone()),
+            tau_proto::UnixMicros::new(5),
+        )
+        .expect("append standalone start");
+    assert!(matches!(
+        store
+            .agent(target_id.as_str())
+            .and_then(tau_core::AgentTree::standalone_compaction_recovery),
+        Some(tau_core::StandaloneCompactionRecovery::Interrupted(ref durable_start))
+            if durable_start == &started
+    ));
+    assert!(matches!(
+        store
+            .agent(target_id.as_str())
+            .expect("target tree")
+            .manual_compaction_recoveries()
+            .as_slice(),
+        [tau_core::ManualCompactionRecovery::Started {
+            requested: durable_request,
+            started: durable_start,
+            outcome: None,
+        }] if durable_request == &requested && durable_start.as_ref() == &started
+    ));
+    let seeded_caller_correlation_count = store
+        .agent_events(caller_id.as_str())
+        .expect("seeded caller records")
+        .iter()
+        .filter(|record| is_caller_correlation(&record.event))
+        .count();
+    let seeded_target_correlation_count = store
+        .agent_events(target_id.as_str())
+        .expect("seeded target records")
+        .iter()
+        .filter(|record| is_target_correlation(&record.event))
+        .count();
+    drop(store);
+
+    let mut first = strict_compaction_provider_harness_with_start_reason(
+        &state,
+        tau_proto::SessionStartReason::Resume,
+    )
+    .expect("first cold reopen");
+    assert!(first.provider_model_info[&"strict/model".into()].supports_standalone_compaction);
+    assert!(
+        first
+            .provider_model_routes
+            .contains_key(&"strict/model".into())
+    );
+    let target_records = first
+        .agent_store
+        .agent_events(target_id.as_str())
+        .expect("target records");
+    assert_eq!(
+        target_records
+            .iter()
+            .filter(|record| is_target_correlation(&record.event))
+            .count(),
+        seeded_target_correlation_count + 1
+    );
+    let request_positions = target_records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            matches!(
+                &record.event,
+                Event::AgentManualCompactionRequested(event) if event == &requested
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let start_positions = target_records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionStarted(event) if event == &started
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let failures = target_records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| match &record.event {
+            Event::AgentStandaloneCompactionFailed(failed)
+                if failed.transaction_id == transaction_id =>
+            {
+                Some((index, failed))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(request_positions.len(), 1);
+    assert_eq!(start_positions.len(), 1);
+    assert_eq!(failures.len(), 1);
+    assert!(request_positions[0] < start_positions[0]);
+    assert!(start_positions[0] < failures[0].0);
+    assert_eq!(failures[0].1.agent_id, target_id);
+    assert_eq!(failures[0].1.cut, started.cut);
+    assert_eq!(failures[0].1.resume_through, started.resume_through);
+    assert_eq!(
+        failures[0].1.reason,
+        tau_proto::StandaloneCompactionFailureReason::Interrupted
+    );
+
+    let caller_records = first
+        .agent_store
+        .agent_events(caller_id.as_str())
+        .expect("caller records");
+    assert_eq!(
+        caller_records
+            .iter()
+            .filter(|record| is_caller_correlation(&record.event))
+            .count(),
+        seeded_caller_correlation_count + 1
+    );
+    let placeholder_positions = caller_records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            matches!(
+                &record.event,
+                Event::ProviderToolResult(result)
+                    if result.call_id == call_id
+                        && result.tool_name == tool_name
+                        && result.tool_type == tau_proto::ToolType::Function
+                        && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let background_errors = caller_records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| match &record.event {
+            Event::ToolBackgroundError(error) if error.call_id == call_id => Some((index, error)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(placeholder_positions.len(), 1);
+    assert_eq!(background_errors.len(), 1);
+    assert!(placeholder_positions[0] < background_errors[0].0);
+    assert_eq!(background_errors[0].1.tool_name, tool_name);
+    assert_eq!(
+        background_errors[0].1.tool_type,
+        tau_proto::ToolType::Function
+    );
+    assert!(matches!(
+        first
+            .agent_store
+            .agent(target_id.as_str())
+            .and_then(tau_core::AgentTree::standalone_compaction_recovery),
+        Some(tau_core::StandaloneCompactionRecovery::Blocked {
+            failed,
+            compact_prompt_id: durable_prompt_id,
+        }) if failed == *failures[0].1 && durable_prompt_id == compact_prompt_id
+    ));
+    assert!(!event_log_events(&first).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+    )));
+
+    first.shutdown().expect("first shutdown");
+    drop(first);
+    assert!(
+        !tau_core::session_is_locked(&tau_config::settings::sessions_dir_of(&state), "s1")
+            .expect("session lock probe"),
+        "joined shutdown must release the session lock"
+    );
+    let mut second = strict_compaction_provider_harness_with_start_reason(
+        &state,
+        tau_proto::SessionStartReason::Resume,
+    )
+    .expect("second cold reopen");
+    assert!(second.provider_model_info[&"strict/model".into()].supports_standalone_compaction);
+    assert!(
+        second
+            .provider_model_routes
+            .contains_key(&"strict/model".into())
+    );
+    let second_target_records = second
+        .agent_store
+        .agent_events(target_id.as_str())
+        .expect("second target records");
+    assert_eq!(
+        second_target_records
+            .iter()
+            .filter(|record| is_target_correlation(&record.event))
+            .count(),
+        target_records
+            .iter()
+            .filter(|record| is_target_correlation(&record.event))
+            .count()
+    );
+    assert_eq!(
+        second_target_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentManualCompactionRequested(event) if event.request_id == request_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        second_target_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionStarted(event)
+                    if event.transaction_id == transaction_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        second_target_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionFailed(event)
+                    if event.transaction_id == transaction_id
+            ))
+            .count(),
+        1
+    );
+    let second_caller_records = second
+        .agent_store
+        .agent_events(caller_id.as_str())
+        .expect("second caller records");
+    assert_eq!(
+        second_caller_records
+            .iter()
+            .filter(|record| is_caller_correlation(&record.event))
+            .count(),
+        caller_records
+            .iter()
+            .filter(|record| is_caller_correlation(&record.event))
+            .count()
+    );
+    assert_eq!(
+        second_caller_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ToolBackgroundError(error) if error.call_id == call_id
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        !event_log_events(&second)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
+    let second_target_tree = second
+        .agent_store
+        .load_agent(target_id.as_str())
+        .expect("load second target")
+        .expect("second target tree");
+    assert!(matches!(
+        second_target_tree.standalone_compaction_recovery(),
+        Some(tau_core::StandaloneCompactionRecovery::Blocked { ref failed, .. })
+            if failed.transaction_id == transaction_id
+                && failed.reason
+                    == tau_proto::StandaloneCompactionFailureReason::Interrupted
+    ));
+    second.shutdown().expect("second shutdown");
+}
+
 fn setup_manual_cross_compaction_test() -> (
     TempDir,
     Harness,
