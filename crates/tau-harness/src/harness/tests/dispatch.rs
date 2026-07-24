@@ -13854,6 +13854,278 @@ fn readiness_deferred_linear_activations_share_one_checkpoint() {
     assert!(h.pending_publish_idle_dispatches.is_empty());
 }
 
+/// Expected provider-submission phase for an inference lifecycle assertion.
+enum ExpectedProviderSubmission {
+    /// The provider submission has not been reported.
+    Pending,
+    /// The provider submission has committed.
+    Submitted,
+}
+
+/// Assert one agent's exact inference-dispatch lifecycle and return its
+/// branch-owned checkpoint.
+fn assert_inference_dispatch_lifecycle(
+    events: &[Event],
+    agent_id: &tau_proto::AgentId,
+    expected_through: tau_proto::AgentHead,
+    expected_cut: Option<tau_proto::AgentHead>,
+    expected_submission: ExpectedProviderSubmission,
+) -> tau_proto::AgentInferenceDispatchStarted {
+    let checkpoints = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started) if &started.agent_id == agent_id => {
+                Some(started)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 1);
+    let checkpoint = checkpoints[0];
+    assert_eq!(checkpoint.through, expected_through);
+    assert_eq!(checkpoint.activation_cut, expected_cut);
+    assert_eq!(checkpoint.model, Some("test/model".into()));
+    assert_eq!(
+        checkpoint.operation,
+        Some(tau_proto::PromptOperation::Inference)
+    );
+    let sequence = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_id == *agent_id
+                    && started.agent_prompt_id == checkpoint.agent_prompt_id =>
+            {
+                Some("checkpoint")
+            }
+            Event::AgentPromptStarted(started)
+                if started.agent_id == *agent_id
+                    && started.agent_prompt_id == checkpoint.agent_prompt_id =>
+            {
+                Some("started")
+            }
+            Event::AgentPromptCreated(created)
+                if created.agent_id == *agent_id
+                    && created.agent_prompt_id == checkpoint.agent_prompt_id =>
+            {
+                Some("created")
+            }
+            Event::ProviderPromptSubmitted(submitted)
+                if submitted.agent_prompt_id == checkpoint.agent_prompt_id =>
+            {
+                Some("submitted")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected_sequence = match expected_submission {
+        ExpectedProviderSubmission::Pending => vec!["checkpoint", "started", "created"],
+        ExpectedProviderSubmission::Submitted => {
+            vec!["checkpoint", "started", "created", "submitted"]
+        }
+    };
+    assert_eq!(sequence, expected_sequence);
+    checkpoint.clone()
+}
+
+/// Assert that live dispatch ownership exactly matches a committed inference
+/// checkpoint.
+fn assert_inference_dispatch_owner(
+    agent: &Agent,
+    checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+) {
+    assert!(matches!(
+        &agent.activation_dispatch,
+        crate::agent::ActivationDispatchState::DispatchUncertain {
+            owner: crate::agent::InferenceCheckpointOwner::Inference,
+            agent_prompt_id,
+            through,
+            model: Some(model),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut,
+        } if agent_prompt_id == &checkpoint.agent_prompt_id
+            && *through == checkpoint.through
+            && model == &tau_proto::ModelId::from("test/model")
+            && *activation_cut == checkpoint.activation_cut
+    ));
+}
+
+/// Releasing a later agent's context barrier must bypass an earlier retained
+/// context-not-ready obligation without consuming, duplicating, or rebinding
+/// it. This protects per-agent readiness independence and bounded no-progress
+/// drains.
+#[test]
+fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let retained_cid = ensure_test_user_agent(&mut h);
+    let ready_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let retained_agent_id = durable_agent_id_for_conversation(&h, &retained_cid);
+    let ready_agent_id = durable_agent_id_for_conversation(&h, &ready_cid);
+    let context_provider = tau_proto::ConnectionId::from("reverse-readiness-context");
+    for agent_id in [&retained_agent_id, &ready_agent_id] {
+        h.pending_agent_context_ready.insert(
+            agent_id.clone(),
+            std::collections::HashSet::from([context_provider.clone()]),
+        );
+    }
+
+    h.dispatch_prompt_for_agent(
+        &retained_cid,
+        PendingPrompt::user("retained activation".to_owned()),
+    )
+    .expect("defer retained activation");
+    h.dispatch_prompt_for_agent(
+        &ready_cid,
+        PendingPrompt::user("ready activation".to_owned()),
+    )
+    .expect("defer ready activation");
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
+    assert_eq!(h.pending_publish_idle_dispatches[0].cid, retained_cid);
+    assert_eq!(h.pending_publish_idle_dispatches[1].cid, ready_cid);
+    let retained_obligation = h.pending_publish_idle_dispatches[0].clone();
+    let ready_obligation = h.pending_publish_idle_dispatches[1].clone();
+    assert!(retained_obligation.committed_activation);
+    assert!(ready_obligation.committed_activation);
+    assert!(matches!(
+        h.agents[&retained_cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
+    assert!(matches!(
+        h.agents[&ready_cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
+
+    h.pending_agent_context_ready.remove(&ready_agent_id);
+    h.drain_publish_idle_dispatches();
+
+    let events = event_log_events(&h);
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.agent_id == retained_agent_id
+    )));
+    let ready_checkpoint = assert_inference_dispatch_lifecycle(
+        &events,
+        &ready_agent_id,
+        ready_obligation
+            .activation_through
+            .expect("ready activation watermark"),
+        ready_obligation.activation_cut,
+        ExpectedProviderSubmission::Pending,
+    );
+    assert_inference_dispatch_owner(&h.agents[&ready_cid], &ready_checkpoint);
+    assert!(matches!(
+        h.agents[&retained_cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    let retained = &h.pending_publish_idle_dispatches[0];
+    assert_eq!(retained.cid, retained_cid);
+    assert_eq!(
+        retained.activation_through,
+        retained_obligation.activation_through
+    );
+    assert_eq!(retained.activation_cut, retained_obligation.activation_cut);
+    assert_eq!(
+        retained.committed_activation,
+        retained_obligation.committed_activation
+    );
+
+    let events_before_stable_drain = event_log_events(&h);
+    h.drain_publish_idle_dispatches();
+    assert_eq!(event_log_events(&h), events_before_stable_drain);
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    let retained = &h.pending_publish_idle_dispatches[0];
+    assert_eq!(retained.cid, retained_cid);
+    assert_eq!(
+        retained.activation_through,
+        retained_obligation.activation_through
+    );
+    assert_eq!(retained.activation_cut, retained_obligation.activation_cut);
+    assert_eq!(
+        retained.committed_activation,
+        retained_obligation.committed_activation
+    );
+
+    let ready_provider = h.pending_provider_prompts[&ready_checkpoint.agent_prompt_id].clone();
+    h.handle_extension_event_inner(
+        ready_provider.as_str(),
+        Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
+            agent_prompt_id: ready_checkpoint.agent_prompt_id.clone(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    )
+    .expect("record ready-agent provider submission");
+    let events = event_log_events(&h);
+    let submitted_ready_checkpoint = assert_inference_dispatch_lifecycle(
+        &events,
+        &ready_agent_id,
+        ready_checkpoint.through,
+        ready_checkpoint.activation_cut,
+        ExpectedProviderSubmission::Submitted,
+    );
+    assert_eq!(
+        submitted_ready_checkpoint.agent_prompt_id,
+        ready_checkpoint.agent_prompt_id
+    );
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert_eq!(h.pending_publish_idle_dispatches[0].cid, retained_cid);
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.agent_id == retained_agent_id
+    )));
+
+    h.pending_agent_context_ready.remove(&retained_agent_id);
+    h.drain_publish_idle_dispatches();
+
+    let events = event_log_events(&h);
+    let retained_checkpoint = assert_inference_dispatch_lifecycle(
+        &events,
+        &retained_agent_id,
+        retained_obligation
+            .activation_through
+            .expect("retained activation watermark"),
+        retained_obligation.activation_cut,
+        ExpectedProviderSubmission::Pending,
+    );
+    assert_inference_dispatch_owner(&h.agents[&retained_cid], &retained_checkpoint);
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+
+    let retained_provider =
+        h.pending_provider_prompts[&retained_checkpoint.agent_prompt_id].clone();
+    h.handle_extension_event_inner(
+        retained_provider.as_str(),
+        Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
+            agent_prompt_id: retained_checkpoint.agent_prompt_id.clone(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    )
+    .expect("record retained-agent provider submission");
+    h.drain_publish_idle_dispatches();
+    let events = event_log_events(&h);
+    for (agent_id, checkpoint) in [
+        (&retained_agent_id, &retained_checkpoint),
+        (&ready_agent_id, &ready_checkpoint),
+    ] {
+        let submitted_checkpoint = assert_inference_dispatch_lifecycle(
+            &events,
+            agent_id,
+            checkpoint.through,
+            checkpoint.activation_cut,
+            ExpectedProviderSubmission::Submitted,
+        );
+        assert_eq!(
+            submitted_checkpoint.agent_prompt_id,
+            checkpoint.agent_prompt_id
+        );
+    }
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
 /// One selected deferred obligation with uncertain ownership must not become a
 /// global agent slot that blocks a later runnable agent.
 #[test]
