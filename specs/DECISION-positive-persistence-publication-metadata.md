@@ -1,6 +1,6 @@
 # DECISION-positive-persistence-publication-metadata: Use positive persistence publication metadata
 
-Authority: confirmed, 2026-07-22, dpc
+Authority: confirmed, 2026-07-24, dpc
 
 Generic event publication metadata uses `persist: bool`: `true` requests
 ordinary eligible semantic persistence, while `false` requests live-only
@@ -10,11 +10,15 @@ every former `transient=true` value becomes `persist=false`.
 `persist` remains publication metadata rather than an unconditional storage
 command. Event-family classification retains authority over semantic stores:
 families excluded for either metadata value remain excluded, while
-`agent.prompt_created` and the existing canonical terminal-tool exceptions
-remain persisted even when their publication metadata is `persist=false`.
+the existing canonical terminal-tool exceptions remain persisted even when
+their publication metadata is `persist=false`.
 Interception, admission, deferred or captured envelopes, commit, routing, and
 codec boundaries must preserve the positive bit without changing those
 classifications.
+
+Compact prompt materialization persistence and transient full-prompt delivery
+are governed by
+[DECISION-compact-prompt-materialization-authority](DECISION-compact-prompt-materialization-authority.md).
 
 The old field is removed completely. There are no aliases, migrations,
 dual-read paths, compatibility defaults, or deprecation period under
