@@ -68,6 +68,11 @@ test: build
   cargo test
 
 
+# scan the project with ast-grep rules
+ast-grep *ARGS="":
+  ast-grep scan --config sgconfig.yml {{ARGS}}
+
+
 # run `cargo clippy` on everything
 clippy *ARGS="--locked --offline --workspace --all-targets":
   cargo clippy {{ARGS}} -- --deny warnings --allow deprecated
