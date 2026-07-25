@@ -95,13 +95,10 @@
           # returning to the multi-minute fat-LTO/one-CGU configuration.
           assert releaseProfile.lto == "thin";
           assert releaseProfile.codegen-units == 16;
-          flakeboxLib.filterSubPaths {
-            root = builtins.path {
-              name = projectName;
-              path = ./.;
-              filter = path: type: type != "directory" || builtins.baseNameOf path != "specs";
-            };
+          flakeboxLib.source.fromPaths {
+            root = ./.;
             paths = buildPaths;
+            filter = flakeboxLib.source.filters.excludeDirectoriesNamed [ "specs" ];
           };
 
         # Placeholders are 40 / 16 raw bytes that the binary embeds via
