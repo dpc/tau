@@ -325,6 +325,11 @@ pub struct AgentTree {
     ordinary_inference_generation: u64,
     /// Unique content-free materialization facts keyed by provider prompt id.
     prompt_starts: HashMap<tau_proto::AgentPromptId, tau_proto::AgentPromptStarted>,
+    /// Durable outer turns keyed by stable identity and their session/terminal
+    /// state.
+    outer_turns: HashMap<tau_proto::AgentOuterTurnId, OuterTurnFold>,
+    /// Sole currently open durable outer turn.
+    active_outer_turn: Option<tau_proto::AgentOuterTurnId>,
     /// Canonical provider image bytes retained across all durable transcript
     /// events, including branches and compaction replacement windows.
     retained_provider_image_bytes: u64,
@@ -354,6 +359,17 @@ pub struct AgentTree {
     inference_dispatches: HashMap<tau_proto::AgentPromptId, InferenceDispatchFold>,
     /// Durable inference checkpoint insertion order.
     inference_dispatch_order: Vec<tau_proto::AgentPromptId>,
+}
+
+/// Folded durable state for one outer turn.
+#[derive(Clone, Debug, PartialEq)]
+struct OuterTurnFold {
+    /// Session attributed by the immutable start.
+    session_id: tau_proto::SessionId,
+    /// Whether a matching terminal fact was observed.
+    finished: bool,
+    /// Harness runtime that authored the start.
+    runtime_id: tau_proto::AccountingRuntimeId,
 }
 
 /// Folded state for one durable inference checkpoint.
@@ -1057,6 +1073,8 @@ impl AgentTree {
             next_event_seq: PersistedAgentEventSeq::new(0),
             ordinary_inference_generation: 0,
             prompt_starts: HashMap::new(),
+            outer_turns: HashMap::new(),
+            active_outer_turn: None,
             retained_provider_image_bytes: 0,
             pending_tool_rounds: HashMap::new(),
             tool_call_rounds: HashMap::new(),
@@ -1151,9 +1169,15 @@ impl AgentTree {
                 record.seq.get()
             )));
         }
-        if matches!(&record.event, Event::AgentPromptStarted(_)) && record.source.is_some() {
+        if matches!(
+            &record.event,
+            Event::AgentPromptStarted(_)
+                | Event::AgentOuterTurnStarted(_)
+                | Event::AgentOuterTurnFinished(_)
+        ) && record.source.is_some()
+        {
             return Err(AgentEventValidationError::new(
-                "agent.prompt_started must be a harness-authored source-free record",
+                "agent accounting lifecycle facts must be harness-authored source-free records",
             ));
         }
         let node_id = if record.event.name().category() == &tau_proto::EventCategory::Message {
@@ -1308,6 +1332,23 @@ impl AgentTree {
         match event {
             Event::AgentStarted(started) => self.apply_agent_started(started),
             Event::AgentUserInteractionRecorded(_) => {}
+            Event::AgentOuterTurnStarted(started) => {
+                self.outer_turns.insert(
+                    started.outer_turn_id.clone(),
+                    OuterTurnFold {
+                        session_id: started.session_id.clone(),
+                        finished: false,
+                        runtime_id: started.runtime_id.clone(),
+                    },
+                );
+                self.active_outer_turn = Some(started.outer_turn_id.clone());
+            }
+            Event::AgentOuterTurnFinished(finished) => {
+                if let Some(turn) = self.outer_turns.get_mut(&finished.outer_turn_id) {
+                    turn.finished = true;
+                }
+                self.active_outer_turn = None;
+            }
             Event::AgentDisplayNameSet(name) => self.update_display_name(&name.display_name),
             Event::AgentMetadataSet(set) => {
                 self.metadata.insert(
@@ -1739,6 +1780,107 @@ impl AgentTree {
             }
             Event::AgentMetadataSet(set) if set.agent_id == self.agent_id => Some(Ok(())),
             Event::AgentMetadataUnset(unset) if unset.agent_id == self.agent_id => Some(Ok(())),
+            Event::AgentOuterTurnStarted(turn) if turn.agent_id == self.agent_id => {
+                Some(if self.outer_turns.contains_key(&turn.outer_turn_id) {
+                    Err(AgentEventValidationError::new(
+                        "outer turn start duplicates an existing turn identity",
+                    ))
+                } else if self
+                    .active_outer_turn
+                    .as_ref()
+                    .and_then(|active| self.outer_turns.get(active))
+                    .is_some_and(|active| active.runtime_id == turn.runtime_id)
+                {
+                    Err(AgentEventValidationError::new(
+                        "outer turn start overlaps another turn in this runtime",
+                    ))
+                } else if turn.outer_turn_id
+                    != tau_proto::AgentOuterTurnId::for_prompt(&turn.agent_prompt_id)
+                {
+                    Err(AgentEventValidationError::new(
+                        "outer turn identity does not match its inference prompt",
+                    ))
+                } else if !matches!(
+                    self.inference_dispatches.get(&turn.agent_prompt_id),
+                    Some(dispatch)
+                        if dispatch.checkpoint.operation
+                            == Some(tau_proto::PromptOperation::Inference)
+                            && !dispatch.finished
+                ) {
+                    Err(AgentEventValidationError::new(
+                        "outer turn has no matching unresolved inference checkpoint",
+                    ))
+                } else if let tau_proto::AgentOuterTurnActivation::Journal {
+                    occurrence: claimed,
+                } = turn.activation
+                    && self
+                        .inference_dispatches
+                        .get(&turn.agent_prompt_id)
+                        .and_then(|dispatch| {
+                            let checkpoint = &dispatch.checkpoint;
+                            (checkpoint.operation == Some(tau_proto::PromptOperation::Inference))
+                                .then_some(checkpoint)
+                        })
+                        .and_then(|checkpoint| {
+                            let path = self.branch_node_ids_from(match checkpoint.through {
+                                tau_proto::AgentHead::Root => None,
+                                tau_proto::AgentHead::Node(node) => Some(node),
+                            });
+                            match checkpoint.activation_cut? {
+                                tau_proto::AgentHead::Root => path.first().copied(),
+                                tau_proto::AgentHead::Node(cut) => path
+                                    .iter()
+                                    .position(|candidate| *candidate == cut)
+                                    .and_then(|index| path.get(index.saturating_add(1)).copied()),
+                            }
+                        })
+                        .map(tau_proto::AgentHead::Node)
+                        != Some(claimed)
+                {
+                    Err(AgentEventValidationError::new(
+                        "outer turn activation does not match its inference checkpoint",
+                    ))
+                } else if matches!(
+                    turn.activation,
+                    tau_proto::AgentOuterTurnActivation::Journal {
+                        occurrence: tau_proto::AgentHead::Root
+                    }
+                ) {
+                    Err(AgentEventValidationError::new(
+                        "journal activation correlation must identify an occurrence",
+                    ))
+                } else if let tau_proto::AgentOuterTurnActivation::Journal {
+                    occurrence: tau_proto::AgentHead::Node(node),
+                } = turn.activation
+                    && self.node(node).is_none()
+                {
+                    Err(AgentEventValidationError::new(
+                        "outer turn activation occurrence is absent from the journal",
+                    ))
+                } else {
+                    // A prior unmatched start is an allowed crash cut. A new
+                    // unique identity starts the next runtime without rewriting
+                    // that explicitly unterminated historical fact.
+                    Ok(())
+                })
+            }
+            Event::AgentOuterTurnFinished(turn) if turn.agent_id == self.agent_id => Some(
+                match (
+                    self.active_outer_turn.as_ref(),
+                    self.outer_turns.get(&turn.outer_turn_id),
+                ) {
+                    (Some(active), Some(fold))
+                        if active == &turn.outer_turn_id
+                            && fold.session_id == turn.session_id
+                            && !fold.finished =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(AgentEventValidationError::new(
+                        "outer turn finish has no matching open start",
+                    )),
+                },
+            ),
             _ => None,
         }
     }
@@ -1995,6 +2137,30 @@ impl AgentTree {
                 "duplicate agent prompt materialization fact",
             ));
         }
+        match (&started.outer_turn_id, started.operation) {
+            (Some(turn_id), tau_proto::PromptOperation::Inference) => {
+                if self.active_outer_turn.as_ref() != Some(turn_id)
+                    || !matches!(
+                        self.outer_turns.get(turn_id),
+                        Some(fold)
+                            if fold.session_id == started.session_id && !fold.finished
+                    )
+                {
+                    return Err(AgentEventValidationError::new(
+                        "agent prompt outer turn is absent, closed, or in another session",
+                    ));
+                }
+            }
+            (Some(_), tau_proto::PromptOperation::StandaloneCompaction) => {
+                return Err(AgentEventValidationError::new(
+                    "standalone compaction cannot belong to an outer turn",
+                ));
+            }
+            (None, _) => {
+                // Missing correlation is accepted only as explicit legacy data;
+                // forward writers always populate ordinary inference ownership.
+            }
+        }
 
         match self.prompt_started_owner_matches(started) {
             None => {
@@ -2019,6 +2185,16 @@ impl AgentTree {
         prompt_id: &tau_proto::AgentPromptId,
     ) -> Option<&tau_proto::AgentPromptStarted> {
         self.prompt_starts.get(prompt_id)
+    }
+
+    /// Return whether this exact outer turn remains durably open.
+    #[must_use]
+    pub fn outer_turn_is_open(&self, turn_id: &tau_proto::AgentOuterTurnId) -> bool {
+        self.active_outer_turn.as_ref() == Some(turn_id)
+            && self
+                .outer_turns
+                .get(turn_id)
+                .is_some_and(|turn| !turn.finished)
     }
 
     /// Returns whether a compact materialization fact may acquire its sole live

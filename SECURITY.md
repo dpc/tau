@@ -619,3 +619,17 @@ selection are no-mutation outcomes.
 Picker membership follows live lifecycle/navigation authority independently of
 missing, invalid, or unreadable creation-fact enrichment. Selection never
 changes navigation mode, runtime state, or agent loading.
+
+Session activity reports trust only harness-authored canonical journal facts.
+Provider-supplied accounting fields are discarded before canonical publication;
+captured response-local usage, effective rates, and increments are immutable
+authority. Outer-turn lifecycle and prompt joins are immutable must-pass facts.
+Stats traversal is read-only and performs no repair, migration, configuration
+lookup, or inferred backfill. Missing legacy authority makes `complete` false;
+malformed or corrupt journals fail closed. An unmatched crash-cut start remains
+reported as unterminated but does not block a later boot's fresh turn.
+
+Changes to this boundary must re-check strict replay lifecycle joins, cross-session
+prompt/response/tool isolation (including reused call IDs), interception
+drop/replacement and peer-forgery rejection, response-local rather than cumulative
+usage accounting, and the no-write behavior of offline inspection.

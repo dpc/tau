@@ -2295,6 +2295,11 @@ pub struct AgentHeadMoved {
 pub struct AgentStarted {
     /// Agent this log belongs to.
     pub agent_id: AgentId,
+    /// Authenticated path that initiated this agent's creation. `None` decodes
+    /// only pre-accounting legacy journals; forward harness writes always set
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<AgentCreator>,
     /// Optional parent agent whose inheritable metadata was copied at creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_agent: Option<AgentId>,
@@ -2310,6 +2315,156 @@ pub struct AgentStarted {
     /// daemon and should not be expected after restart/resume.
     #[serde(default, skip_serializing_if = "is_false")]
     pub ephemeral: bool,
+}
+
+/// Authenticated provenance for an immutable agent creation fact.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentCreator {
+    /// A user-facing harness path created the agent.
+    #[default]
+    User,
+    /// Another agent initiated creation, possibly across a session boundary.
+    Agent {
+        /// Session containing the initiating agent.
+        session_id: SessionId,
+        /// Initiating agent identity.
+        agent_id: AgentId,
+    },
+    /// An extension initiated creation without an owning user or agent.
+    Extension {
+        /// Stable configured extension identity.
+        name: ExtensionName,
+        /// Runtime extension instance that authenticated the request.
+        instance_id: ExtensionInstanceId,
+    },
+}
+
+/// Stable identity of one non-overlapping outer agent turn.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentOuterTurnId(String);
+
+impl AgentOuterTurnId {
+    /// Derive the turn identity from its unique durable inference prompt.
+    #[must_use]
+    pub fn for_prompt(prompt_id: &AgentPromptId) -> Self {
+        Self(format!("ot-{prompt_id}"))
+    }
+}
+
+impl From<String> for AgentOuterTurnId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for AgentOuterTurnId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl std::fmt::Display for AgentOuterTurnId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for AgentOuterTurnId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Opaque stable correlation captured when a non-journaled input is accepted.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentActivationCorrelationId(String);
+
+impl AgentActivationCorrelationId {
+    /// Construct a harness-minted opaque accepted-input correlation.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+/// Unique identity for one harness accounting runtime.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AccountingRuntimeId(String);
+
+impl AccountingRuntimeId {
+    /// Construct a runtime identity from harness-generated entropy.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Borrow the opaque runtime identity.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Stable initiating occurrence for an outer turn.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "details", rename_all = "snake_case")]
+pub enum AgentOuterTurnActivation {
+    /// An exact occurrence in the owning agent journal.
+    Journal {
+        /// Durable transcript node that initiated the turn.
+        occurrence: AgentHead,
+    },
+    /// A stable correlation copied from accepted non-journaled input.
+    External {
+        /// Opaque harness-minted accepted-input correlation.
+        correlation_id: AgentActivationCorrelationId,
+    },
+}
+
+/// Harness-authored durable fact that an accepted activation started an outer
+/// turn.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentOuterTurnStarted {
+    /// Agent executing the turn.
+    pub agent_id: AgentId,
+    /// Session to which this occurrence is attributed.
+    pub session_id: SessionId,
+    /// Stable per-agent outer-turn identity.
+    pub outer_turn_id: AgentOuterTurnId,
+    /// Durable inference checkpoint/prompt that owns this turn.
+    pub agent_prompt_id: AgentPromptId,
+    /// Harness-runtime identity used to distinguish a valid post-crash start
+    /// from overlapping starts in one runtime.
+    pub runtime_id: AccountingRuntimeId,
+    /// Exact durable transcript occurrence that initiated this activation.
+    pub activation: AgentOuterTurnActivation,
+}
+
+/// Terminal disposition of a durably bounded outer turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOuterTurnDisposition {
+    /// The harness settled all foreground work and returned the agent to idle.
+    Settled,
+}
+
+/// Harness-authored durable fact that an outer agent turn returned to idle.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentOuterTurnFinished {
+    /// Agent that executed the turn.
+    pub agent_id: AgentId,
+    /// Session to which this occurrence is attributed.
+    pub session_id: SessionId,
+    /// Identity copied from the matching start fact.
+    pub outer_turn_id: AgentOuterTurnId,
+    /// Terminal outcome selected at the actual running-to-idle transition.
+    pub disposition: AgentOuterTurnDisposition,
 }
 
 /// Content-free durable fact recording one accepted visible user interaction.
@@ -4048,6 +4203,13 @@ pub struct AgentPromptStarted {
     pub session_id: SessionId,
     /// Currently selected model as `"provider/model_id"`.
     pub model: ModelId,
+    /// Captured model dispatch parameters, authoritative for historical
+    /// accounting. `None` identifies a pre-accounting legacy fact.
+    #[serde(default)]
+    pub model_params: Option<ModelParams>,
+    /// Owning ordinary outer turn; absent for standalone work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer_turn_id: Option<AgentOuterTurnId>,
     /// Provider operation materialized for this dispatch.
     pub operation: PromptOperation,
     /// Who asked for this prompt.
@@ -4066,6 +4228,8 @@ impl From<&AgentPromptCreated> for AgentPromptStarted {
             agent_id: prompt.agent_id.clone(),
             session_id: prompt.session_id.clone(),
             model: prompt.model.clone(),
+            model_params: Some(prompt.model_params),
+            outer_turn_id: None,
             operation: prompt.operation,
             originator: prompt.originator.clone(),
             ctx_id: prompt.ctx_id.clone(),
@@ -4482,6 +4646,15 @@ pub struct ProviderResponseFinished {
     /// Provider-reported usage for this response, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ProviderTokenUsage>,
+    /// Harness-captured effective price rates for this accepted response.
+    /// Missing values identify legacy/report DTOs and are never provider
+    /// authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_api_cost_rates: Option<crate::EstimatedApiCostRates>,
+    /// Harness-calculated cost from this response's local usage counters.
+    /// Missing values identify legacy/report DTOs and are never inferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_api_cost_increment: Option<crate::EstimatedApiCost>,
     /// Input-token count of the conversation before provider-side compaction,
     /// if this finished response contains a durable compaction item and the
     /// harness knows the previous context size.
@@ -4906,6 +5079,10 @@ pub enum Event {
     AgentHeadMoved(AgentHeadMoved),
     #[serde(rename = "agent.started")]
     AgentStarted(AgentStarted),
+    #[serde(rename = "agent.outer_turn_started")]
+    AgentOuterTurnStarted(AgentOuterTurnStarted),
+    #[serde(rename = "agent.outer_turn_finished")]
+    AgentOuterTurnFinished(AgentOuterTurnFinished),
     #[serde(rename = "agent.user_interaction_recorded")]
     AgentUserInteractionRecorded(AgentUserInteractionRecorded),
     #[serde(rename = "agent.display_name_set")]
@@ -5281,6 +5458,8 @@ impl Event {
             Self::AgentInferenceDispatchStarted(_) => EventName::AGENT_INFERENCE_DISPATCH_STARTED,
             Self::AgentPromptCreated(_) => EventName::AGENT_PROMPT_CREATED,
             Self::AgentPromptStarted(_) => EventName::AGENT_PROMPT_STARTED,
+            Self::AgentOuterTurnStarted(_) => EventName::AGENT_OUTER_TURN_STARTED,
+            Self::AgentOuterTurnFinished(_) => EventName::AGENT_OUTER_TURN_FINISHED,
             Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,
             Self::AgentPromptPrewarmRequested(_) => EventName::AGENT_PROMPT_PREWARM_REQUESTED,
             Self::AgentUserMessageInjected(_) => EventName::AGENT_USER_MESSAGE_INJECTED,

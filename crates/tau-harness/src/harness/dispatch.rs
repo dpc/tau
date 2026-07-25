@@ -133,6 +133,25 @@ impl Harness {
                 "agent `{agent_id}` is terminating"
             )));
         }
+        // A fresh ordinary activation explicitly abandons a response-uncertain
+        // inference restored from a previous harness runtime. The historical
+        // outer start remains unterminated as the crash boundary; this runtime
+        // owns a new prompt-derived turn instead of letting the stale checkpoint
+        // block the agent forever.
+        if prompt.creates_inference_activation()
+            && !prompt.is_internal()
+            && let Some(agent) = self.agents.get_mut(agent_id)
+            && agent.in_flight_prompt.is_none()
+            && matches!(
+                agent.activation_dispatch,
+                crate::agent::ActivationDispatchState::DispatchUncertain {
+                    owner: crate::agent::InferenceCheckpointOwner::Inference,
+                    ..
+                }
+            )
+        {
+            agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+        }
         if let Some(agent) = self.agents.get_mut(agent_id) {
             agent.lifecycle_notification_only_turn = false;
         }

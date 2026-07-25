@@ -3766,6 +3766,9 @@ fn simple_finished(
     text: impl Into<String>,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id,
         agent_id,
         output_items: Vec::new(),
@@ -4433,6 +4436,9 @@ where
         CompactOutcome::Finished(output_items) => {
             writer.write_message(&HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+                    estimated_api_cost_rates: None,
+                    estimated_api_cost_increment: None,
+
                     agent_prompt_id: agent_prompt_id.into(),
                     agent_id: prompt.agent_id.clone(),
                     output_items,
@@ -4894,6 +4900,9 @@ fn finish_stream<W: Write>(
     let provider_response_id = state.response_id().map(str::to_owned);
     let output_items = state.into_output_items();
     let finished = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: prompt.agent_id.clone(),
         stop_reason: stop_reason_from_output_items(&output_items),
@@ -4977,6 +4986,9 @@ fn finish_error<W: Write>(
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let finished = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: prompt.agent_id.clone(),
         output_items: Vec::new(),

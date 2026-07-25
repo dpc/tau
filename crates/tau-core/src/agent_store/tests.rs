@@ -37,6 +37,8 @@ fn creation_facts_read_valid_first_record() {
             None,
             AgentEventParent::InheritHead,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 agent_id: agent_id.clone(),
                 parent_agent: Some(AgentId::parse("parent").expect("parent id")),
                 role: "engineer".to_owned(),
@@ -91,6 +93,8 @@ fn creation_facts_require_journal_bound_cold_checkpoint() {
                 None,
                 AgentEventParent::InheritHead,
                 Event::AgentStarted(tau_proto::AgentStarted {
+                    creator: Some(tau_proto::AgentCreator::default()),
+
                     agent_id: agent_id.clone(),
                     parent_agent: None,
                     role: "engineer".to_owned(),
@@ -164,6 +168,8 @@ fn creation_facts_enforce_aggregate_budget() {
             None,
             AgentEventParent::InheritHead,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 agent_id: agent_id.clone(),
                 parent_agent: None,
                 role: "engineer".to_owned(),
@@ -196,6 +202,8 @@ fn ephemeral_creation_facts_enforce_aggregate_budget() {
             None,
             AgentEventParent::InheritHead,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 agent_id: agent_id.clone(),
                 parent_agent: None,
                 role: "engineer".to_owned(),
@@ -439,6 +447,8 @@ fn strict_replay_rejects_partial_frame_before_valid_suffix() {
 /// Builds the immutable first event used by durable append tests.
 fn started_event(agent_id: &AgentId) -> Event {
     Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         agent_id: agent_id.clone(),
         parent_agent: None,
         role: "engineer".to_owned(),

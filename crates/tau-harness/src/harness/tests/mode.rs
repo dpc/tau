@@ -326,6 +326,9 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: None,
+
             agent_prompt_id: "ephemeral-debug-prompt".into(),
             agent_id: agent_id.clone(),
             session_id: "s1".into(),

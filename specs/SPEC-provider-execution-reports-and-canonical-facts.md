@@ -57,8 +57,11 @@ disconnect, and session rollover cleanup does. There is no canonical
 
 A current-owner finished report enters the existing response terminal pipeline. The
 harness discards provider claims to recovery disposition and context-limit telemetry,
-then derives agent identity, usage, telemetry, recovery, normalization, transcript,
-watch, tool, side-conversation, prompt-route, and turn effects from harness state.
+estimated cost rates, and estimated cost increments, then derives agent identity,
+usage, telemetry, recovery, normalization, transcript, watch, tool,
+side-conversation, prompt-route, and turn effects from harness state. The canonical
+response captures the effective rates and its response-local cost increment; the
+nested cumulative usage snapshot is never durable accounting input.
 
 Canceled, stale, unknown, and duplicate reports produce no canonical response.
 Standalone-compaction success derives `agent.compacted`; invalid standalone compaction

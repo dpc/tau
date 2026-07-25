@@ -3497,6 +3497,9 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-staged-tools".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -3607,6 +3610,9 @@ fn prompt_snapshot_does_not_expand_to_staged_registration() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-unadvertised-staged".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -5364,6 +5370,9 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
     unregister_shell(&mut h);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -5648,6 +5657,9 @@ fn unavailable_tool_is_reported_without_crashing() {
     );
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-x".into(),
         agent_id: target_agent_id.clone(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -5718,6 +5730,9 @@ fn disconnected_tool_completes_pending_call() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "sp-main".into(),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -5870,6 +5885,9 @@ fn disconnected_tool_is_removed_cleanly() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-x".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -6082,6 +6100,9 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-x".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -6443,6 +6464,9 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     );
 
     let response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-x".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -6562,6 +6586,9 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-x".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -6644,6 +6671,9 @@ fn duplicate_tool_call_id_becomes_model_visible_tool_error() {
     h.prompt_agents.insert("sp-x".into(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-x".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -6722,6 +6752,9 @@ fn reused_prior_tool_call_id_becomes_model_visible_tool_error() {
     h.completed_tool_calls.insert("old-call".into());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-y".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -6799,6 +6832,9 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
     .expect("cancel");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-x".into(),
         agent_id: target_agent_id,
         output_items: vec![
@@ -6870,6 +6906,9 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
     h.prompt_agents.insert("sp-x".into(), cid.clone());
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-x".into(),
         agent_id: target_agent_id.clone(),
         output_items: vec![
@@ -7469,6 +7508,9 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "sp-open".into(),
             agent_id: owner_agent_id.clone(),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -7619,6 +7661,9 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
         seed_agent_thinking(&mut h, &cid, "sp-old");
         h.prompt_agents.insert("sp-old".into(), cid.clone());
         h.handle_provider_response_finished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "sp-old".into(),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -7653,6 +7698,9 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
     h.prompt_agents.insert("sp-new".into(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-new".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -7826,6 +7874,9 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
     h.prompt_agents.insert("sp-query".into(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-query".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -7920,6 +7971,9 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-query-pending".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -7972,6 +8026,9 @@ fn non_tool_stop_reason_tool_call_gets_terminal_error() {
     h.prompt_agents.insert("sp-length".into(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-length".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {

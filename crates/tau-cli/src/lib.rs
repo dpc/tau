@@ -592,6 +592,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 let command_name = match command {
                     cli::SessionCommand::List(_) => "session list",
                     cli::SessionCommand::Show { .. } => "session show",
+                    cli::SessionCommand::Stats { .. } => "session stats",
                 };
                 reject_harness_config_overrides(&harness_config_overrides, command_name)?;
             }
@@ -747,6 +748,25 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 for line in tau_session_inspect::session_lines(sessions_dir, &session_id)? {
                     println!("{line}");
                 }
+                Ok(())
+            }
+
+            cli::Command::Session {
+                command:
+                    cli::SessionCommand::Stats {
+                        session,
+                        sessions_dir,
+                    },
+            } => {
+                reject_harness_config_overrides(&harness_config_overrides, "session stats")?;
+                let stats = tau_session_inspect::read_session_stats(&sessions_dir, &session)?
+                    .ok_or_else(|| {
+                        CliError::Participant(format!("session `{session}` not found"))
+                    })?;
+                let output = serde_toon::to_string(&stats).map_err(|error| {
+                    CliError::Participant(format!("failed to serialize session stats: {error}"))
+                })?;
+                println!("{output}");
                 Ok(())
             }
 

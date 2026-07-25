@@ -328,6 +328,8 @@ pub(crate) struct Agent {
     /// Runtime-scoped outer agent-turn generation used by watch state
     /// notifications.
     pub(crate) turn_generation: u64,
+    /// Durable identity of the currently running ordinary outer turn.
+    pub(crate) active_outer_turn_id: Option<tau_proto::AgentOuterTurnId>,
     /// Whether the current turn was caused only by lifecycle notifications.
     pub(crate) lifecycle_notification_only_turn: bool,
     /// Watch subscription ids present when a notification-only turn suppressed
@@ -649,6 +651,7 @@ impl Agent {
             turn_state: AgentTurnState::Idle,
             published_runtime_state: tau_proto::AgentRuntimeState::Idle,
             turn_generation: 0,
+            active_outer_turn_id: None,
             lifecycle_notification_only_turn: false,
             suppressed_start_subscriptions: Vec::new(),
             parent_tool_call_id: None,

@@ -641,6 +641,9 @@ fn agent_watch_cycle_error_preserves_safe_display_and_details() {
 #[test]
 fn agent_watch_notification_extracts_assistant_response_text() {
     let response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-watch".into(),
         agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
         output_items: vec![ContextItem::Message(tau_proto::MessageItem {
@@ -676,6 +679,9 @@ fn agent_watch_ignores_mid_turn_tool_call_responses() {
     // Tool-call stops are mid-turn: the final response is only known after the
     // requested tools run and the provider completes a later turn.
     let response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-watch".into(),
         agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
         output_items: vec![ContextItem::Message(tau_proto::MessageItem {
@@ -709,6 +715,9 @@ fn agent_watch_ignores_mid_turn_tool_call_responses() {
 #[test]
 fn agent_watch_ignores_internal_originated_responses() {
     let response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-watch".into(),
         agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
         output_items: vec![ContextItem::Message(tau_proto::MessageItem {
@@ -745,6 +754,9 @@ fn agent_watch_ignores_internal_originated_responses() {
 #[test]
 fn agent_watch_legacy_response_suppresses_untyped_provider_errors() {
     let response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-watch-error".into(),
         agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
         output_items: Vec::new(),

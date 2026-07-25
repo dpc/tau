@@ -2037,6 +2037,9 @@ fn finished(
     stop_reason: ProviderStopReason,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt.agent_prompt_id.clone(),
         agent_id: prompt.agent_id.clone(),
         output_items,

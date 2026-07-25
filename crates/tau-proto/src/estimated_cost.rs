@@ -176,7 +176,7 @@ impl std::fmt::Display for InvalidEstimatedUsdPerMillion {
 impl std::error::Error for InvalidEstimatedUsdPerMillion {}
 
 /// The three basic token prices used for an equivalent API cost estimate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EstimatedApiCostRates {
     /// Uncached input-token price per million tokens.
     pub uncached_input: EstimatedUsdPerMillion,
@@ -222,6 +222,13 @@ impl EstimatedApiCost {
     /// conservatively prices all reported input as uncached. A malformed cached
     /// count larger than total input is capped at total input.
     pub fn add_usage(&mut self, usage: &ProviderTokenUsage, rates: EstimatedApiCostRates) {
+        let increment = Self::for_usage(usage, rates);
+        self.0 = self.0.saturating_add(increment.0);
+    }
+
+    /// Calculate the cost increment for one response-local usage record.
+    #[must_use]
+    pub fn for_usage(usage: &ProviderTokenUsage, rates: EstimatedApiCostRates) -> Self {
         let cached = usage.prompt_cached_tokens.min(usage.prompt_sent_tokens);
         let uncached = usage.prompt_sent_tokens.saturating_sub(cached);
         let increment = u128::from(uncached)
@@ -233,8 +240,7 @@ impl EstimatedApiCost {
                 u128::from(usage.response_received_tokens)
                     .saturating_mul(u128::from(rates.output.as_micro_usd())),
             );
-        let total = u128::from(self.0).saturating_add(increment);
-        self.0 = u64::try_from(total).unwrap_or(u64::MAX);
+        Self(u64::try_from(increment).unwrap_or(u64::MAX))
     }
 }
 

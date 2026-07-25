@@ -4007,6 +4007,9 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "sp-main".into(),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -4143,6 +4146,8 @@ fn interception_drop_of_must_pass_event_is_overridden() {
 
 fn agent_started_event(role: &str) -> Event {
     Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: tau_proto::AgentId::parse("agent-started-test").expect("agent id"),
         role: role.to_owned(),
@@ -4249,6 +4254,93 @@ fn interception_cannot_retarget_user_interaction_fact() {
             &original,
             &replacement,
         )
+    );
+}
+
+/// Outer-turn accounting boundaries survive actual interception Drop and
+/// replacement replies, while peer publication rejects both event families.
+#[test]
+fn outer_turn_accounting_facts_are_immutable_and_must_pass() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let interceptor = connect_test_tool(&mut h, "outer-turn-interceptor");
+    h.handle_extension_event(
+        "outer-turn-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::AGENT_OUTER_TURN_STARTED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_OUTER_TURN_FINISHED),
+            ],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("first".to_owned()))
+        .expect("dispatch first");
+    let (started, persist) = intercepted_payload(&interceptor);
+    assert!(persist);
+    assert!(matches!(started, Event::AgentOuterTurnStarted(_)));
+    h.handle_extension_event(
+        "outer-turn-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop start");
+    let prompt_id = h.agents[&cid]
+        .in_flight_prompt
+        .clone()
+        .expect("first prompt continued after start");
+    interceptor.lock().expect("interceptor frames").clear();
+    h.handle_provider_response_finished(provider_text_response(
+        &prompt_id,
+        agent_id.clone(),
+        "first done",
+    ))
+    .expect("finish first");
+    let (finished, persist) = intercepted_payload(&interceptor);
+    assert!(persist);
+    assert!(matches!(finished, Event::AgentOuterTurnFinished(_)));
+    let mut replacement = finished.clone();
+    if let Event::AgentOuterTurnFinished(turn) = &mut replacement {
+        turn.session_id = "forged-session".into();
+    }
+    h.handle_extension_event(
+        "outer-turn-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(replacement))),
+        })),
+    )
+    .expect("replace finish");
+
+    let records = h
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent records");
+    assert!(records.iter().any(|record| record.event == started));
+    assert!(records.iter().any(|record| record.event == finished));
+
+    let record_count = records.len();
+    for forged in [started, finished] {
+        assert!(Harness::is_peer_forbidden_harness_fact(&forged));
+        h.handle_extension_event(
+            "outer-turn-interceptor",
+            TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_persist(
+                forged, true,
+            ))),
+        )
+        .expect("forbidden peer emit is ignored");
+    }
+    assert_eq!(
+        h.agent_store
+            .agent_events(agent_id.as_str())
+            .expect("records after peer emits")
+            .len(),
+        record_count,
+        "peer-authored lifecycle facts must not reach durable admission"
     );
 }
 

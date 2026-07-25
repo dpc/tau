@@ -23,6 +23,7 @@ libc.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_toon_format.workspace = true
 socket2.workspace = true
 tau-actions.workspace = true
 tau-cli-picker.workspace = true

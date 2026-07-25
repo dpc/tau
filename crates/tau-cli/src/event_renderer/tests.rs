@@ -527,6 +527,8 @@ fn agent_message_summary_omits_name_for_unnamed_target() {
     let message = agent_message("named-sender", "manual-target", "payload");
     let mut renderer = renderer_for_agent_id_tests();
     renderer.handle(&tau_proto::Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         agent_id: agent_id("named-sender"),
         parent_agent: None,
         role: "engineer".to_owned(),
@@ -535,6 +537,8 @@ fn agent_message_summary_omits_name_for_unnamed_target() {
         ephemeral: false,
     }));
     renderer.handle(&tau_proto::Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         agent_id: agent_id("manual-target"),
         parent_agent: None,
         role: "engineer-junior".to_owned(),
@@ -556,6 +560,8 @@ fn agent_message_summary_projects_known_names_independently() {
     let message = agent_message("agent-a", "agent-b", "payload");
     let mut renderer = renderer_for_agent_id_tests();
     renderer.handle(&tau_proto::Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         agent_id: agent_id("agent-a"),
         parent_agent: None,
         role: "researcher".to_owned(),
@@ -569,6 +575,8 @@ fn agent_message_summary_projects_known_names_independently() {
     );
 
     renderer.handle(&tau_proto::Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         agent_id: agent_id("agent-b"),
         parent_agent: None,
         role: "reviewer".to_owned(),

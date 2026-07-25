@@ -9,10 +9,13 @@
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
-use tau_core::{AgentEntry, PolicyStore, SessionStore, SessionStoreError};
+use tau_core::{AgentEntry, AgentStoreError, PolicyStore, SessionStore, SessionStoreError};
 use tau_proto::{
     CborValue, ContentPart, ContextItem, EventSelector, ToolCallItem, ToolResultStatus,
 };
+
+mod session_stats;
+pub use session_stats::*;
 
 /// Errors from the read-only inspection paths.
 #[derive(Debug)]
@@ -21,6 +24,8 @@ pub enum InspectError {
     Io(io::Error),
     /// The session or policy store could not be opened or decoded.
     SessionStore(SessionStoreError),
+    /// An authoritative agent journal could not be opened or decoded.
+    AgentStore(AgentStoreError),
 }
 
 impl fmt::Display for InspectError {
@@ -28,6 +33,7 @@ impl fmt::Display for InspectError {
         match self {
             Self::Io(source) => write!(f, "I/O error: {source}"),
             Self::SessionStore(source) => write!(f, "session store error: {source}"),
+            Self::AgentStore(source) => write!(f, "agent store error: {source}"),
         }
     }
 }
@@ -37,6 +43,7 @@ impl std::error::Error for InspectError {
         match self {
             Self::Io(source) => Some(source),
             Self::SessionStore(source) => Some(source),
+            Self::AgentStore(source) => Some(source),
         }
     }
 }
@@ -50,6 +57,12 @@ impl From<io::Error> for InspectError {
 impl From<SessionStoreError> for InspectError {
     fn from(source: SessionStoreError) -> Self {
         Self::SessionStore(source)
+    }
+}
+
+impl From<AgentStoreError> for InspectError {
+    fn from(source: AgentStoreError) -> Self {
+        Self::AgentStore(source)
     }
 }
 

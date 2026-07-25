@@ -1958,6 +1958,8 @@ pub struct Harness {
     pub(crate) current_session_generation: u64,
     /// Next process-local loaded-agent runtime incarnation.
     next_agent_runtime_incarnation: u64,
+    /// Random identity stamped on outer turns authored by this harness runtime.
+    accounting_runtime_id: tau_proto::AccountingRuntimeId,
     /// Reason associated with the current session binding. Late UI subscribers
     /// receive a replayed `SessionStarted` snapshot with this reason.
     pub(crate) current_session_start_reason: tau_proto::SessionStartReason,
@@ -2502,6 +2504,9 @@ where
                     .unwrap_or_default();
                 writer.write_message(&HarnessInputMessage::emit_transient(
                     Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+                        estimated_api_cost_rates: None,
+                        estimated_api_cost_increment: None,
+
                         agent_prompt_id: spid,
                         agent_id: prompt.agent_id.clone(),
                         output_items: vec![ContextItem::Message(MessageItem {
@@ -2579,6 +2584,9 @@ where
 
                 writer.write_message(&HarnessInputMessage::emit_transient(
                     Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+                        estimated_api_cost_rates: None,
+                        estimated_api_cost_increment: None,
+
                         agent_prompt_id: spid,
                         agent_id: prompt.agent_id.clone(),
                         output_items: vec![ContextItem::ToolCall(tool_call)],
@@ -2886,6 +2894,10 @@ impl Harness {
             current_session_id: parts.current_session_id,
             current_session_generation: 0,
             next_agent_runtime_incarnation: 1,
+            accounting_runtime_id: tau_proto::AccountingRuntimeId::new(format!(
+                "{:016x}",
+                rand::random::<u64>()
+            )),
             current_session_start_reason: parts.current_session_start_reason,
             agent_id_rng: StdRng::from_entropy(),
             ui_shell_route_rng: StdRng::from_entropy(),
@@ -4541,7 +4553,17 @@ impl Harness {
             return;
         }
         let persist = event.defaults_to_persist();
-        let source = self.resolved_publish_source(source);
+        // Accounting lifecycle facts are harness-authored authority. Do not
+        // inherit the peer/provider source of the publication whose
+        // post-commit continuation generated them.
+        let source = if matches!(
+            event,
+            Event::AgentOuterTurnStarted(_) | Event::AgentOuterTurnFinished(_)
+        ) {
+            None
+        } else {
+            self.resolved_publish_source(source)
+        };
         let agent_id = self.agent_id_for_event(&event).or_else(|| {
             self.agents
                 .get(cid)
@@ -7534,6 +7556,8 @@ impl Harness {
             Event::AgentPromptSubmitted(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentPromptSteered(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentPromptStarted(prompt) => Some(prompt.agent_id.clone()),
+            Event::AgentOuterTurnStarted(turn) => Some(turn.agent_id.clone()),
+            Event::AgentOuterTurnFinished(turn) => Some(turn.agent_id.clone()),
             Event::AgentPromptCreated(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentCompactionTriggered(triggered) => Some(triggered.agent_id.clone()),
             Event::AgentCompacted(compacted) => Some(compacted.agent_id.clone()),
@@ -15418,6 +15442,8 @@ impl Harness {
                 | Event::AgentStatsUpdated(_)
                 | Event::AgentStarted(_)
                 | Event::AgentPromptStarted(_)
+                | Event::AgentOuterTurnStarted(_)
+                | Event::AgentOuterTurnFinished(_)
                 | Event::AgentPromptCreated(_)
                 | Event::AgentMessageSent(_)
                 | Event::AgentMessageReceived(_)
@@ -16428,6 +16454,27 @@ impl Harness {
             .and_then(|parent_cid| self.agents.get(parent_cid))
             .map(|parent| parent.session_id.clone())
             .unwrap_or_else(|| self.current_session_id.clone());
+        let creator = if query.tool_call_id.is_some() {
+            let parent = parent_cid
+                .as_ref()
+                .and_then(|parent_cid| self.agents.get(parent_cid))
+                .ok_or_else(|| {
+                    HarnessError::Participant(
+                        "tool-backed agent creation lost its authenticated parent".to_owned(),
+                    )
+                })?;
+            tau_proto::AgentCreator::Agent {
+                session_id: parent.session_id.clone(),
+                agent_id: crate::parse_agent_id(parent.agent_id.as_deref().ok_or_else(|| {
+                    HarnessError::Participant(
+                        "tool-backed agent creation parent lacks durable identity".to_owned(),
+                    )
+                })?),
+            }
+        } else {
+            let (name, instance_id) = self.extension_action_owner(&source_id);
+            tau_proto::AgentCreator::Extension { name, instance_id }
+        };
         // Start-agent requests create distinct agent transcripts, so their
         // runtime cursor starts at the root. Parent branch NodeIds belong
         // to the parent's agent log and must not be reused in the child log.
@@ -16448,6 +16495,8 @@ impl Harness {
             .into_iter()
             .collect();
         let started = Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(creator),
+
             agent_id: crate::parse_agent_id(&agent_id),
             parent_agent: parent_agent_id
                 .as_ref()
@@ -19576,6 +19625,22 @@ impl Harness {
             return;
         };
         if new_state == tau_proto::AgentRuntimeState::Running {
+            self.ensure_outer_turn_started(cid);
+        } else {
+            let finish = self.agents.get_mut(cid).and_then(|agent| {
+                let outer_turn_id = agent.active_outer_turn_id.take()?;
+                Some(tau_proto::AgentOuterTurnFinished {
+                    agent_id: crate::parse_agent_id(agent.agent_id.as_deref()?),
+                    session_id: agent.session_id.clone(),
+                    outer_turn_id,
+                    disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+                })
+            });
+            if let Some(finish) = finish {
+                self.publish_for_agent(cid, Event::AgentOuterTurnFinished(finish));
+            }
+        }
+        if new_state == tau_proto::AgentRuntimeState::Running {
             self.agent_watch_provider_status.remove(&agent_id);
             for watcher_id in self.watchers_for_agent(&agent_id) {
                 if let Some(subscription_id) = self
@@ -19623,6 +19688,90 @@ impl Harness {
             agent.lifecycle_notification_only_turn = false;
             agent.suppressed_start_subscriptions.clear();
         }
+    }
+
+    /// Persist the sole ordinary outer-turn start once its durable inference
+    /// checkpoint supplies both the initiating occurrence and unique prompt id.
+    fn ensure_outer_turn_started(&mut self, cid: &AgentId) {
+        let activation = self.outer_turn_activation(cid);
+        let restored_turn = activation.as_ref().and_then(|(_, prompt_id)| {
+            let turn_id = tau_proto::AgentOuterTurnId::for_prompt(prompt_id);
+            let agent = self.agents.get(cid)?;
+            self.agent_store
+                .agent(agent.agent_id.as_deref()?)
+                .is_some_and(|tree| tree.outer_turn_is_open(&turn_id))
+                .then_some(turn_id)
+        });
+        if let Some(turn_id) = restored_turn {
+            if let Some(agent) = self.agents.get_mut(cid) {
+                agent.active_outer_turn_id = Some(turn_id);
+            }
+            return;
+        }
+        let runtime_id = self.accounting_runtime_id.clone();
+        let start = self.agents.get_mut(cid).and_then(|agent| {
+            let (activation, prompt_id) = activation?;
+            if agent.active_outer_turn_id.is_some() {
+                return None;
+            }
+            let durable_agent_id = crate::parse_agent_id(agent.agent_id.as_deref()?);
+            let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&prompt_id);
+            agent.active_outer_turn_id = Some(outer_turn_id.clone());
+            Some(tau_proto::AgentOuterTurnStarted {
+                agent_id: durable_agent_id,
+                session_id: agent.session_id.clone(),
+                outer_turn_id,
+                agent_prompt_id: prompt_id,
+                runtime_id,
+                activation,
+            })
+        });
+        if let Some(start) = start {
+            self.publish_for_agent(cid, Event::AgentOuterTurnStarted(start));
+        }
+    }
+
+    /// Resolve the first durable transcript occurrence after an inference
+    /// checkpoint's activation cut.
+    fn outer_turn_activation(
+        &self,
+        cid: &AgentId,
+    ) -> Option<(tau_proto::AgentOuterTurnActivation, AgentPromptId)> {
+        let agent = self.agents.get(cid)?;
+        let (through, cut, prompt_id) = match &agent.activation_dispatch {
+            crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+                agent_prompt_id,
+                through,
+                dispatch,
+                ..
+            } if dispatch.operation == tau_proto::PromptOperation::Inference => {
+                (*through, dispatch.activation_cut, agent_prompt_id.clone())
+            }
+            crate::agent::ActivationDispatchState::DispatchUncertain {
+                agent_prompt_id,
+                through,
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut: Some(cut),
+                ..
+            } => (*through, *cut, agent_prompt_id.clone()),
+            _ => return None,
+        };
+        let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
+        let path = tree.branch_node_ids_from(match through {
+            tau_proto::AgentHead::Root => None,
+            tau_proto::AgentHead::Node(node) => Some(node),
+        });
+        let occurrence = match cut {
+            tau_proto::AgentHead::Root => path.first().copied(),
+            tau_proto::AgentHead::Node(cut) => path
+                .iter()
+                .position(|candidate| *candidate == cut)
+                .and_then(|index| path.get(index.saturating_add(1)).copied()),
+        };
+        let activation = tau_proto::AgentOuterTurnActivation::Journal {
+            occurrence: tau_proto::AgentHead::Node(occurrence?),
+        };
+        Some((activation, prompt_id))
     }
 
     /// Convert a notification-only running generation into an observable mixed
@@ -20871,6 +21020,8 @@ impl Harness {
         let display_name = self.display_name_for_new_agent(&agent_id, role, None);
         let cid: AgentId = crate::parse_agent_id(&agent_id);
         let started = Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::default()),
+
             agent_id: crate::parse_agent_id(&agent_id),
             parent_agent: parent_cid
                 .as_ref()
@@ -20954,6 +21105,8 @@ impl Harness {
             return None;
         }
         let started = Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::default()),
+
             agent_id: crate::parse_agent_id(&agent_id),
             parent_agent: self.parent_agent_id_for_cid(cid),
             role: role.clone(),
@@ -21045,6 +21198,8 @@ impl Harness {
                 .map(|agent| agent.persistence)
                 .unwrap_or_default();
             let started = Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 agent_id: crate::parse_agent_id(agent_id),
                 parent_agent: self.parent_agent_id_for_cid(cid),
                 role: self
@@ -21279,6 +21434,8 @@ impl Harness {
             agent_id: agent_id.clone(),
             session_id: self.current_session_id.clone(),
             model: owned_model,
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: None,
             operation: owned_operation,
             originator,
             ctx_id: None,
@@ -21301,6 +21458,19 @@ impl Harness {
             return None;
         }
         let prompt = self.prepare_agent_prompt_for_dispatch(cid)?;
+        self.ensure_outer_turn_started(cid);
+        if prompt.operation == tau_proto::PromptOperation::Inference
+            && self
+                .agents
+                .get(cid)
+                .is_none_or(|agent| agent.active_outer_turn_id.is_none())
+        {
+            self.terminalize_owned_dispatch_error(
+                cid,
+                "ordinary inference lacks durable outer-turn correlation".to_owned(),
+            );
+            return None;
+        }
         let agent_prompt_id = prompt.agent_prompt_id.clone();
         if agent_prompt_id != owned_prompt_id
             || !self
@@ -21313,7 +21483,13 @@ impl Harness {
             );
             return None;
         }
-        let started = tau_proto::AgentPromptStarted::from(&prompt);
+        let mut started = tau_proto::AgentPromptStarted::from(&prompt);
+        if started.operation == tau_proto::PromptOperation::Inference {
+            started.outer_turn_id = self
+                .agents
+                .get(cid)
+                .and_then(|agent| agent.active_outer_turn_id.clone());
+        }
         let provider_connection_id = self
             .provider_model_routes
             .get(&prompt.model)
@@ -21371,6 +21547,9 @@ impl Harness {
                 agent_prompt_id, ..
             } => agent_id.map(|agent_id| {
                 Event::ProviderResponseFinished(ProviderResponseFinished {
+                    estimated_api_cost_rates: None,
+                    estimated_api_cost_increment: None,
+
                     agent_prompt_id: agent_prompt_id.clone(),
                     agent_id,
                     output_items: Vec::new(),
@@ -21434,6 +21613,9 @@ impl Harness {
                 self.local_route_failure_prompts
                     .insert(agent_prompt_id.clone());
                 Event::ProviderResponseFinished(ProviderResponseFinished {
+                    estimated_api_cost_rates: None,
+                    estimated_api_cost_increment: None,
+
                     agent_prompt_id,
                     agent_id,
                     output_items: Vec::new(),
@@ -22436,6 +22618,8 @@ impl Harness {
         // supplied across that trust boundary before evaluating eligibility.
         response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
         response.context_limit_telemetry = None;
+        response.estimated_api_cost_rates = None;
+        response.estimated_api_cost_increment = None;
         let raw_response_contains_tool_calls = response
             .output_items
             .iter()
@@ -22598,7 +22782,7 @@ impl Harness {
             cached_tokens,
             output_tokens,
         );
-        self.add_finished_response_estimated_cost(&cid, &response, source);
+        self.add_finished_response_estimated_cost(&cid, &mut response, source);
         let (requested_tool_calls, tool_calls_with_non_tool_stop) =
             self.reconcile_finished_response_tool_call_stop(&response, &tool_calls);
         let prompt_operation = self
@@ -23532,15 +23716,14 @@ impl Harness {
     fn add_finished_response_estimated_cost(
         &mut self,
         cid: &AgentId,
-        response: &ProviderResponseFinished,
+        response: &mut ProviderResponseFinished,
         source: Option<&str>,
     ) {
         let captured_rates = self
             .prompt_estimated_cost_rates
             .remove(&response.agent_prompt_id);
-        let Some(usage) = response.usage.as_ref() else {
-            return;
-        };
+        let empty_usage = tau_proto::ProviderTokenUsage::default();
+        let usage = response.usage.as_ref().unwrap_or(&empty_usage);
         let rates = captured_rates.unwrap_or_else(|| {
             tracing::warn!(
                 target: "tau_harness",
@@ -23551,8 +23734,16 @@ impl Harness {
             );
             tau_proto::ESTIMATED_API_COST_FALLBACK
         });
+        let increment = tau_proto::EstimatedApiCost::for_usage(usage, rates);
+        response.estimated_api_cost_rates = Some(rates);
+        response.estimated_api_cost_increment = Some(increment);
         if let Some(agent) = self.agents.get_mut(cid) {
-            agent.estimated_api_cost.add_usage(usage, rates);
+            agent.estimated_api_cost = tau_proto::EstimatedApiCost::from_picodollars(
+                agent
+                    .estimated_api_cost
+                    .as_picodollars()
+                    .saturating_add(increment.as_picodollars()),
+            );
         }
         self.emit_agent_stats_updated_from(cid, source);
     }

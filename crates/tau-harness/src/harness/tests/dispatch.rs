@@ -303,7 +303,11 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
         )
         .to_owned(),
     );
-    h.try_advance_queue();
+    h.dispatch_prompt_for_agent(
+        &cid,
+        PendingPrompt::user("retry repaired template".to_owned()),
+    )
+    .expect("retry repaired template");
     let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(
         prompt.system_prompt,
@@ -1573,6 +1577,8 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                     agent_id,
                     None,
                     Event::AgentStarted(tau_proto::AgentStarted {
+                        creator: Some(tau_proto::AgentCreator::default()),
+
                         parent_agent: None,
                         agent_id: crate::parse_agent_id(agent_id),
                         role: "engineer".to_owned(),
@@ -1686,6 +1692,8 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
                 agent_id.as_str(),
                 None,
                 Event::AgentStarted(tau_proto::AgentStarted {
+                    creator: Some(tau_proto::AgentCreator::default()),
+
                     agent_id: agent_id.clone(),
                     parent_agent: None,
                     role: "engineer".to_owned(),
@@ -1749,6 +1757,8 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
     let agent_id = {
         let mut h = echo_harness(&sp).expect("start");
         h.selected_model = Some("test/model".into());
+        let parent = ensure_test_user_agent(&mut h);
+        h.tool_agents.insert("delegate-call".into(), parent);
         h.handle_start_agent_request(
             "conn-delegate",
             StartAgentRequest {
@@ -1881,6 +1891,9 @@ pub(super) fn provider_text_response(
     text: &str,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid.clone(),
         agent_id,
         output_items: vec![ContextItem::Message(MessageItem {
@@ -1911,6 +1924,9 @@ fn provider_repetition_response(
     agent_id: tau_proto::AgentId,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid.clone(),
         agent_id,
         output_items: Vec::new(),
@@ -2045,6 +2061,8 @@ fn seed_agent_loaded(state_dir: &Path, session_id: &str, agent_id: &str) {
                 None,
                 tau_core::AgentEventParent::InheritHead,
                 Event::AgentStarted(tau_proto::AgentStarted {
+                    creator: Some(tau_proto::AgentCreator::default()),
+
                     parent_agent: None,
                     agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
                     role: "engineer".to_owned(),
@@ -2144,6 +2162,9 @@ fn seed_background_placeholder_for_agent(
             agent_id,
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+
                 agent_prompt_id: format!("sp-{call_id}").into(),
                 agent_id: parsed_agent_id,
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -2393,6 +2414,9 @@ pub(super) fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (Te
     h.prompt_agents.insert(spid.clone(), cid);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -2477,6 +2501,9 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -2606,6 +2633,9 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -2707,6 +2737,9 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
     h.prompt_agents.insert(spid.clone(), cid);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -3163,6 +3196,9 @@ fn side_agent_error_response_propagates_error_result() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: side_spid.clone(),
         agent_id: tau_proto::AgentId::parse("side").expect("agent id"),
         output_items: Vec::new(),
@@ -3791,6 +3827,9 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -3924,6 +3963,9 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         .insert("registered-not-snapshot".into(), spid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -4020,6 +4062,9 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
     h.registry.unregister_connection("conn-strict-old-tool");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -4109,6 +4154,9 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -4339,6 +4387,9 @@ fn provider_tool_response(
     arguments: CborValue,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt.agent_prompt_id.clone(),
         agent_id: prompt.agent_id.clone(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -4589,6 +4640,9 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -4688,6 +4742,9 @@ fn background_error_clears_actual_running_call() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -4799,6 +4856,9 @@ fn background_cancel_clears_actual_running_call() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -4935,6 +4995,9 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -5045,6 +5108,9 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -5155,6 +5221,9 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -5554,6 +5623,9 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
         "conn-wrong",
         TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ProviderResponseFinished(ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+
                 agent_prompt_id: "spoofed-prompt".into(),
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 output_items: Vec::new(),
@@ -5639,6 +5711,9 @@ fn cancel_publishes_tool_cancel_request() {
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: crate::parse_agent_id(&target_agent_id),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -5802,6 +5877,8 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
             prompt_sent_tokens: 1_000_000,
             ..tau_proto::ProviderTokenUsage::default()
         }),
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
@@ -6058,6 +6135,9 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
     let bg_call_id: ToolCallId = "live-bg-sibling".into();
     let fg_call_id: ToolCallId = "live-fg-sibling".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: crate::parse_agent_id(&target_agent_id),
         output_items: vec![
@@ -6227,6 +6307,9 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
     h.prompt_agents.insert(spid.clone(), parent_cid.clone());
     let call_id: ToolCallId = "builtin-agent-start-bg".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: crate::parse_agent_id(&parent_agent_id),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -6308,6 +6391,9 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
     h.prompt_agents.insert(spid.clone(), parent_cid.clone());
     let call_id: ToolCallId = "live-builtin-agent-start-bg".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: crate::parse_agent_id(&parent_agent_id),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -6592,6 +6678,8 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
             prompt_sent_tokens: 1_000_000,
             ..tau_proto::ProviderTokenUsage::default()
         }),
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
@@ -7307,6 +7395,9 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
         ),
     ]);
     let response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-x".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -7438,6 +7529,9 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         ])
     };
     let response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id,
         output_items: vec![
@@ -8008,6 +8102,9 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         ),
     ]);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-x".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -8176,6 +8273,9 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
     h.submit_user_prompt("s1".into(), "hello".to_owned())
         .expect("submit");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: read_nth_prompt_created(&h, 0).agent_prompt_id,
         agent_id: read_nth_prompt_created(&h, 0).agent_id,
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8230,6 +8330,9 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1.clone(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8293,6 +8396,9 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8375,6 +8481,9 @@ fn response_id_anchors_next_prompt_with_previous_response() {
     let spid1 = prompt1.agent_prompt_id.clone();
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: prompt1.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8436,6 +8545,9 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: prompt1.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8478,6 +8590,9 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     let prompt2 = read_nth_prompt_created(&h, 1);
     let spid2 = prompt2.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid2,
         agent_id: prompt2.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8544,6 +8659,9 @@ fn model_switch_invalidates_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: prompt1.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8619,6 +8737,9 @@ fn params_drift_invalidates_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: prompt1.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8692,6 +8813,9 @@ fn system_prompt_drift_invalidates_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: prompt1.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8777,6 +8901,9 @@ fn tools_drift_invalidates_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: prompt1.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8862,6 +8989,9 @@ fn stable_params_preserve_chain_anchor() {
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: prompt1.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -8926,6 +9056,9 @@ fn missing_response_id_leaves_chain_unset() {
     let spid1 = prompt1.agent_prompt_id.clone();
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: prompt1.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -9001,6 +9134,9 @@ fn queued_prompt_extends_completed_first_prompt() {
     assert_eq!(second, PromptSubmission::Queued);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: prompt1.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -9105,6 +9241,8 @@ fn existing_agent_loaded_into_different_session_gets_session_state_notice() {
             agent_id.as_str(),
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 parent_agent: None,
                 agent_id: agent_id.clone(),
                 role: "engineer".to_owned(),
@@ -9637,6 +9775,9 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
     assert!(notice_pos < user_pos);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: first_spid,
         agent_id: first_prompt.agent_id.clone(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -9768,6 +9909,9 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
         .expect("submit first resumed prompt");
     let prompt = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt.agent_prompt_id,
         agent_id: prompt.agent_id,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -10907,6 +11051,9 @@ fn manual_standalone_compact_installs_one_boundary() {
     assert_eq!(started.model, prompt.model);
     assert_eq!(started.operation, prompt.operation);
     let response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt.agent_prompt_id,
         agent_id: crate::parse_agent_id(&agent_id),
         output_items: vec![ContextItem::Message(tau_proto::MessageItem {
@@ -10970,6 +11117,9 @@ pub(super) fn context_overflow_response(
     prompt: &tau_proto::AgentPromptCreated,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt.agent_prompt_id.clone(),
         agent_id: prompt.agent_id.clone(),
         output_items: Vec::new(),
@@ -11405,6 +11555,8 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     append_seed_agent_event(
         &mut store,
         Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::default()),
+
             parent_agent: None,
             agent_id: agent_id.clone(),
             role: "engineer".to_owned(),
@@ -11447,6 +11599,9 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
         }),
     );
     let planned = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt_id,
         agent_id,
         output_items: Vec::new(),
@@ -11586,6 +11741,9 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
     append_seed_agent_event(
         &mut store,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: prompt_id,
             agent_id: agent_id.clone(),
             output_items: Vec::new(),
@@ -11837,6 +11995,9 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
     append_seed_agent_event(
         &mut store,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: failed_prompt_id.clone(),
             agent_id: agent_id.clone(),
             output_items: Vec::new(),
@@ -12539,6 +12700,8 @@ fn reactive_context_overflow_delegate_cancel_is_terminal_once() {
         .expect("test model")
         .supports_standalone_compaction = true;
     let call_id = ToolCallId::from("delegate-reactive-call");
+    let parent = ensure_test_user_agent(&mut h);
+    h.tool_agents.insert(call_id.clone(), parent);
     let mut query = ext_query("q-delegate-reactive");
     query.tool_call_id = Some(call_id.clone());
     h.handle_start_agent_request(HARNESS_CONNECTION_ID, query)
@@ -12702,6 +12865,9 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     h.handle_compact_request("s1".into(), Some(&agent_id));
     let compact = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: compact.agent_prompt_id,
         agent_id: crate::parse_agent_id(&agent_id),
         output_items: Vec::new(),
@@ -12821,6 +12987,9 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
         let compact = read_nth_prompt_created(&h, 0);
         compact_prompt_id = compact.agent_prompt_id.clone();
         h.handle_provider_response_finished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: compact.agent_prompt_id,
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: Vec::new(),
@@ -12881,6 +13050,9 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
             .expect("start automatic compaction");
         let compact = read_nth_prompt_created(&h, 0);
         h.handle_provider_response_finished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: compact.agent_prompt_id,
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: vec![ContextItem::Message(MessageItem {
@@ -13030,6 +13202,9 @@ fn standalone_auto_compaction_schedules_at_threshold() {
 
     let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: compact.agent_prompt_id,
         agent_id: crate::parse_agent_id(&agent_id),
         output_items: vec![ContextItem::Message(tau_proto::MessageItem {
@@ -13244,6 +13419,9 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "ap-mixed-round".into(),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: calls
@@ -13475,6 +13653,9 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "ap-reactive-tool".into(),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -14795,6 +14976,9 @@ fn seed_historical_open_prefix_failure(
     h.publish_for_agent(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "ap-historical-inference".into(),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -15333,6 +15517,9 @@ fn provider_compact_call(
     call_id: &ToolCallId,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt.agent_prompt_id.clone(),
         agent_id: prompt.agent_id.clone(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -15779,6 +15966,9 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
     h.prompt_agents.insert(prompt_id.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt_id,
         agent_id: crate::parse_agent_id(&agent_id),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -15884,6 +16074,9 @@ fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live(
         .insert(prompt_id.clone(), caller_cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt_id,
         agent_id: crate::parse_agent_id(&caller_id),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -16297,6 +16490,9 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                model_params: Some(tau_proto::ModelParams::default()),
+                outer_turn_id: None,
+
                 agent_prompt_id: initiating_prompt_id.clone(),
                 agent_id: agent_id.clone(),
                 session_id: "s1".into(),
@@ -16314,6 +16510,9 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+
                 agent_prompt_id: initiating_prompt_id.clone(),
                 agent_id: agent_id.clone(),
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -16424,6 +16623,9 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                model_params: Some(tau_proto::ModelParams::default()),
+                outer_turn_id: None,
+
                 agent_prompt_id: compact_prompt_id.clone(),
                 agent_id: agent_id.clone(),
                 session_id: "s1".into(),
@@ -16577,7 +16779,11 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         .agent_store
         .agent_events(agent_id.as_str())
         .expect("first reopened records");
-    assert_eq!(first_records.len(), seeded_record_count + 3);
+    assert_eq!(
+        first_records.len(),
+        seeded_record_count + 4,
+        "recovery also durably starts the resumed ordinary outer turn"
+    );
     assert_eq!(
         first_records
             .iter()
@@ -16972,6 +17178,9 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+
                 agent_prompt_id: initiating_prompt_id.clone(),
                 agent_id: caller_id.clone(),
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -17363,6 +17572,8 @@ fn setup_manual_cross_compaction_test() -> (
     h.publish_for_agent(
         &target_cid,
         Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::default()),
+
             agent_id: tau_proto::AgentId::parse("unrelated-target").expect("target id"),
             parent_agent: None,
             role: h.selected_role.clone(),
@@ -17970,6 +18181,28 @@ fn ordinary_prompt_started_advances_persisted_inference_generation() {
         prompt_record.operation,
         tau_proto::PromptOperation::Inference
     );
+    assert!(prompt_record.model_params.is_some());
+    let outer_turn_id = prompt_record
+        .outer_turn_id
+        .clone()
+        .expect("ordinary prompt owns a durable outer turn");
+    assert!(
+        h.agent_store
+            .agent_events(agent_id.as_str())
+            .expect("agent events")
+            .iter()
+            .any(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnStarted(started)
+                    if started.outer_turn_id == outer_turn_id
+                    && matches!(
+                        started.activation,
+                        tau_proto::AgentOuterTurnActivation::Journal {
+                            occurrence: tau_proto::AgentHead::Node(_)
+                        }
+                    )
+            ))
+    );
     assert_eq!(
         h.agent_store
             .agent(agent_id.as_str())
@@ -18001,9 +18234,150 @@ fn ordinary_prompt_started_advances_persisted_inference_generation() {
         full_prompt_count
     );
 
-    h.handle_provider_response_finished(provider_text_response(&prompt_id, agent_id, "done"))
-        .expect("finish ordinary provider prompt");
+    h.handle_provider_response_finished(provider_text_response(
+        &prompt_id,
+        agent_id.clone(),
+        "done",
+    ))
+    .expect("finish ordinary provider prompt");
+    assert!(
+        h.agent_store
+            .agent_events(agent_id.as_str())
+            .expect("agent events")
+            .iter()
+            .any(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id == outer_turn_id
+            ))
+    );
     h.shutdown().expect("shutdown");
+}
+
+/// A cold boot preserves one unresolved ordinary outer turn without duplicating
+/// its start, then accounts a later completed turn alongside the crash
+/// boundary.
+#[test]
+fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut first = echo_harness(&state).expect("first harness");
+    let cid = ensure_test_user_agent(&mut first);
+    let agent_id = durable_agent_id_for_conversation(&first, &cid);
+    let session_id = first.current_session_id.clone();
+    first
+        .dispatch_prompt_for_agent(&cid, PendingPrompt::user("crash boundary".to_owned()))
+        .expect("dispatch unresolved prompt");
+    let unresolved_prompt_id = first.agents[&cid]
+        .in_flight_prompt
+        .clone()
+        .expect("unresolved prompt");
+    let expected_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&unresolved_prompt_id);
+    assert_eq!(
+        first
+            .agent_store
+            .agent_events(agent_id.as_str())
+            .expect("first records")
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnStarted(started)
+                    if started.outer_turn_id == expected_turn_id
+                        && started.agent_prompt_id == unresolved_prompt_id
+            ))
+            .count(),
+        1
+    );
+    first.shutdown().expect("first shutdown");
+    drop(first);
+
+    let mut second = echo_harness_with_start_reason(
+        session_id.as_str(),
+        &state,
+        tau_proto::SessionStartReason::Resume,
+    )
+    .expect("second harness");
+    let resumed_cid = second.agent_routes[agent_id.as_str()].clone();
+    let resumed_records = second
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("resumed records");
+    assert_eq!(
+        resumed_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnStarted(started)
+                    if started.outer_turn_id == expected_turn_id
+            ))
+            .count(),
+        1,
+        "cold restore must not duplicate the unresolved start"
+    );
+    assert!(!resumed_records.iter().any(|record| matches!(
+        &record.event,
+        Event::AgentOuterTurnFinished(finished)
+            if finished.outer_turn_id == expected_turn_id
+    )));
+
+    second
+        .dispatch_prompt_for_agent(
+            &resumed_cid,
+            PendingPrompt::user("completed after restart".to_owned()),
+        )
+        .expect("dispatch completed prompt");
+    let completed_prompt_id = second.agents[&resumed_cid]
+        .in_flight_prompt
+        .clone()
+        .expect("completed prompt");
+    let completed_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&completed_prompt_id);
+    second
+        .handle_provider_response_finished(provider_text_response(
+            &completed_prompt_id,
+            agent_id.clone(),
+            "done",
+        ))
+        .expect("finish post-restart prompt");
+    second.shutdown().expect("second shutdown");
+    drop(second);
+
+    let stats = tau_session_inspect::read_session_stats(
+        &tau_config::settings::sessions_dir_of(&state),
+        session_id.as_str(),
+    )
+    .expect("read stats")
+    .expect("session stats");
+    let agent = stats
+        .agents
+        .iter()
+        .find(|stats| stats.agent_id == agent_id)
+        .expect("agent stats");
+    assert_eq!(agent.totals.outer_turns_started, 2);
+    assert_eq!(agent.totals.outer_turns_finished, 1);
+    assert_eq!(agent.totals.outer_turns_unterminated, 1);
+    let records = tau_core::AgentStore::open(state.join("agents"))
+        .expect("agent store")
+        .agent_events(agent_id.as_str())
+        .expect("final records");
+    let starts = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentOuterTurnStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[0].outer_turn_id, expected_turn_id);
+    assert_eq!(
+        starts[1].outer_turn_id,
+        tau_proto::AgentOuterTurnId::for_prompt(&completed_prompt_id)
+    );
+    assert_ne!(starts[0].runtime_id, starts[1].runtime_id);
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        Event::AgentOuterTurnFinished(finished)
+            if finished.outer_turn_id == completed_turn_id
+    )));
 }
 
 /// Regression: a completed manual request at generation zero must not reject a
@@ -18581,6 +18955,9 @@ fn start_background_tool_and_finish_placeholder_turn(
     seed_agent_thinking(h, cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: crate::parse_agent_id(&agent_id),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -19891,6 +20268,9 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: target_agent_id,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -19973,6 +20353,9 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: side_spid,
         agent_id: crate::parse_agent_id(&side_agent_id),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -20604,6 +20987,8 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
 
     let mut query = ext_query("q-reentrant");
     query.tool_call_id = Some("delegate-call".into());
+    let parent = ensure_test_user_agent(&mut h);
+    h.tool_agents.insert("delegate-call".into(), parent);
     let side_agent_id = h
         .enqueue_internal_start_agent_request_without_draining(query)
         .expect("enqueue query");
@@ -20699,6 +21084,8 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
+    let parent = ensure_test_user_agent(&mut h);
+    h.tool_agents.insert("delegate-call".into(), parent);
 
     h.handle_start_agent_request(
         "conn-delegate",
@@ -20729,6 +21116,9 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: side_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -20776,6 +21166,8 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let delegate_events = connect_test_tool(&mut h, "conn-delegate");
+    let parent = ensure_test_user_agent(&mut h);
+    h.tool_agents.insert("delegate-call".into(), parent);
 
     h.handle_start_agent_request(
         "conn-delegate",
@@ -20819,6 +21211,9 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: side_spid.clone(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -20876,6 +21271,9 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     assert!(serialized.contains("please include this"));
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: message_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -21033,6 +21431,9 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -21169,6 +21570,9 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: main_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -21323,6 +21727,9 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
     let main_prompt = read_nth_prompt_created(&h, 0);
     let main_spid = main_prompt.agent_prompt_id.clone();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: main_spid,
         agent_id: main_prompt.agent_id.clone(),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -21445,6 +21852,9 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: main_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -21659,6 +22069,9 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: main_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -21719,6 +22132,9 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: side_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -21849,6 +22265,9 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: main_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -21885,6 +22304,9 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: side_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -21932,6 +22354,9 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side follow-up prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: followup_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -22147,6 +22572,9 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: main_spid,
         agent_id: crate::parse_agent_id(&parent_agent_id),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -22184,6 +22612,9 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         .expect("side prompt id");
     let side_agent_id = h.agents[&side_cid].agent_id.clone().expect("agent id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: side_spid,
         agent_id: crate::parse_agent_id(&side_agent_id),
         output_items: vec![
@@ -22341,6 +22772,9 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -22584,6 +23018,9 @@ fn backgrounded_tool_progress_is_not_published() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -22988,6 +23425,9 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid.clone(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -23093,6 +23533,9 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
     seed_agent_thinking(&mut h, &cid, "sp-main");
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -23203,6 +23646,9 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     );
     let delegate_args = CborValue::Map(Vec::new());
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: main_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -23301,6 +23747,9 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         .expect("prompt B");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid_a,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -23329,6 +23778,9 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     })
     .expect("side response A");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid_b,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -24550,6 +25002,9 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         },
     );
     let terminal = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: terminal_prompt.clone(),
         agent_id: crate::parse_agent_id(&watched_id),
         output_items: Vec::new(),
@@ -24855,6 +25310,18 @@ fn agent_watch_reports_structured_outer_agent_turn_state() {
         .into_iter()
         .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
         .count();
+    let before_accounting_boundaries = h
+        .agent_store
+        .agent_events(watched_id.as_str())
+        .expect("watched records")
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record.event,
+                Event::AgentOuterTurnStarted(_) | Event::AgentOuterTurnFinished(_)
+            )
+        })
+        .count();
     h.agents
         .get_mut(&watched_cid)
         .expect("watched")
@@ -24873,6 +25340,19 @@ fn agent_watch_reports_structured_outer_agent_turn_state() {
     assert_eq!(
         after_notification_only_turn, before_notification_only_turn,
         "notification-only turns must not recursively fan out lifecycle state"
+    );
+    assert_eq!(
+        h.agent_store
+            .agent_events(watched_id.as_str())
+            .expect("watched records")
+            .into_iter()
+            .filter(|record| matches!(
+                record.event,
+                Event::AgentOuterTurnStarted(_) | Event::AgentOuterTurnFinished(_)
+            ))
+            .count(),
+        before_accounting_boundaries,
+        "notification-only turns must append neither accounting boundary"
     );
 
     h.shutdown().expect("shutdown");
@@ -25028,6 +25508,41 @@ fn watch_chain_mixed_lifecycle_turn_emits_paired_state() {
         fresh_states[1].watch_turn_state.as_ref().is_some_and(
             |state| !state.initial && state.state == tau_proto::AgentRuntimeState::Idle
         )
+    );
+    let b_records = h
+        .agent_store
+        .agent_events(b_id.as_str())
+        .expect("agent b records");
+    let starts = b_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentOuterTurnStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let owned_prompts = b_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptStarted(prompt) if prompt.outer_turn_id.is_some() => Some(prompt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let finishes = b_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentOuterTurnFinished(finished) => Some(finished),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (starts.len(), owned_prompts.len(), finishes.len()),
+        (1, 1, 1),
+        "notification-only promotion must produce one owned ordinary lifecycle"
+    );
+    assert_eq!(starts[0].outer_turn_id, finishes[0].outer_turn_id);
+    assert_eq!(
+        owned_prompts[0].outer_turn_id.as_ref(),
+        Some(&starts[0].outer_turn_id)
     );
 
     h.shutdown().expect("shutdown");
@@ -25194,6 +25709,7 @@ fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
         "cost-prompt".into(),
         h.provider_model_info[&model_a].estimated_api_cost_rates(),
     );
+    let captured_rates = h.provider_model_info[&model_a].estimated_api_cost_rates();
     h.provider_model_info
         .get_mut(&model_a)
         .expect("model metadata")
@@ -25213,11 +25729,16 @@ fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
         )
     };
 
-    h.add_finished_response_estimated_cost(&cid, &response(model_a), None);
-    h.add_finished_response_estimated_cost(
-        &cid,
-        &response(tau_proto::ModelId::from("local/unpriced")),
-        None,
+    let mut response_a = response(model_a);
+    h.add_finished_response_estimated_cost(&cid, &mut response_a, None);
+    let mut response_fallback = response(tau_proto::ModelId::from("local/unpriced"));
+    h.add_finished_response_estimated_cost(&cid, &mut response_fallback, None);
+    assert_eq!(response_a.estimated_api_cost_rates, Some(captured_rates));
+    assert_eq!(
+        response_a.estimated_api_cost_increment,
+        Some(tau_proto::EstimatedApiCost::from_picodollars(
+            1_000_000_000_000
+        ))
     );
 
     assert_eq!(
@@ -25309,6 +25830,8 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
         },
     );
     let _delegate = connect_test_tool(&mut h, "conn-delegate");
+    let parent = ensure_test_user_agent(&mut h);
+    h.tool_agents.insert("explicit-call".into(), parent);
     h.registry.register(
         "conn-delegate",
         ToolSpec {
@@ -25420,6 +25943,9 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: main_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -25481,6 +26007,9 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("outer side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: outer_side_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -25547,6 +26076,9 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         })
         .expect("nested side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: nested_side_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -25703,6 +26235,9 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: main_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -25758,6 +26293,9 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("outer side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: outer_side_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -25881,6 +26419,9 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid,
         agent_id: target_agent_id,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -25938,6 +26479,9 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: side_spid,
         agent_id: side_agent_id,
         output_items: vec![ContextItem::Message(MessageItem {
@@ -26064,6 +26608,9 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: main_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -26119,6 +26666,9 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("top prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: top_spid,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -26244,6 +26794,9 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
     }
 
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: old_spid.clone(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -27639,6 +28192,9 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
     );
     assert!(h.agents.contains_key(&cid));
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt_id,
         agent_id: recipient.clone(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -28594,6 +29150,9 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
             None,
             parent,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+
                 agent_prompt_id: "ap-first-round".into(),
                 agent_id: agent_id.clone(),
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -28632,6 +29191,9 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
         .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
         .count();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: second_prompt_id.clone(),
         agent_id: agent_id.clone(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -28765,6 +29327,9 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
             None,
             parent,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+
                 agent_prompt_id: "ap-racing-open-round".into(),
                 agent_id: agent_id.clone(),
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -28812,6 +29377,9 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         })
         .count();
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: compact.agent_prompt_id.clone(),
         agent_id: agent_id.clone(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -29282,6 +29850,8 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             agent_id: crate::parse_agent_id("forged-agent"),
         }),
         Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::default()),
+
             parent_agent: None,
             agent_id: crate::parse_agent_id("forged-agent"),
             role: "engineer".to_owned(),
@@ -31005,6 +31575,8 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
             target_id.as_str(),
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 parent_agent: None,
                 agent_id: target_id.clone(),
                 role: h.selected_role.clone(),

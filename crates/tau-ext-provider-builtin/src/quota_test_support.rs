@@ -79,6 +79,9 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
             })]
         };
         let finished = ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: execution.job.agent_prompt_id.clone(),
             agent_id: prompt.agent_id.clone(),
             output_items,

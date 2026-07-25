@@ -90,10 +90,16 @@ delivery is released.
 ## Prompt lifecycle versus provider prompt payloads
 
 `agent.prompt_started` is the durable harness-authored materialization fact. It
-carries prompt, agent, session, model, originator, correlation, and operation
-metadata without provider content. Agent-journal replay folds it for uniqueness
+carries prompt, agent, session, model, captured model parameters, owning outer
+turn, originator, correlation, and operation metadata without provider content.
+Agent-journal replay folds it for uniqueness
 and inference-generation authority, but subscriber historical catch-up excludes
 it.
+
+`agent.outer_turn_started` and `agent.outer_turn_finished` are durable,
+harness-authored activation boundaries. Their stable ids, session attribution,
+initiating durable occurrence, and terminal disposition are accounting authority;
+replay never infers a missing finish.
 
 `agent.prompt_created` is the full transient provider work request and may carry
 large system prompts, context, images, and tool definitions. It is emitted only

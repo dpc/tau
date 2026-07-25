@@ -149,8 +149,9 @@ created. This implements
 
 Prompt dispatch first commits and syncs a lightweight, harness-authored durable
 `agent.prompt_started` materialization fact. That fact includes the provider
-operation and must uniquely match one unresolved durable inference checkpoint or
-standalone-compaction start. Its one-shot live post-commit continuation then
+operation, captured `ModelParams`, and the owning durable outer-turn id for
+ordinary inference, and must uniquely match one unresolved durable inference
+checkpoint or standalone-compaction start. Its one-shot live post-commit continuation then
 publishes the full transient `agent.prompt_created` provider work request.
 Providers consume `agent.prompt_created`; UIs and side-effect observers should
 subscribe to `agent.prompt_started` so materialized prompt context and tool

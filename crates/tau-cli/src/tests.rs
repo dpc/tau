@@ -1235,6 +1235,9 @@ fn agent_prompt_created(agent_prompt_id: &str, session_id: &str) -> AgentPromptC
 
 fn agent_prompt_started(agent_prompt_id: &str, session_id: &str) -> tau_proto::AgentPromptStarted {
     tau_proto::AgentPromptStarted {
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: None,
+
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         session_id: session_id.into(),
@@ -1995,6 +1998,9 @@ fn finished_response(
         ProviderStopReason::EndTurn
     };
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items,
@@ -2286,6 +2292,8 @@ fn first_agent_event_does_not_force_full_redraw() {
         reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("engineer_abc12345"),
         role: "engineer".to_owned(),
@@ -3350,6 +3358,8 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
         agent_id: agent_id("worker-1"),
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("worker-1"),
         role: "engineer".to_owned(),
@@ -3380,6 +3390,8 @@ fn agent_stats_does_not_overwrite_display_name() {
     );
 
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("engineer-Ab12"),
         role: "engineer".to_owned(),
@@ -3424,6 +3436,8 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         agent_id: agent_id("worker-1"),
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("worker-1"),
         role: "engineer".to_owned(),
@@ -3517,6 +3531,8 @@ fn navigation_mode_results_do_not_mutate_cache() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("worker-1"),
         role: "engineer".to_owned(),
@@ -3579,6 +3595,8 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
         agent_id: agent_id("worker-1"),
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("worker-1"),
         role: "engineer".to_owned(),
@@ -3628,6 +3646,8 @@ fn delegated_agent_effectiveness_follows_stats_not_start_result() {
         agent_id: agent_id("worker-1"),
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("worker-1"),
         role: "engineer".to_owned(),
@@ -3682,6 +3702,8 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
         ctx_id: None,
     };
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("worker-1"),
         role: "engineer".to_owned(),
@@ -4743,6 +4765,8 @@ fn agent_messages_render_all_recipients_as_history() {
         cli_test_theme(),
     );
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("manager_11111111"),
         role: "manager".to_owned(),
@@ -5988,6 +6012,8 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
         reason: SessionStartReason::New,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("engineer-junior_b"),
         role: "engineer-junior".to_owned(),
@@ -6031,6 +6057,8 @@ fn status_agent_chip_omits_parenthetical_for_unnamed_agent() {
         reason: SessionStartReason::New,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("engineer-junior_b"),
         role: "engineer-junior".to_owned(),
@@ -6076,6 +6104,8 @@ fn status_agent_chip_shows_current_agent_watchers() {
         reason: SessionStartReason::New,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: agent_id("engineer_child"),
         role: "engineer".to_owned(),
@@ -6259,6 +6289,9 @@ fn model_status_shows_main_tools_then_context_then_quota() {
     // and should render immediately before the context chip. Quota remains
     // final, while side-conversation calls stay rolled up under their delegate.
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "side-sp".into(),
         agent_id: tau_proto::AgentId::parse("q1").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -8104,6 +8137,9 @@ fn watched_agent_stats_redraw_active_indicator() {
     assert!(!vt.screen_contains(100, "running [engineer_1]"));
 
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: None,
+
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
         agent_prompt_id: "ap-engineer_1-0".into(),
@@ -8170,6 +8206,9 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
     ));
     for watched in ["engineer_b", "engineer_a"] {
         renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: None,
+
             session_id: "s1".into(),
             agent_id: agent_id(watched),
             agent_prompt_id: format!("ap-{watched}-0").into(),
@@ -8224,6 +8263,9 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
     }
     let prompt_started = |agent: &str| {
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: None,
+
             session_id: "s1".into(),
             agent_id: agent_id(agent),
             agent_prompt_id: format!("ap-{agent}").into(),
@@ -8278,6 +8320,9 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
         },
     ));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: None,
+
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
         agent_prompt_id: "ap-engineer_1-0".into(),
@@ -8365,6 +8410,9 @@ fn watched_agent_response_finished_removes_active_indicator() {
         },
     ));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: None,
+
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
         agent_prompt_id: "ap-engineer_1-0".into(),
@@ -8396,6 +8444,9 @@ fn watched_agent_response_finished_removes_active_indicator() {
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "ap-engineer_1-0".into(),
         agent_id: agent_id("engineer_1"),
         output_items: Vec::new(),
@@ -8468,6 +8519,9 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
         tau_proto::AgentRuntimeState::Running,
     ));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: None,
+
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
         agent_prompt_id: "ap-engineer_1-0".into(),
@@ -8571,6 +8625,9 @@ fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "ap-engineer_1-0".into(),
         agent_id: agent_id("engineer_1"),
         output_items: Vec::new(),
@@ -8645,6 +8702,9 @@ fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "ap-engineer_1-0".into(),
         agent_id: agent_id("engineer_1"),
         output_items: Vec::new(),
@@ -8695,6 +8755,9 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         },
     ));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "ap-engineer_1-0".into(),
         agent_id: agent_id("engineer_1"),
         output_items: Vec::new(),
@@ -8715,6 +8778,9 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         ws_pool_delta: None,
     }));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: None,
+
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
         agent_prompt_id: "ap-engineer_1-0".into(),

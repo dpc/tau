@@ -256,6 +256,9 @@ fn provider_execution_reports_never_enter_semantic_history() {
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: prompt_id.clone(),
             agent_id,
             output_items: Vec::new(),
@@ -402,6 +405,8 @@ fn shell_reports_never_enter_semantic_history() {
 #[test]
 fn persist_false_non_tool_event_is_not_persisted() {
     let event = Event::AgentStarted(AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: parse_agent_id("agent-1"),
         role: "default".into(),
@@ -499,6 +504,9 @@ fn persist_false_preserves_every_persistence_exception() {
     };
     let exceptions = [
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: None,
+
             agent_prompt_id: "prompt-1".into(),
             agent_id: parse_agent_id("agent-1"),
             session_id: "session-1".into(),
@@ -542,6 +550,8 @@ fn persist_false_preserves_every_persistence_exception() {
     }
 
     let ordinary = Event::AgentStarted(AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: parse_agent_id("agent-1"),
         role: "default".into(),
@@ -577,6 +587,8 @@ fn inverted_wire_metadata_preserves_persistence_exceptions() {
     assert!(should_persist_event(&exception, persist));
 
     let ordinary = Event::AgentStarted(AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         parent_agent: None,
         agent_id: parse_agent_id("agent-1"),
         role: "default".into(),

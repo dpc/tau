@@ -189,13 +189,18 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   observer/interceptor visibility remains available, but historical replay and
   `GetAgentPromptCreated` do not reconstruct it.
 - **`agent.prompt_started`** — Durable, content-free prompt materialization fact.
-  Carries the prompt id, agent id, session id, model, operation, originator, and
-  optional UI correlation id. It commits after the durable dispatch owner and
+  Carries the prompt id, agent id, session id, model, captured model parameters,
+  owning outer-turn id for ordinary inference, operation, originator, and optional
+  UI correlation id. It commits after the durable dispatch owner and
   before the matching transient `agent.prompt_created`. Agent-journal replay
   folds it for exact-one materialization and ordinary-inference generation
   authority, but subscriber catch-up excludes it and replay never recreates
   provider work. UIs and observers should use this when they only need to track
   in-flight prompt state.
+- **`agent.outer_turn_started` / `agent.outer_turn_finished`** — Durable
+  harness-authored boundaries for one non-overlapping accepted activation. They
+  carry the stable turn id and session attribution; the start also identifies the
+  initiating transcript occurrence and the finish records its terminal disposition.
 - **`agent.state`** — Transient live runtime snapshot for one agent. Carries
   `agent_id` plus `idle`/`running` state so UIs can show work in progress
   without treating it as transcript history.

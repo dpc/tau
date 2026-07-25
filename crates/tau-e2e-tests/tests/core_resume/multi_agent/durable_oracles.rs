@@ -2,8 +2,12 @@
 
 use std::collections::BTreeSet;
 
+use tau_core::PersistedAgentEvent;
 use tau_e2e_tests::DurableSessionSnapshot;
-use tau_proto::{ContextItem, Event, EventName, ToolCallId};
+use tau_proto::{
+    AccountingRuntimeId, AgentHead, AgentOuterTurnActivation, AgentOuterTurnDisposition,
+    AgentPromptId, ContextItem, Event, EventName, NodeId, SessionId, ToolCallId,
+};
 
 use super::{Identities, agent_start_projection};
 use crate::GateFixture;
@@ -26,8 +30,8 @@ pub(super) fn assert_snapshot_a(
         != expected
         || snapshot.session_events.len() != 2
         || snapshot.restore_events.len() != 2
-        || snapshot.agent_events[&identities.main].len() != 20
-        || snapshot.agent_events[&identities.worker].len() != 6
+        || snapshot.agent_events[&identities.main].len() != 26
+        || snapshot.agent_events[&identities.worker].len() != 8
     {
         return Err(format!(
             "S8 Boot A durable record counts changed: session={}, restore={}, main={}, worker={}",
@@ -58,6 +62,26 @@ pub(super) fn assert_snapshot_a(
         }
     }
     assert_exact_event_names(snapshot, identities)?;
+    let main_runtime = assert_lifecycle_pairs(
+        &snapshot.agent_events[&identities.main],
+        &identities.main,
+        &snapshot.session_id,
+        &[
+            (&["ap-main-0", "ap-main-1"], 0),
+            (&["ap-main-2"], 4),
+            (&["ap-main-3"], 6),
+        ],
+    )?;
+    let worker_prompt = format!("ap-{}-0", identities.worker.as_str());
+    let worker_runtime = assert_lifecycle_pairs(
+        &snapshot.agent_events[&identities.worker],
+        &identities.worker,
+        &snapshot.session_id,
+        &[(&[worker_prompt.as_str()], 0)],
+    )?;
+    if main_runtime != worker_runtime {
+        return Err("S8 Boot A lifecycle facts used inconsistent runtime identities".into());
+    }
     for (record, agent_id) in snapshot.session_events.iter().zip(identities.all()) {
         if !matches!(
             &record.event,
@@ -109,6 +133,7 @@ fn assert_exact_event_names(
         E::AGENT_USER_INTERACTION_RECORDED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
+        E::AGENT_OUTER_TURN_STARTED,
         E::AGENT_PROMPT_STARTED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_MESSAGE_RECEIVED,
@@ -117,22 +142,29 @@ fn assert_exact_event_names(
         E::AGENT_PROMPT_STARTED,
         E::AGENT_MESSAGE_RECEIVED,
         E::PROVIDER_RESPONSE_FINISHED,
+        E::AGENT_OUTER_TURN_FINISHED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
+        E::AGENT_OUTER_TURN_STARTED,
         E::AGENT_PROMPT_STARTED,
         E::AGENT_MESSAGE_RECEIVED,
         E::AGENT_MESSAGE_RECEIVED,
         E::PROVIDER_RESPONSE_FINISHED,
+        E::AGENT_OUTER_TURN_FINISHED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
+        E::AGENT_OUTER_TURN_STARTED,
         E::AGENT_PROMPT_STARTED,
         E::PROVIDER_RESPONSE_FINISHED,
+        E::AGENT_OUTER_TURN_FINISHED,
     ];
     let worker_expected = [
         E::AGENT_STARTED,
         E::AGENT_DISPLAY_NAME_SET,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
+        E::AGENT_OUTER_TURN_STARTED,
         E::AGENT_PROMPT_STARTED,
         E::PROVIDER_RESPONSE_FINISHED,
+        E::AGENT_OUTER_TURN_FINISHED,
     ];
     for (agent_id, expected) in [
         (&identities.main, main_expected.as_slice()),
@@ -237,7 +269,7 @@ fn assert_boot_a_agent_payloads(
                     && prompt.ctx_id.is_none()
         )
         || !exact_text_response(
-            &worker[5].event,
+            &worker[6].event,
             &identities.worker,
             "worker boot-a complete",
             false,
@@ -542,17 +574,36 @@ pub(super) fn assert_snapshot_suffix(
     let worker_before = &before.agent_events[&identities.worker];
     let worker_after = &after.agent_events[&identities.worker];
     let suffix = &worker_after[worker_before.len()..];
+    let previous_runtime = worker_before
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::AgentOuterTurnStarted(started) => Some(started.runtime_id.clone()),
+            _ => None,
+        })
+        .ok_or("S8 worker Boot A lifecycle start missing")?;
+    let fresh_prompt = format!("ap-{}-1", identities.worker.as_str());
+    let resumed_runtime = assert_lifecycle_pairs(
+        suffix,
+        &identities.worker,
+        &after.session_id,
+        &[(&[fresh_prompt.as_str()], 3)],
+    )?;
+    if resumed_runtime == previous_runtime {
+        return Err("S8 cold resume reused its Boot A accounting runtime identity".into());
+    }
     let [
         interaction,
         notice,
         prompt,
         dispatch,
+        outer_start,
         started,
         response_record,
+        outer_finish,
     ] = suffix
     else {
         return Err(format!(
-            "S8 worker durable suffix has {} records instead of six",
+            "S8 worker durable suffix has {} records instead of eight",
             suffix.len()
         )
         .into());
@@ -596,6 +647,12 @@ pub(super) fn assert_snapshot_suffix(
     let Event::ProviderResponseFinished(response) = &response_record.event else {
         return Err("S8 worker durable suffix omitted its terminal response".into());
     };
+    let Event::AgentOuterTurnStarted(outer_start) = &outer_start.event else {
+        return Err("S8 worker durable suffix omitted its outer-turn start".into());
+    };
+    let Event::AgentOuterTurnFinished(outer_finish) = &outer_finish.event else {
+        return Err("S8 worker durable suffix omitted its outer-turn finish".into());
+    };
     if dispatch.agent_id != identities.worker
         || started.agent_id != identities.worker
         || dispatch.agent_prompt_id != response.agent_prompt_id
@@ -608,6 +665,10 @@ pub(super) fn assert_snapshot_suffix(
         || dispatch.activation_cut != Some(tau_proto::AgentHead::Node(tau_proto::NodeId::new(2)))
         || started.model.to_string() != "fake/test"
         || started.operation != tau_proto::PromptOperation::Inference
+        || outer_start.agent_prompt_id != dispatch.agent_prompt_id
+        || outer_start.outer_turn_id
+            != tau_proto::AgentOuterTurnId::for_prompt(&dispatch.agent_prompt_id)
+        || outer_finish.outer_turn_id != outer_start.outer_turn_id
         || response.agent_id != identities.worker
         || !exact_text_response(
             &response_record.event,
@@ -660,6 +721,111 @@ pub(super) fn assert_snapshot_suffix(
         .into());
     }
     Ok(())
+}
+
+/// Validates exact dispatch/start/prompt/finish ownership for complete outer
+/// turns and returns their shared harness-runtime identity.
+fn assert_lifecycle_pairs(
+    records: &[PersistedAgentEvent],
+    agent_id: &tau_proto::AgentId,
+    session_id: &SessionId,
+    expected: &[(&[&str], u64)],
+) -> Result<AccountingRuntimeId, Box<dyn std::error::Error>> {
+    let starts = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| match &record.event {
+            Event::AgentOuterTurnStarted(started) => Some((index, record, started)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let finishes = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| match &record.event {
+            Event::AgentOuterTurnFinished(finished) => Some((index, record, finished)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if starts.len() != expected.len() || finishes.len() != expected.len() {
+        return Err(format!(
+            "S8 lifecycle pair count changed for {agent_id}: starts={}, finishes={}",
+            starts.len(),
+            finishes.len()
+        )
+        .into());
+    }
+    let runtime_id = starts
+        .first()
+        .map(|(_, _, started)| started.runtime_id.clone())
+        .ok_or("S8 lifecycle expectation must not be empty")?;
+    if runtime_id.as_str().is_empty() {
+        return Err("S8 accounting runtime identity was empty".into());
+    }
+    for (
+        ((start_index, start_record, started), (finish_index, finish_record, finished)),
+        (prompt_ids, occurrence),
+    ) in starts.iter().zip(&finishes).zip(expected)
+    {
+        let first_prompt = AgentPromptId::from(prompt_ids[0]);
+        let expected_turn = tau_proto::AgentOuterTurnId::for_prompt(&first_prompt);
+        if start_record.source.is_some()
+            || finish_record.source.is_some()
+            || started.agent_id != *agent_id
+            || started.session_id != *session_id
+            || started.agent_prompt_id != first_prompt
+            || started.outer_turn_id != expected_turn
+            || started.runtime_id != runtime_id
+            || started.activation
+                != (AgentOuterTurnActivation::Journal {
+                    occurrence: AgentHead::Node(NodeId::new(*occurrence)),
+                })
+            || finished.agent_id != *agent_id
+            || finished.session_id != *session_id
+            || finished.outer_turn_id != expected_turn
+            || finished.disposition != AgentOuterTurnDisposition::Settled
+            || finish_index <= start_index
+        {
+            return Err(format!(
+                "S8 lifecycle payload changed for {agent_id}: {started:?} / {finished:?}"
+            )
+            .into());
+        }
+        for prompt_id in *prompt_ids {
+            let prompt_id = AgentPromptId::from(*prompt_id);
+            let dispatch_index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentInferenceDispatchStarted(dispatch)
+                            if dispatch.agent_id == *agent_id
+                                && dispatch.agent_prompt_id == prompt_id
+                    )
+                })
+                .ok_or_else(|| format!("S8 lifecycle dispatch missing for {prompt_id}"))?;
+            let prompt_index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentPromptStarted(prompt)
+                            if prompt.agent_id == *agent_id
+                                && prompt.session_id == *session_id
+                                && prompt.agent_prompt_id == prompt_id
+                                && prompt.outer_turn_id.as_ref() == Some(&expected_turn)
+                    )
+                })
+                .ok_or_else(|| format!("S8 lifecycle prompt missing for {prompt_id}"))?;
+            if dispatch_index >= prompt_index
+                || prompt_index <= *start_index
+                || prompt_index >= *finish_index
+            {
+                return Err(format!("S8 lifecycle ordering changed for {prompt_id}").into());
+            }
+        }
+    }
+    Ok(runtime_id)
 }
 
 /// Counts fully matched closed scenario actions in the fake-provider trace.

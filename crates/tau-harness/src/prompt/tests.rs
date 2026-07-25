@@ -1488,6 +1488,9 @@ fn assemble_conversation_includes_tool_error_details() {
     tree.apply_event(&user_prompt("build firefox"));
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "sp-tools".into(),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
@@ -1580,6 +1583,9 @@ fn assemble_conversation_preserves_agent_phase() {
     tree.apply_event(&user_prompt("hi"));
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "sp-1".into(),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![ContextItem::Message(MessageItem {
@@ -1836,6 +1842,9 @@ fn assemble_conversation_replays_reasoning_items_before_text() {
     .to_string();
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "sp-1".into(),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![
@@ -1887,6 +1896,9 @@ fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
     .to_string();
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "sp-1".into(),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![ContextItem::Reasoning(tau_proto::OpaqueProviderItem::new(

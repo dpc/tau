@@ -463,6 +463,9 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
         .pending_provider_prompts
         .insert("prompt-1".into(), "provider".into());
     let response = tau_proto::ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "prompt-1".into(),
         agent_id: crate::parse_agent_id("spoofed"),
         output_items: vec![tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
@@ -509,7 +512,10 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
     for (source, event) in derived {
         let expected = match event {
             Event::ProviderResponseFinishedReported(_) => Some("provider"),
-            Event::AgentPromptStarted(_) | Event::AgentPromptCreated(_) => None,
+            Event::AgentPromptStarted(_)
+            | Event::AgentPromptCreated(_)
+            | Event::AgentOuterTurnStarted(_)
+            | Event::AgentOuterTurnFinished(_) => None,
             _ => Some(HARNESS_CONNECTION_ID),
         };
         assert_eq!(
@@ -589,6 +595,8 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
             agent_id.as_str(),
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 parent_agent: None,
                 agent_id: agent_id.clone(),
                 role: "engineer".to_owned(),
@@ -663,6 +671,9 @@ fn finished_report_live_delivery_clears_provider_image_bytes() {
         )
         .expect("subscribe observer");
     let response = tau_proto::ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "unknown-prompt".into(),
         agent_id: crate::parse_agent_id("spoofed"),
         output_items: vec![tau_proto::ContextItem::ToolResult(

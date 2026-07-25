@@ -225,3 +225,8 @@ architectural boundaries and durable design choices.
 Tau is under heavy development. For the most exact command-line and
 configuration surface, use the installed command's `--help`, generated
 configuration from `tau init`, and the component documentation linked above.
+
+Persisted activity accounting is available through
+`tau session stats --session <id>`. The versioned TOON report traverses immutable
+session membership and member agent journals without a cumulative sidecar, and
+marks unavailable legacy facts rather than inferring them.

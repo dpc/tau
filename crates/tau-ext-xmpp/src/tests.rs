@@ -1639,6 +1639,8 @@ fn replayed_role_metadata_populates_muc_room_template() {
             HarnessOutputMessage::deliver_replay(
                 tau_proto::UnixMicros::new(1),
                 Event::AgentStarted(tau_proto::AgentStarted {
+                    creator: Some(tau_proto::AgentCreator::default()),
+
                     agent_id: agent_id("agent-1"),
                     parent_agent: None,
                     role: "engineer".to_owned(),

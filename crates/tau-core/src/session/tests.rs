@@ -19,6 +19,106 @@ fn apply_persisted_test_record(
     (seq, node)
 }
 
+/// A crash-cut unmatched start remains durable, while a different harness
+/// runtime may start and finish a fresh turn without permitting same-runtime
+/// overlap.
+#[test]
+fn outer_turn_fold_distinguishes_crash_recovery_from_runtime_overlap() {
+    let agent_id = tau_proto::AgentId::parse("agent_0").expect("agent id");
+    let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
+    apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        Event::AgentStarted(tau_proto::AgentStarted {
+            agent_id: agent_id.clone(),
+            creator: Some(tau_proto::AgentCreator::User),
+            parent_agent: None,
+            role: "engineer".to_owned(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        }),
+    );
+    let start = |id: &str, runtime: &str| {
+        let prompt_id: tau_proto::AgentPromptId = id.into();
+        Event::AgentOuterTurnStarted(tau_proto::AgentOuterTurnStarted {
+            agent_id: agent_id.clone(),
+            session_id: "s1".into(),
+            outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(&prompt_id),
+            agent_prompt_id: prompt_id,
+            runtime_id: tau_proto::AccountingRuntimeId::new(runtime),
+            activation: tau_proto::AgentOuterTurnActivation::External {
+                correlation_id: tau_proto::AgentActivationCorrelationId::new(id),
+            },
+        })
+    };
+    let checkpoint = |id: &str| {
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: id.into(),
+            through: tau_proto::AgentHead::Root,
+            model: Some("test/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        })
+    };
+    apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        checkpoint("ap-first"),
+    );
+    apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        start("ap-first", "runtime-1"),
+    );
+    assert!(
+        tree.validate_event_at(
+            AgentEventParent::InheritHead,
+            &start("ap-overlap", "runtime-1")
+        )
+        .is_err()
+    );
+    apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        checkpoint("ap-overlap"),
+    );
+    assert!(
+        tree.validate_event_at(
+            AgentEventParent::InheritHead,
+            &start("ap-overlap", "runtime-1")
+        )
+        .is_err()
+    );
+    apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        checkpoint("ap-second"),
+    );
+    apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        start("ap-second", "runtime-2"),
+    );
+    apply_persisted_test_record(
+        &mut tree,
+        AgentEventParent::InheritHead,
+        Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+            agent_id,
+            session_id: "s1".into(),
+            outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(&"ap-second".into()),
+            disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+        }),
+    );
+    assert!(
+        !tree.outer_turn_is_open(&tau_proto::AgentOuterTurnId::for_prompt(
+            &"ap-second".into()
+        ))
+    );
+}
+
 /// Ensures extension-supplied typed image metadata cannot bypass the durable
 /// provider-content byte/type validation boundary.
 #[test]
@@ -122,6 +222,9 @@ fn provider_image_content_rejects_per_agent_aggregate_overflow() {
 fn provider_response_rejects_input_side_tool_result_items() {
     let tree = AgentTree::from_events(agent_id(), &[]);
     let response = tau_proto::ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "ap-invalid-result".into(),
         agent_id: agent_id(),
         output_items: vec![ContextItem::ToolResult(tau_proto::ToolResultItem {
@@ -254,6 +357,9 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
         let mut tree = AgentTree::from_events(agent_id(), &[]);
         let parent = append_user_input(&mut tree, "parent");
         let response = tau_proto::ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "ap-tool-prefix".into(),
             agent_id: agent_id(),
             output_items: tool_types
@@ -341,6 +447,9 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "ap-text-prefix".into(),
             agent_id: agent_id(),
             output_items: vec![ContextItem::Message(MessageItem {
@@ -566,6 +675,9 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
     );
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: checkpoint.agent_prompt_id,
             agent_id: agent_id(),
             output_items: vec![ContextItem::Message(MessageItem {
@@ -611,6 +723,9 @@ fn reactive_overflow_recovery_is_claimed_exactly_once() {
         .expect("ordinary checkpoint is valid");
     tree.apply_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()));
     let response = tau_proto::ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: checkpoint.agent_prompt_id.clone(),
         agent_id: agent_id(),
         output_items: Vec::new(),
@@ -673,6 +788,9 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
         activation_cut: Some(AgentHead::Root),
     };
     let planned_response = tau_proto::ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: base_checkpoint.agent_prompt_id.clone(),
         agent_id: agent_id(),
         output_items: Vec::new(),
@@ -1193,6 +1311,9 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         .apply_event_at(
             AgentEventParent::InheritHead,
             &Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+
                 agent_prompt_id: "sp-tool-round".into(),
                 agent_id: agent_id.clone(),
                 output_items: vec![
@@ -1526,6 +1647,9 @@ fn tool_calling_response(
     call_ids: Vec<ToolCallId>,
 ) -> tau_proto::ProviderResponseFinished {
     tau_proto::ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: prompt_id.into(),
         agent_id: agent_id.clone(),
         output_items: call_ids
@@ -1620,6 +1744,8 @@ fn validate_event_rejects_blank_display_names() {
         validation_error(
             &tree,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 agent_id: agent_id.clone(),
                 parent_agent: None,
                 role: "engineer".to_owned(),
@@ -1733,6 +1859,9 @@ fn manual_compaction_generation_excludes_standalone_prompts() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     let prompt = |id: &str, operation| {
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: None,
+
             agent_prompt_id: id.into(),
             agent_id: agent_id(),
             session_id: "session".into(),
@@ -1792,6 +1921,9 @@ fn prompt_started_requires_unique_matching_owner() {
         activation_cut: Some(AgentHead::Root),
     };
     let started = tau_proto::AgentPromptStarted {
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: None,
+
         agent_prompt_id: checkpoint.agent_prompt_id.clone(),
         agent_id: agent_id(),
         session_id: "session".into(),

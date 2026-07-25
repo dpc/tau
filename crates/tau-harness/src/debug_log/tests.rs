@@ -277,6 +277,9 @@ fn published_line_preserves_enriched_token_usage() {
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let model: ModelId = "openai/gpt-5".parse().expect("model id");
     let event = Event::ProviderResponseFinished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: AgentPromptId::from("sp-0"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: Vec::new(),
@@ -702,6 +705,9 @@ fn ui_debug_event_stats_requests_are_not_logged() {
 #[test]
 fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
     let mut event = Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: AgentPromptId::from("sp-image"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![tau_proto::ContextItem::ToolResult(

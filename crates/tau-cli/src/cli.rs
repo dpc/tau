@@ -208,6 +208,17 @@ pub enum SessionCommand {
         #[arg(long, default_value_os_t = default_sessions_dir())]
         sessions_dir: PathBuf,
     },
+
+    /// Print exact durable activity accounting for one session as TOON.
+    Stats {
+        /// Session identifier to account.
+        #[arg(long)]
+        session: String,
+
+        /// Path to per-session storage root (`<state-dir>/sessions/`).
+        #[arg(long, default_value_os_t = default_sessions_dir())]
+        sessions_dir: PathBuf,
+    },
 }
 
 /// Output and exact-directory filters for `tau session list`.

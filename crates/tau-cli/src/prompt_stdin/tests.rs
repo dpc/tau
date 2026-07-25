@@ -56,6 +56,9 @@ fn assistant_finished(
     stop_reason: ProviderStopReason,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid.into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -91,6 +94,9 @@ fn one_shot_output_waits_through_tool_calls_and_keeps_final_snapshots() {
     output.capture_update(&user_update("sp-tool", "", Some(" final")));
 
     assert!(!output.capture_finished(&ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-tool".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         stop_reason: ProviderStopReason::ToolCalls,
@@ -133,6 +139,9 @@ fn one_shot_output_falls_back_to_latest_streaming_text() {
     output.capture_update(&user_update("sp-final", "complete", None));
 
     assert!(output.capture_finished(&ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-final".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         stop_reason: ProviderStopReason::EndTurn,
@@ -163,6 +172,9 @@ fn one_shot_output_status_clear_resets_streaming_fallback() {
     output.capture_update(&user_update("sp-final", "good", Some("good plan")));
 
     assert!(output.capture_finished(&ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-final".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         stop_reason: ProviderStopReason::EndTurn,

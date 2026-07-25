@@ -1619,6 +1619,9 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
     h.publish_for_agent(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "sp-seeded-tools".into(),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: calls
@@ -1670,6 +1673,9 @@ fn rewrite_finished_response_tool_call_items_preserves_provider_replay_sidecars(
         )])),
     };
     let mut response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-raw".into(),
         agent_id: crate::parse_agent_id("main"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {

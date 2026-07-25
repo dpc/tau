@@ -373,6 +373,9 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
         tau_proto::ContextItem::UnknownProviderItem(unknown.clone()),
     ];
     let response = tau_proto::ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "prompt-1".into(),
         agent_id: agent_id(),
         output_items,

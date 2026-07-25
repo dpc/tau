@@ -880,10 +880,16 @@ impl AgentStore {
                 ),
             });
         }
-        if matches!(&event, Event::AgentPromptStarted(_)) && source.is_some() {
+        if matches!(
+            &event,
+            Event::AgentPromptStarted(_)
+                | Event::AgentOuterTurnStarted(_)
+                | Event::AgentOuterTurnFinished(_)
+        ) && source.is_some()
+        {
             return Err(AgentStoreError::InvalidEvent {
                 source: AgentEventValidationError::new(
-                    "agent.prompt_started must be a harness-authored source-free record",
+                    "agent accounting lifecycle facts must be harness-authored source-free records",
                 ),
             });
         }

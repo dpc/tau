@@ -222,6 +222,9 @@ fn session_loaded(session_id: &str, agent_id: &str, ephemeral: bool) -> Event {
 
 fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
     Event::ProviderResponseFinished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: AgentPromptId::from("prompt-1"),
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -317,6 +320,9 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
     };
     let prompt = |id: &str, operation| {
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: None,
+
             agent_prompt_id: id.into(),
             agent_id: AgentId::parse("target").expect("agent id"),
             session_id: "session".into(),
@@ -519,6 +525,8 @@ fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
             "agent-1",
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
                 parent_agent: None,
                 role: "engineer".to_owned(),
@@ -604,6 +612,8 @@ fn agent_checkpoint_lists_fresh_and_repairs_a_suffix() {
             "agent-1",
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 parent_agent: None,
                 agent_id: AgentId::parse("agent-1").expect("agent id"),
                 role: "engineer".to_owned(),
@@ -710,6 +720,8 @@ fn agent_store_requires_committed_creation_for_routing_identity() {
             "agent-1",
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
                 parent_agent: None,
                 role: "engineer".to_owned(),
@@ -771,6 +783,8 @@ fn agent_checkpoint_full_rebuild_stops_before_record_65() {
             "agent-1",
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
                 parent_agent: None,
                 role: "engineer".to_owned(),

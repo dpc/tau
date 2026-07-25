@@ -22,6 +22,8 @@ fn append_agent_creation(store: &mut tau_core::AgentStore, agent_id: &str) {
             agent_id,
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 parent_agent: None,
                 agent_id: crate::parse_agent_id(agent_id),
                 role: "engineer".to_owned(),
@@ -1059,6 +1061,8 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
             "offline-agent",
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 parent_agent: None,
                 agent_id: tau_proto::AgentId::parse("offline-agent").expect("agent id"),
                 role: "engineer".to_owned(),
@@ -1355,6 +1359,9 @@ fn provider_response_contains_text(finished: &ProviderResponseFinished, needle: 
 
 fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-restored-tools".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: call_ids
@@ -1419,6 +1426,8 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
             "main",
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 parent_agent: None,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 role: "engineer".to_owned(),
@@ -1576,6 +1585,8 @@ fn seed_restored_tool_round_for_agent(
             agent_id,
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 parent_agent: None,
                 agent_id: crate::parse_agent_id(agent_id),
                 role: "engineer".to_owned(),
@@ -2104,6 +2115,8 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             agent_id.as_str(),
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                creator: Some(tau_proto::AgentCreator::default()),
+
                 parent_agent: None,
                 agent_id: agent_id.clone(),
                 role: "engineer".to_owned(),
@@ -2556,6 +2569,9 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     h.publish_event(
         None,
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: spid,
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: assistant_output("final"),
@@ -2696,6 +2712,9 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
         h.publish_for_agent(
             &cid,
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+
                 agent_prompt_id: spid.into(),
                 agent_id: crate::parse_agent_id(&agent_id),
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
@@ -3027,6 +3046,9 @@ fn resumed_harness_replays_persisted_session_history() {
             .expect("first prompt agent id")
             .clone();
         h.handle_provider_response_finished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: spid,
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: assistant_output("remembered potato"),
@@ -3263,6 +3285,9 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
 
     let spid1 = h.send_prompt_to_agent("s1");
     h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: spid1,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: assistant_output("answer"),

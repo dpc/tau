@@ -15,6 +15,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
 tau-config.workspace = true
 tau-core.workspace = true
 tau-proto.workspace = true

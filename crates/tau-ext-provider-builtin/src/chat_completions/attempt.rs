@@ -171,6 +171,9 @@ fn finished(
     usage: Option<tau_proto::ProviderTokenUsage>,
 ) -> tau_proto::ProviderResponseFinished {
     tau_proto::ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: agent_prompt_id.clone(),
         agent_id: prompt.agent_id.clone(),
         output_items,

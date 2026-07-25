@@ -165,6 +165,8 @@ fn seed_unloaded_worker(
         agent_id.as_str(),
         None,
         Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::default()),
+
             agent_id: agent_id.clone(),
             parent_agent: Some(identities.main.clone()),
             role: "deterministic-worker".to_owned(),

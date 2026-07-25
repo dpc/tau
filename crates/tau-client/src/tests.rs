@@ -1099,6 +1099,8 @@ fn agent_id() -> tau_proto::AgentId {
 
 fn agent_started() -> Event {
     Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+
         agent_id: agent_id(),
         parent_agent: None,
         role: "engineer".to_owned(),

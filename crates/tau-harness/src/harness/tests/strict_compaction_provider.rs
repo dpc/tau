@@ -201,6 +201,9 @@ fn run_provider(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::
             tau_proto::Emit {
                 event: Box::new(Event::ProviderResponseFinishedReported(
                     ProviderResponseFinished {
+                        estimated_api_cost_rates: None,
+                        estimated_api_cost_increment: None,
+
                         agent_prompt_id: prompt.agent_prompt_id,
                         agent_id: prompt.agent_id,
                         output_items: reply.output_items,

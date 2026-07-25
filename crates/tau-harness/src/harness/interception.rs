@@ -353,6 +353,8 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // Lightweight prompt lifecycle: UIs and notification extensions use this
     // instead of the full provider prompt payload.
     EventName::AGENT_PROMPT_STARTED,
+    EventName::AGENT_OUTER_TURN_STARTED,
+    EventName::AGENT_OUTER_TURN_FINISHED,
     // Agent response: dropping this would wedge `c.head` /
     // `prompt_agents` bookkeeping and the conversation
     // would never advance.
@@ -498,6 +500,8 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::AgentInferenceDispatchStarted(_)
             | Event::AgentPromptCreated(_)
             | Event::AgentPromptStarted(_)
+            | Event::AgentOuterTurnStarted(_)
+            | Event::AgentOuterTurnFinished(_)
             | Event::ProviderResponseFinished(_)
             | Event::HarnessProviderQuotaChanged(_)
             | Event::ToolResult(_)

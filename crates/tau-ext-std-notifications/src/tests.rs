@@ -427,6 +427,9 @@ fn agent_prompt_terminated(agent_id: &str, agent_prompt_id: &str) -> Event {
 
 fn agent_prompt_started_for_agent(agent_id: &str, agent_prompt_id: &str) -> Event {
     Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: None,
+
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         session_id: "s1".into(),
@@ -444,6 +447,9 @@ fn assistant_finished_response_for_agent(
     originator: tau_proto::PromptOriginator,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
@@ -475,6 +481,9 @@ fn tool_call_finished_response(
     originator: tau_proto::PromptOriginator,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(tool_call)],

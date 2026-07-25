@@ -1,5 +1,110 @@
 use super::*;
 
+/// Locks the persisted adjacent-tag shape for both activation authorities so a
+/// serde attribute change cannot silently make existing agent journals
+/// unreadable.
+#[test]
+fn outer_turn_activation_shapes_round_trip_in_json_and_cbor() {
+    let cases = [
+        (
+            AgentOuterTurnActivation::Journal {
+                occurrence: AgentHead::Node(NodeId::new(7)),
+            },
+            serde_json::json!({
+                "kind": "journal",
+                "details": {
+                    "occurrence": {
+                        "kind": "node",
+                        "node_id": 7
+                    }
+                }
+            }),
+        ),
+        (
+            AgentOuterTurnActivation::External {
+                correlation_id: AgentActivationCorrelationId::new("accepted-7"),
+            },
+            serde_json::json!({
+                "kind": "external",
+                "details": {
+                    "correlation_id": "accepted-7"
+                }
+            }),
+        ),
+    ];
+    for (activation, expected) in cases {
+        let json = serde_json::to_value(&activation).expect("serialize activation JSON");
+        assert_eq!(json, expected);
+        assert_eq!(
+            serde_json::from_value::<AgentOuterTurnActivation>(json)
+                .expect("deserialize activation JSON"),
+            activation
+        );
+
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&activation, &mut encoded).expect("serialize activation CBOR");
+        let shape: CborValue =
+            ciborium::from_reader(encoded.as_slice()).expect("decode activation CBOR shape");
+        let CborValue::Map(fields) = shape else {
+            panic!("activation CBOR must be a map");
+        };
+        let field = |name: &str| {
+            fields.iter().find_map(|(key, value)| {
+                (key == &CborValue::Text(name.to_owned())).then_some(value)
+            })
+        };
+        assert_eq!(
+            field("kind"),
+            Some(&json_to_cbor(&expected["kind"])),
+            "CBOR kind"
+        );
+        assert_eq!(
+            field("details"),
+            Some(&json_to_cbor(&expected["details"])),
+            "CBOR details"
+        );
+        assert_eq!(
+            ciborium::from_reader::<AgentOuterTurnActivation, _>(encoded.as_slice())
+                .expect("deserialize activation CBOR"),
+            activation
+        );
+    }
+}
+
+/// Locks the nested activation envelope inside its real event, preventing a
+/// variant-only round trip from missing top-level event encoding regressions.
+#[test]
+fn outer_turn_started_event_preserves_nested_activation_shape() {
+    let event = Event::AgentOuterTurnStarted(AgentOuterTurnStarted {
+        agent_id: AgentId::parse("agent-7").expect("agent id"),
+        session_id: "session-7".into(),
+        outer_turn_id: AgentOuterTurnId::for_prompt(&"ap-agent-7-0".into()),
+        agent_prompt_id: "ap-agent-7-0".into(),
+        runtime_id: AccountingRuntimeId::new("runtime-7"),
+        activation: AgentOuterTurnActivation::Journal {
+            occurrence: AgentHead::Node(NodeId::new(7)),
+        },
+    });
+    let json = serde_json::to_value(&event).expect("serialize event JSON");
+    assert_eq!(json["event"], "agent.outer_turn_started");
+    assert_eq!(json["payload"]["activation"]["kind"], "journal");
+    assert_eq!(
+        json["payload"]["activation"]["details"]["occurrence"],
+        serde_json::json!({"kind": "node", "node_id": 7})
+    );
+    assert_eq!(
+        serde_json::from_value::<Event>(json).expect("deserialize event JSON"),
+        event
+    );
+
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&event, &mut encoded).expect("serialize event CBOR");
+    assert_eq!(
+        ciborium::from_reader::<Event, _>(encoded.as_slice()).expect("deserialize event CBOR"),
+        event
+    );
+}
+
 /// User-entered references may carry one convenience sigil, while canonical
 /// parsing, storage, and serialization remain unsigiled and strict.
 #[test]
@@ -950,6 +1055,9 @@ fn representative_events() -> Vec<Event> {
             operation: PromptOperation::Inference,
         }),
         Event::AgentPromptStarted(AgentPromptStarted {
+            model_params: Some(ModelParams::default()),
+            outer_turn_id: None,
+
             agent_prompt_id: "sp-1".into(),
             agent_id: agent_id("engineer_abcd1234"),
             session_id: "session_123".into(),
@@ -987,6 +1095,8 @@ fn representative_events() -> Vec<Event> {
             head: AgentHead::Root,
         }),
         Event::AgentStarted(AgentStarted {
+            creator: Some(AgentCreator::default()),
+
             agent_id: agent_id("engineer_abcd1234"),
             parent_agent: None,
             role: "engineer".to_owned(),
@@ -1043,6 +1153,9 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+
             agent_prompt_id: "sp-1".into(),
             agent_id: agent_id("engineer_abcd1234"),
             output_items: vec![ContextItem::Message(MessageItem {
@@ -3056,6 +3169,9 @@ fn execution_events_use_provider_wire_family() {
         ),
         (
             Event::ProviderResponseFinished(ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+
                 agent_prompt_id: "sp-1".into(),
                 agent_id: agent_id("engineer_abcd1234"),
                 stop_reason: ProviderStopReason::EndTurn,
@@ -3111,6 +3227,9 @@ fn provider_execution_reports_use_distinct_transient_wires() {
         ),
         (
             Event::ProviderResponseFinishedReported(ProviderResponseFinished {
+                estimated_api_cost_rates: None,
+                estimated_api_cost_increment: None,
+
                 agent_prompt_id: prompt_id.clone(),
                 agent_id,
                 stop_reason: ProviderStopReason::EndTurn,
@@ -3855,6 +3974,8 @@ fn ephemeral_agent_fields_default_false_and_skip_serializing() {
     assert!(!create.ephemeral);
 
     let started = AgentStarted {
+        creator: Some(AgentCreator::default()),
+
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         parent_agent: None,
         role: "engineer".to_owned(),
@@ -4511,6 +4632,9 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
     );
 
     let mut value = serde_json::to_value(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: "sp-wire".into(),
         agent_id: agent_id("engineer_abcd1234"),
         output_items: Vec::new(),
@@ -4853,6 +4977,9 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     );
 
     let mut response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+
         agent_prompt_id: checkpoint.agent_prompt_id,
         agent_id: started.agent_id,
         output_items: Vec::new(),
