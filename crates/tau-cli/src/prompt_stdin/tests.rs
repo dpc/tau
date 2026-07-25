@@ -183,3 +183,23 @@ fn one_shot_output_status_clear_resets_streaming_fallback() {
     assert_eq!(output.thinking_blocks, vec!["good plan"]);
     assert_eq!(output.final_response.as_deref(), Some("good"));
 }
+
+/// Prompt-stdin keeps stdout machine-friendly by routing provider reasoning
+/// separately to stderr, so redirecting stderr leaves only the final answer.
+#[test]
+fn one_shot_output_writes_thinking_to_stderr_and_answer_to_stdout() {
+    let output = OneShotOutput {
+        thinking_blocks: vec!["first plan".to_owned(), "final plan".to_owned()],
+        final_response: Some("answer".to_owned()),
+        ..OneShotOutput::default()
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    output
+        .write_to(&mut stdout, &mut stderr)
+        .expect("write one-shot output");
+
+    assert_eq!(stdout, b"answer\n");
+    assert_eq!(stderr, b"first plan\n\nfinal plan\n");
+}

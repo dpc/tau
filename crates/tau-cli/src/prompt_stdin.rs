@@ -55,7 +55,7 @@ pub(crate) fn run_prompt_stdin(
     let result = read_one_shot_result(&mut reader, &mut output);
 
     if result.is_ok() {
-        output.write_stdout()?;
+        output.write()?;
     }
 
     disconnect_prompt_stdin_client(&mut writer);
@@ -229,27 +229,38 @@ impl OneShotOutput {
         true
     }
 
-    fn write_stdout(&self) -> io::Result<()> {
+    fn write(&self) -> io::Result<()> {
         let mut stdout = io::stdout().lock();
-        let mut wrote_block = false;
+        let mut stderr = io::stderr().lock();
+        self.write_to(&mut stdout, &mut stderr)
+    }
+
+    fn write_to(&self, stdout: &mut impl Write, stderr: &mut impl Write) -> io::Result<()> {
+        let mut wrote_thinking = false;
         for thinking in &self.thinking_blocks {
-            write_text_block(&mut stdout, &mut wrote_block, thinking)?;
+            write_text_block(stderr, &mut wrote_thinking, thinking)?;
         }
+        if wrote_thinking {
+            stderr.write_all(b"\n")?;
+        }
+
+        let mut wrote_response = false;
         if let Some(response) = self.final_response.as_deref() {
-            write_text_block(&mut stdout, &mut wrote_block, response)?;
+            write_text_block(stdout, &mut wrote_response, response)?;
         }
-        if wrote_block {
+        if wrote_response {
             stdout.write_all(b"\n")?;
         }
+        stderr.flush()?;
         stdout.flush()
     }
 }
 
-fn write_text_block(stdout: &mut impl Write, wrote_block: &mut bool, text: &str) -> io::Result<()> {
+fn write_text_block(output: &mut impl Write, wrote_block: &mut bool, text: &str) -> io::Result<()> {
     if *wrote_block {
-        stdout.write_all(b"\n\n")?;
+        output.write_all(b"\n\n")?;
     }
-    stdout.write_all(text.as_bytes())?;
+    output.write_all(text.as_bytes())?;
     *wrote_block = true;
     Ok(())
 }
