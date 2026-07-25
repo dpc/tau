@@ -1062,7 +1062,7 @@ pub struct ToolSpec {
     /// Whether the harness may close the model-visible foreground turn before
     /// the real tool process has returned. `None` means the harness applies its
     /// default policy, currently
-    /// [`BackgroundSupport::MinForegroundSeconds`]`(5)`.
+    /// [`BackgroundSupport::MinForegroundSeconds`]`(2)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_support: Option<BackgroundSupport>,
     /// Optional compact examples owned by the tool provider. The harness keeps
@@ -1124,7 +1124,7 @@ impl BackgroundSupport {
     /// Effective background support when a tool registration omits the field.
     #[must_use]
     pub const fn default_effective() -> Self {
-        Self::MinForegroundSeconds(5)
+        Self::MinForegroundSeconds(2)
     }
 }
 

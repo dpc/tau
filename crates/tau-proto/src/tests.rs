@@ -3890,6 +3890,10 @@ fn tool_spec_defaults_and_background_support() {
     assert!(serialized.get("enabled_by_default").is_none());
     assert!(serialized.get("background_support").is_none());
     assert_eq!(parsed.background_support, None);
+    assert_eq!(
+        BackgroundSupport::default_effective(),
+        BackgroundSupport::MinForegroundSeconds(2)
+    );
 
     let backgrounded: ToolSpec = serde_json::from_value(serde_json::json!({
         "name": "agent_start",

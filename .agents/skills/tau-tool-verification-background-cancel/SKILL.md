@@ -41,7 +41,7 @@ monotonic deadline wins, without consuming input or background results. Exact-id
 and bare background waits remain unbounded. Registration and expiry stay inside
 the running outer turn and must not emit an idle/watch lifecycle edge.
 
-Current background timing: most backgroundable tools background after about 5
+Current background timing: most backgroundable tools background after about 2
 seconds, and `wait` itself never backgrounds. `agent_start` currently finishes
 instantly after creating the sub-agent and returns `self_agent_id` and
 `sub_agent_id`; the sub-agent's later turns and final answers are delivered to
@@ -226,7 +226,7 @@ Procedure:
 Do not send messages. Do not do anything else.
 ```
 
-Let the delegate run long enough for the inner shell call to background, usually about 6 seconds. Then cancel the delegate and wait for the agent_start result. Expect `error: Tool call canceled`.
+Let the delegate run long enough for the inner shell call to background, usually about 3 seconds. Then cancel the delegate and wait for the agent_start result. Expect `error: Tool call canceled`.
 
 After the delegate cancel result is consumed, watch for stray completion prompts for any other tool call ID, especially the inner shell call. If a stray `[tau-internal] Tool call ... is complete.` prompt appears, call `wait` for that ID and record the full result. Treat this as a leak unless there is a clear documented reason it belongs to the parent conversation.
 

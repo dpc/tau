@@ -24157,7 +24157,7 @@ impl Harness {
 
     /// Returns the effective foreground/background support for a tool name.
     /// Missing registration metadata uses the protocol default of
-    /// `MinForegroundSeconds(5)`.
+    /// `MinForegroundSeconds(2)`.
     fn resolve_tool_background_support(&self, name: &str) -> BackgroundSupport {
         self.registry
             .resolve_provider(name)
