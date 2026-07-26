@@ -41,6 +41,95 @@ const WORKER_INITIAL: &str = concat!(
     "Complete the deterministic worker instruction."
 );
 
+/// Return one agent's post-initialization resume suffix after validating the
+/// shared durable snapshot prefix.
+fn suffix_after_initialization<'a>(
+    before: &DurableSessionSnapshot,
+    after: &'a DurableSessionSnapshot,
+    agent_id: &AgentId,
+) -> Result<&'a [tau_core::PersistedAgentEvent], Box<dyn std::error::Error>> {
+    let before_events = &before.agent_events[agent_id];
+    let after_events = &after.agent_events[agent_id];
+    suffix_after_initialization_events(before_events, after_events, agent_id, &after.session_id)
+}
+
+/// Require one fresh, content-equivalent initialization fact after an exact
+/// event prefix and return only later agent-owned work.
+fn suffix_after_initialization_events<'a>(
+    before_events: &[tau_core::PersistedAgentEvent],
+    after_events: &'a [tau_core::PersistedAgentEvent],
+    agent_id: &AgentId,
+    session_id: &SessionId,
+) -> Result<&'a [tau_core::PersistedAgentEvent], Box<dyn std::error::Error>> {
+    if !after_events.starts_with(before_events) {
+        return Err(format!("{agent_id} journal prefix changed across resume").into());
+    }
+    let Some((initialization, suffix)) = after_events[before_events.len()..].split_first() else {
+        return Err(format!("{agent_id} omitted its exact resume initialization fact").into());
+    };
+    let Event::AgentInitializationContextSet(current) = &initialization.event else {
+        return Err(format!("{agent_id} resume suffix did not start with initialization").into());
+    };
+    let previous = before_events
+        .iter()
+        .rev()
+        .find_map(|record| match &record.event {
+            Event::AgentInitializationContextSet(context) => Some(context),
+            _ => None,
+        })
+        .ok_or_else(|| format!("{agent_id} lacks its prior initialization fact"))?;
+    let tau_proto::AgentInitializationContextSet {
+        session_id: current_session_id,
+        agent_id: current_agent_id,
+        agent_initialization_id: current_initialization_id,
+        agents_message: current_agents_message,
+        effective_skills: current_effective_skills,
+        agents_files: current_agents_files,
+    } = current;
+    let tau_proto::AgentInitializationContextSet {
+        session_id: previous_session_id,
+        agent_id: previous_agent_id,
+        agent_initialization_id: previous_initialization_id,
+        agents_message: previous_agents_message,
+        effective_skills: previous_effective_skills,
+        agents_files: previous_agents_files,
+    } = previous;
+    if current_agent_id != agent_id || current_session_id != session_id {
+        return Err(format!("{agent_id} resume initialization has the wrong owner").into());
+    }
+    if current_initialization_id == previous_initialization_id
+        || current_session_id != previous_session_id
+        || current_agent_id != previous_agent_id
+        || current_agents_message != previous_agents_message
+        || current_effective_skills != previous_effective_skills
+        || current_agents_files != previous_agents_files
+    {
+        return Err(format!("{agent_id} did not append a fresh equivalent initialization").into());
+    }
+    Ok(suffix)
+}
+
+/// Require a resume to preserve session-owned streams and append only one
+/// validated initialization replacement to each loaded agent.
+fn assert_initialization_only_refresh(
+    before: &DurableSessionSnapshot,
+    after: &DurableSessionSnapshot,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if after.session_events != before.session_events
+        || after.restore_events != before.restore_events
+        || after.agent_events.keys().collect::<BTreeSet<_>>()
+            != before.agent_events.keys().collect::<BTreeSet<_>>()
+    {
+        return Err("resume changed session, restore, or agent membership state".into());
+    }
+    for agent_id in before.agent_events.keys() {
+        if !suffix_after_initialization(before, after, agent_id)?.is_empty() {
+            return Err(format!("{agent_id} appended state beyond initialization refresh").into());
+        }
+    }
+    Ok(())
+}
+
 /// Builds the shared S1/S3 production-worker grammar with scenario-local
 /// correlation identifiers.
 fn production_worker_scenario(name: &str, prefix: &str) -> ScenarioV2 {

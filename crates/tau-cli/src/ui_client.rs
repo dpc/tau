@@ -230,8 +230,8 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::EXTENSION_STARTING),
         EventSelector::Exact(E::EXTENSION_READY),
         EventSelector::Exact(E::EXTENSION_EXITED),
-        EventSelector::Exact(E::EXTENSION_SKILL_AVAILABLE),
-        EventSelector::Exact(E::EXTENSION_AGENTS_MD_AVAILABLE),
+        EventSelector::Exact(E::HARNESS_SESSION_SKILLS_AVAILABLE),
+        EventSelector::Exact(E::HARNESS_AGENT_CONTEXT_INITIALIZED),
         EventSelector::Exact(E::EXTENSION_CONTEXT_READY),
         // Harness UI state, status, prompt/context accounting, and terminal
         // side-effect events.

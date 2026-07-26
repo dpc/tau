@@ -19,13 +19,19 @@ fn responses_backend() -> tau_proto::ProviderBackend {
     }
 }
 
-fn publish_pending_agent_context_ready(h: &mut Harness, agent_id: &str) {
+fn publish_pending_agent_discovery(h: &mut Harness, agent_id: &str) {
     let agent_id = tau_proto::AgentId::parse(agent_id).expect("agent id");
-    let Some(source_id) = h
-        .pending_agent_context_ready
-        .get(&agent_id)
-        .and_then(|waiting_on| waiting_on.iter().next())
-        .cloned()
+    let Some((source_id, initialization_id)) =
+        h.pending_agent_discovery
+            .get(&agent_id)
+            .and_then(|pending| {
+                pending
+                    .waiting_on
+                    .iter()
+                    .next()
+                    .cloned()
+                    .map(|source_id| (source_id, pending.initialization_id.clone()))
+            })
     else {
         return;
     };
@@ -33,6 +39,8 @@ fn publish_pending_agent_context_ready(h: &mut Harness, agent_id: &str) {
         source_id.as_str(),
         TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
+                agent_initialization_id: initialization_id,
+
                 session_id: h.current_session_id.clone(),
                 agent_id,
             },
@@ -1561,6 +1569,8 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                     "s1",
                     None,
                     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
                         session_id: "s1".into(),
                         agent_id: crate::parse_agent_id(agent_id),
                         ephemeral: false,
@@ -1680,6 +1690,8 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
                 "s1",
                 None,
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
                     session_id: "s1".into(),
                     agent_id: agent_id.clone(),
                     ephemeral: false,
@@ -2046,6 +2058,8 @@ fn seed_agent_loaded(state_dir: &Path, session_id: &str, agent_id: &str) {
             session_id,
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
                 session_id: session_id.into(),
                 agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
                 ephemeral: false,
@@ -8869,6 +8883,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
             add_to_prompt: true,
             user_invocable: true,
             disable_model_invocation: false,
+            argument_hint: None,
             modified: None,
         },
     );
@@ -9124,7 +9139,7 @@ fn queued_prompt_extends_completed_first_prompt() {
         .get(&test_user_agent(&h))
         .and_then(|conv| conv.agent_id.clone())
         .expect("first prompt agent id");
-    publish_pending_agent_context_ready(&mut h, first_agent_id.as_str());
+    publish_pending_agent_discovery(&mut h, first_agent_id.as_str());
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
 
@@ -10212,6 +10227,8 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         &shell_conn,
         TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
+                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
                 session_id: "s2".into(),
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             },
@@ -10228,7 +10245,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         .agent_id
         .clone()
         .expect("new session agent id");
-    publish_pending_agent_context_ready(&mut h, new_agent_id.as_str());
+    publish_pending_agent_discovery(&mut h, new_agent_id.as_str());
     assert!(read_nth_prompt_created(&h, 0).agent_id.as_str() == new_agent_id);
 
     h.shutdown().expect("shutdown");
@@ -11546,6 +11563,8 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     h.publish_event(
         None,
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: agent_id.clone(),
             ephemeral: false,
@@ -13787,7 +13806,8 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
     let prefix = h.agents[&cid].head.expect("prefix");
     h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(100);
     h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
-    h.pending_agent_context_ready.insert(
+    set_test_agent_context_wait(
+        &mut h,
         crate::parse_agent_id(&agent_id),
         std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
     );
@@ -13818,8 +13838,7 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
             && deferred.activation_cut == Some(tau_proto::AgentHead::Node(message_node))
     }));
 
-    h.pending_agent_context_ready
-        .remove(&crate::parse_agent_id(&agent_id));
+    finish_test_agent_context_wait(&mut h, &crate::parse_agent_id(&agent_id));
     h.drain_publish_idle_dispatches();
     let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(
@@ -13861,7 +13880,8 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(0);
     h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
-    h.pending_agent_context_ready.insert(
+    set_test_agent_context_wait(
+        &mut h,
         agent_id.clone(),
         std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
     );
@@ -13881,7 +13901,7 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
             head: tau_proto::AgentHead::Root,
         }),
     );
-    h.pending_agent_context_ready.remove(&agent_id);
+    finish_test_agent_context_wait(&mut h, &agent_id);
     h.drain_publish_idle_dispatches();
 
     assert!(
@@ -13936,7 +13956,8 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(100);
     h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
-    h.pending_agent_context_ready.insert(
+    set_test_agent_context_wait(
+        &mut h,
         agent_id.clone(),
         std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
     );
@@ -13955,7 +13976,7 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
             head: tau_proto::AgentHead::Root,
         }),
     );
-    h.pending_agent_context_ready.remove(&agent_id);
+    finish_test_agent_context_wait(&mut h, &agent_id);
     h.drain_publish_idle_dispatches();
     assert!(
         event_log_events(&h)
@@ -14011,7 +14032,8 @@ fn readiness_deferred_linear_activations_share_one_checkpoint() {
     enable_remote_compaction_for_test_model(&mut h);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.pending_agent_context_ready.insert(
+    set_test_agent_context_wait(
+        &mut h,
         agent_id.clone(),
         std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
     );
@@ -14025,7 +14047,7 @@ fn readiness_deferred_linear_activations_share_one_checkpoint() {
     assert_ne!(branch_a, branch_b);
     assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
 
-    h.pending_agent_context_ready.remove(&agent_id);
+    finish_test_agent_context_wait(&mut h, &agent_id);
     h.drain_publish_idle_dispatches();
     let checkpoints = event_log_events(&h)
         .into_iter()
@@ -14150,7 +14172,8 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
     let ready_agent_id = durable_agent_id_for_conversation(&h, &ready_cid);
     let context_provider = tau_proto::ConnectionId::from("reverse-readiness-context");
     for agent_id in [&retained_agent_id, &ready_agent_id] {
-        h.pending_agent_context_ready.insert(
+        set_test_agent_context_wait(
+            &mut h,
             agent_id.clone(),
             std::collections::HashSet::from([context_provider.clone()]),
         );
@@ -14182,7 +14205,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         crate::agent::ActivationDispatchState::None
     ));
 
-    h.pending_agent_context_ready.remove(&ready_agent_id);
+    finish_test_agent_context_wait(&mut h, &ready_agent_id);
     h.drain_publish_idle_dispatches();
 
     let events = event_log_events(&h);
@@ -14263,7 +14286,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
             if started.agent_id == retained_agent_id
     )));
 
-    h.pending_agent_context_ready.remove(&retained_agent_id);
+    finish_test_agent_context_wait(&mut h, &retained_agent_id);
     h.drain_publish_idle_dispatches();
 
     let events = event_log_events(&h);
@@ -14324,7 +14347,8 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
     let runnable_agent_id = durable_agent_id_for_conversation(&h, &runnable_cid);
     let context_provider = tau_proto::ConnectionId::from("deferred-fairness-context");
     for agent_id in [&blocked_agent_id, &runnable_agent_id] {
-        h.pending_agent_context_ready.insert(
+        set_test_agent_context_wait(
+            &mut h,
             agent_id.clone(),
             std::collections::HashSet::from([context_provider.clone()]),
         );
@@ -14345,8 +14369,8 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
     assert_eq!(h.pending_publish_idle_dispatches[1].cid, runnable_cid);
     let blocked_obligation = h.pending_publish_idle_dispatches[0].clone();
     let runnable_obligation = h.pending_publish_idle_dispatches[1].clone();
-    h.pending_agent_context_ready.remove(&blocked_agent_id);
-    h.pending_agent_context_ready.remove(&runnable_agent_id);
+    finish_test_agent_context_wait(&mut h, &blocked_agent_id);
+    finish_test_agent_context_wait(&mut h, &runnable_agent_id);
     h.agents
         .get_mut(&blocked_cid)
         .expect("blocked agent")
@@ -14487,7 +14511,8 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
         .role = Some("unroutable-test-role".to_owned());
     let context_provider = tau_proto::ConnectionId::from("unroutable-fairness-context");
     for agent_id in [&unroutable_agent_id, &runnable_agent_id] {
-        h.pending_agent_context_ready.insert(
+        set_test_agent_context_wait(
+            &mut h,
             agent_id.clone(),
             std::collections::HashSet::from([context_provider.clone()]),
         );
@@ -14502,8 +14527,8 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
         PendingPrompt::user("runnable activation".to_owned()),
     )
     .expect("defer runnable activation");
-    h.pending_agent_context_ready.remove(&unroutable_agent_id);
-    h.pending_agent_context_ready.remove(&runnable_agent_id);
+    finish_test_agent_context_wait(&mut h, &unroutable_agent_id);
+    finish_test_agent_context_wait(&mut h, &runnable_agent_id);
     assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
     let unroutable_obligation = h.pending_publish_idle_dispatches[0].clone();
 
@@ -14625,7 +14650,8 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
     enable_remote_compaction_for_test_model(&mut h);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.pending_agent_context_ready.insert(
+    set_test_agent_context_wait(
+        &mut h,
         agent_id.clone(),
         std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
     );
@@ -14646,7 +14672,7 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
     assert_ne!(branch_a, branch_b);
     assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
 
-    h.pending_agent_context_ready.remove(&agent_id);
+    finish_test_agent_context_wait(&mut h, &agent_id);
     h.drain_publish_idle_dispatches();
     let branch_b_prompt = read_nth_prompt_created(&h, 0);
     let checkpoints = event_log_events(&h)
@@ -14699,7 +14725,8 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
     enable_remote_compaction_for_test_model(&mut h);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.pending_agent_context_ready.insert(
+    set_test_agent_context_wait(
+        &mut h,
         agent_id.clone(),
         std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
     );
@@ -14744,7 +14771,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
             .collect::<Vec<_>>()
     );
 
-    h.pending_agent_context_ready.remove(&agent_id);
+    finish_test_agent_context_wait(&mut h, &agent_id);
     h.set_agent_turn_state(&cid, AgentTurnState::Idle);
     h.drain_publish_idle_dispatches();
     h.try_advance_queue();
@@ -16379,7 +16406,7 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
 /// background result already committed must preserve that terminal, fold its
 /// one internal completion notification, checkpoint continuation before
 /// dispatch, and leave a second response-less reopen dispatch-uncertain without
-/// another append.
+/// appending anything beyond its fresh initialization replacement.
 #[test]
 fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
     let td = TempDir::new().expect("tempdir");
@@ -16781,8 +16808,8 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         .expect("first reopened records");
     assert_eq!(
         first_records.len(),
-        seeded_record_count + 4,
-        "recovery also durably starts the resumed ordinary outer turn"
+        seeded_record_count + 5,
+        "recovery also records refreshed initialization and starts the resumed outer turn"
     );
     assert_eq!(
         first_records
@@ -17017,7 +17044,45 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         .agent_store
         .agent_events(agent_id.as_str())
         .expect("second reopened records");
-    assert_eq!(second_records.len(), first_records.len());
+    assert!(second_records.starts_with(&first_records));
+    let [initialization] = &second_records[first_records.len()..] else {
+        panic!("cold reopen must append exactly one initialization replacement");
+    };
+    let previous = first_records
+        .iter()
+        .rev()
+        .find_map(|record| match &record.event {
+            Event::AgentInitializationContextSet(context) => Some(context),
+            _ => None,
+        })
+        .expect("first run initialization replacement");
+    let Event::AgentInitializationContextSet(current) = &initialization.event else {
+        panic!("cold reopen suffix must be an initialization replacement");
+    };
+    let tau_proto::AgentInitializationContextSet {
+        session_id: previous_session_id,
+        agent_id: previous_agent_id,
+        agent_initialization_id: previous_initialization_id,
+        agents_message: previous_agents_message,
+        effective_skills: previous_effective_skills,
+        agents_files: previous_agents_files,
+    } = previous;
+    let tau_proto::AgentInitializationContextSet {
+        session_id: current_session_id,
+        agent_id: current_agent_id,
+        agent_initialization_id: current_initialization_id,
+        agents_message: current_agents_message,
+        effective_skills: current_effective_skills,
+        agents_files: current_agents_files,
+    } = current;
+    assert_eq!(current_session_id, &tau_proto::SessionId::new("s1"));
+    assert_eq!(current_agent_id, &agent_id);
+    assert_ne!(current_initialization_id, previous_initialization_id);
+    assert_eq!(current_session_id, previous_session_id);
+    assert_eq!(current_agent_id, previous_agent_id);
+    assert_eq!(current_agents_message, previous_agents_message);
+    assert_eq!(current_effective_skills, previous_effective_skills);
+    assert_eq!(current_agents_files, previous_agents_files);
     assert_eq!(
         second_records
             .iter()
@@ -20137,8 +20202,10 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
         .agent_id
         .clone()
         .expect("waiter agent id");
-    h.pending_agent_context_ready
-        .remove(&tau_proto::AgentId::parse(&waiter_agent_id).expect("agent id"));
+    finish_test_agent_context_wait(
+        &mut h,
+        &tau_proto::AgentId::parse(&waiter_agent_id).expect("agent id"),
+    );
 
     let background_call_id: ToolCallId = "bg-cross-msg-wait".into();
     start_background_tool_and_finish_placeholder_turn(
@@ -28682,7 +28749,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
     let recipient_cid = h.create_durable_user_agent(h.current_session_id.clone(), &role);
     let sender_id = durable_agent_id_for_conversation(&h, &sender_cid);
     let recipient_id = durable_agent_id_for_conversation(&h, &recipient_cid);
-    h.pending_agent_context_ready.remove(&recipient_id);
+    finish_test_agent_context_wait(&mut h, &recipient_id);
 
     h.dispatch_prompt_for_agent(
         &recipient_cid,
@@ -29543,8 +29610,10 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
         .agent_id
         .clone()
         .expect("watcher agent id");
-    h.pending_agent_context_ready
-        .remove(&tau_proto::AgentId::parse(&watcher_id).expect("watcher id"));
+    finish_test_agent_context_wait(
+        &mut h,
+        &tau_proto::AgentId::parse(&watcher_id).expect("watcher id"),
+    );
     h.agents
         .get_mut(&watcher_cid)
         .expect("watcher conversation")
@@ -29679,8 +29748,10 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
         .agent_id
         .clone()
         .expect("watcher agent id");
-    h.pending_agent_context_ready
-        .remove(&tau_proto::AgentId::parse(&watcher_id).expect("watcher id"));
+    finish_test_agent_context_wait(
+        &mut h,
+        &tau_proto::AgentId::parse(&watcher_id).expect("watcher id"),
+    );
     h.agents
         .get_mut(&watched_cid)
         .expect("watched conversation")
@@ -29841,6 +29912,8 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             session_id: "forged-session".into(),
         }),
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "forged-session".into(),
             agent_id: crate::parse_agent_id("forged-agent"),
             ephemeral: false,
@@ -31103,6 +31176,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
             session_id: h.current_session_id.clone(),
             agent_id: agent_id.clone(),
         }),
+        true,
         None,
     );
     assert!(!h.agent_navigation_modes.contains_key(&agent_id));

@@ -659,7 +659,9 @@ fn disable_echo_tool_context_gate_for_tests(harness: &mut Harness) {
     // tool calls. Keep those helpers focused on provider/tool behavior instead
     // of deferring prompts for shell's cwd context acknowledgement.
     harness.agent_context_providers.clear();
-    harness.pending_agent_context_ready.clear();
+    harness.pending_agent_discovery.clear();
+    harness.frozen_agent_discovery.clear();
+    harness.agent_context_initialized.clear();
 }
 
 /// Runs a foreground daemon that accepts socket clients.

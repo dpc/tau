@@ -114,7 +114,7 @@ model tags and role configuration.
 
 `tau-ext-shell` discovers local AGENTS.md files and Markdown skills from the
 working-directory and user roots, parses skill frontmatter through `tau-skills`,
-canonicalizes file paths, and announces candidates to the harness. User
+canonicalizes file paths, and publishes complete atomic source snapshots. User
 AGENTS.md roots are scanned before project roots in this order:
 `$HOME/.config/agents`, `$HOME/.config/agents.local`, legacy `$HOME/.agents`,
 and legacy `$HOME/.agents.local`. All readable, non-empty files from those roots
@@ -132,17 +132,18 @@ Skill roots, nested skill directories, root-level Markdown skill files, and
 directory-level `SKILL.md` files are followed through symlinks; `tau-skills`
 tracks canonical directories during traversal so symlink cycles stop at the first
 already-seen directory.
-Because the shell extension registers as a session context provider, after it
-has sent the session-wide skill and AGENTS.md announcements for a
-`session.started` event, it emits `extension.session_context_ready` so the
-harness can safely run startup role required-skill validation.
-All four session-discovery publications use `persist=false` wire metadata and retain the
-skills-then-AGENTS.md-then-readiness order required by
+Because the shell extension registers as a session context provider, it publishes
+one complete session snapshot followed by `extension.session_context_ready` for
+each `session.started`. For every `session.agent_loaded`, it publishes one
+complete snapshot correlated to that load's `agent_initialization_id`, then
+correlated workdir context and readiness. Replay defers this sequence until the
+per-agent replay boundary so restored metadata wins over process defaults.
+All discovery publications use `persist=false` metadata and the ordering required by
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 Its startup `shell.workdir` prompt-fragment event is a transient declaration that
 the harness commits before activating prompt assembly state, as specified by
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
-`tau-skills` deduplicates files found by this extension before announcement; the
+`tau-skills` deduplicates files before snapshot publication; the
 harness still owns skill-name validation at the protocol boundary, canonical
 winner selection among announced candidates from all sources, model/user
 invocation filtering, and `:skill` prompt expansion policy.

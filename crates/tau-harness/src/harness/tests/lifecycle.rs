@@ -4005,110 +4005,6 @@ fn intercepted_provider_resolution_propagates_initial_tool_collision() {
 }
 
 #[test]
-fn skill_agent_context_and_fragment_are_staged_until_ready() {
-    // Skills, agent context, and extension prompt fragments all feed prompt
-    // assembly. None of them may affect the system prompt until Ready activates
-    // the staged batch.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("start");
-    h.selected_model = Some("test/model".into());
-    let conn_id = "conn-staged-context";
-    let _sink = connect_handshaking_tool(&mut h, conn_id);
-
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
-            name: "staged-skill".into(),
-            description: "STAGED SKILL DESCRIPTION".to_owned(),
-            file_path: "/tmp/staged-skill/SKILL.md".into(),
-            add_to_prompt: true,
-            user_invocable: true,
-            disable_model_invocation: false,
-            argument_hint: None,
-        })),
-    )
-    .expect("stage skill");
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid]
-        .agent_id
-        .as_deref()
-        .expect("agent id")
-        .to_owned();
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtAgentContextPublish(
-            tau_proto::ExtAgentContextPublish {
-                agent_id: crate::parse_agent_id(&agent_id),
-                key: "demo".into(),
-                value: tau_proto::AgentContextValue(serde_json::json!({
-                    "answer": "STAGED CONTEXT VALUE"
-                })),
-            },
-        )),
-    )
-    .expect("stage agent context");
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtPromptFragmentPublish(
-            tau_proto::ExtPromptFragmentPublish {
-                fragment: tau_proto::PromptFragment::new(
-                    "staged.context.fragment",
-                    tau_proto::PromptPriority::new(20),
-                    "CTX={{#each agent_context.demo}}{{value.answer}}{{/each}}",
-                ),
-            },
-        )),
-    )
-    .expect("stage prompt fragment");
-
-    assert!(!h.discovered_skills.contains_key("staged-skill"));
-    let prompt_agent_id = tau_proto::AgentId::parse(&agent_id).expect("agent id");
-    let before_prompt = h
-        .try_build_system_prompt_for_role_and_agent(
-            &h.selected_role,
-            Some(&prompt_agent_id),
-            &[],
-            None,
-            false,
-        )
-        .expect("prompt renders");
-    assert!(!before_prompt.contains("STAGED SKILL DESCRIPTION"));
-    assert!(!before_prompt.contains("STAGED CONTEXT VALUE"));
-
-    h.handle_extension_message(
-        conn_id,
-        TestMessage::Ready(tau_proto::Ready {
-            message: Some("ready".to_owned()),
-        }),
-    )
-    .expect("ready");
-
-    assert!(h.discovered_skills.contains_key("staged-skill"));
-    let after_prompt = h
-        .try_build_system_prompt_for_role_and_agent(
-            &h.selected_role,
-            Some(&prompt_agent_id),
-            &[],
-            None,
-            false,
-        )
-        .expect("prompt renders");
-    assert!(after_prompt.contains("STAGED SKILL DESCRIPTION"));
-    assert!(after_prompt.contains("STAGED CONTEXT VALUE"));
-    assert!(
-        !event_log_events(&h).iter().any(|event| matches!(
-            event,
-            Event::HarnessNotice(info)
-                if info.message.contains("extension.agent_context_publish rejected")
-        )),
-        "agent context publishes update prompt context but must not be persisted as agent transcript events"
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
 fn startup_session_dir_is_reported_before_extension_ready() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -4234,95 +4130,6 @@ fn session_init_catchup_does_not_duplicate_ui_startup_status_snapshots() {
         "startup UI should see one extension-ready status, not live plus catch-up duplicates"
     );
     drop(events);
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Ensures a committed AGENTS.md declaration remains projection-staged until
-/// extension Ready, while operational per-agent readiness and queued prompts
-/// stay behind activation and observe the activated instructions.
-#[test]
-fn agents_context_ready_staged_until_ready_and_queue_waits() {
-    // AGENTS.md discovery and the matching context-ready acknowledgement are
-    // startup context state. A queued user prompt must wait for Ready, then see
-    // the injected AGENTS.md context in the dispatched prompt.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("start");
-    let conn_id = "conn-staged-agents";
-    let _sink = connect_handshaking_tool(&mut h, conn_id);
-    h.initialized_sessions.remove("s1");
-    h.turn_state = TurnState::InitializingSession {
-        session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
-        waiting_on: [tau_proto::ConnectionId::from(conn_id)]
-            .into_iter()
-            .collect(),
-    };
-
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtAgentsMdAvailable(
-            tau_proto::ExtAgentsMdAvailable {
-                file_path: "/repo/AGENTS.md".into(),
-                content: "# Rules\nSTAGED AGENTS CONTEXT".to_owned(),
-            },
-        )),
-    )
-    .expect("stage agents");
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtensionContextReady(
-            tau_proto::ExtensionContextReady {
-                session_id: "s1".into(),
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            },
-        )),
-    )
-    .expect("stage context ready");
-    let submission = h
-        .submit_user_prompt("s1".into(), "queued after staged context".to_owned())
-        .expect("submit");
-
-    assert!(matches!(submission, PromptSubmission::Queued));
-    assert!(h.discovered_agents_files.is_empty());
-    assert!(matches!(
-        h.turn_state,
-        TurnState::InitializingSession { .. }
-    ));
-    assert!(
-        !event_log_events(&h)
-            .iter()
-            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
-    );
-    assert!(event_log_contains_source_event(&h, conn_id, |event| {
-        matches!(event, Event::ExtAgentsMdAvailable(_))
-    }));
-    assert!(!event_log_contains_source_event(&h, conn_id, |event| {
-        matches!(event, Event::ExtensionContextReady(_))
-    }));
-
-    h.handle_extension_message(
-        conn_id,
-        TestMessage::Ready(tau_proto::Ready {
-            message: Some("ready".to_owned()),
-        }),
-    )
-    .expect("ready");
-
-    assert!(h.initialized_sessions.contains("s1"));
-    assert!(event_log_contains_source_event(&h, conn_id, |event| {
-        matches!(
-            event,
-            Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
-        )
-    }));
-    let prompt = read_nth_prompt_created(&h, 0);
-    assert!(prompt_context_contains(
-        &prompt,
-        "queued after staged context"
-    ));
-    assert!(prompt_context_contains(&prompt, "STAGED AGENTS CONTEXT"));
 
     h.shutdown().expect("shutdown");
 }
@@ -4824,10 +4631,16 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
         .and_then(|agent| agent.agent_id.as_deref())
         .expect("durable user agent")
         .to_owned();
+    let initialization_id = h.pending_agent_discovery[&crate::parse_agent_id(&agent_id)]
+        .initialization_id
+        .clone();
     h.handle_extension_event(
         conn_id,
         TestProtocolItem::Event(Event::ExtAgentContextPublish(
             tau_proto::ExtAgentContextPublish {
+                session_id: tau_proto::SessionId::new("s1"),
+                agent_initialization_id: initialization_id.clone(),
+
                 agent_id: crate::parse_agent_id(&agent_id),
                 key: "cwd".into(),
                 value: tau_proto::AgentContextValue(serde_json::json!("/tmp/work")),
@@ -4839,6 +4652,8 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
         conn_id,
         TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
+                agent_initialization_id: initialization_id,
+
                 session_id: "s1".into(),
                 agent_id: crate::parse_agent_id(&agent_id),
             },
@@ -4900,10 +4715,16 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
         .find_map(|agent| agent.agent_id.clone())
         .map(|agent_id| tau_proto::AgentId::parse(&agent_id).expect("agent id"))
         .expect("loaded agent");
+    let initialization_id = h.pending_agent_discovery[&agent_id]
+        .initialization_id
+        .clone();
     h.handle_extension_event(
         conn_id,
         TestProtocolItem::Event(Event::ExtAgentContextPublish(
             tau_proto::ExtAgentContextPublish {
+                session_id: tau_proto::SessionId::new("s1"),
+                agent_initialization_id: initialization_id,
+
                 agent_id: agent_id.clone(),
                 key: "disconnect-test".into(),
                 value: tau_proto::AgentContextValue(serde_json::json!("stale")),
@@ -4932,153 +4753,6 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
         Event::AgentPromptCreated(prompt)
             if prompt_context_contains(prompt, "resume after disconnect")
     )));
-}
-
-#[test]
-fn disconnect_before_ready_drops_all_staged_state() {
-    // If a handshaking extension goes away, its staged batch is discarded rather
-    // than becoming visible through model routes, prompt assembly, interceptors,
-    // custom events, or tool routing.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("start");
-    clear_quiet_provider_models(&mut h);
-    let conn_id = "conn-drop-staged";
-    let sink = connect_handshaking_extension(&mut h, conn_id, tau_proto::ClientKind::Provider);
-    let model_name = "staged/drop-model";
-    let model_id: tau_proto::ModelId = model_name.into();
-
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
-            tau_proto::ToolRegistrationDeclared {
-                tool: staged_tool_spec("dropped_tool"),
-                tool_group: None,
-                prompt_fragment: Some(tau_proto::PromptFragment::new(
-                    "dropped.tool.fragment",
-                    tau_proto::PromptPriority::new(10),
-                    "DROPPED TOOL FRAGMENT",
-                )),
-            },
-        )),
-    )
-    .expect("stage tool");
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ProviderModelsDeclared(
-            tau_proto::ProviderModelsDeclared {
-                models: vec![staged_provider_model(model_name)],
-            },
-        )),
-    )
-    .expect("stage models");
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
-            name: "dropped-skill".into(),
-            description: "DROPPED SKILL".to_owned(),
-            file_path: "/tmp/dropped/SKILL.md".into(),
-            add_to_prompt: true,
-            user_invocable: true,
-            disable_model_invocation: false,
-            argument_hint: None,
-        })),
-    )
-    .expect("stage skill");
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtAgentsMdAvailable(
-            tau_proto::ExtAgentsMdAvailable {
-                file_path: "/repo/DROPPED.md".into(),
-                content: "DROPPED AGENTS".to_owned(),
-            },
-        )),
-    )
-    .expect("stage agents");
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid]
-        .agent_id
-        .as_deref()
-        .expect("agent id")
-        .to_owned();
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtAgentContextPublish(
-            tau_proto::ExtAgentContextPublish {
-                agent_id: crate::parse_agent_id(&agent_id),
-                key: "dropped".into(),
-                value: tau_proto::AgentContextValue(serde_json::json!("DROPPED CONTEXT")),
-            },
-        )),
-    )
-    .expect("stage agent context");
-    h.handle_extension_event(
-        conn_id,
-        TestProtocolItem::Event(Event::ExtPromptFragmentPublish(
-            tau_proto::ExtPromptFragmentPublish {
-                fragment: tau_proto::PromptFragment::new(
-                    "dropped.extension.fragment",
-                    tau_proto::PromptPriority::new(20),
-                    "DROPPED EXTENSION FRAGMENT",
-                ),
-            },
-        )),
-    )
-    .expect("stage fragment");
-    h.handle_extension_message(
-        conn_id,
-        TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority::new(0),
-        }),
-    )
-    .expect("stage intercept");
-    h.handle_extension_message(
-        conn_id,
-        TestMessage::Emit(tau_proto::Emit {
-            event: Box::new(Event::ExtensionEvent(
-                tau_proto::CustomEvent::try_new(
-                    "demo.dropped".parse().expect("event name"),
-                    Some("s1".into()),
-                    CborValue::Text("DROPPED EVENT".to_owned()),
-                )
-                .expect("valid custom event"),
-            )),
-            persist: true,
-        }),
-    )
-    .expect("stage emit");
-
-    h.handle_disconnect(conn_id);
-    h.publish_event(None, draft_event("after disconnect"));
-
-    assert!(!h.extensions.activation_staging.contains_key(conn_id));
-    assert!(h.registry.providers_for("dropped_tool").is_empty());
-    assert!(!h.available_models.contains(&model_id));
-    assert!(!h.provider_model_routes.contains_key(&model_id));
-    assert!(!h.discovered_skills.contains_key("dropped-skill"));
-    assert!(h.discovered_agents_files.is_empty());
-    assert!(
-        !h.agent_context
-            .template_value(Some(&crate::parse_agent_id(&agent_id)))
-            .to_string()
-            .contains("DROPPED CONTEXT")
-    );
-    assert!(
-        !h.build_system_prompt_for_role(&h.selected_role)
-            .contains("DROPPED")
-    );
-    assert!(!event_log_contains_source_event(&h, conn_id, |event| {
-        event.name().to_string().contains("dropped")
-    }));
-    assert!(
-        sink.lock()
-            .expect("sink")
-            .iter()
-            .all(|routed| { !matches!(routed.frame, HarnessOutputMessage::InterceptRequest(_)) })
-    );
-
-    h.shutdown().expect("shutdown");
 }
 
 /// Staged captured-model presence followed by final absence is coalesced into
@@ -6331,25 +6005,27 @@ fn agents_context_is_injected_when_agent_is_created() {
     let _cid = ensure_test_user_agent(&mut h);
 
     let events = loaded_agent_events(&h, "s1");
-    let injected = events
+    let bootstrap = events
         .iter()
         .rev()
         .find_map(|event| match event {
-            Event::AgentUserMessageInjected(injected)
-                if injected.text.contains("# AGENTS.md instructions")
-                    && injected.text.contains("/repo/pkg") =>
+            Event::AgentInitializationContextSet(context)
+                if context
+                    .agents_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("/repo/pkg")) =>
             {
-                Some(injected.text.as_str())
+                context.agents_message.as_deref()
             }
             _ => None,
         })
-        .expect("expected injected AGENTS.md user message");
-    assert!(injected.contains("# AGENTS.md instructions"));
-    assert!(injected.contains("<AGENTS_FILE path=\"/repo/pkg/AGENTS.md\">"));
-    assert!(injected.contains("<AGENTS_FILE path=\"/repo/AGENTS.md\">"));
-    assert!(injected.contains("</AGENTS_FILE>"));
-    let root_pos = injected.find("root rule").expect("root rule");
-    let pkg_pos = injected.find("package rule").expect("package rule");
+        .expect("expected AGENTS.md initialization context");
+    assert!(bootstrap.contains("# AGENTS.md instructions"));
+    assert!(bootstrap.contains("<AGENTS_FILE path=\"/repo/pkg/AGENTS.md\">"));
+    assert!(bootstrap.contains("<AGENTS_FILE path=\"/repo/AGENTS.md\">"));
+    assert!(bootstrap.contains("</AGENTS_FILE>"));
+    let root_pos = bootstrap.find("root rule").expect("root rule");
+    let pkg_pos = bootstrap.find("package rule").expect("package rule");
     assert!(
         root_pos < pkg_pos,
         "broader file should appear before nested one"
@@ -6415,10 +6091,9 @@ fn resumed_session_init_does_not_reinject_agents_context() {
     };
     h.handle_extension_event(
         &tools_connection_id,
-        TestProtocolItem::Event(Event::ExtensionContextReady(
-            tau_proto::ExtensionContextReady {
+        TestProtocolItem::Event(Event::ExtensionSessionContextReady(
+            tau_proto::ExtensionSessionContextReady {
                 session_id: "s1".into(),
-                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             },
         )),
     )
@@ -8085,14 +7760,20 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
     h.apply_agent_context_publish(
         "ctx-ext",
         tau_proto::ExtAgentContextPublish {
+            session_id: tau_proto::SessionId::new("test-session"),
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             agent_id: agent_id.clone(),
             key: tau_proto::AgentContextKey::from("skills"),
             value: tau_proto::AgentContextValue(serde_json::json!(["stale"])),
         },
     );
     h.agent_context_providers.insert(contributor.clone());
-    h.pending_agent_context_ready
-        .insert(agent_id.clone(), HashSet::from([contributor.clone()]));
+    set_test_agent_context_wait(
+        &mut h,
+        agent_id.clone(),
+        HashSet::from([contributor.clone()]),
+    );
 
     h.handle_disconnect("ctx-ext");
 
@@ -8102,7 +7783,7 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
         serde_json::json!({})
     );
     assert!(!h.agent_context_providers.contains(&contributor));
-    assert!(!h.pending_agent_context_ready.contains_key(&agent_id));
+    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
 }
 
 #[test]
@@ -8126,14 +7807,20 @@ fn switch_session_clears_session_scoped_extension_context() {
     h.apply_agent_context_publish(
         "ctx-ext",
         tau_proto::ExtAgentContextPublish {
+            session_id: tau_proto::SessionId::new("test-session"),
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             agent_id: agent_id.clone(),
             key: tau_proto::AgentContextKey::from("skills"),
             value: tau_proto::AgentContextValue(serde_json::json!(["old session"])),
         },
     );
     h.agent_context_providers.insert(contributor.clone());
-    h.pending_agent_context_ready
-        .insert(agent_id.clone(), HashSet::from([contributor.clone()]));
+    set_test_agent_context_wait(
+        &mut h,
+        agent_id.clone(),
+        HashSet::from([contributor.clone()]),
+    );
 
     h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
         .expect("switch session");
@@ -8153,6 +7840,6 @@ fn switch_session_clears_session_scoped_extension_context() {
         h.agent_context.template_value(Some(&agent_id)),
         serde_json::json!({})
     );
-    assert!(h.pending_agent_context_ready.is_empty());
+    assert!(h.pending_agent_discovery.is_empty());
     assert!(h.agent_context_providers.contains(&contributor));
 }

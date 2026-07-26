@@ -127,9 +127,16 @@ impl<'a> InternalToolHost<'a> {
     }
 
     /// Return a cloned snapshot of skills discovered by the harness.
-    pub fn discovered_skills(&self) -> Vec<InternalSkill> {
-        self.harness
-            .discovered_skills
+    pub fn discovered_skills(&self, conversation_id: &AgentId) -> Vec<InternalSkill> {
+        let skills = self
+            .harness
+            .agents
+            .get(conversation_id)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| tau_proto::AgentId::parse(agent_id).ok())
+            .and_then(|agent_id| self.harness.frozen_agent_discovery.get(&agent_id))
+            .map_or(&self.harness.discovered_skills, |snapshot| &snapshot.skills);
+        skills
             .iter()
             .filter(|(_, skill)| !skill.disable_model_invocation)
             .map(|(name, skill)| InternalSkill {

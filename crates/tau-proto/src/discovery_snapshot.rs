@@ -124,9 +124,8 @@ pub struct DiscoveryAgentsFileSummary {
 
 /// An extension's complete session-baseline discovery contribution.
 ///
-/// This transient declaration is migration scaffolding until all producers and
-/// consumers switch atomically. Empty lists will clear the source in that
-/// later runtime implementation.
+/// The transient declaration atomically replaces its source; empty lists clear
+/// it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionSessionDiscoverySnapshotDeclared {
     /// Session to which this complete source snapshot belongs.
@@ -139,9 +138,8 @@ pub struct ExtensionSessionDiscoverySnapshotDeclared {
 
 /// An extension's complete contribution for one agent initialization.
 ///
-/// This transient declaration is migration scaffolding until all producers and
-/// consumers switch atomically. Empty lists will clear the source in that
-/// later runtime implementation.
+/// The transient declaration atomically replaces its pending source; empty
+/// lists clear it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionAgentDiscoverySnapshotDeclared {
     /// Session containing the target agent.

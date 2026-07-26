@@ -73,7 +73,18 @@ pub(crate) struct CwdState {
     /// Atomic committed value cache; valid and invalid states share one lock.
     workdir_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, WorkdirValue>>>,
     /// Loaded agents waiting for initial context publication and readiness.
-    pending_ready_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, tau_proto::SessionId>>>,
+    pending_ready_by_agent: Arc<
+        Mutex<
+            HashMap<tau_proto::AgentId, (tau_proto::SessionId, tau_proto::AgentInitializationId)>,
+        >,
+    >,
+    /// Current loaded initialization correlation retained for later context
+    /// updates.
+    initialization_by_agent: Arc<
+        Mutex<
+            HashMap<tau_proto::AgentId, (tau_proto::SessionId, tau_proto::AgentInitializationId)>,
+        >,
+    >,
     /// At most one pending setter transaction per agent for this instance.
     pending_workdir_by_agent: Arc<Mutex<HashMap<tau_proto::AgentId, PendingWorkdirResult>>>,
     /// Process-local monotonic source for bounded opaque mutation ids.
@@ -92,6 +103,7 @@ impl CwdState {
             process_startup_cwd: Arc::new(Mutex::new(Self::read_process_startup_cwd())),
             workdir_by_agent: Arc::new(Mutex::new(HashMap::new())),
             pending_ready_by_agent: Arc::new(Mutex::new(HashMap::new())),
+            initialization_by_agent: Arc::new(Mutex::new(HashMap::new())),
             pending_workdir_by_agent: Arc::new(Mutex::new(HashMap::new())),
             next_mutation_id: Arc::new(AtomicU64::new(1)),
             mutation_id_salt: {
@@ -294,18 +306,47 @@ impl CwdState {
         &self,
         agent_id: tau_proto::AgentId,
         session_id: tau_proto::SessionId,
+        agent_initialization_id: tau_proto::AgentInitializationId,
     ) {
+        self.initialization_by_agent
+            .lock()
+            .expect("cwd initialization map lock poisoned")
+            .insert(
+                agent_id.clone(),
+                (session_id.clone(), agent_initialization_id.clone()),
+            );
         self.pending_ready_by_agent
             .lock()
             .expect("cwd ready map lock poisoned")
-            .insert(agent_id, session_id);
+            .insert(agent_id, (session_id, agent_initialization_id));
+    }
+
+    /// Return the current loaded initialization correlation for context
+    /// updates.
+    pub(crate) fn initialization(
+        &self,
+        agent_id: &tau_proto::AgentId,
+    ) -> Option<(tau_proto::SessionId, tau_proto::AgentInitializationId)> {
+        self.initialization_by_agent
+            .lock()
+            .expect("cwd initialization map lock poisoned")
+            .get(agent_id)
+            .cloned()
+    }
+
+    /// Forget lifecycle correlation after the agent unloads.
+    pub(crate) fn remove_initialization(&self, agent_id: &tau_proto::AgentId) {
+        self.initialization_by_agent
+            .lock()
+            .expect("cwd initialization map lock poisoned")
+            .remove(agent_id);
     }
 
     /// Consume pending context readiness after context publication.
     pub(crate) fn take_pending_ready(
         &self,
         agent_id: &tau_proto::AgentId,
-    ) -> Option<tau_proto::SessionId> {
+    ) -> Option<(tau_proto::SessionId, tau_proto::AgentInitializationId)> {
         self.pending_ready_by_agent
             .lock()
             .expect("cwd ready map lock poisoned")
@@ -316,7 +357,7 @@ impl CwdState {
     pub(crate) fn pending_ready(
         &self,
         agent_id: &tau_proto::AgentId,
-    ) -> Option<tau_proto::SessionId> {
+    ) -> Option<(tau_proto::SessionId, tau_proto::AgentInitializationId)> {
         self.pending_ready_by_agent
             .lock()
             .expect("cwd ready map lock poisoned")

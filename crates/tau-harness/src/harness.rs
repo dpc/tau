@@ -82,6 +82,7 @@ use crate::extension::{
     spawn_supervised,
 };
 use crate::format::{format_tool_progress, render_entry_preview};
+use crate::frozen_agent_discovery::FrozenAgentDiscovery;
 use crate::harness::agent_context::AgentContextStore;
 use crate::harness::agent_watch_provider_deliveries::AgentWatchProviderDeliveries;
 use crate::harness::current_session::CurrentSessionState;
@@ -113,6 +114,7 @@ use crate::model::{
     role_infos, select_model_for_role, selected_params_for_role, thinking_summaries_for_model,
     verbosities_for_model,
 };
+use crate::pending_agent_discovery::PendingAgentDiscovery;
 use crate::prompt::{
     BUILT_IN_SYSTEM_TEMPLATE_NAME, RolePromptTemplateContext, ToolPromptFragment,
     assemble_prompt_context_from, built_in_system_prompt_templates, render_agents_context_message,
@@ -1333,6 +1335,7 @@ fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill
                     add_to_prompt: skill.add_to_prompt,
                     user_invocable: skill.user_invocable,
                     disable_model_invocation: skill.disable_model_invocation,
+                    argument_hint: skill.argument_hint,
                     modified,
                 },
             )
@@ -1340,10 +1343,101 @@ fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill
         .collect()
 }
 
-fn normalize_skill_invocation_policy(skill: &mut tau_proto::ExtSkillAvailable) {
-    if skill.disable_model_invocation {
-        skill.user_invocable = true;
+const MAX_DISCOVERY_SNAPSHOT_ITEMS: usize = 8192;
+const MAX_DISCOVERY_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DISCOVERY_AGENTS_FILE_BYTES: usize = 1024 * 1024;
+type ValidatedDiscoverySnapshot = (
+    Vec<(tau_proto::SkillName, DiscoveredSkill)>,
+    Vec<DiscoveredAgentsFile>,
+);
+
+fn discovery_modified_time(
+    modified: Option<tau_proto::DiscoveryModifiedMicros>,
+) -> Option<SystemTime> {
+    let micros = modified?.get();
+    if 0 <= micros {
+        SystemTime::UNIX_EPOCH.checked_add(Duration::from_micros(micros.unsigned_abs()))
+    } else {
+        SystemTime::UNIX_EPOCH.checked_sub(Duration::from_micros(micros.unsigned_abs()))
     }
+}
+
+fn discovered_skill_to_effective(
+    name: &tau_proto::SkillName,
+    skill: &DiscoveredSkill,
+) -> tau_proto::DiscoveryEffectiveSkill {
+    tau_proto::DiscoveryEffectiveSkill {
+        name: name.clone(),
+        description: skill.description.clone(),
+        source: match &skill.source {
+            DiscoveredSkillSource::File(path) => {
+                tau_proto::DiscoveryEffectiveSkillSource::File { path: path.clone() }
+            }
+            DiscoveredSkillSource::BuiltIn { .. } => {
+                tau_proto::DiscoveryEffectiveSkillSource::BuiltIn
+            }
+        },
+        add_to_prompt: skill.add_to_prompt,
+        user_invocable: skill.user_invocable,
+        disable_model_invocation: skill.disable_model_invocation,
+        argument_hint: skill.argument_hint.clone(),
+    }
+}
+
+fn effective_skills(
+    skills: &HashMap<tau_proto::SkillName, DiscoveredSkill>,
+) -> Vec<tau_proto::DiscoveryEffectiveSkill> {
+    let mut effective = skills
+        .iter()
+        .map(|(name, skill)| discovered_skill_to_effective(name, skill))
+        .collect::<Vec<_>>();
+    effective.sort_by(|left, right| left.name.cmp(&right.name));
+    effective
+}
+
+fn replace_discovery_source(
+    candidates: &mut HashMap<tau_proto::SkillName, Vec<DiscoveredSkill>>,
+    winners: &mut HashMap<tau_proto::SkillName, DiscoveredSkill>,
+    agents_files: &mut Vec<DiscoveredAgentsFile>,
+    source_id: &str,
+    new_skills: Vec<(tau_proto::SkillName, DiscoveredSkill)>,
+    new_agents_files: Vec<DiscoveredAgentsFile>,
+) {
+    let mut incoming = new_skills.into_iter().collect::<HashMap<_, _>>();
+    for (name, slots) in candidates.iter_mut() {
+        let mut replaced = false;
+        slots.retain_mut(|slot| {
+            if slot.source_id.as_str() != source_id {
+                return true;
+            }
+            if !replaced && let Some(replacement) = incoming.remove(name) {
+                *slot = replacement;
+                replaced = true;
+                true
+            } else {
+                false
+            }
+        });
+    }
+    candidates.retain(|_, slots| !slots.is_empty());
+    for (name, skill) in incoming {
+        candidates.entry(name).or_default().push(skill);
+    }
+    winners.clear();
+    for (name, slots) in candidates.iter() {
+        if let Some(winner) = selected_skill_candidate(slots).cloned() {
+            winners.insert(name.clone(), winner);
+        }
+    }
+
+    // One source occupies one stable global slot. Rebuild its contents in the
+    // producer's broad-to-specific order at that slot.
+    let insertion_index = agents_files
+        .iter()
+        .position(|slot| slot.source_id.as_str() == source_id)
+        .unwrap_or(agents_files.len());
+    agents_files.retain(|slot| slot.source_id.as_str() != source_id);
+    agents_files.splice(insertion_index..insertion_index, new_agents_files);
 }
 
 fn built_in_skill_modified_time() -> Option<SystemTime> {
@@ -1958,6 +2052,8 @@ pub struct Harness {
     pub(crate) current_session_generation: u64,
     /// Next process-local loaded-agent runtime incarnation.
     next_agent_runtime_incarnation: u64,
+    /// Next process-local opaque agent-initialization correlation.
+    next_agent_initialization_id: u64,
     /// Random identity stamped on outer turns authored by this harness runtime.
     accounting_runtime_id: tau_proto::AccountingRuntimeId,
     /// Reason associated with the current session binding. Late UI subscribers
@@ -2332,10 +2428,15 @@ pub struct Harness {
     /// Extensions that explicitly registered as session-wide prompt-context
     /// providers.
     pub(crate) session_context_providers: HashSet<tau_proto::ConnectionId>,
-    /// Per-agent context providers still expected to acknowledge the latest
-    /// `session.agent_loaded` before that agent's first prompt can dispatch.
-    pub(crate) pending_agent_context_ready:
-        HashMap<tau_proto::AgentId, HashSet<tau_proto::ConnectionId>>,
+    /// Mutable discovery/readiness state for exact current load attempts.
+    pub(crate) pending_agent_discovery: HashMap<tau_proto::AgentId, PendingAgentDiscovery>,
+    /// Frozen effective discovery state for initialized loaded agents.
+    pub(crate) frozen_agent_discovery: HashMap<tau_proto::AgentId, FrozenAgentDiscovery>,
+    /// Current canonical initialized projection for each loaded agent.
+    pub(crate) agent_context_initialized:
+        HashMap<tau_proto::AgentId, tau_proto::HarnessAgentContextInitialized>,
+    /// Current canonical full session skill projection.
+    pub(crate) session_skills_available: tau_proto::HarnessSessionSkillsAvailable,
     /// Extension-level prompt fragments keyed by source connection and name.
     pub(crate) extension_prompt_fragments:
         BTreeMap<tau_proto::ConnectionId, BTreeMap<String, PromptFragment>>,
@@ -2873,6 +2974,8 @@ impl Harness {
 
     fn from_base_parts(parts: HarnessBaseParts) -> Self {
         let discovered_skills = built_in_discovered_skills();
+        let initial_effective_skills = effective_skills(&discovered_skills);
+        let initial_session_id = parts.current_session_id.clone();
         let discovered_skill_candidates = discovered_skills
             .iter()
             .map(|(name, skill)| (name.clone(), vec![skill.clone()]))
@@ -2894,6 +2997,7 @@ impl Harness {
             current_session_id: parts.current_session_id,
             current_session_generation: 0,
             next_agent_runtime_incarnation: 1,
+            next_agent_initialization_id: 1,
             accounting_runtime_id: tau_proto::AccountingRuntimeId::new(format!(
                 "{:016x}",
                 rand::random::<u64>()
@@ -3016,7 +3120,13 @@ impl Harness {
             agent_context: AgentContextStore::default(),
             agent_context_providers: HashSet::new(),
             session_context_providers: HashSet::new(),
-            pending_agent_context_ready: HashMap::new(),
+            pending_agent_discovery: HashMap::new(),
+            frozen_agent_discovery: HashMap::new(),
+            agent_context_initialized: HashMap::new(),
+            session_skills_available: tau_proto::HarnessSessionSkillsAvailable {
+                session_id: initial_session_id,
+                skills: initial_effective_skills,
+            },
             extension_prompt_fragments: BTreeMap::new(),
             system_prompt_templates: parts.system_prompt_templates,
             initialized_sessions: HashSet::new(),
@@ -4925,7 +5035,7 @@ impl Harness {
             self.activate_projected_message_fact(&agent_id, outcome, &event);
         }
         self.with_derived_publish_source(source.map(Into::into), |harness| {
-            harness.react_to_committed_event(source, &event, None);
+            harness.react_to_committed_event(source, &event, true, None);
         });
     }
 
@@ -5559,7 +5669,7 @@ impl Harness {
         }
         self.process_committed_peer_event(source, peer_context, &event);
         self.with_derived_publish_source(source.map(Into::into), |harness| {
-            harness.react_to_committed_event(source, &event, append_outcome.as_ref());
+            harness.react_to_committed_event(source, &event, persist, append_outcome.as_ref());
         });
         if sync_head_for
             .as_ref()
@@ -6321,6 +6431,7 @@ impl Harness {
         &mut self,
         source: Option<&str>,
         event: &Event,
+        persist: bool,
         append_outcome: Option<&tau_core::AgentAppendOutcome>,
     ) {
         self.react_to_committed_tool_terminal(source, event, append_outcome);
@@ -6703,6 +6814,9 @@ impl Harness {
                 .map(|(cid, _)| cid.clone())
         {
             self.session_loaded_agents.remove(&unloaded.agent_id);
+            self.pending_agent_discovery.remove(&unloaded.agent_id);
+            self.frozen_agent_discovery.remove(&unloaded.agent_id);
+            self.agent_context_initialized.remove(&unloaded.agent_id);
             self.shown_tool_failure_examples
                 .retain(|(agent_id, _, _)| agent_id != &cid);
             self.agent_routes.remove(unloaded.agent_id.as_str());
@@ -6720,7 +6834,25 @@ impl Harness {
             self.activate_received_agent_message(message, append_outcome);
         }
         if let Event::SessionAgentLoaded(loaded) = event {
-            self.replay_loaded_agent_history_to_subscribers(&loaded.agent_id);
+            if persist {
+                self.replay_loaded_agent_history_to_subscribers(&loaded.agent_id);
+            }
+            let is_current_initialization = self
+                .pending_agent_discovery
+                .get(&loaded.agent_id)
+                .is_some_and(|pending| pending.initialization_id == loaded.agent_initialization_id);
+            if is_current_initialization
+                && self
+                    .pending_agent_discovery
+                    .get(&loaded.agent_id)
+                    .is_some_and(|pending| pending.waiting_on.is_empty())
+                && let Err(error) = self.finalize_agent_discovery(&loaded.agent_id)
+            {
+                self.emit_harness_failure(&format!("failed to finalize agent discovery: {error}"));
+            }
+        }
+        if let Event::AgentInitializationContextSet(context) = event {
+            self.apply_finalized_agent_initialization_context(context);
         }
         if let Event::AgentHeadMoved(moved) = event
             && let Some(cid) = self.runtime_agent_id_for_target_agent(Some(moved.agent_id.as_str()))
@@ -7549,6 +7681,7 @@ impl Harness {
         match event {
             Event::AgentStarted(started) => Some(started.agent_id.clone()),
             Event::AgentDisplayNameSet(name) => Some(name.agent_id.clone()),
+            Event::AgentInitializationContextSet(context) => Some(context.agent_id.clone()),
             Event::AgentMetadataSet(set) => Some(set.agent_id.clone()),
             Event::AgentMetadataUnset(unset) => Some(unset.agent_id.clone()),
             Event::AgentMetadataSetRequest(set) => Some(set.agent_id.clone()),
@@ -8651,32 +8784,38 @@ impl Harness {
             .push(update);
     }
 
-    fn stage_extension_skill_available(
+    fn stage_session_discovery_snapshot(
         &mut self,
         source_id: &str,
-        skill: tau_proto::ExtSkillAvailable,
+        snapshot: tau_proto::ExtensionSessionDiscoverySnapshotDeclared,
         admission: ExtensionFrameAdmission,
     ) {
         self.extension_activation_stage_mut(source_id)
-            .skill_announcements
-            .push(StagedSessionBound {
-                admission,
-                value: skill,
-            });
+            .session_discovery_snapshot = Some(StagedSessionBound {
+            admission,
+            value: snapshot,
+        });
     }
 
-    fn stage_agents_md_available(
+    fn stage_agent_discovery_snapshot(
         &mut self,
         source_id: &str,
-        agents: tau_proto::ExtAgentsMdAvailable,
+        snapshot: tau_proto::ExtensionAgentDiscoverySnapshotDeclared,
         admission: ExtensionFrameAdmission,
     ) {
+        let key = (
+            snapshot.agent_id.clone(),
+            snapshot.agent_initialization_id.clone(),
+        );
         self.extension_activation_stage_mut(source_id)
-            .agents_files
-            .push(StagedSessionBound {
-                admission,
-                value: agents,
-            });
+            .agent_discovery_snapshots
+            .insert(
+                key,
+                StagedSessionBound {
+                    admission,
+                    value: snapshot,
+                },
+            );
     }
 
     fn stage_agent_context_provider_register(
@@ -8839,47 +8978,211 @@ impl Harness {
             .insert(publish.fragment.name.clone(), publish.fragment);
     }
 
-    fn apply_extension_skill_available(
+    fn validate_discovery_snapshot(
         &mut self,
         source_id: &str,
-        mut skill: tau_proto::ExtSkillAvailable,
-    ) {
-        normalize_skill_invocation_policy(&mut skill);
-        self.record_discovered_skill(source_id, &skill);
-    }
+        skills: Vec<tau_proto::DiscoverySkillCandidate>,
+        agents_files: Vec<tau_proto::DiscoveryAgentsFile>,
+    ) -> Option<ValidatedDiscoverySnapshot> {
+        let mut accepted_items = 0usize;
+        let mut accepted_bytes = 0usize;
+        let mut item_limit_reached = false;
+        let mut seen_skills = HashSet::new();
+        let mut validated_skills = Vec::new();
+        for skill in skills {
+            if accepted_items == MAX_DISCOVERY_SNAPSHOT_ITEMS {
+                self.emit_info_important(&format!(
+                    "discovery snapshot from {source_id} truncated after \
+                     {MAX_DISCOVERY_SNAPSHOT_ITEMS} items"
+                ));
+                item_limit_reached = true;
+                break;
+            }
+            accepted_items += 1;
+            let item_bytes = skill
+                .name
+                .as_str()
+                .len()
+                .saturating_add(skill.description.len())
+                .saturating_add(skill.file_path.as_os_str().len())
+                .saturating_add(skill.argument_hint.as_deref().map_or(0, str::len));
+            if MAX_DISCOVERY_SNAPSHOT_BYTES < accepted_bytes.saturating_add(item_bytes) {
+                self.emit_info_important(&format!(
+                    "skill skipped: {} exceeds discovery snapshot bounds",
+                    skill.name
+                ));
+                continue;
+            }
+            accepted_bytes = accepted_bytes.saturating_add(item_bytes);
+            if !seen_skills.insert(skill.name.clone()) {
+                self.emit_info_important(&format!(
+                    "skill skipped: duplicate `{}` in complete source snapshot",
+                    skill.name
+                ));
+                continue;
+            }
+            if let Some(message) = tau_skills::skill_name_validation_message(skill.name.as_str()) {
+                self.emit_info_important(&format!(
+                    "skill skipped: {} from {} has invalid name: {}",
+                    skill.name,
+                    skill.file_path.display(),
+                    message
+                ));
+                continue;
+            }
+            if !skill.file_path.is_absolute() {
+                self.emit_info_important(&format!(
+                    "skill skipped: {} has non-absolute path {}",
+                    skill.name,
+                    skill.file_path.display()
+                ));
+                continue;
+            }
+            let description = tau_skills::truncate_description(&skill.description).into_owned();
+            if description != skill.description {
+                self.emit_info_important(&format!(
+                    "skill skipped: {} description exceeds the supported bound",
+                    skill.name
+                ));
+                continue;
+            }
+            validated_skills.push((
+                skill.name,
+                DiscoveredSkill {
+                    source_id: source_id.into(),
+                    description,
+                    source: DiscoveredSkillSource::File(skill.file_path),
+                    add_to_prompt: skill.add_to_prompt,
+                    user_invocable: skill.user_invocable || skill.disable_model_invocation,
+                    disable_model_invocation: skill.disable_model_invocation,
+                    argument_hint: skill.argument_hint,
+                    modified: discovery_modified_time(skill.sampled_modified),
+                },
+            ));
+        }
 
-    fn apply_agents_md_available(
-        &mut self,
-        source_id: &str,
-        agents: tau_proto::ExtAgentsMdAvailable,
-    ) {
-        let file_path = PathBuf::from(&agents.file_path);
-        if let Some(existing) = self
-            .discovered_agents_files
-            .iter_mut()
-            .find(|existing| existing.source_id == source_id && existing.file_path == file_path)
-        {
-            existing.content = agents.content.clone();
-        } else {
-            self.discovered_agents_files.push(DiscoveredAgentsFile {
+        let mut seen_paths = HashSet::new();
+        let mut validated_files = Vec::new();
+        for file in agents_files.into_iter().take_while(|_| !item_limit_reached) {
+            if accepted_items == MAX_DISCOVERY_SNAPSHOT_ITEMS {
+                self.emit_info_important(&format!(
+                    "discovery snapshot from {source_id} truncated after \
+                     {MAX_DISCOVERY_SNAPSHOT_ITEMS} items"
+                ));
+                break;
+            }
+            accepted_items += 1;
+            let item_bytes = file
+                .file_path
+                .as_os_str()
+                .len()
+                .saturating_add(file.content.len());
+            if MAX_DISCOVERY_SNAPSHOT_BYTES < accepted_bytes.saturating_add(item_bytes) {
+                self.emit_info_important(&format!(
+                    "AGENTS.md skipped: {} exceeds discovery snapshot bounds",
+                    file.file_path.display()
+                ));
+                continue;
+            }
+            accepted_bytes = accepted_bytes.saturating_add(item_bytes);
+            if !file.file_path.is_absolute() {
+                self.emit_info_important(&format!(
+                    "AGENTS.md skipped: non-absolute path {}",
+                    file.file_path.display()
+                ));
+                continue;
+            }
+            if MAX_DISCOVERY_AGENTS_FILE_BYTES < file.content.len() {
+                self.emit_info_important(&format!(
+                    "AGENTS.md skipped: {} exceeds {} bytes",
+                    file.file_path.display(),
+                    MAX_DISCOVERY_AGENTS_FILE_BYTES
+                ));
+                continue;
+            }
+            let path = file.file_path.canonicalize().unwrap_or(file.file_path);
+            if !seen_paths.insert(path.clone()) {
+                self.emit_info_important(&format!(
+                    "AGENTS.md skipped: duplicate canonical path {}",
+                    path.display()
+                ));
+                continue;
+            }
+            validated_files.push(DiscoveredAgentsFile {
                 source_id: source_id.into(),
-                file_path,
-                content: agents.content.clone(),
+                file_path: path,
+                content: file.content,
             });
         }
-        let live_agents: Vec<_> = self
-            .agents
-            .iter()
-            .filter_map(|(cid, agent)| {
-                agent
-                    .agent_id
-                    .as_ref()
-                    .map(|agent_id| (cid.clone(), agent_id.clone()))
-            })
-            .collect();
-        for (cid, agent_id) in live_agents {
-            self.insert_agents_context_for_agent(&cid, &agent_id);
+        Some((validated_skills, validated_files))
+    }
+
+    fn apply_session_discovery_snapshot(
+        &mut self,
+        source_id: &str,
+        snapshot: tau_proto::ExtensionSessionDiscoverySnapshotDeclared,
+    ) {
+        if snapshot.session_id != self.current_session_id {
+            return;
         }
+        let Some((skills, agents_files)) =
+            self.validate_discovery_snapshot(source_id, snapshot.skills, snapshot.agents_files)
+        else {
+            return;
+        };
+        replace_discovery_source(
+            &mut self.discovered_skill_candidates,
+            &mut self.discovered_skills,
+            &mut self.discovered_agents_files,
+            source_id,
+            skills,
+            agents_files,
+        );
+        self.publish_session_skills_projection();
+    }
+
+    fn apply_agent_discovery_snapshot(
+        &mut self,
+        source_id: &str,
+        snapshot: tau_proto::ExtensionAgentDiscoverySnapshotDeclared,
+    ) {
+        if snapshot.session_id != self.current_session_id {
+            return;
+        }
+        let Some(pending) = self.pending_agent_discovery.get(&snapshot.agent_id) else {
+            return;
+        };
+        if pending.initialization_id != snapshot.agent_initialization_id {
+            return;
+        }
+        let Some((skills, agents_files)) =
+            self.validate_discovery_snapshot(source_id, snapshot.skills, snapshot.agents_files)
+        else {
+            return;
+        };
+        let Some(pending) = self.pending_agent_discovery.get_mut(&snapshot.agent_id) else {
+            return;
+        };
+        replace_discovery_source(
+            &mut pending.skill_candidates,
+            &mut pending.skills,
+            &mut pending.agents_files,
+            source_id,
+            skills,
+            agents_files,
+        );
+    }
+
+    fn publish_session_skills_projection(&mut self) {
+        let snapshot = tau_proto::HarnessSessionSkillsAvailable {
+            session_id: self.current_session_id.clone(),
+            skills: effective_skills(&self.discovered_skills),
+        };
+        self.session_skills_available = snapshot.clone();
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::HarnessSessionSkillsAvailable(snapshot),
+        );
     }
 
     fn publish_provider_models_update(
@@ -9121,10 +9424,23 @@ impl Harness {
         publish: tau_proto::ExtAgentContextPublish,
     ) {
         let tau_proto::ExtAgentContextPublish {
+            session_id,
+            agent_initialization_id,
             agent_id,
             key,
             value,
         } = publish;
+        let matches_pending = self
+            .pending_agent_discovery
+            .get(&agent_id)
+            .is_some_and(|pending| pending.initialization_id == agent_initialization_id);
+        let matches_frozen = self
+            .frozen_agent_discovery
+            .get(&agent_id)
+            .is_some_and(|frozen| frozen.initialization_id == agent_initialization_id);
+        if session_id != self.current_session_id || !(matches_pending || matches_frozen) {
+            return;
+        }
         let contributor = tau_proto::ConnectionId::from(source_id);
         let extension_name = self
             .extensions
@@ -9209,14 +9525,14 @@ impl Harness {
         if let Some(schema) = stage.action_schema {
             self.publish_action_schema(source_id, schema);
         }
-        for staged in stage.skill_announcements {
-            if self.extension_frame_admission_is_current(&staged.admission) {
-                self.apply_extension_skill_available(source_id, staged.value);
-            }
+        if let Some(staged) = stage.session_discovery_snapshot
+            && self.extension_frame_admission_is_current(&staged.admission)
+        {
+            self.apply_session_discovery_snapshot(source_id, staged.value);
         }
-        for staged in stage.agents_files {
+        for staged in stage.agent_discovery_snapshots.into_values() {
             if self.extension_frame_admission_is_current(&staged.admission) {
-                self.apply_agents_md_available(source_id, staged.value);
+                self.apply_agent_discovery_snapshot(source_id, staged.value);
             }
         }
         if stage
@@ -9815,12 +10131,12 @@ impl Harness {
                     Event::ActionSchemaPublished(_)
                         | Event::ToolRegistrationDeclared(_)
                         | Event::ToolUnregistrationDeclared(_)
-                        | Event::ExtSkillAvailable(_)
-                        | Event::ExtAgentsMdAvailable(_)
-                        | Event::ProviderModelsDeclared(_)
-                        | Event::ExtensionContextProviderRegister(_)
-                        | Event::ExtensionSessionContextProviderRegister(_)
-                        | Event::ExtAgentContextPublish(_)
+                         | Event::ProviderModelsDeclared(_)
+                         | Event::ExtensionContextProviderRegister(_)
+                         | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
+                         | Event::ExtensionSessionContextProviderRegister(_)
+                         | Event::ExtensionSessionDiscoverySnapshotDeclared(_)
+                         | Event::ExtAgentContextPublish(_)
                         | Event::ExtPromptFragmentPublish(_)
                 )
         );
@@ -10508,6 +10824,7 @@ impl Harness {
         if matches!(
             event,
             Event::ExtensionContextProviderRegister(_)
+                | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
                 | Event::ExtAgentContextPublish(_)
                 | Event::ExtensionContextReady(_)
         ) {
@@ -10534,7 +10851,9 @@ impl Harness {
             }
             let declaration = matches!(
                 event,
-                Event::ExtensionContextProviderRegister(_) | Event::ExtAgentContextPublish(_)
+                Event::ExtensionContextProviderRegister(_)
+                    | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
+                    | Event::ExtAgentContextPublish(_)
             );
             if declaration && self.should_stage_extension_capabilities(source_id) {
                 *self
@@ -10557,8 +10876,7 @@ impl Harness {
         if matches!(
             event,
             Event::ExtensionSessionContextProviderRegister(_)
-                | Event::ExtSkillAvailable(_)
-                | Event::ExtAgentsMdAvailable(_)
+                | Event::ExtensionSessionDiscoverySnapshotDeclared(_)
                 | Event::ExtensionSessionContextReady(_)
         ) {
             // This is configured event-authority admission only. Registration,
@@ -10586,8 +10904,7 @@ impl Harness {
             let declaration = matches!(
                 event,
                 Event::ExtensionSessionContextProviderRegister(_)
-                    | Event::ExtSkillAvailable(_)
-                    | Event::ExtAgentsMdAvailable(_)
+                    | Event::ExtensionSessionDiscoverySnapshotDeclared(_)
             );
             if declaration && self.should_stage_extension_capabilities(source_id) {
                 *self
@@ -10788,6 +11105,7 @@ impl Harness {
         if matches!(
             event,
             Event::ExtensionContextProviderRegister(_)
+                | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
                 | Event::ExtAgentContextPublish(_)
                 | Event::ExtensionContextReady(_)
         ) {
@@ -10797,8 +11115,7 @@ impl Harness {
         if matches!(
             event,
             Event::ExtensionSessionContextProviderRegister(_)
-                | Event::ExtSkillAvailable(_)
-                | Event::ExtAgentsMdAvailable(_)
+                | Event::ExtensionSessionDiscoverySnapshotDeclared(_)
                 | Event::ExtensionSessionContextReady(_)
         ) {
             self.process_committed_session_discovery_event(peer_context, event);
@@ -11019,6 +11336,17 @@ impl Harness {
                     );
                 } else {
                     self.apply_agent_context_publish(source_id.as_str(), publish.clone());
+                }
+            }
+            Event::ExtensionAgentDiscoverySnapshotDeclared(snapshot) => {
+                if self.should_stage_extension_capabilities(source_id.as_str()) {
+                    self.stage_agent_discovery_snapshot(
+                        source_id.as_str(),
+                        snapshot.clone(),
+                        extension.admission.clone(),
+                    );
+                } else {
+                    self.apply_agent_discovery_snapshot(source_id.as_str(), snapshot.clone());
                 }
             }
             Event::ExtensionContextReady(ready) => {
@@ -11562,26 +11890,15 @@ impl Harness {
                     self.apply_session_context_provider_registration(source_id.as_str());
                 }
             }
-            Event::ExtSkillAvailable(skill) => {
+            Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot) => {
                 if self.should_stage_extension_capabilities(source_id.as_str()) {
-                    self.stage_extension_skill_available(
+                    self.stage_session_discovery_snapshot(
                         source_id.as_str(),
-                        skill.clone(),
+                        snapshot.clone(),
                         extension.admission.clone(),
                     );
                 } else {
-                    self.apply_extension_skill_available(source_id.as_str(), skill.clone());
-                }
-            }
-            Event::ExtAgentsMdAvailable(agents) => {
-                if self.should_stage_extension_capabilities(source_id.as_str()) {
-                    self.stage_agents_md_available(
-                        source_id.as_str(),
-                        agents.clone(),
-                        extension.admission.clone(),
-                    );
-                } else {
-                    self.apply_agents_md_available(source_id.as_str(), agents.clone());
+                    self.apply_session_discovery_snapshot(source_id.as_str(), snapshot.clone());
                 }
             }
             Event::ExtensionSessionContextReady(ready) => {
@@ -13261,7 +13578,7 @@ impl Harness {
         let is_user_interaction =
             prompt.originator.is_user() && !prompt.message_class.is_internal();
         let text = if is_user_interaction && !prompt.literal {
-            let Some(text) = self.expand_user_skill_command(&prompt.text) else {
+            let Some(text) = self.expand_user_skill_command(&prompt.agent_id, &prompt.text) else {
                 return Ok(true);
             };
             text
@@ -13362,7 +13679,11 @@ impl Harness {
         Ok(())
     }
 
-    fn expand_user_skill_command(&mut self, text: &str) -> Option<String> {
+    fn expand_user_skill_command(
+        &mut self,
+        agent_id: &tau_proto::AgentId,
+        text: &str,
+    ) -> Option<String> {
         let Some((name, args)) = user_skill_invocation::parse_user_skill_command(text) else {
             return Some(text.to_owned());
         };
@@ -13371,7 +13692,17 @@ impl Harness {
             return None;
         }
         let skill_name = tau_proto::SkillName::from(name.to_owned());
-        let Some(skill) = self.discovered_skills.get(&skill_name).cloned() else {
+        let Some(skills) = self
+            .frozen_agent_discovery
+            .get(agent_id)
+            .map(|snapshot| &snapshot.skills)
+        else {
+            self.emit_info(&format!(
+                ":skill: agent `{agent_id}` has no finalized discovery snapshot"
+            ));
+            return None;
+        };
+        let Some(skill) = skills.get(&skill_name).cloned() else {
             self.emit_info(&format!(":skill: unknown skill `{name}`"));
             return None;
         };
@@ -13401,6 +13732,22 @@ impl Harness {
                 None
             }
         }
+    }
+
+    fn resolve_pending_user_skill_for_agent(
+        &mut self,
+        cid: &AgentId,
+        mut prompt: PendingPrompt,
+    ) -> Option<PendingPrompt> {
+        if !prompt.expand_user_skill_on_dispatch {
+            return Some(prompt);
+        }
+        let agent_id = self
+            .target_agent_id_for_agent(cid)
+            .map(crate::parse_agent_id)?;
+        prompt.text = self.expand_user_skill_command(&agent_id, &prompt.text)?;
+        prompt.expand_user_skill_on_dispatch = false;
+        Some(prompt)
     }
 
     fn handle_ui_set_agent_display_name(
@@ -13489,19 +13836,8 @@ impl Harness {
         let is_user_initial_prompt = req.initial_prompt.is_some()
             && req.originator.is_user()
             && !req.message_class.is_internal();
-        let initial_prompt = if let Some(initial_prompt) = req.initial_prompt {
-            let initial_prompt = if is_user_initial_prompt && !req.literal {
-                let Some(text) = self.expand_user_skill_command(&initial_prompt) else {
-                    return Ok(true);
-                };
-                text
-            } else {
-                initial_prompt
-            };
-            Some(initial_prompt)
-        } else {
-            None
-        };
+        let defer_initial_skill_expansion = is_user_initial_prompt && !req.literal;
+        let initial_prompt = req.initial_prompt;
         let parent_ephemeral = parent_cid
             .as_ref()
             .and_then(|cid| self.agents.get(cid))
@@ -13529,7 +13865,7 @@ impl Harness {
             if !req.message_class.is_internal() {
                 self.preempt_blocking_ext_side_agents(&req.session_id);
             }
-            let prompt = if req.message_class.is_internal() {
+            let mut prompt = if req.message_class.is_internal() {
                 PendingPrompt::internal(initial_prompt)
             } else if req.originator.is_user() {
                 PendingPrompt::human_ui(initial_prompt)
@@ -13537,6 +13873,7 @@ impl Harness {
                 PendingPrompt::user(initial_prompt)
             }
             .with_ctx_id(req.ctx_id.clone());
+            prompt.expand_user_skill_on_dispatch = defer_initial_skill_expansion;
             if self.dispatch_blocked_for(&cid) || !self.session_initialized(&req.session_id) {
                 if let Some(conv) = self.agents.get_mut(&cid) {
                     conv.pending_prompts.push_back(prompt.clone());
@@ -13554,7 +13891,9 @@ impl Harness {
                 );
                 self.try_advance_queue();
             } else {
-                self.dispatch_prompt_for_agent(&cid, prompt)?;
+                if let Some(prompt) = self.resolve_pending_user_skill_for_agent(&cid, prompt) {
+                    self.dispatch_prompt_for_agent(&cid, prompt)?;
+                }
             }
         }
         Ok(true)
@@ -14477,15 +14816,34 @@ impl Harness {
         self.agent_context.remove_contributor(&disconnected);
         self.agent_context_providers.remove(&disconnected);
         self.session_context_providers.remove(&disconnected);
-        self.pending_agent_context_ready.retain(|_, waiting_on| {
-            waiting_on.remove(&disconnected);
-            !waiting_on.is_empty()
-        });
+        let mut finalize = Vec::new();
+        for (agent_id, pending) in &mut self.pending_agent_discovery {
+            replace_discovery_source(
+                &mut pending.skill_candidates,
+                &mut pending.skills,
+                &mut pending.agents_files,
+                connection_id,
+                Vec::new(),
+                Vec::new(),
+            );
+            if pending.waiting_on.remove(&disconnected) && pending.waiting_on.is_empty() {
+                finalize.push(agent_id.clone());
+            }
+        }
+        for agent_id in finalize {
+            if let Err(error) = self.finalize_agent_discovery(&agent_id) {
+                self.emit_harness_failure(&format!(
+                    "failed to finalize agent discovery after disconnect: {error}"
+                ));
+            }
+        }
     }
 
     fn clear_session_agent_context(&mut self) {
         self.agent_context.clear();
-        self.pending_agent_context_ready.clear();
+        self.pending_agent_discovery.clear();
+        self.frozen_agent_discovery.clear();
+        self.agent_context_initialized.clear();
     }
 
     fn disable_optional_extension(&mut self, connection_id: &str, message: &str) {
@@ -14556,6 +14914,7 @@ impl Harness {
             .remove(connection_id);
         self.extensions.ready_received.remove(connection_id);
         self.remove_discovered_context(connection_id);
+        self.publish_session_skills_projection();
         // Remove prompt/context projections before resolving an interception
         // owned by this connection. Resolution may synchronously commit deferred
         // readiness and dispatch a prompt snapshot.
@@ -15785,105 +16144,6 @@ impl Harness {
         }
     }
 
-    fn record_discovered_skill(&mut self, source_id: &str, skill: &tau_proto::ExtSkillAvailable) {
-        if let Some(message) = tau_skills::skill_name_validation_message(skill.name.as_str()) {
-            self.emit_info_important(&format!(
-                "skill skipped: {} from {} has invalid name: {}",
-                skill.name,
-                skill.file_path.display(),
-                message,
-            ));
-            return;
-        }
-
-        let description = if tau_skills::MAX_DESCRIPTION_LENGTH < skill.description.len() {
-            self.emit_info_important(&format!(
-                "skill warning: {} from {} description exceeds {} bytes ({}); truncating",
-                skill.name,
-                skill.file_path.display(),
-                tau_skills::MAX_DESCRIPTION_LENGTH,
-                skill.description.len(),
-            ));
-            tau_skills::truncate_description(&skill.description).into_owned()
-        } else {
-            skill.description.clone()
-        };
-
-        let modified = skill_file_modified_time(&skill.file_path);
-        let candidate = DiscoveredSkill {
-            source_id: source_id.into(),
-            description,
-            source: DiscoveredSkillSource::File(std::path::PathBuf::from(&skill.file_path)),
-            add_to_prompt: skill.add_to_prompt,
-            user_invocable: skill.user_invocable || skill.disable_model_invocation,
-            disable_model_invocation: skill.disable_model_invocation,
-            modified,
-        };
-        let previous_winner = self.discovered_skills.get(&skill.name).cloned();
-        let candidates = self
-            .discovered_skill_candidates
-            .entry(skill.name.clone())
-            .or_default();
-        if let Some(existing) = candidates
-            .iter_mut()
-            .find(|existing| existing.source_id == source_id)
-        {
-            *existing = candidate;
-        } else {
-            candidates.push(candidate);
-        }
-        self.recompute_discovered_skill_winner(&skill.name);
-
-        if let Some(previous_winner) = previous_winner
-            && previous_winner.source_id != source_id
-            && let Some(current_winner) = self.discovered_skills.get(&skill.name).cloned()
-        {
-            self.emit_skill_collision_notice(skill, source_id, &previous_winner, &current_winner);
-        }
-    }
-
-    fn emit_skill_collision_notice(
-        &mut self,
-        skill: &tau_proto::ExtSkillAvailable,
-        source_id: &str,
-        previous_winner: &DiscoveredSkill,
-        current_winner: &DiscoveredSkill,
-    ) {
-        if current_winner.source_id == source_id {
-            self.emit_notice(
-                tau_proto::notice_kind::SKILL_COLLISION,
-                tau_proto::NoticeLevel::Trace,
-                false,
-                &format!(
-                    "skill collision: {} from {} replaces {} from {} (newer modified time)",
-                    skill.name,
-                    skill.file_path.display(),
-                    previous_winner.source.label(),
-                    previous_winner.source_id,
-                ),
-            );
-            return;
-        }
-        let modified = skill_file_modified_time(&skill.file_path);
-        let reason = if compare_skill_modified(modified, current_winner.modified).is_eq() {
-            "same or unavailable modified time"
-        } else {
-            "newer modified time"
-        };
-        self.emit_notice(
-            tau_proto::notice_kind::SKILL_COLLISION,
-            tau_proto::NoticeLevel::Trace,
-            false,
-            &format!(
-                "skill collision: {} from {} ignored; keeping {} from {} ({reason})",
-                skill.name,
-                skill.file_path.display(),
-                current_winner.source.label(),
-                current_winner.source_id,
-            ),
-        );
-    }
-
     fn session_init_provider_ids(&self) -> std::collections::HashSet<tau_proto::ConnectionId> {
         let event = Event::SessionStarted(tau_proto::SessionStarted {
             session_id: self.current_session_id.clone(),
@@ -15898,16 +16158,29 @@ impl Harness {
     fn agent_context_provider_ids(
         &self,
         agent_id: tau_proto::AgentId,
+        agent_initialization_id: tau_proto::AgentInitializationId,
     ) -> HashSet<tau_proto::ConnectionId> {
         let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             session_id: self.current_session_id.clone(),
             ephemeral: self.agent_is_ephemeral(&agent_id),
             agent_id,
+            agent_initialization_id,
         });
         self.tool_connections_subscribed_to(&event)
             .into_iter()
             .filter(|connection_id| self.agent_context_providers.contains(connection_id))
             .collect()
+    }
+
+    fn mint_agent_initialization_id(&mut self) -> tau_proto::AgentInitializationId {
+        let next = self.next_agent_initialization_id;
+        self.next_agent_initialization_id = self.next_agent_initialization_id.saturating_add(1);
+        tau_proto::AgentInitializationId::new(format!(
+            "{}-{:016x}-{:016x}",
+            self.accounting_runtime_id.as_str(),
+            self.current_session_generation,
+            next
+        ))
     }
 
     fn tool_connections_subscribed_to(&self, event: &Event) -> HashSet<tau_proto::ConnectionId> {
@@ -15953,9 +16226,9 @@ impl Harness {
     }
 
     fn agent_context_ready_for_loaded_agent(&self, agent_id: &tau_proto::AgentId) -> bool {
-        self.pending_agent_context_ready
-            .get(agent_id)
-            .is_none_or(HashSet::is_empty)
+        !self.session_loaded_agents.contains(agent_id)
+            || (self.frozen_agent_discovery.contains_key(agent_id)
+                && !self.pending_agent_discovery.contains_key(agent_id))
     }
 
     fn available_delegate_role_names(&self) -> Vec<String> {
@@ -19289,10 +19562,6 @@ impl Harness {
             return;
         }
 
-        for source_id in &waiting_on {
-            self.remove_discovered_context(source_id.as_str());
-        }
-
         self.turn_state = TurnState::InitializingSession {
             session_id,
             reason,
@@ -19309,31 +19578,15 @@ impl Harness {
             return Ok(());
         }
         let source_id = tau_proto::ConnectionId::from(source_id);
-        let completed_session = match &mut self.turn_state {
-            TurnState::InitializingSession {
-                session_id,
-                reason,
-                waiting_on,
-            } => {
-                let removed = waiting_on.remove(&source_id);
-                if removed && waiting_on.is_empty() {
-                    Some((session_id.clone(), *reason))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        if let Some((session_id, reason)) = completed_session {
-            self.complete_session_init(session_id, reason)?;
-        }
-        if let Some(waiting_on) = self.pending_agent_context_ready.get_mut(&ready.agent_id) {
-            waiting_on.remove(&source_id);
-            if waiting_on.is_empty() {
-                self.pending_agent_context_ready.remove(&ready.agent_id);
-                self.drain_publish_idle_dispatches();
-                self.try_advance_queue();
-            }
+        let should_finalize = self
+            .pending_agent_discovery
+            .get_mut(&ready.agent_id)
+            .filter(|pending| pending.initialization_id == ready.agent_initialization_id)
+            .is_some_and(|pending| {
+                pending.waiting_on.remove(&source_id) && pending.waiting_on.is_empty()
+            });
+        if should_finalize {
+            self.finalize_agent_discovery(&ready.agent_id)?;
         }
         Ok(())
     }
@@ -19506,6 +19759,23 @@ impl Harness {
         // for discovery; the discovered context is injected when a durable agent
         // is explicitly created from the UI's current role/cwd state.
         self.enforce_required_role_skills()?;
+        self.publish_session_skills_projection();
+        // A resumed roster is already live before session discovery completes.
+        // Start one fresh correlated initialization for every restored member
+        // before any replay activation or queued prompt can dispatch.
+        let restored = self
+            .agents
+            .iter()
+            .filter_map(|(cid, agent)| {
+                agent
+                    .agent_id
+                    .clone()
+                    .map(|agent_id| (cid.clone(), agent_id))
+            })
+            .collect::<Vec<_>>();
+        for (cid, agent_id) in restored {
+            self.ensure_loaded_agent_for_agent(&cid, &agent_id);
+        }
         self.initialized_sessions.insert(session_id.clone());
         // Catch up before repair: repair appends its synthetic tool errors to
         // the durable log as it publishes them live, so running it first
@@ -19531,26 +19801,127 @@ impl Harness {
         );
     }
 
+    fn finalize_agent_discovery(
+        &mut self,
+        agent_id: &tau_proto::AgentId,
+    ) -> Result<(), HarnessError> {
+        if self
+            .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            .is_none()
+        {
+            self.pending_agent_discovery.remove(agent_id);
+            return Ok(());
+        }
+        let Some(pending) = self.pending_agent_discovery.get_mut(agent_id) else {
+            return Ok(());
+        };
+        if !pending.waiting_on.is_empty() {
+            return Ok(());
+        }
+        let mut diagnostics = Vec::new();
+        let names = pending.skill_candidates.keys().cloned().collect::<Vec<_>>();
+        for name in names {
+            loop {
+                let Some(winner) = pending
+                    .skill_candidates
+                    .get(&name)
+                    .and_then(|slots| selected_skill_candidate(slots))
+                    .cloned()
+                else {
+                    pending.skills.remove(&name);
+                    break;
+                };
+                if user_skill_invocation::read_user_invoked_skill_body(&winner.source).is_ok() {
+                    pending.skills.insert(name.clone(), winner);
+                    break;
+                }
+                diagnostics.push(format!(
+                    "skill skipped at agent initialization: {} from {} is unreadable",
+                    name,
+                    winner.source.label()
+                ));
+                if let Some(slots) = pending.skill_candidates.get_mut(&name) {
+                    slots.retain(|candidate| candidate.source_id != winner.source_id);
+                    if slots.is_empty() {
+                        pending.skill_candidates.remove(&name);
+                    }
+                }
+            }
+        }
+        let initialization_id = pending.initialization_id.clone();
+        let agents_message = (!pending.agents_files.is_empty())
+            .then(|| render_agents_context_message(pending.agents_files.iter()));
+        let agents_files = pending
+            .agents_files
+            .iter()
+            .map(|file| tau_proto::DiscoveryAgentsFileSummary {
+                file_path: file.file_path.clone(),
+                lines: file.content.lines().count() as u64,
+                bytes: file.content.len() as u64,
+            })
+            .collect();
+        let context = tau_proto::AgentInitializationContextSet {
+            session_id: self.current_session_id.clone(),
+            agent_id: agent_id.clone(),
+            agent_initialization_id: initialization_id,
+            agents_message,
+            effective_skills: effective_skills(&pending.skills),
+            agents_files,
+        };
+        for diagnostic in diagnostics {
+            self.emit_info_important(&diagnostic);
+        }
+        let event = Event::AgentInitializationContextSet(context);
+        let cid = self
+            .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            .expect("agent route checked before discovery finalization");
+        self.publish_event_for_agent(&cid, None, event);
+        Ok(())
+    }
+
+    fn apply_finalized_agent_initialization_context(
+        &mut self,
+        context: &tau_proto::AgentInitializationContextSet,
+    ) {
+        let Some(pending) = self.pending_agent_discovery.remove(&context.agent_id) else {
+            return;
+        };
+        if pending.initialization_id != context.agent_initialization_id {
+            return;
+        }
+        let frozen = FrozenAgentDiscovery {
+            initialization_id: pending.initialization_id,
+            skills: pending.skills,
+        };
+        self.frozen_agent_discovery
+            .insert(context.agent_id.clone(), frozen);
+        let frozen = self
+            .frozen_agent_discovery
+            .get(&context.agent_id)
+            .expect("just inserted frozen discovery");
+        let projection = tau_proto::HarnessAgentContextInitialized {
+            session_id: context.session_id.clone(),
+            agent_id: context.agent_id.clone(),
+            agent_initialization_id: frozen.initialization_id.clone(),
+            listed_skills: effective_skills(&frozen.skills)
+                .into_iter()
+                .filter(|skill| skill.add_to_prompt && !skill.disable_model_invocation)
+                .collect(),
+            agents_files: context.agents_files.clone(),
+        };
+        self.agent_context_initialized
+            .insert(context.agent_id.clone(), projection.clone());
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::HarnessAgentContextInitialized(projection),
+        );
+        self.drain_publish_idle_dispatches();
+        self.try_advance_queue();
+    }
+
     // -----------------------------------------------------------------------
     // Agent prompt assembly
     // -----------------------------------------------------------------------
-
-    fn insert_agents_context_for_agent(&mut self, cid: &AgentId, agent_id: &str) {
-        if self.discovered_agents_files.is_empty() {
-            return;
-        }
-        let text = render_agents_context_message(self.discovered_agents_files.iter());
-        self.publish_event_for_agent(
-            cid,
-            None,
-            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
-                inference_activation: false,
-                agent_id: crate::parse_agent_id(agent_id),
-                text,
-                message_class: tau_proto::PromptMessageClass::User,
-            }),
-        );
-    }
 
     /// Persist a user-initiated `!` shell command's output as a
     /// tagged user message so the agent sees it in the next prompt.
@@ -21075,7 +21446,6 @@ impl Harness {
         );
         self.publish_delegate_roles_context();
         self.ensure_loaded_agent_for_agent_with_metadata(&cid, &agent_id, metadata);
-        self.insert_agents_context_for_agent(&cid, &agent_id);
         Ok(cid)
     }
 
@@ -21305,11 +21675,6 @@ impl Harness {
             self.session_ever_loaded_agents
                 .insert(agent_id_proto.clone());
             self.session_loaded_agents.insert(agent_id_proto.clone());
-            let waiting_on = self.agent_context_provider_ids(agent_id_proto.clone());
-            if !waiting_on.is_empty() {
-                self.pending_agent_context_ready
-                    .insert(agent_id_proto.clone(), waiting_on);
-            }
             let _ = (role, initial_metadata);
             for (key, entry) in self.inherited_metadata_for_cid(cid) {
                 self.enqueue_publish(
@@ -21333,14 +21698,44 @@ impl Harness {
                     }),
                 );
             }
-            self.publish_event(
-                None,
-                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                    session_id: self.current_session_id.clone(),
-                    agent_id: agent_id_proto,
-                    ephemeral: persistence.is_ephemeral(),
-                }),
-            );
+        }
+        if self.pending_agent_discovery.contains_key(&agent_id_proto)
+            || self.frozen_agent_discovery.contains_key(&agent_id_proto)
+        {
+            return;
+        }
+        let agent_initialization_id = self.mint_agent_initialization_id();
+        let waiting_on = self
+            .agent_context_provider_ids(agent_id_proto.clone(), agent_initialization_id.clone());
+        self.pending_agent_discovery.insert(
+            agent_id_proto.clone(),
+            PendingAgentDiscovery {
+                initialization_id: agent_initialization_id.clone(),
+                skill_candidates: self.discovered_skill_candidates.clone(),
+                skills: self.discovered_skills.clone(),
+                agents_files: self.discovered_agents_files.clone(),
+                waiting_on,
+            },
+        );
+        let loaded = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            session_id: self.current_session_id.clone(),
+            agent_id: agent_id_proto.clone(),
+            agent_initialization_id,
+            ephemeral: persistence.is_ephemeral(),
+        });
+        if already_loaded {
+            self.enqueue_publish(None, loaded, false, false, None);
+        } else {
+            self.publish_event(None, loaded);
+        }
+        if self.pending_intercept.is_none()
+            && self
+                .pending_agent_discovery
+                .get(&agent_id_proto)
+                .is_some_and(|pending| pending.waiting_on.is_empty())
+            && let Err(error) = self.finalize_agent_discovery(&agent_id_proto)
+        {
+            self.emit_harness_failure(&format!("failed to finalize agent discovery: {error}"));
         }
     }
 
@@ -21765,6 +22160,24 @@ impl Harness {
             });
         let contains_exact_sentinel_envelope = prompt_context.contains_exact_sentinel_envelope;
         let mut context = prompt_context.context;
+        if let Some(agents_message) = tree
+            .and_then(tau_core::AgentTree::initialization_context)
+            .and_then(|initialization| initialization.agents_message.as_ref())
+        {
+            context.blocks.insert(
+                0,
+                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                    items: vec![ContextItem::Message(tau_proto::MessageItem {
+                        role: tau_proto::ContextRole::User,
+                        content: vec![tau_proto::ContentPart::Text {
+                            text: agents_message.clone(),
+                        }],
+                        phase: None,
+                        responses_raw_json: None,
+                    })],
+                }),
+            );
+        }
         if compaction_transaction.is_some() {
             context.blocks.push(tau_proto::ContextBlock::UserInput(
                 tau_proto::UserInputBlock {
@@ -22034,6 +22447,9 @@ impl Harness {
             .map(|provider| provider.connection_id.clone())
             .collect::<HashSet<_>>();
         let system_template = self.system_template_for_role(role_name)?;
+        let skills = agent_id
+            .and_then(|agent_id| self.frozen_agent_discovery.get(agent_id))
+            .map_or(&self.discovered_skills, |snapshot| &snapshot.skills);
         let template_context = match agent_id {
             Some(agent_id) => RolePromptTemplateContext::for_agent(role_name, agent_id),
             None => RolePromptTemplateContext::for_role(role_name),
@@ -22043,7 +22459,7 @@ impl Harness {
         );
         try_build_system_prompt_with_tool_template_context(
             system_template,
-            &self.discovered_skills,
+            skills,
             &prompt_fragments,
             &tool_prompt_fragments,
             self.agent_context

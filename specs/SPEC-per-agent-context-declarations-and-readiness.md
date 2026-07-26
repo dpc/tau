@@ -1,87 +1,55 @@
-# SPEC-per-agent-context-declarations-and-readiness: Per-agent context publication
-
-## Status
-
-`AgentInitializationId` and the new agent discovery/replacement/projection DTOs
-exist as additive migration scaffolding, but existing `session.agent_loaded`,
-`extension.agent_context_publish`, and `extension.context_ready` payloads remain
-uncorrelated and retain the behavior below. The next atomic runtime phase must
-add mandatory initialization correlation while switching their producers and
-consumers; the current overlap is not a supported final interface.
+# SPEC-per-agent-context-declarations-and-readiness: Correlated per-agent context
 
 ## Record justification
 
-The contract spans protocol defaults, client helpers, generic harness admission
-and interception, extension activation, prompt projection and waits, semantic
-store exclusion, and first-party shell producers. No component-local artifact
-can describe its complete authority, ordering, lifetime, and persistence rules.
+The contract spans protocol fields, client helpers, generic admission and
+interception, extension activation, prompt projection, initialization waits,
+disconnect handling, and shell production; no component-local artifact owns all
+of it.
 
 This specification implements the per-agent context row of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
-It governs `extension.context_provider_register`,
-`extension.agent_context_publish`, and `extension.context_ready`.
+[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md)
+and is constrained by
+[DECISION-agent-initialization-discovery-snapshots](DECISION-agent-initialization-discovery-snapshots.md).
 
-## Authority and publication
+## Correlation and authority
 
-Every authenticated configured extension entry kind, including configured Core,
-may author all three events without a capability. Unconfigured and socket peers
-have no authority. Registration does not gate value or readiness publication,
-and values may name an agent that is not currently loaded. These asymmetries
-preserve the existing extension interface.
+Every `session.agent_loaded` carries a fresh mandatory
+`agent_initialization_id`. Every authenticated configured local extension kind
+may publish `extension.context_provider_register`,
+`extension.agent_discovery_snapshot_declared`,
+`extension.agent_context_publish`, and `extension.context_ready`; registration
+is not an admission prerequisite. Mutating current state additionally requires
+the exact session, agent, and initialization id.
 
-Generic Emit captures the stable configured publisher, exact run-local
-`ConnectionId`, instance id, and kind before ordinary same-name interception.
-Drop has no downstream effect. Replacement repeats structural and authority
-admission. After commit, the consumer revalidates that complete generation
-before changing provider membership, prompt context, or readiness barriers. A
-stale generation's event remains observable but cannot mutate successor state.
+Generic Emit captures the stable configured publisher and exact live connection
+generation before ordinary same-name interception. Drop has no downstream effect;
+replacement repeats structural and authority checks. A stale generation may
+remain observable after commit but cannot mutate current state.
 
 ## Projection and readiness
 
-A committed registration adds its exact live connection to the provider set. A
-committed value replaces that connection's contribution for its `(agent, key)`
-slot. Disconnect removes the connection's provider membership and all of its
-contributions. It also removes that exact source from every captured per-agent
-wait set; removing the final waiter immediately resumes any prompt deferred at
-the publish-idle dispatch boundary.
+A committed correlated context value replaces the connection's contribution for
+its `(agent, key)` slot during initialization and remains valid for the same
+frozen live initialization afterward. Arbitrary or unloaded agents, wrong
+sessions, wrong initialization ids, and old load attempts cannot receive context.
+Disconnect removes that connection's keyed contributions.
 
-When the harness loads an agent, its wait set contains registered, live,
-non-socket Tool connections whose live selectors match `session.agent_loaded`
-by Exact or Prefix. Readiness publication itself remains ungated: only a source
-already present in the captured wait set can release its entry.
+The per-agent wait set contains registered live non-socket Tool connections whose
+live selectors match the exact `session.agent_loaded`. Only matching
+`extension.context_ready` removes its source. Per-agent readiness never releases a
+session-discovery wait. Duplicate, wrong-scope, stale, and unregistered readiness
+is inert. Disconnect removes its source from every pending wait and may finalize
+an initialization.
 
-For compatibility, a committed `extension.context_ready` with the current
-session id performs both existing operations: it releases the source from the
-named agent's per-agent wait and from any session-initialization wait containing
-that source. This cross-scope release is intentional preservation, not a new
-recommendation. A mismatched session id changes neither wait.
+The single interception queue preserves declaration-before-readiness order.
+Pre-Ready registrations, context values, and discovery snapshots use bounded
+activation reservations; readiness remains operational traffic behind activation.
 
-The single pending interception and FIFO deferred-publication queue ensure that
-an earlier registration or value settles before a later readiness
-acknowledgement can commit and release work.
+All raw events default to `persist=false`, remain excluded from semantic journals,
+and have no cold or historical replay. The durable initialization replacement and
+transient current projection are specified by
+[SPEC-session-discovery-declarations-and-readiness](SPEC-session-discovery-declarations-and-readiness.md).
 
-## Activation and persistence
-
-Pre-Ready registrations and values reserve bounded activation message count and
-encoded bytes before interception. Replacement reaccounts bytes. Commit settles
-the family pending count while retaining the declaration's charge in its
-activation stage; activation removes the stage and its charges. Drop, oversize
-failure, or disconnect release both the charge and pending count. Recorded Ready
-cannot activate the extension while such a declaration remains unsettled.
-Readiness is operational traffic and stays behind activation.
-
-All three raw events default to `persist=false` and are unconditionally excluded from
-semantic agent, session, and restore journals for either caller-supplied
-`Emit.persist` value. They have no cold replay or current-state synthesis.
-First-party registration, value, and readiness sends use `persist=false`.
-
-The local configured-extension trust boundary and bounded-wait risk are
-documented in [`SECURITY.md`](../SECURITY.md). Unrelated authority-matrix rows
-remain outside this specification.
-
-`agent.initialization_context_set` is the durable replacement DTO for an exact
-session, agent, and initialization correlation. It carries the optional
-bootstrap message, frozen effective skills, and ordered AGENTS.md summaries.
-No reducer folds it during this scaffold phase. The corresponding
-`harness.agent_context_initialized` current projection remains transient and
-unpublished until the runtime switch.
+The local configured-extension trust boundary and bounded-wait risk are documented
+in [`SECURITY.md`](../SECURITY.md).

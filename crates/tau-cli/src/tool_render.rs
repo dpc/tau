@@ -428,14 +428,6 @@ pub(crate) fn format_tool_duration(duration: Duration) -> String {
     format!("{}s", duration.as_secs())
 }
 
-fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
-    info_suffix(format_stats(
-        None,
-        Some(text.lines().count() as u64),
-        Some(text.len() as u64),
-    ))
-}
-
 fn abbreviate_inline_text(text: &str) -> String {
     const EDGE_CHARS: usize = 20;
 
@@ -1445,21 +1437,34 @@ fn system_path_block(
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 
-pub(crate) fn system_loaded_block(
+pub(crate) fn agent_context_initialized_block(
     theme: &tau_themes::Theme,
-    path: &Path,
-    content: &str,
+    initialized: &tau_proto::HarnessAgentContextInitialized,
 ) -> tau_cli_term::StyledBlock {
     use tau_themes::{ThemedText, names};
 
     let mut text = ThemedText::new();
     let info = text.add_style(names::SYSTEM_INFO);
     let path_style = text.add_style(names::SYSTEM_PATH);
-    let stats_style = text.add_style(names::TOOL_STATUS_INFO);
-    text.push(info, "loaded: ");
-    text.push(path_style, display_path(path));
-    text.push(info, " ");
-    text.push(stats_style, output_stats_suffix(content).text);
+    let stats = text.add_style(names::TOOL_STATUS_INFO);
+    text.push(
+        info,
+        format!("initialized {}\\nskills:", initialized.agent_id),
+    );
+    for skill in &initialized.listed_skills {
+        text.push(info, "\\n  ");
+        text.push(path_style, skill.name.to_string());
+        text.push(stats, format!(" — {}", skill.description));
+    }
+    text.push(info, "\\nAGENTS.md:");
+    for file in &initialized.agents_files {
+        text.push(info, "\\n  ");
+        text.push(path_style, file.file_path.display().to_string());
+        text.push(
+            stats,
+            format!(" ({} lines, {} bytes)", file.lines, file.bytes),
+        );
+    }
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 

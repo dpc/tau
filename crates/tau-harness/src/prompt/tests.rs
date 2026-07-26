@@ -166,6 +166,7 @@ fn discovered_skill(description: &str, add_to_prompt: bool) -> DiscoveredSkill {
         add_to_prompt,
         user_invocable: true,
         disable_model_invocation: false,
+        argument_hint: None,
         modified: None,
     }
 }
@@ -184,6 +185,7 @@ fn system_prompt_excludes_disable_model_invocation_skills() {
             add_to_prompt: true,
             user_invocable: true,
             disable_model_invocation: true,
+            argument_hint: None,
             modified: None,
         },
     );

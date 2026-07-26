@@ -645,7 +645,6 @@ fn targeted_user_shell_runs_from_agent_workdir() {
         }))
         .expect("seed workdir");
     writer.flush().expect("flush seed");
-    let _ = reader.read_event().expect("context").expect("context");
     writer
         .write_event(&Event::UiShellCommand(tau_proto::UiShellCommand {
             session_id: "session-1".into(),
@@ -1756,7 +1755,6 @@ fn locked_apply_patch_uses_workdir_frozen_at_admission() {
         }))
         .expect("seed cwd");
     writer.flush().expect("flush seed");
-    let _ = reader.read_event().expect("read context").expect("context");
 
     writer
         .write_event(&tool_started(
@@ -1816,10 +1814,6 @@ fn locked_apply_patch_uses_workdir_frozen_at_admission() {
         }))
         .expect("move cwd while waiting");
     writer.flush().expect("flush cwd b");
-    let _ = reader
-        .read_event()
-        .expect("read cwd b context")
-        .expect("context");
 
     writer
         .write_event(&tool_started(
@@ -1890,7 +1884,6 @@ fn shell_without_manual_lock_does_not_wait_for_update_lock() {
         }))
         .expect("seed cwd");
     writer.flush().expect("flush seed");
-    let _ = reader.read_event().expect("read context").expect("context");
 
     writer
         .write_event(&tool_started(
@@ -2831,6 +2824,8 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
 
     dispatch_session_agent_loaded(
         tau_proto::SessionAgentLoaded {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: tau_proto::SessionId::new("session-1"),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             ephemeral: false,
@@ -2840,6 +2835,18 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
         false,
     );
 
+    loop {
+        let message = rx.recv().expect("discovery snapshot");
+        if matches!(
+            message,
+            HarnessInputMessage::Emit(ref emit)
+                if matches!(emit.event.as_ref(),
+                    Event::ExtensionAgentDiscoverySnapshotDeclared(declared)
+                        if declared.agent_id.as_str() == "agent-1")
+        ) {
+            break;
+        }
+    }
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("cwd metadata publish") else {
         panic!("expected cwd metadata publish");
     };
@@ -2858,7 +2865,13 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
         metadata.agent_id.clone(),
         PathBuf::from(cwd.display().to_string()),
     );
-    let context = cwd_context_event(metadata.agent_id, &cwd, &cwd_state);
+    let context = cwd_context_event(
+        "session-1".into(),
+        metadata.agent_id,
+        tau_proto::AgentInitializationId::new("init-1"),
+        &cwd,
+        &cwd_state,
+    );
     let Event::ExtAgentContextPublish(publish) = context else {
         panic!("expected cwd agent context publish");
     };
@@ -3314,6 +3327,8 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             ephemeral: false,
@@ -3365,64 +3380,6 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
 
 /// Ensures the deterministic skill, AGENTS.md, and readiness batch uses
 /// `persist=false` wire metadata for every session-discovery event.
-#[test]
-fn session_discovery_events_use_transient_wire_metadata() {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let output = Output::channel(tx);
-    dispatch_session_discovery_messages(
-        "session-transient".into(),
-        vec![
-            HarnessInputMessage::emit_transient(Event::ExtSkillAvailable(
-                tau_proto::ExtSkillAvailable {
-                    name: "transient-skill".into(),
-                    description: "transient skill".to_owned(),
-                    file_path: "/tmp/transient-skill.md".into(),
-                    add_to_prompt: true,
-                    user_invocable: true,
-                    disable_model_invocation: false,
-                    argument_hint: None,
-                },
-            )),
-            HarnessInputMessage::emit_transient(Event::ExtAgentsMdAvailable(
-                tau_proto::ExtAgentsMdAvailable {
-                    file_path: "/tmp/AGENTS.md".into(),
-                    content: "transient instructions".to_owned(),
-                },
-            )),
-        ],
-        &output,
-    );
-
-    let frames = rx.try_iter().collect::<Vec<_>>();
-    let mut saw_skill = false;
-    let mut saw_agents = false;
-    let mut saw_ready = false;
-    for frame in frames {
-        let HarnessInputMessage::Emit(emit) = frame else {
-            continue;
-        };
-        match emit.event.as_ref() {
-            Event::ExtSkillAvailable(_) => {
-                assert!(!emit.persist);
-                saw_skill = true;
-            }
-            Event::ExtAgentsMdAvailable(_) => {
-                assert!(!emit.persist);
-                saw_agents = true;
-            }
-            Event::ExtensionSessionContextReady(ready) => {
-                assert_eq!(ready.session_id, "session-transient");
-                assert!(!emit.persist);
-                saw_ready = true;
-            }
-            _ => {}
-        }
-    }
-    assert!(saw_skill);
-    assert!(saw_agents);
-    assert!(saw_ready);
-}
-
 #[test]
 fn extension_reads_file() {
     let tempdir = TempDir::new().expect("tempdir");
@@ -8070,14 +8027,18 @@ fn two_shell_instance_workdirs_are_independent_and_prefix_associated() {
     );
     assert_ne!(first.key(), second.key());
     let Event::ExtAgentContextPublish(first_context) = cwd_context_event(
+        "session-1".into(),
         agent_id.clone(),
+        tau_proto::AgentInitializationId::new("init-1"),
         &first.get(&agent_id).expect("first path"),
         &first,
     ) else {
         unreachable!()
     };
     let Event::ExtAgentContextPublish(second_context) = cwd_context_event(
+        "session-1".into(),
         agent_id,
+        tau_proto::AgentInitializationId::new("init-1"),
         &second
             .get(&tau_proto::AgentId::parse("agent-two-shells").expect("agent id"))
             .expect("second path"),
@@ -8152,7 +8113,6 @@ fn shell_surface_directory_overrides_remain_call_local_across_full_dispatch() {
         }))
         .expect("seed workdir");
     writer.flush().expect("flush seed");
-    let _ = reader.read_event().expect("context").expect("context");
 
     for tool_name in [SHELL_TOOL_NAME, GPT_SHELL_TOOL_NAME] {
         let surface =
@@ -8276,7 +8236,6 @@ fn malformed_gpt_workdir_fails_without_side_effects_through_full_dispatch() {
         }))
         .expect("seed workdir");
     writer.flush().expect("flush seed");
-    let _ = reader.read_event().expect("context").expect("context");
 
     writer
         .write_event(&tool_started(
@@ -8392,7 +8351,6 @@ fn workdir_without_path_reports_current_status_without_mutation() {
         }))
         .expect("seed workdir");
     writer.flush().expect("flush seed");
-    let _ = reader.read_event().expect("context").expect("context");
     writer
         .write_event(&tool_started(
             "call-workdir-read",
@@ -8443,11 +8401,6 @@ fn absolute_workdir_setter_repairs_malformed_metadata() {
         }))
         .expect("malformed metadata");
     writer.flush().expect("flush malformed");
-    let context = reader.read_event().expect("read").expect("invalid context");
-    assert!(matches!(
-        context,
-        Event::ExtAgentContextPublish(publish) if publish.value.0["status"] == "invalid"
-    ));
 
     writer
         .write_event(&tool_started(
@@ -8539,7 +8492,6 @@ fn workdir_setter_waits_for_committed_metadata_before_notice_and_result() {
         }))
         .expect("seed cwd");
     writer.flush().expect("flush seed");
-    let _ = reader.read_event().expect("read context").expect("context");
 
     writer
         .write_event(&tool_started(
@@ -8573,8 +8525,6 @@ fn workdir_setter_waits_for_committed_metadata_before_notice_and_result() {
         .expect("commit cwd");
     writer.flush().expect("flush commit");
 
-    let context = reader.read_event().expect("read context").expect("context");
-    assert!(matches!(context, Event::ExtAgentContextPublish(p) if p.key.as_ref() == "workdir"));
     let notice = reader.read_event().expect("read notice").expect("notice");
     let Event::AgentUserMessageInjected(notice) = notice else {
         panic!("expected cwd notice");
@@ -8616,7 +8566,6 @@ fn overlapping_same_agent_workdir_setter_is_rejected_until_first_commit() {
         }))
         .expect("seed cwd");
     writer.flush().expect("flush seed");
-    let _ = reader.read_event().expect("read context").expect("context");
 
     writer
         .write_event(&tool_started(
@@ -8664,7 +8613,6 @@ fn overlapping_same_agent_workdir_setter_is_rejected_until_first_commit() {
         .write_event(&Event::AgentMetadataSet(first_metadata))
         .expect("commit first cwd");
     writer.flush().expect("flush commit");
-    let _ = reader.read_event().expect("read context").expect("context");
     let _ = reader.read_event().expect("read notice").expect("notice");
     let result = reader.read_event().expect("read result").expect("result");
     assert!(
@@ -8702,6 +8650,8 @@ fn replayed_session_agent_loaded_restores_workdir_context_and_ready() {
         .write_frame(&HarnessOutputMessage::deliver_replay(
             tau_proto::UnixMicros::new(2),
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
                 session_id: "s1".into(),
                 agent_id: agent_id.clone(),
                 ephemeral: false,
@@ -8757,6 +8707,8 @@ fn live_loaded_existing_agent_uses_replayed_workdir_before_ready() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: agent_id.clone(),
             ephemeral: false,
@@ -8826,6 +8778,8 @@ fn live_loaded_agent_defaults_workdir_after_replay_boundary_without_metadata() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: agent_id.clone(),
             ephemeral: false,
@@ -8869,6 +8823,8 @@ fn live_loaded_agent_does_not_default_workdir_after_replay_error() {
     runtime
         .handle_event(
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
                 session_id: "s1".into(),
                 agent_id: agent_id.clone(),
                 ephemeral: false,
@@ -8968,6 +8924,8 @@ fn malformed_workdir_metadata_does_not_wedge_context_ready() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: agent_id.clone(),
             ephemeral: false,

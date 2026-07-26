@@ -74,31 +74,30 @@ fn prompt_fragment_declarations_never_enter_semantic_history() {
     assert!(!should_persist_event(&event, false));
 }
 
-/// Session-discovery declarations and readiness are runtime observations, never
-/// semantic history, regardless of peer-selected persistence metadata.
+/// Complete discovery declarations are runtime replacement inputs and never
+/// enter semantic history, even when a peer requests durable publication.
 #[test]
-fn session_discovery_events_never_enter_semantic_history() {
-    for event in [
-        Event::ExtensionSessionContextProviderRegister(
-            tau_proto::ExtensionSessionContextProviderRegister {},
+fn discovery_snapshot_declarations_never_enter_semantic_history() {
+    let events = [
+        Event::ExtensionSessionDiscoverySnapshotDeclared(
+            tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+                session_id: "test-session".into(),
+                skills: Vec::new(),
+                agents_files: Vec::new(),
+            },
         ),
-        Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
-            name: "runtime-skill".into(),
-            description: "runtime skill".to_owned(),
-            file_path: "/tmp/runtime-skill.md".into(),
-            add_to_prompt: true,
-            user_invocable: true,
-            disable_model_invocation: false,
-            argument_hint: None,
-        }),
-        Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
-            file_path: "/tmp/AGENTS.md".into(),
-            content: "runtime instructions".to_owned(),
-        }),
-        Event::ExtensionSessionContextReady(tau_proto::ExtensionSessionContextReady {
-            session_id: "session-1".into(),
-        }),
-    ] {
+        Event::ExtensionAgentDiscoverySnapshotDeclared(
+            tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                session_id: "test-session".into(),
+                agent_id: parse_agent_id("agent-1"),
+                agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+                skills: Vec::new(),
+                agents_files: Vec::new(),
+            },
+        ),
+    ];
+
+    for event in events {
         assert!(!event.defaults_to_persist());
         assert!(!should_persist_event(&event, true));
         assert!(!should_persist_event(&event, false));
@@ -112,11 +111,16 @@ fn per_agent_context_events_never_enter_semantic_history() {
     for event in [
         Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
         Event::ExtAgentContextPublish(tau_proto::ExtAgentContextPublish {
+            session_id: tau_proto::SessionId::new("test-session"),
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             key: "workdir".into(),
             value: tau_proto::AgentContextValue(serde_json::json!("/tmp")),
         }),
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "session-1".into(),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         }),
@@ -605,6 +609,8 @@ fn inverted_wire_metadata_preserves_persistence_exceptions() {
 #[test]
 fn session_membership_events_route_to_session_log() {
     let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
+        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
         session_id: "session-1".into(),
         agent_id: parse_agent_id("agent-1"),
         ephemeral: false,

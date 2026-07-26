@@ -796,7 +796,7 @@ fn handle_skill_tool_call(
 ) -> Result<(), HarnessError> {
     let call_id = call.id.clone();
     host.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
-    match handle_skill_query(host, &call.arguments) {
+    match handle_skill_query(host, conversation_id, &call.arguments) {
         Ok((result, display)) => host.finish_tool_with_cbor_result(
             conversation_id,
             call_id,
@@ -821,6 +821,7 @@ fn handle_skill_tool_call(
 #[allow(clippy::result_large_err)]
 fn handle_skill_query(
     host: &mut InternalToolHost<'_>,
+    conversation_id: &AgentId,
     arguments: &CborValue,
 ) -> Result<(CborValue, Option<ToolUseState>), (String, Option<ToolUseState>)> {
     let needles = extract_skill_search_queries(arguments).map_err(|message| {
@@ -837,7 +838,7 @@ fn handle_skill_query(
             )
         })?
         .unwrap_or(false);
-    let skills = host.discovered_skills();
+    let skills = host.discovered_skills(conversation_id);
     let outcome = search_discovered_skills(&skills, &needles, search_content);
     for warning in &outcome.warnings {
         host.emit_info_important(warning);

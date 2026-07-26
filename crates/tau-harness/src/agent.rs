@@ -442,6 +442,9 @@ pub(crate) struct PendingPrompt {
     pub(crate) submission_source: tau_proto::PromptSubmissionSource,
     /// Optional caller correlation id carried with this exact prompt.
     pub(crate) ctx_id: Option<String>,
+    /// Resolve a non-literal user skill command against the target agent's
+    /// frozen discovery snapshot immediately before durable submission.
+    pub(crate) expand_user_skill_on_dispatch: bool,
 }
 
 impl From<String> for PendingPrompt {
@@ -471,6 +474,7 @@ impl PendingPrompt {
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            expand_user_skill_on_dispatch: false,
         }
     }
 
@@ -497,6 +501,7 @@ impl PendingPrompt {
             source: PendingPromptSource::General,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            expand_user_skill_on_dispatch: false,
         }
     }
 
@@ -515,6 +520,7 @@ impl PendingPrompt {
             source: PendingPromptSource::LoopGuard,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            expand_user_skill_on_dispatch: false,
         }
     }
 
@@ -527,6 +533,7 @@ impl PendingPrompt {
             source: PendingPromptSource::PassiveBackgroundCompletion,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            expand_user_skill_on_dispatch: false,
         }
     }
 
@@ -545,6 +552,7 @@ impl PendingPrompt {
             source: PendingPromptSource::PassiveRestoreNotice,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
+            expand_user_skill_on_dispatch: false,
         }
     }
 

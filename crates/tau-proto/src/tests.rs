@@ -449,22 +449,6 @@ fn manual_compaction_request_events_round_trip() {
     );
 }
 
-/// Ensures older serialized `extension.skill_available` payloads remain
-/// readable and default to user-invocable/model-invocable behavior.
-#[test]
-fn ext_skill_available_serde_defaults_new_invocation_fields() {
-    let value = serde_json::json!({
-        "name": "legacy-skill",
-        "description": "Legacy skill",
-        "file_path": "/tmp/legacy/SKILL.md",
-        "add_to_prompt": false
-    });
-    let skill: ExtSkillAvailable = serde_json::from_value(value).expect("legacy skill event");
-    assert!(skill.user_invocable);
-    assert!(!skill.disable_model_invocation);
-    assert!(skill.argument_hint.is_none());
-}
-
 fn agent_id(value: &str) -> AgentId {
     AgentId::parse(value).expect("test agent id")
 }
@@ -939,6 +923,8 @@ fn representative_events() -> Vec<Event> {
             reason: SessionStartReason::Initial,
         }),
         Event::SessionAgentLoaded(SessionAgentLoaded {
+            agent_initialization_id: AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: agent_id("engineer_abcd1234"),
             ephemeral: false,
@@ -1216,19 +1202,6 @@ fn representative_events() -> Vec<Event> {
             attempt: 2,
             reason: Some("hot reload".to_owned()),
         }),
-        Event::ExtSkillAvailable(ExtSkillAvailable {
-            name: "brave-search".into(),
-            description: "Web search via Brave API".to_owned(),
-            file_path: "/home/user/.agents/skills/brave-search/SKILL.md".into(),
-            add_to_prompt: true,
-            user_invocable: true,
-            disable_model_invocation: false,
-            argument_hint: None,
-        }),
-        Event::ExtAgentsMdAvailable(ExtAgentsMdAvailable {
-            file_path: "/home/user/src/project/AGENTS.md".into(),
-            content: "# Project instructions\n- Run tests".to_owned(),
-        }),
         Event::ExtensionSessionDiscoverySnapshotDeclared(
             ExtensionSessionDiscoverySnapshotDeclared {
                 session_id: "s1".into(),
@@ -1270,6 +1243,8 @@ fn representative_events() -> Vec<Event> {
         Event::ExtensionContextProviderRegister(ExtensionContextProviderRegister {}),
         Event::ExtensionSessionContextProviderRegister(ExtensionSessionContextProviderRegister {}),
         Event::ExtensionContextReady(ExtensionContextReady {
+            agent_initialization_id: AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: agent_id("agent-1"),
         }),
@@ -1277,6 +1252,9 @@ fn representative_events() -> Vec<Event> {
             session_id: "s1".into(),
         }),
         Event::ExtAgentContextPublish(ExtAgentContextPublish {
+            session_id: SessionId::new("test-session"),
+            agent_initialization_id: AgentInitializationId::new("test-init"),
+
             agent_id: agent_id("agent-1"),
             key: "cwd".into(),
             value: AgentContextValue(serde_json::json!("/tmp/project")),
@@ -2038,7 +2016,7 @@ fn first_party_event_wire_tags_match_event_names_and_persistence() {
     assert_eq!(seen, expected_first_party_event_names());
 }
 
-/// Ensures every additive discovery event preserves its complete nested wire
+/// Ensures every discovery event preserves its complete nested wire
 /// payload through JSON and CBOR, including both effective-skill source kinds.
 #[test]
 fn discovery_snapshot_events_round_trip_complete_wire_payloads() {
@@ -2172,8 +2150,6 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::ActionResult(_)
                 | Event::ActionError(_)
                 | Event::ExtPromptFragmentPublish(_)
-                | Event::ExtSkillAvailable(_)
-                | Event::ExtAgentsMdAvailable(_)
                 | Event::ExtensionSessionDiscoverySnapshotDeclared(_)
                 | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
                 | Event::ExtensionSessionContextProviderRegister(_)
@@ -2243,7 +2219,6 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.watches_updated",
         "extension.agent_context_publish",
         "extension.agent_discovery_snapshot_declared",
-        "extension.agents_md_available",
         "extension.context_provider_register",
         "extension.context_ready",
         "extension.prompt_fragment_publish",
@@ -2253,7 +2228,6 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "extension.session_context_provider_register",
         "extension.session_context_ready",
         "extension.session_discovery_snapshot_declared",
-        "extension.skill_available",
         "extension.starting",
         "extension.exited",
         "harness.agent_context_usage_changed",
@@ -4006,6 +3980,8 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             ctx_id: None,
         }),
         Event::SessionAgentLoaded(SessionAgentLoaded {
+            agent_initialization_id: AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: agent_id("worker"),
             ephemeral: false,
@@ -4194,6 +4170,8 @@ fn ephemeral_agent_fields_default_false_and_skip_serializing() {
     assert!(json.get("ephemeral").is_none());
 
     let loaded = SessionAgentLoaded {
+        agent_initialization_id: AgentInitializationId::new("test-init"),
+
         session_id: "s1".into(),
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         ephemeral: true,

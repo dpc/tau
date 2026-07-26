@@ -3,8 +3,6 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use tau_proto::ExtSkillAvailable;
-
 use crate::locked;
 
 /// Shared skill snapshot used by the renderer and prompt completer.
@@ -26,24 +24,32 @@ impl SkillCommandState {
         Self::default()
     }
 
-    /// Apply one committed raw skill-availability declaration.
-    pub(crate) fn apply_skill_available(&self, skill: &ExtSkillAvailable) {
+    /// Replace completion state from one canonical complete session snapshot.
+    pub(crate) fn apply_session_snapshot(
+        &self,
+        snapshot: &tau_proto::HarnessSessionSkillsAvailable,
+    ) {
         let mut inner = locked(&self.inner);
-        // Raw declarations retain their authored flags. Manual-only
-        // `disable_model_invocation` skills are nevertheless effectively
-        // user-invocable in both this live projection and the harness projection.
-        if !skill.user_invocable && !skill.disable_model_invocation {
-            inner.remove(skill.name.as_str());
-            return;
+        inner.clear();
+        for skill in &snapshot.skills {
+            if !skill.user_invocable {
+                continue;
+            }
+            let source_label = match &skill.source {
+                tau_proto::DiscoveryEffectiveSkillSource::File { path } => {
+                    path.display().to_string()
+                }
+                tau_proto::DiscoveryEffectiveSkillSource::BuiltIn => "built-in skill".to_owned(),
+            };
+            inner.insert(
+                skill.name.to_string(),
+                SkillCompletion {
+                    description: skill.description.clone(),
+                    argument_hint: skill.argument_hint.clone(),
+                    source_label,
+                },
+            );
         }
-        inner.insert(
-            skill.name.to_string(),
-            SkillCompletion {
-                description: skill.description.clone(),
-                argument_hint: skill.argument_hint.clone(),
-                source_label: skill.file_path.display().to_string(),
-            },
-        );
     }
 
     /// Build the `:skill` argument completer for the current snapshot.

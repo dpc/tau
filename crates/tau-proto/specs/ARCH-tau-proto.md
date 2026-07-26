@@ -1,14 +1,5 @@
 # ARCH-tau-proto: tau-proto architecture
 
-## Status
-
-Atomic session/agent discovery declarations, initialization replacement state,
-protected canonical projections, and `AgentInitializationId` exist as additive
-migration scaffolding. Runtime producers and consumers still use the old
-positive item events and uncorrelated context/readiness fields; the next phase
-must switch them atomically and remove the old surface. This intermediate wire
-overlap is not a supported dual interface.
-
 The protocol now separates transient `message.*_reported` inputs from
 harness-authored canonical `message.*` facts, carries declared
 `PeerCapability::MessageBridge` authority in `Hello`, and separates transient
@@ -192,14 +183,15 @@ lifecycle, persistence, runtime/navigation classification for live rows, and
 content-minimized creation labels. It is not an event and has no
 extension/external request path.
 
-The four session-discovery DTOs retain their existing wire names and default to
-`persist=false`:
-session-provider registration, skill availability, AGENTS.md availability, and session
-readiness. Their commit-before-effects contract is
+Session discovery uses transient session-provider registration, complete atomic
+session/agent source snapshots, and correlated readiness. `session.agent_loaded`,
+per-agent snapshots, keyed context, readiness, the durable initialization
+replacement, and the canonical agent projection carry a mandatory
+`AgentInitializationId`. The harness alone authors the durable replacement and
+canonical projections. Their contract is
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
-The three per-agent context DTOs likewise retain their wire names and default to
-`persist=false`: provider registration, keyed agent context publication, and agent
-readiness. Their commit-before-effects contract is
+Per-agent provider registration, keyed context publication, and readiness remain
+transient and use the same exact initialization correlation. Their contract is
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 
 `term.osc1337_set_user_var` and `term.bell` retain their existing DTOs, wire

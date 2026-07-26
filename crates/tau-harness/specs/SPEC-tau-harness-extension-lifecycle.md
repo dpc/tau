@@ -165,13 +165,12 @@ Pre-Ready prompt-fragment declarations reserve count and encoded bytes before
 interception, block Ready until pass/drop/disconnect settles, and stage only the
 committed survivor. See
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
-Session-provider registration, skill, and AGENTS.md declarations use the same
-pre-interception activation reservation boundary; readiness remains ordered operational
-traffic. See
+Session-provider registration and complete session discovery snapshots use the
+same pre-interception activation reservation boundary; readiness remains ordered
+operational traffic. Per-agent registration, complete correlated discovery
+snapshots, and keyed context use the same bounded boundary. See
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
-Per-agent provider registration and value declarations use the same bounded
-pre-interception reservation and Ready-blocking rules. Per-agent readiness is
-operational traffic and therefore remains ordered behind activation. See
+Per-agent readiness is operational traffic and therefore remains ordered behind activation. See
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 Harness-internal tool handlers are installed before this preflight, so their names
 participate as reserved owners. Per-connection retained activation traffic is

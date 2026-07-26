@@ -1,6 +1,9 @@
 # Skills
 
-Tau discovers Markdown skills at session start, advertises only the small set that should be immediately visible, and lets the agent discover or load the rest with the `skill` tool.
+Tau discovers Markdown skills into an atomic session baseline, refreshes and
+freezes that state for each agent initialization, advertises only the small set
+that should be immediately visible, and lets the agent discover or load the rest
+with the `skill` tool.
 
 
 ## Discovery
@@ -46,7 +49,10 @@ Project-scoped skills default to advertised. User-scoped skills default to hidde
 
 ## Prompt advertisement
 
-Advertised skills appear in `<available_skills>` with only name and description. Tau does not include the skill body until the agent calls `skill`.
+Advertised skills from the target agent's frozen snapshot appear in
+`<available_skills>` with only name and description. Tau does not include the
+skill body until the agent calls `skill`. Later session discovery changes do not
+mutate an already initialized agent.
 
 This keeps normal agent context small while still surfacing project-local instructions that are likely relevant immediately.
 
@@ -60,7 +66,12 @@ Users can force a skill into the next model prompt with either form:
 :skill:<name> [arguments...]
 ```
 
-The harness validates the selected discovered skill, rejects unknown or non-user-invocable skills with a visible `harness.notice`, reads the same bounded 64 KiB prefix used by the model-visible tool, strips frontmatter, and expands the submitted prompt to a Pi-style block:
+The harness validates against the selected agent's frozen skill snapshot, rejects
+unknown or non-user-invocable skills with a visible `harness.notice`, reads the
+same bounded 64 KiB prefix used by the model-visible tool, strips frontmatter,
+and expands the submitted prompt to a Pi-style block. A new agent's initial
+`:skill` command waits for its discovery initialization to finalize before this
+expansion.
 
 ```text
 <skill name="..." location="...">
@@ -74,7 +85,9 @@ References are relative to ...
 
 Arguments are append-only text. Tau does not implement placeholder substitution or structured skill arguments.
 
-Terminal `:skill` name completion is currently best-effort over live extension skill announcements; the harness still validates against its canonical selected winner at invocation time. A dedicated harness-owned skill-winner completion snapshot is deferred.
+Terminal `:skill` name completion uses the harness-owned complete canonical
+session snapshot. Invocation still validates against the selected agent's frozen
+snapshot, which may intentionally differ after later session refreshes.
 
 `disable-model-invocation` and `:skill` visibility are prompt-surface controls, not security boundaries. A model with filesystem tools may still read a skill file if it learns the path, and Tau ignores `allowed-tools` as a permission mechanism.
 
@@ -88,7 +101,10 @@ The agent calls `skill` with a `query` string:
 
 Tau lowercases and deduplicates query terms. Punctuation separates terms, except hyphens inside skill names are preserved.
 
-Search uses OR semantics: a skill matches if any query term matches its name or description. Hits are sorted by `matched_terms` descending, then by name. `matched_terms` is the number of distinct query terms that matched, not an occurrence count.
+Search uses the target agent's frozen snapshot with OR semantics: a skill matches
+if any query term matches its name or description. Hits are sorted by
+`matched_terms` descending, then by name. `matched_terms` is the number of
+distinct query terms that matched, not an occurrence count.
 
 By default, Tau does not read skill bodies during search. `search_content: true` also searches the first 64 KiB of the skill file after stripping frontmatter from that prefix.
 

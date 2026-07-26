@@ -78,12 +78,10 @@ for control of the emit/intercept pipeline.
   effective configuration, including their display descriptions for UIs.
 - **`harness.agent_context_initialized`** — Protected transient current-state
   projection for one exact agent initialization, carrying model-listed skills
-  and ordered AGENTS.md path/line/byte summaries. The harness does not publish
-  this scaffold event until the runtime migration lands.
+  and ordered AGENTS.md path/line/byte summaries.
 - **`harness.session_skills_available`** — Protected transient complete
   validated session skill snapshot for role preflight and manual completion.
-  The harness does not publish this scaffold event until the runtime migration
-  lands. Effective skill sources are tagged as file-backed absolute paths or a
+  Effective skill sources are tagged as file-backed absolute paths or a
   built-in discriminator; built-in content is resolved by skill name and is not
   carried in projection events.
 - **`harness.role_selected`** — Which role is currently selected, plus
@@ -123,8 +121,11 @@ membership journal, not a transcript.
   the next one. Extensions flush or drop per-session state. Interceptors cannot
   drop or rewrite it.
 - **`session.agent_loaded`** — Membership fact: a global agent is loaded into
-  this session. Durable agents write this to the session log so resume can fold
-  the loaded-agent set. Ephemeral agents set `ephemeral: true`; the fact is
+  this session. The first durable membership transition writes this to the
+  session log so resume can fold the loaded-agent set. Restored initialization
+  restates already-folded membership transiently with a fresh
+  `agent_initialization_id` instead of appending a duplicate membership fact.
+  Ephemeral agents set `ephemeral: true`; the fact is
   delivered live/replayed while the daemon runs but is memory-only and omitted
   from cold resume. Interceptors cannot drop or rewrite this immutable
   membership fact.
@@ -180,14 +181,16 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   and requires the same harness-stamped `submission_source`; old steered records
   without that field are unsupported.
 - **`agent.user_message_injected`** — Synthetic transcript context inserted by
-  the harness (for example shell output or an AGENTS.md preamble) and folded
+  the harness (for example shell output) and folded
   like user input. It uses the same immutable harness-owned, default-false
   activation marker: false is passive/legacy context and cannot independently
   wake replay.
 - **`agent.initialization_context_set`** — Durable harness-authored replacement
-  DTO for one exact `agent_initialization_id`, carrying an optional bootstrap
-  block, frozen effective skills, and ordered AGENTS.md summaries. The reducer
-  does not interpret this scaffold event until the runtime migration lands.
+  DTO carrying an optional bootstrap block, frozen effective skills, ordered
+  AGENTS.md summaries, and the initialization ID that produced the replacement.
+  Every finalization appends one exact-ID replacement, including unchanged
+  effective content refreshed during cold restore. The reducer folds the fact
+  into replaceable side state without adding a transcript node.
 - **`agent.prompt_recalled`** — A queued prompt was recalled for editing.
 - **`agent.prompt_created`** — The harness assembled a provider prompt and
   assigned it an `agent_prompt_id`; payload carries `agent_id`, `session_id`,
@@ -506,48 +509,29 @@ processes.
 Emitted by extensions to advertise capabilities or interact with the
 harness/agent.
 
-Every authenticated configured extension kind may author the four session-discovery
-events below without a capability; unconfigured/socket peers may not. Registration does
-not gate skill, AGENTS.md, or readiness publication. Their raw events default to `persist=false`,
-never enter semantic journals or replay/synthesis, and commit before projection, derived
-facts, or readiness release.
+Every authenticated configured extension kind may author session-discovery
+registration, complete source snapshots, and readiness without a capability;
+unconfigured/socket peers may not. Raw events default to `persist=false`, never
+enter semantic journals or replay, and commit before projection or wait release.
 See
 [`SPEC-session-discovery-declarations-and-readiness`](../specs/SPEC-session-discovery-declarations-and-readiness.md).
 
-The snapshot events below are temporary migration scaffolding for
-[`DECISION-agent-initialization-discovery-snapshots`](../specs/DECISION-agent-initialization-discovery-snapshots.md).
-No producer emits them and no runtime consumer interprets them yet. The legacy
-positive item events remain operational only until the next phase atomically
-switches producers and consumers and removes them; this intermediate state is
-not a supported dual discovery interface.
-
-Every authenticated configured extension kind may also author the three
-per-agent context events without a capability; unconfigured/socket peers may
-not. Registration controls captured wait participation but does not gate value
-or readiness publication, and values may target arbitrary or unloaded agents.
-For the current session, committed `extension.context_ready` releases both the
-source's named-agent wait and, for compatibility, any session-initialization
-wait containing it; a mismatched session is effect-free. Raw events are
+Every authenticated configured extension kind may also author per-agent
+discovery and context events without a capability; unconfigured/socket peers may
+not. Registration controls captured wait participation. Values and readiness
+must match the current session, loaded agent, and initialization id; per-agent
+readiness never releases session initialization. Raw events are
 transient runtime observations and never enter semantic replay. See
 [`SPEC-per-agent-context-declarations-and-readiness`](../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 
-- **`extension.skill_available`** — The extension discovered a skill on
-  disk: name, description, file path, whether to inject it into the
-  system prompt, whether users may invoke it with `:skill`, whether model-side
-  invocation is disabled (which implies user invocation), and an optional argument hint.
-  The transient declaration commits before validation, collision selection, or diagnostics.
-- **`extension.agents_md_available`** — The extension discovered an
-  AGENTS.md file and is shipping its contents eagerly so the harness
-  can inject them without a tool round-trip. The transient declaration commits before
-  slot replacement and durable per-agent instruction injection.
 - **`extension.session_discovery_snapshot_declared`** — A complete transient
   session-baseline source snapshot containing skill candidates and ordered
   AGENTS.md files. Optional sampled modification times are signed microseconds
   from the Unix epoch, so negative values represent pre-epoch files. Empty
-  lists mean clear once runtime handling lands.
+  lists atomically clear that source.
 - **`extension.agent_discovery_snapshot_declared`** — A complete transient
   source snapshot for one exact session, agent, and
-  `agent_initialization_id`. Empty lists mean clear once runtime handling lands.
+  `agent_initialization_id`. Empty lists atomically clear that pending source.
 - **`extension.context_provider_register`** — A transient declaration that commits
   before the extension registers as a
   per-agent context provider that can publish context after

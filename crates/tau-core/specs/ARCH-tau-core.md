@@ -7,6 +7,10 @@ memory-only membership does not consume that cursor. Both durable journal
 writers reject encoded records larger than the shared 64 MiB reader allocation
 limit before opening or mutating the journal.
 
+`AgentTree` folds `agent.initialization_context_set` as replaceable side state,
+not a transcript node. The latest bootstrap/skill replacement survives replay
+and remains outside branch-head movement and compaction.
+
 Agent journals and both ordinary and restore session journals use the same
 failure-atomic frame append. A writer captures the exact pre-append EOF, commits
 the length prefix and CBOR payload with a data sync, and advances folded state,

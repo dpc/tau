@@ -79,7 +79,14 @@ Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bin
 - duplicate user-skill names from XDG skill roots beat legacy user roots before
   modified-time collision resolution
 
-`tau-ext-shell` parses skill `user-invocable`, `disable-model-invocation`, and `argument-hint` metadata and forwards it to the harness. The harness owns collision winner selection and policy: `disable-model-invocation` hides a skill from `<available_skills>` and the model `skill` tool and implies user invocation, while `:skill <name> [args]` (or `:skill:<name> [args]`) explicitly injects user-invocable skill content into the next prompt with arguments appended.
+`tau-ext-shell` parses skill `user-invocable`, `disable-model-invocation`, and
+`argument-hint` metadata and publishes one complete source snapshot at session
+discovery and for each correlated agent initialization. The harness atomically
+selects collision winners and freezes each initialized agent's view.
+`disable-model-invocation` hides a skill from that agent's
+`<available_skills>` and model `skill` tool and implies user invocation, while
+`:skill <name> [args]` (or `:skill:<name> [args]`) expands against the selected
+agent's frozen snapshot.
 
 `.local` locations are intended for machine- or user-specific instructions and are usually gitignored.
 

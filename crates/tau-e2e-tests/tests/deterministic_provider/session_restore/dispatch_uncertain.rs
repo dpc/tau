@@ -12,8 +12,8 @@ use super::{
     BootIdentities, DeterministicFixture, DurableSessionSnapshot, FAKE_PROVIDER, Observed,
     ProviderTurnCounts, SESSION, ScenarioActionV2, ScenarioLaneV2, ScenarioV2,
     SessionRestoreObserver, WORKER_INITIAL, WORKER_PROMPT, assert_provider_turn_counts,
-    assert_restored_roster, assert_resume_boundaries, initial_live_watch_subscription_id,
-    interruption_support as interruption, matched_action_count,
+    assert_restored_roster, assert_resume_boundaries, count_prompt, count_response,
+    initial_live_watch_subscription_id, interruption_support as interruption, matched_action_count,
 };
 
 /// Exact compact JSON size of the reviewed S5 scenario grammar.
@@ -165,8 +165,24 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     snapshot_b.require_prefix(&snapshot_a)?;
     interruption::assert_unfinished_worker_dispatch(&snapshot_b, &identities.worker, &dispatch)?;
-    if snapshot_b.agent_events[&identities.worker] != snapshot_a.agent_events[&identities.worker] {
-        return Err("S5 Boot B changed the dispatch-uncertain worker journal".into());
+    let main_suffix =
+        super::suffix_after_initialization(&snapshot_a, &snapshot_b, &identities.main)?;
+    if count_prompt(
+        main_suffix,
+        &identities.main,
+        "recreate uncertain worker watch",
+    ) != 1
+        || count_response(
+            main_suffix,
+            &identities.main,
+            "uncertain worker watch recreated",
+        ) != 1
+    {
+        return Err("S5 main work did not follow its exact initialization refresh".into());
+    }
+    if !super::suffix_after_initialization(&snapshot_a, &snapshot_b, &identities.worker)?.is_empty()
+    {
+        return Err("S5 Boot B changed the worker beyond initialization refresh".into());
     }
 
     let socket_c = fixture.socket_path("s5-boot-c");
@@ -199,9 +215,7 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     daemon_c.finish()?;
 
     let snapshot_c = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
-    if snapshot_c != snapshot_b {
-        return Err("S5 Boot C changed durable state without agent input".into());
-    }
+    super::assert_initialization_only_refresh(&snapshot_b, &snapshot_c)?;
     interruption::assert_unfinished_worker_dispatch(&snapshot_c, &identities.worker, &dispatch)?;
     fixture.assert_consumed()?;
     Ok(())

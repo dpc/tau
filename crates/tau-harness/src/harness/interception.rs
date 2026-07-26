@@ -413,11 +413,11 @@ fn rollover_publication_must_commit(event: &Event) -> bool {
                 | Event::StartAgentRequest(_)
                 | Event::ExtInternalPromptSubmitRequest(_)
                 | Event::ExtensionContextProviderRegister(_)
+                | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
                 | Event::ExtAgentContextPublish(_)
                 | Event::ExtensionContextReady(_)
                 | Event::ExtensionSessionContextProviderRegister(_)
-                | Event::ExtSkillAvailable(_)
-                | Event::ExtAgentsMdAvailable(_)
+                | Event::ExtensionSessionDiscoverySnapshotDeclared(_)
                 | Event::ExtensionSessionContextReady(_)
         )
 }
@@ -1393,11 +1393,11 @@ impl Harness {
                         ActivationDeclarationFamily::PromptFragment
                     }
                     Event::ExtensionSessionContextProviderRegister(_)
-                    | Event::ExtSkillAvailable(_)
-                    | Event::ExtAgentsMdAvailable(_) => {
+                    | Event::ExtensionSessionDiscoverySnapshotDeclared(_) => {
                         ActivationDeclarationFamily::SessionDiscovery
                     }
                     Event::ExtensionContextProviderRegister(_)
+                    | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
                     | Event::ExtAgentContextPublish(_) => ActivationDeclarationFamily::AgentContext,
                     _ => return None,
                 };

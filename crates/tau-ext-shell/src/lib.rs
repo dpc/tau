@@ -16,10 +16,11 @@ use std::time::{Duration, Instant};
 
 use tau_proto::{
     ActionError, ActionInvoke, ActionOutput, ActionResult, AgentContextKey, AgentContextValue,
-    CborValue, Event, ExtAgentContextPublish, ExtensionContextReady, ExtensionSessionContextReady,
-    HarnessInputMessage, PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded,
-    SessionStarted, ToolCancelled, ToolExample, ToolExampleSelector, ToolResult, ToolResultKind,
-    ToolSpec, ToolTag,
+    CborValue, DiscoveryAgentsFile, DiscoveryModifiedMicros, DiscoverySkillCandidate, Event,
+    ExtAgentContextPublish, ExtensionAgentDiscoverySnapshotDeclared, ExtensionContextReady,
+    ExtensionSessionContextReady, ExtensionSessionDiscoverySnapshotDeclared, HarnessInputMessage,
+    PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded, SessionStarted,
+    ToolCancelled, ToolExample, ToolExampleSelector, ToolResult, ToolResultKind, ToolSpec, ToolTag,
 };
 use tracing::{debug, trace};
 
@@ -2095,10 +2096,15 @@ fn apply_started_cwd_metadata(
         if item.key == cwd_state.key() {
             if let CborValue::Text(path) = item.value {
                 let cwd = PathBuf::from(path);
-                if cwd_state.set_metadata_text(started.agent_id.clone(), cwd.clone()) && !is_replay
+                if cwd_state.set_metadata_text(started.agent_id.clone(), cwd.clone())
+                    && !is_replay
+                    && let Some((session_id, initialization_id)) =
+                        cwd_state.initialization(&started.agent_id)
                 {
                     let _ = tx.send(HarnessInputMessage::emit_transient(cwd_context_event(
+                        session_id,
                         started.agent_id.clone(),
+                        initialization_id,
                         &cwd,
                         cwd_state,
                     )));
@@ -2117,12 +2123,19 @@ fn dispatch_session_agent_loaded(
     defer_default_until_replay_complete: bool,
 ) {
     if defer_default_until_replay_complete {
-        cwd_state.set_pending_ready(loaded.agent_id, loaded.session_id);
+        cwd_state.set_pending_ready(
+            loaded.agent_id,
+            loaded.session_id,
+            loaded.agent_initialization_id,
+        );
         return;
     }
+    publish_agent_discovery_snapshot(&loaded, tx);
     if let Some(cwd) = cwd_state.get(&loaded.agent_id) {
         let _ = tx.send(HarnessInputMessage::emit_transient(cwd_context_event(
+            loaded.session_id.clone(),
             loaded.agent_id.clone(),
+            loaded.agent_initialization_id.clone(),
             &cwd,
             cwd_state,
         )));
@@ -2130,12 +2143,17 @@ fn dispatch_session_agent_loaded(
             Event::ExtensionContextReady(ExtensionContextReady {
                 session_id: loaded.session_id,
                 agent_id: loaded.agent_id,
+                agent_initialization_id: loaded.agent_initialization_id,
             }),
         ));
         return;
     }
 
-    cwd_state.set_pending_ready(loaded.agent_id.clone(), loaded.session_id);
+    cwd_state.set_pending_ready(
+        loaded.agent_id.clone(),
+        loaded.session_id,
+        loaded.agent_initialization_id,
+    );
     let Ok(cwd) = cwd_state.process_default() else {
         return;
     };
@@ -2150,14 +2168,22 @@ fn dispatch_session_agent_loaded(
     ));
 }
 
-fn cwd_context_event(agent_id: tau_proto::AgentId, cwd: &Path, cwd_state: &CwdState) -> Event {
+fn cwd_context_event(
+    session_id: tau_proto::SessionId,
+    agent_id: tau_proto::AgentId,
+    agent_initialization_id: tau_proto::AgentInitializationId,
+    cwd: &Path,
+    cwd_state: &CwdState,
+) -> Event {
     let status = if cwd.is_dir() {
         "available"
     } else {
         "unavailable"
     };
     Event::ExtAgentContextPublish(ExtAgentContextPublish {
+        session_id,
         agent_id,
+        agent_initialization_id,
         key: AgentContextKey::new("workdir"),
         value: AgentContextValue(serde_json::json!({
             "label": cwd_state.context_label(),
@@ -2167,9 +2193,16 @@ fn cwd_context_event(agent_id: tau_proto::AgentId, cwd: &Path, cwd_state: &CwdSt
     })
 }
 
-fn invalid_cwd_context_event(agent_id: tau_proto::AgentId, cwd_state: &CwdState) -> Event {
+fn invalid_cwd_context_event(
+    session_id: tau_proto::SessionId,
+    agent_id: tau_proto::AgentId,
+    agent_initialization_id: tau_proto::AgentInitializationId,
+    cwd_state: &CwdState,
+) -> Event {
     Event::ExtAgentContextPublish(ExtAgentContextPublish {
+        session_id,
         agent_id,
+        agent_initialization_id,
         key: AgentContextKey::new("workdir"),
         value: AgentContextValue(serde_json::json!({
             "label": cwd_state.context_label(),
@@ -2241,31 +2274,105 @@ fn build_session_started_messages(_started: SessionStarted) -> Vec<HarnessInputM
 
     let result = tau_skills::load_skills_from_skill_dirs(&skill_dirs);
     push_skill_diagnostic_requests(&mut messages, result.diagnostics);
-    for skill in result.skills {
-        let file_path = skill.file_path.canonicalize().unwrap_or(skill.file_path);
-        messages.push(HarnessInputMessage::emit_transient(
-            Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
-                name: skill.name.into(),
-                description: skill.description,
-                file_path,
-                add_to_prompt: skill.add_to_prompt,
-                user_invocable: skill.user_invocable,
-                disable_model_invocation: skill.disable_model_invocation,
-                argument_hint: skill.argument_hint,
-            }),
-        ));
-    }
-
-    for agents_file in discover_session_agents_files() {
-        messages.push(HarnessInputMessage::emit_transient(
-            Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
-                file_path: agents_file.file_path,
-                content: agents_file.content,
-            }),
-        ));
-    }
+    let skills = result
+        .skills
+        .into_iter()
+        .map(discovery_skill_candidate)
+        .collect();
+    let agents_files = discover_session_agents_files()
+        .into_iter()
+        .map(|file| DiscoveryAgentsFile {
+            file_path: file.file_path,
+            content: file.content,
+        })
+        .collect();
+    messages.push(HarnessInputMessage::emit_transient(
+        Event::ExtensionSessionDiscoverySnapshotDeclared(
+            ExtensionSessionDiscoverySnapshotDeclared {
+                session_id: _started.session_id,
+                skills,
+                agents_files,
+            },
+        ),
+    ));
 
     messages
+}
+
+fn discovery_skill_candidate(skill: tau_skills::Skill) -> DiscoverySkillCandidate {
+    let file_path = skill.file_path.canonicalize().unwrap_or(skill.file_path);
+    let sampled_modified = std::fs::metadata(&file_path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(system_time_to_discovery_micros);
+    DiscoverySkillCandidate {
+        name: skill.name.into(),
+        description: skill.description,
+        file_path,
+        add_to_prompt: skill.add_to_prompt,
+        user_invocable: skill.user_invocable,
+        disable_model_invocation: skill.disable_model_invocation,
+        argument_hint: skill.argument_hint,
+        sampled_modified,
+    }
+}
+
+fn system_time_to_discovery_micros(time: std::time::SystemTime) -> Option<DiscoveryModifiedMicros> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_micros())
+            .ok()
+            .map(DiscoveryModifiedMicros::new),
+        Err(error) => i64::try_from(error.duration().as_micros())
+            .ok()
+            .and_then(i64::checked_neg)
+            .map(DiscoveryModifiedMicros::new),
+    }
+}
+
+fn publish_agent_discovery_snapshot(loaded: &SessionAgentLoaded, tx: &Output) {
+    publish_agent_discovery_snapshot_for(
+        loaded.session_id.clone(),
+        loaded.agent_id.clone(),
+        loaded.agent_initialization_id.clone(),
+        tx,
+    );
+}
+
+fn publish_agent_discovery_snapshot_for(
+    session_id: tau_proto::SessionId,
+    agent_id: tau_proto::AgentId,
+    agent_initialization_id: tau_proto::AgentInitializationId,
+    tx: &Output,
+) {
+    let session = SessionStarted {
+        session_id: session_id.clone(),
+        reason: tau_proto::SessionStartReason::Resume,
+    };
+    let messages = build_session_started_messages(session);
+    for message in messages {
+        match message {
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot) = *emit.event {
+                    let _ = tx.send(HarnessInputMessage::emit_transient(
+                        Event::ExtensionAgentDiscoverySnapshotDeclared(
+                            ExtensionAgentDiscoverySnapshotDeclared {
+                                session_id: session_id.clone(),
+                                agent_id: agent_id.clone(),
+                                agent_initialization_id: agent_initialization_id.clone(),
+                                skills: snapshot.skills,
+                                agents_files: snapshot.agents_files,
+                            },
+                        ),
+                    ));
+                } else {
+                    let _ = tx.send(HarnessInputMessage::Emit(emit));
+                }
+            }
+            other => {
+                let _ = tx.send(other);
+            }
+        }
+    }
 }
 
 fn shell_workdir_prompt_fragment() -> PromptFragment {

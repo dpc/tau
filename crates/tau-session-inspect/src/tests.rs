@@ -139,6 +139,8 @@ fn session_list_isolates_invalid_session_journals() {
                 session_id,
                 None,
                 Event::SessionAgentLoaded(SessionAgentLoaded {
+                    agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
                     session_id: SessionId::from(session_id),
                     agent_id: AgentId::parse(agent_id).expect("agent id"),
                     ephemeral: false,

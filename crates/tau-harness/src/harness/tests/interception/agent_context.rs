@@ -5,6 +5,9 @@ use super::*;
 /// Build one per-agent context value with an easily inspected payload.
 fn context(agent_id: &str, value: &str) -> Event {
     Event::ExtAgentContextPublish(tau_proto::ExtAgentContextPublish {
+        session_id: tau_proto::SessionId::new("s1"),
+        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         key: "test".into(),
         value: tau_proto::AgentContextValue(serde_json::json!(value)),
@@ -79,9 +82,9 @@ fn dropped_context_value_has_no_projection() {
 }
 
 /// A same-name interceptor replacement must become the committed observation
-/// and the only value applied to the per-agent prompt projection.
+/// but an uncorrelated unloaded target cannot mutate prompt projection.
 #[test]
-fn context_replacement_projects_only_committed_payload() {
+fn uncorrelated_context_replacement_is_observable_but_not_projected() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     connect_ready_configured_extension(
@@ -104,7 +107,7 @@ fn context_replacement_projects_only_committed_payload() {
     .expect("replace context");
 
     let projected = h.agent_context.template_value(Some(&agent_id)).to_string();
-    assert!(projected.contains("replacement"));
+    assert!(!projected.contains("replacement"));
     assert!(!projected.contains("original"));
     assert!(source_committed(&h, "context-owner", |event| {
         matches!(
@@ -129,7 +132,8 @@ fn parked_context_value_prevents_readiness_overtake() {
     );
     connect_agent_context_interceptor(&mut h);
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
-    h.pending_agent_context_ready.insert(
+    set_test_agent_context_wait(
+        &mut h,
         agent_id.clone(),
         [tau_proto::ConnectionId::from("context-owner")]
             .into_iter()
@@ -141,12 +145,14 @@ fn parked_context_value_prevents_readiness_overtake() {
     h.handle_extension_event_inner(
         "context-owner",
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: agent_id.clone(),
         }),
     )
     .expect("queue readiness");
-    assert!(h.pending_agent_context_ready.contains_key(&agent_id));
+    assert!(h.pending_agent_discovery.contains_key(&agent_id));
 
     h.handle_extension_event(
         "agent-context-interceptor",
@@ -162,7 +168,7 @@ fn parked_context_value_prevents_readiness_overtake() {
             .contains("ordered")
     );
     assert!(
-        h.pending_agent_context_ready.contains_key(&agent_id),
+        h.pending_agent_discovery.contains_key(&agent_id),
         "readiness must remain effect-free while its own interception is pending"
     );
     h.handle_extension_event(
@@ -179,14 +185,12 @@ fn parked_context_value_prevents_readiness_overtake() {
             .to_string()
             .contains("ordered")
     );
-    assert!(!h.pending_agent_context_ready.contains_key(&agent_id));
+    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
 }
 
-/// Every authenticated configured client kind retains the existing authority
-/// to publish per-agent context, without registration or loaded-agent gating;
-/// an unconfigured peer retains none.
+/// Configured client kind alone cannot bypass initialization correlation.
 #[test]
-fn configured_kinds_publish_ungated_context_for_arbitrary_agents() {
+fn configured_kinds_cannot_publish_context_for_arbitrary_agents() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let kinds = [
@@ -203,11 +207,10 @@ fn configured_kinds_publish_ungated_context_for_arbitrary_agents() {
         connect_ready_configured_extension(&mut h, &source, &source, kind);
         h.handle_extension_event_inner(&source, context(&agent, &source))
             .expect("publish configured context");
-        assert!(
+        assert_eq!(
             h.agent_context
-                .template_value(Some(&tau_proto::AgentId::parse(&agent).expect("agent id")))
-                .to_string()
-                .contains(&source)
+                .template_value(Some(&tau_proto::AgentId::parse(&agent).expect("agent id"))),
+            serde_json::json!({})
         );
         assert!(source_committed(&h, &source, |event| {
             matches!(
@@ -516,6 +519,8 @@ fn pre_ready_context_readiness_after_rollover_is_observation_only() {
         "context-owner",
         TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
+                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
                 session_id: "replacement".into(),
                 agent_id: agent_id.clone(),
             },
@@ -525,7 +530,8 @@ fn pre_ready_context_readiness_after_rollover_is_observation_only() {
 
     h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
         .expect("switch session");
-    h.pending_agent_context_ready.insert(
+    set_test_agent_context_wait(
+        &mut h,
         agent_id.clone(),
         [tau_proto::ConnectionId::from("context-owner")]
             .into_iter()
@@ -543,7 +549,7 @@ fn pre_ready_context_readiness_after_rollover_is_observation_only() {
         )
     }));
     assert_eq!(
-        h.pending_agent_context_ready.get(&agent_id),
+        test_agent_context_waits(&h, &agent_id),
         Some(
             &[tau_proto::ConnectionId::from("context-owner")]
                 .into_iter()
@@ -552,11 +558,9 @@ fn pre_ready_context_readiness_after_rollover_is_observation_only() {
     );
 }
 
-/// Current-session per-agent readiness deliberately preserves its legacy
-/// cross-scope behavior by releasing both agent and session initialization
-/// waits.
+/// Per-agent readiness releases only its exact correlated initialization.
 #[test]
-fn context_ready_preserves_session_and_agent_wait_release() {
+fn context_ready_does_not_release_session_wait() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     connect_ready_configured_extension(
@@ -573,20 +577,21 @@ fn context_ready_preserves_session_and_agent_wait_release() {
         reason: tau_proto::SessionStartReason::Initial,
         waiting_on: [source.clone()].into_iter().collect(),
     };
-    h.pending_agent_context_ready
-        .insert(agent_id.clone(), [source].into_iter().collect());
+    set_test_agent_context_wait(&mut h, agent_id.clone(), [source].into_iter().collect());
 
     h.handle_extension_event_inner(
         "context-owner",
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: agent_id.clone(),
         }),
     )
     .expect("publish readiness");
 
-    assert!(h.initialized_sessions.contains("s1"));
-    assert!(!h.pending_agent_context_ready.contains_key(&agent_id));
+    assert!(!h.initialized_sessions.contains("s1"));
+    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
 }
 
 /// A dropped or wrong-session readiness observation must not release either
@@ -609,10 +614,15 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
         reason: tau_proto::SessionStartReason::Initial,
         waiting_on: [source.clone()].into_iter().collect(),
     };
-    h.pending_agent_context_ready
-        .insert(agent_id.clone(), [source.clone()].into_iter().collect());
+    set_test_agent_context_wait(
+        &mut h,
+        agent_id.clone(),
+        [source.clone()].into_iter().collect(),
+    );
     let ready = |session_id: &str| {
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: session_id.into(),
             agent_id: agent_id.clone(),
         })
@@ -627,7 +637,11 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
         })),
     )
     .expect("drop readiness");
-    assert!(h.pending_agent_context_ready[&agent_id].contains(&source));
+    assert!(
+        h.pending_agent_discovery[&agent_id]
+            .waiting_on
+            .contains(&source)
+    );
     assert!(matches!(
         &h.turn_state,
         TurnState::InitializingSession { waiting_on, .. } if waiting_on.contains(&source)
@@ -642,7 +656,11 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
         })),
     )
     .expect("commit mismatched readiness");
-    assert!(h.pending_agent_context_ready[&agent_id].contains(&source));
+    assert!(
+        h.pending_agent_discovery[&agent_id]
+            .waiting_on
+            .contains(&source)
+    );
     assert!(matches!(
         &h.turn_state,
         TurnState::InitializingSession { waiting_on, .. } if waiting_on.contains(&source)
@@ -761,27 +779,41 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
         .find_map(|agent| agent.agent_id.clone())
         .map(|agent_id| tau_proto::AgentId::parse(&agent_id).expect("agent id"))
         .expect("loaded agent");
-    h.handle_extension_event_inner("fragment-owner", context(agent_id.as_str(), "SAFE CONTEXT"))
+    let initialization_id = h.pending_agent_discovery[&agent_id]
+        .initialization_id
+        .clone();
+    let correlated_context = |value: &str| {
+        Event::ExtAgentContextPublish(tau_proto::ExtAgentContextPublish {
+            session_id: "s1".into(),
+            agent_id: agent_id.clone(),
+            agent_initialization_id: initialization_id.clone(),
+            key: "test".into(),
+            value: tau_proto::AgentContextValue(serde_json::json!(value)),
+        })
+    };
+    h.handle_extension_event_inner("fragment-owner", correlated_context("SAFE CONTEXT"))
         .expect("publish stable context");
     h.handle_extension_event_inner(
         "stale-owner",
-        context(agent_id.as_str(), "STALE DISCONNECTING CONTEXT"),
+        correlated_context("STALE DISCONNECTING CONTEXT"),
     )
     .expect("publish stale context");
     h.handle_extension_event_inner(
         "waiter",
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            agent_initialization_id: initialization_id,
+
             session_id: "s1".into(),
             agent_id: agent_id.clone(),
         }),
     )
     .expect("park waiter readiness");
     assert!(h.pending_intercept.is_some());
-    assert!(h.pending_agent_context_ready.contains_key(&agent_id));
+    assert!(h.pending_agent_discovery.contains_key(&agent_id));
 
     h.handle_disconnect("stale-owner");
 
-    assert!(!h.pending_agent_context_ready.contains_key(&agent_id));
+    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
     assert!(h.pending_intercept.is_none());
     assert!(
         h.pending_publish_idle_dispatches.is_empty(),

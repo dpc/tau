@@ -25,8 +25,7 @@ use tau_proto::{
     ToolResult, ToolResultItem, ToolResultStatus, ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
 use tau_session_inspect::{
-    default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,
-    session_list_lines,
+    format_session_entry, open_session_store, policy_lines, session_lines, session_list_lines,
 };
 use tempfile::TempDir;
 
@@ -46,6 +45,7 @@ use crate::model::{
     select_model_for_role, selected_params_for_role, thinking_summaries_for_model,
     verbosities_for_model,
 };
+use crate::pending_agent_discovery::PendingAgentDiscovery;
 use crate::turn::{PromptSubmission, TurnState};
 
 #[allow(clippy::large_enum_variant)]
@@ -314,27 +314,50 @@ fn test_discovered_skill(
         add_to_prompt: false,
         user_invocable: true,
         disable_model_invocation: false,
+        argument_hint: None,
         modified: Some(std::time::UNIX_EPOCH + Duration::from_secs(modified_secs)),
     }
 }
 
-fn write_skill_file(dir: &Path, name: &str, description: &str, mtime: Option<u64>) -> PathBuf {
-    let path = dir.join(format!("{description}.md"));
-    std::fs::write(
-        &path,
-        format!("---\nname: {name}\ndescription: {description}\n---\n"),
-    )
-    .expect("write skill file");
-    if let Some(mtime) = mtime {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .expect("open skill file");
-        let modified = std::time::UNIX_EPOCH + Duration::from_secs(mtime);
-        file.set_times(std::fs::FileTimes::new().set_modified(modified))
-            .expect("set skill mtime");
-    }
-    path
+fn set_test_agent_context_wait(
+    h: &mut Harness,
+    agent_id: tau_proto::AgentId,
+    waiting_on: std::collections::HashSet<tau_proto::ConnectionId>,
+) {
+    h.frozen_agent_discovery.remove(&agent_id);
+    h.pending_agent_discovery.insert(
+        agent_id,
+        PendingAgentDiscovery {
+            initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            skill_candidates: h.discovered_skill_candidates.clone(),
+            skills: h.discovered_skills.clone(),
+            agents_files: h.discovered_agents_files.clone(),
+            waiting_on,
+        },
+    );
+}
+
+fn test_agent_context_waits<'a>(
+    h: &'a Harness,
+    agent_id: &tau_proto::AgentId,
+) -> Option<&'a std::collections::HashSet<tau_proto::ConnectionId>> {
+    h.pending_agent_discovery
+        .get(agent_id)
+        .map(|pending| &pending.waiting_on)
+}
+
+fn finish_test_agent_context_wait(h: &mut Harness, agent_id: &tau_proto::AgentId) {
+    let Some(mut pending) = h.pending_agent_discovery.remove(agent_id) else {
+        return;
+    };
+    pending.waiting_on.clear();
+    h.frozen_agent_discovery.insert(
+        agent_id.clone(),
+        crate::frozen_agent_discovery::FrozenAgentDiscovery {
+            initialization_id: pending.initialization_id,
+            skills: pending.skills,
+        },
+    );
 }
 
 /// Ensures build timestamps used for built-in skill freshness parse to exact
@@ -392,166 +415,6 @@ fn skill_winner_disconnect_restores_next_best_candidate() {
     assert_eq!(h.discovered_skills[&name].description, "older");
 
     h.shutdown().expect("shutdown");
-}
-
-/// Ensures cross-source skill collisions emit useful trace diagnostics for both
-/// replacement by newer mtimes and ignoring equal/unavailable timestamps
-/// without becoming mandatory visible notices.
-#[test]
-fn skill_collision_diagnostics_describe_replaced_and_ignored_candidates() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    let old_path = write_skill_file(tmp.path(), "collision-skill", "old", Some(100));
-    let new_path = write_skill_file(tmp.path(), "collision-skill", "new", Some(200));
-    let tie_path = write_skill_file(tmp.path(), "collision-skill", "tie", Some(200));
-
-    h.record_discovered_skill(
-        "old-ext",
-        &tau_proto::ExtSkillAvailable {
-            name: "collision-skill".into(),
-            description: "old".to_owned(),
-            file_path: old_path,
-            add_to_prompt: false,
-            user_invocable: true,
-            disable_model_invocation: false,
-            argument_hint: None,
-        },
-    );
-    h.record_discovered_skill(
-        "new-ext",
-        &tau_proto::ExtSkillAvailable {
-            name: "collision-skill".into(),
-            description: "new".to_owned(),
-            file_path: new_path,
-            add_to_prompt: false,
-            user_invocable: true,
-            disable_model_invocation: false,
-            argument_hint: None,
-        },
-    );
-    h.record_discovered_skill(
-        "tie-ext",
-        &tau_proto::ExtSkillAvailable {
-            name: "collision-skill".into(),
-            description: "tie".to_owned(),
-            file_path: tie_path,
-            add_to_prompt: false,
-            user_invocable: true,
-            disable_model_invocation: false,
-            argument_hint: None,
-        },
-    );
-
-    let infos = event_log_events(&h)
-        .into_iter()
-        .filter_map(|event| match event {
-            Event::HarnessNotice(info) => Some(info),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(infos.iter().any(|info| {
-        info.kind == tau_proto::notice_kind::SKILL_COLLISION
-            && info.level == tau_proto::NoticeLevel::Trace
-            && !info.always_show
-            && info.message.contains("skill collision: collision-skill")
-            && info.message.contains("replaces")
-            && info.message.contains("newer modified time")
-    }));
-    assert!(infos.iter().any(|info| {
-        info.kind == tau_proto::notice_kind::SKILL_COLLISION
-            && info.level == tau_proto::NoticeLevel::Trace
-            && !info.always_show
-            && info.message.contains("skill collision: collision-skill")
-            && info.message.contains("ignored")
-            && info.message.contains("same or unavailable modified time")
-    }));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// Ensures actual UI command intake expands to a raw Pi-style canonical
-/// prompt and sends its complete escaped HumanUi envelope to the provider.
-#[test]
-fn user_skill_command_expands_prompt_block() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    let path = tmp.path().join("manual.md");
-    std::fs::write(
-        &path,
-        "---\nname: manual\ndescription: Manual\ndisable-model-invocation: true\n---\nUse manual steps.\n",
-    )
-    .expect("write skill");
-    h.record_discovered_skill(
-        "ext",
-        &tau_proto::ExtSkillAvailable {
-            name: "manual".into(),
-            description: "Manual".to_owned(),
-            file_path: path.clone(),
-            add_to_prompt: true,
-            user_invocable: true,
-            disable_model_invocation: true,
-            argument_hint: Some("[topic]".to_owned()),
-        },
-    );
-
-    let expanded = h
-        .expand_user_skill_command(":skill manual do this")
-        .expect("expanded");
-    assert!(expanded.contains("<skill name=\"manual\" location="));
-    assert!(expanded.contains("References are relative to"));
-    assert!(expanded.contains("Use manual steps."));
-    assert!(expanded.ends_with("</skill>\n\ndo this"));
-
-    h.selected_model = Some("test/model".into());
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
-        literal: false,
-        session_id: "s1".into(),
-        text: ":skill manual do this".to_owned(),
-        agent_id: agent_id.clone(),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: Some("skill-ui".to_owned()),
-    })
-    .expect("submit user skill command");
-
-    let submitted = event_log_events(&h)
-        .into_iter()
-        .find_map(|event| match event {
-            Event::AgentPromptSubmitted(submitted)
-                if submitted.ctx_id.as_deref() == Some("skill-ui") =>
-            {
-                Some(submitted)
-            }
-            _ => None,
-        })
-        .expect("expanded canonical prompt");
-    assert_eq!(submitted.text, expanded);
-    assert_eq!(
-        submitted.submission_source,
-        tau_proto::PromptSubmissionSource::HumanUi
-    );
-    let provider_prompt = event_log_events(&h)
-        .into_iter()
-        .rev()
-        .find_map(|event| match event {
-            Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id => Some(prompt),
-            _ => None,
-        })
-        .expect("provider prompt");
-    let escaped = expanded.replace("</user>", "&lt;/user&gt;");
-    assert_eq!(
-        provider_prompt.context.flatten(),
-        vec![ContextItem::Message(MessageItem {
-            role: ContextRole::User,
-            content: vec![ContentPart::Text {
-                text: format!("<user>{escaped}</user>"),
-            }],
-            phase: None,
-            responses_raw_json: None,
-        })]
-    );
 }
 
 /// Ensures an escaped literal targeting an existing agent retains canonical
@@ -647,126 +510,6 @@ fn assert_literal_provider_projection(h: &Harness, agent_id: &AgentId, text: &st
             phase: None,
             responses_raw_json: None,
         })]
-    );
-}
-
-/// Ensures `disable-model-invocation` is treated as manual-only rather than
-/// unreachable, even if an extension also sends `user-invocable: false`.
-#[test]
-fn disable_model_invocation_implies_user_invocable() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    let path = tmp.path().join("manual-only.md");
-    std::fs::write(
-        &path,
-        "---\nname: manual-only\ndescription: Manual only\n---\nManual only body.\n",
-    )
-    .expect("write skill");
-    h.record_discovered_skill(
-        "ext",
-        &tau_proto::ExtSkillAvailable {
-            name: "manual-only".into(),
-            description: "Manual only".to_owned(),
-            file_path: path,
-            add_to_prompt: true,
-            user_invocable: false,
-            disable_model_invocation: true,
-            argument_hint: None,
-        },
-    );
-
-    assert!(h.discovered_skills["manual-only"].user_invocable);
-    assert!(h.discovered_skills["manual-only"].disable_model_invocation);
-    assert!(
-        h.expand_user_skill_command(":skill manual-only")
-            .expect("expanded")
-            .contains("Manual only body.")
-    );
-}
-
-/// Ensures commit-first publication preserves the raw declaration while the
-/// harness-owned skill projection normalizes manual-only invocation policy.
-#[test]
-fn published_skill_event_preserves_raw_flags_while_projection_normalizes() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    let path = tmp.path().join("manual-event.md");
-    std::fs::write(
-        &path,
-        "---\nname: manual-event\ndescription: Manual event\n---\nManual event body.\n",
-    )
-    .expect("write skill");
-    connect_ready_configured_extension(
-        &mut h,
-        "ext",
-        "configured-ext",
-        tau_proto::ClientKind::Tool,
-    );
-
-    h.handle_extension_event_inner(
-        "ext",
-        Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
-            name: "manual-event".into(),
-            description: "Manual event".to_owned(),
-            file_path: path,
-            add_to_prompt: false,
-            user_invocable: false,
-            disable_model_invocation: true,
-            argument_hint: Some("<task>".to_owned()),
-        }),
-    )
-    .expect("publish skill");
-
-    let published = event_log_events(&h)
-        .into_iter()
-        .find_map(|event| match event {
-            Event::ExtSkillAvailable(skill) if skill.name.as_str() == "manual-event" => Some(skill),
-            _ => None,
-        })
-        .expect("published skill event");
-    assert!(!published.user_invocable);
-    assert!(published.disable_model_invocation);
-    assert_eq!(published.argument_hint.as_deref(), Some("<task>"));
-    assert!(h.discovered_skills["manual-event"].user_invocable);
-}
-
-/// Ensures non-user-invocable skill commands are rejected before any prompt is
-/// submitted to the model path.
-#[test]
-fn user_skill_command_rejects_non_user_invocable_skill() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    let path = tmp.path().join("hidden.md");
-    std::fs::write(
-        &path,
-        "---\nname: hidden\ndescription: Hidden\n---\nHidden body.\n",
-    )
-    .expect("write skill");
-    h.record_discovered_skill(
-        "ext",
-        &tau_proto::ExtSkillAvailable {
-            name: "hidden".into(),
-            description: "Hidden".to_owned(),
-            file_path: path,
-            add_to_prompt: false,
-            user_invocable: false,
-            disable_model_invocation: false,
-            argument_hint: None,
-        },
-    );
-
-    assert!(h.expand_user_skill_command(":skill hidden").is_none());
-    let infos = event_log_events(&h)
-        .into_iter()
-        .filter_map(|event| match event {
-            Event::HarnessNotice(info) => Some(info.message),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        infos
-            .iter()
-            .any(|message| message.contains("not user-invocable"))
     );
 }
 
@@ -1165,7 +908,7 @@ pub(super) fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
         .and_then(|conv| conv.agent_id.as_deref())
         .map(crate::parse_agent_id)
     {
-        h.pending_agent_context_ready.remove(&agent_id);
+        finish_test_agent_context_wait(h, &agent_id);
     }
     cid
 }
@@ -1337,7 +1080,17 @@ fn echo_harness_with_dirs_and_start_reason(
     // directly.
     h.agent_context_providers.clear();
     h.session_context_providers.clear();
-    h.pending_agent_context_ready.clear();
+    let pending_agents = h
+        .pending_agent_discovery
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for agent_id in pending_agents {
+        if let Some(pending) = h.pending_agent_discovery.get_mut(&agent_id) {
+            pending.waiting_on.clear();
+        }
+        h.finalize_agent_discovery(&agent_id)?;
+    }
     Ok(h)
 }
 

@@ -290,10 +290,6 @@ impl EventName {
     pub const EXTENSION_EXITED: Self = Self::from_static(EventCategory::Extension, "exited");
     pub const EXTENSION_RESTARTING: Self =
         Self::from_static(EventCategory::Extension, "restarting");
-    pub const EXTENSION_SKILL_AVAILABLE: Self =
-        Self::from_static(EventCategory::Extension, "skill_available");
-    pub const EXTENSION_AGENTS_MD_AVAILABLE: Self =
-        Self::from_static(EventCategory::Extension, "agents_md_available");
     /// Complete extension-authored session discovery source snapshot.
     pub const EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED: Self = Self::from_static(
         EventCategory::Extension,

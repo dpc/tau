@@ -17,16 +17,16 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionInvocationId, AgentContextKey, AgentId, AgentInitializationContextSet, AgentMessageId,
-    AgentMetadataKey, AgentPromptId, CborValue, ContextItem, DiffSummary, EventCategory, EventName,
-    ExtensionAgentDiscoverySnapshotDeclared, ExtensionInstanceId, ExtensionName,
-    ExtensionSessionDiscoverySnapshotDeclared, HarnessAgentContextInitialized,
-    HarnessProviderQuotaChanged, HarnessSessionSkillsAvailable, InternalPromptKind, MessageDeleted,
-    MessageDelivered, MessageEdited, MessagePhase, MessageReactionAdded, MessageReactionRemoved,
-    MessageSent, ModelId, ModelTag, PromptContext, PromptFragment, PromptSubmissionSource,
-    ProviderQuotaClear, ProviderQuotaPatch, ProviderQuotaReplace, ProviderTokenUsage,
-    ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition, ToolGroupName, ToolName,
-    ToolTag,
+    ActionInvocationId, AgentContextKey, AgentId, AgentInitializationContextSet,
+    AgentInitializationId, AgentMessageId, AgentMetadataKey, AgentPromptId, CborValue, ContextItem,
+    DiffSummary, EventCategory, EventName, ExtensionAgentDiscoverySnapshotDeclared,
+    ExtensionInstanceId, ExtensionName, ExtensionSessionDiscoverySnapshotDeclared,
+    HarnessAgentContextInitialized, HarnessProviderQuotaChanged, HarnessSessionSkillsAvailable,
+    InternalPromptKind, MessageDeleted, MessageDelivered, MessageEdited, MessagePhase,
+    MessageReactionAdded, MessageReactionRemoved, MessageSent, ModelId, ModelTag, PromptContext,
+    PromptFragment, PromptSubmissionSource, ProviderQuotaClear, ProviderQuotaPatch,
+    ProviderQuotaReplace, ProviderTokenUsage, ReasoningTextKind, SessionId, ToolCallId,
+    ToolDefinition, ToolGroupName, ToolName, ToolTag,
 };
 
 fn default_true() -> bool {
@@ -1898,39 +1898,6 @@ pub struct ExtensionRestarting {
     pub reason: Option<String>,
 }
 
-/// A transient raw skill declaration committed before harness validation,
-/// collision selection, diagnostics, or winner projection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtSkillAvailable {
-    pub name: SkillName,
-    pub description: String,
-    /// Absolute path to the skill file so the harness can read it.
-    pub file_path: std::path::PathBuf,
-    /// When true the harness should include this skill in the system prompt.
-    pub add_to_prompt: bool,
-    /// Whether users may explicitly invoke this skill with `:skill`.
-    #[serde(default = "default_true")]
-    pub user_invocable: bool,
-    /// Whether model-side skill discovery/loading should hide this skill.
-    /// Implies that the skill remains user-invocable.
-    #[serde(default)]
-    pub disable_model_invocation: bool,
-    /// Optional UI hint for arguments accepted by this skill.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub argument_hint: Option<String>,
-}
-
-/// A transient raw AGENTS.md declaration committed before slot replacement and
-/// durable per-agent instruction injection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtAgentsMdAvailable {
-    /// Absolute path to the AGENTS.md file.
-    pub file_path: std::path::PathBuf,
-    /// Full file contents, sent eagerly so the harness can inject them
-    /// without an extra tool round trip.
-    pub content: String,
-}
-
 /// Declares that this extension provides prompt context after matching
 /// `session.agent_loaded` events.
 ///
@@ -1951,16 +1918,17 @@ pub struct ExtensionSessionContextProviderRegister {}
 
 /// Acknowledges that this extension finished publishing context for one agent.
 ///
-/// The transient acknowledgement commits before effects. For the current
-/// session, it releases the source from the named agent's captured wait and,
-/// for compatibility, from session initialization; a mismatched session has no
-/// effect. Registration does not gate publication.
+/// The transient acknowledgement commits before effects. It releases only the
+/// source from the exact session/agent/initialization wait; session discovery
+/// readiness is independent. Registration does not gate publication.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionContextReady {
     /// Session containing the loaded agent.
     pub session_id: SessionId,
     /// Agent whose context contributions are complete for now.
     pub agent_id: AgentId,
+    /// Exact initialization attempt whose provider wait this settles.
+    pub agent_initialization_id: AgentInitializationId,
 }
 
 /// A transient session-discovery acknowledgement committed before it may
@@ -1982,8 +1950,12 @@ pub struct AgentContextValue(pub serde_json::Value);
 /// current loaded-agent membership do not gate publication.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExtAgentContextPublish {
+    /// Session containing the target initialization.
+    pub session_id: SessionId,
     /// Agent this context belongs to.
     pub agent_id: AgentId,
+    /// Exact initialization attempt receiving this contribution.
+    pub agent_initialization_id: AgentInitializationId,
     /// Top-level context key exposed to templates under
     /// `agent_context.<key>`.
     pub key: AgentContextKey,
@@ -2529,6 +2501,8 @@ pub struct SessionAgentLoaded {
     pub session_id: SessionId,
     /// Agent now available in the session.
     pub agent_id: AgentId,
+    /// Fresh correlation minted for this runtime load attempt.
+    pub agent_initialization_id: AgentInitializationId,
     /// Whether this membership is live/memory-only because the agent is
     /// ephemeral in the current daemon.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -4906,10 +4880,6 @@ pub enum Event {
     ExtensionExited(ExtensionExited),
     #[serde(rename = "extension.restarting")]
     ExtensionRestarting(ExtensionRestarting),
-    #[serde(rename = "extension.skill_available")]
-    ExtSkillAvailable(ExtSkillAvailable),
-    #[serde(rename = "extension.agents_md_available")]
-    ExtAgentsMdAvailable(ExtAgentsMdAvailable),
     #[serde(rename = "extension.session_discovery_snapshot_declared")]
     ExtensionSessionDiscoverySnapshotDeclared(ExtensionSessionDiscoverySnapshotDeclared),
     #[serde(rename = "extension.agent_discovery_snapshot_declared")]
@@ -5344,8 +5314,6 @@ impl Event {
             Self::ExtensionReady(_) => EventName::EXTENSION_READY,
             Self::ExtensionExited(_) => EventName::EXTENSION_EXITED,
             Self::ExtensionRestarting(_) => EventName::EXTENSION_RESTARTING,
-            Self::ExtSkillAvailable(_) => EventName::EXTENSION_SKILL_AVAILABLE,
-            Self::ExtAgentsMdAvailable(_) => EventName::EXTENSION_AGENTS_MD_AVAILABLE,
             Self::ExtensionSessionDiscoverySnapshotDeclared(_) => {
                 EventName::EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED
             }
@@ -5579,8 +5547,6 @@ impl Event {
                 | Self::ActionResult(_)
                 | Self::ActionError(_)
                 | Self::ExtPromptFragmentPublish(_)
-                | Self::ExtSkillAvailable(_)
-                | Self::ExtAgentsMdAvailable(_)
                 | Self::ExtensionSessionDiscoverySnapshotDeclared(_)
                 | Self::ExtensionAgentDiscoverySnapshotDeclared(_)
                 | Self::ExtensionSessionContextProviderRegister(_)

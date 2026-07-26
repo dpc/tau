@@ -28,13 +28,13 @@ use crate::markdown_render::{
 use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolStatus, ToolSuffixSegment, ToolSummaryDisplay,
-    build_delegate_completion_display, build_tool_summary_display, diff_payload_counts,
-    extension_status_block, extract_diff, format_token_count, pending_tool_call_display,
-    render_compaction_block, render_diff_tool_block, render_harness_notice,
-    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_tool_use_state_without_status, render_turn_stats_block, session_status_block,
-    streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
-    system_loaded_block, tool_duration_suffix, ui_dir_block,
+    agent_context_initialized_block, build_delegate_completion_display, build_tool_summary_display,
+    diff_payload_counts, extension_status_block, extract_diff, format_token_count,
+    pending_tool_call_display, render_compaction_block, render_diff_tool_block,
+    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
+    render_tool_use_state, render_tool_use_state_without_status, render_turn_stats_block,
+    session_status_block, streaming_block, streaming_block_with_indicator_suffix,
+    synthesize_fallback_display, tool_duration_suffix, ui_dir_block,
 };
 use crate::watch_activity::WatchActivityProjection;
 
@@ -86,6 +86,8 @@ pub(crate) struct EventRenderer {
     completion_data: tau_cli_term::CompletionData,
     action_state: ActionCommandState,
     skill_state: SkillCommandState,
+    /// Agent initialization projections already rendered by this UI instance.
+    initialized_discovery_epochs: HashSet<(tau_proto::AgentId, tau_proto::AgentInitializationId)>,
     theme: tau_themes::Theme,
     /// Agent that prompt input targets. `None` means the UI is in the
     /// start-new-agent state; the next user prompt will start/select an agent.
@@ -1375,6 +1377,7 @@ impl EventRenderer {
             completion_data,
             action_state: ActionCommandState::new(std::iter::empty::<&str>()),
             skill_state: SkillCommandState::new(),
+            initialized_discovery_epochs: HashSet::new(),
             theme,
             current_agent_id: None,
             displayed_agent_id: None,
@@ -6741,14 +6744,6 @@ impl EventRenderer {
                 self.handle_extension_exited(exited);
                 true
             }
-            Event::ExtSkillAvailable(skill) => {
-                self.skill_state.apply_skill_available(skill);
-                true
-            }
-            Event::ExtAgentsMdAvailable(agents) => {
-                self.handle_agents_md_available(agents);
-                true
-            }
             Event::ExtensionContextReady(ready) => {
                 self.handle_extension_context_ready(ready);
                 true
@@ -6824,13 +6819,6 @@ impl EventRenderer {
         );
     }
 
-    fn handle_agents_md_available(&mut self, agents: &tau_proto::ExtAgentsMdAvailable) {
-        self.handle.print_output(
-            "agents-md",
-            system_loaded_block(&self.theme, &agents.file_path, &agents.content),
-        );
-    }
-
     fn handle_extension_context_ready(&mut self, ready: &tau_proto::ExtensionContextReady) {
         if !self.notice_visible(tau_proto::NoticeLevel::Debug, false) {
             return;
@@ -6843,6 +6831,23 @@ impl EventRenderer {
 
     fn handle_harness_status_events(&mut self, event: &Event) -> bool {
         match event {
+            Event::HarnessSessionSkillsAvailable(snapshot) => {
+                self.skill_state.apply_session_snapshot(snapshot);
+                true
+            }
+            Event::HarnessAgentContextInitialized(initialized) => {
+                let key = (
+                    initialized.agent_id.clone(),
+                    initialized.agent_initialization_id.clone(),
+                );
+                if self.initialized_discovery_epochs.insert(key) {
+                    self.handle.print_output(
+                        "agent-context-initialized",
+                        agent_context_initialized_block(&self.theme, initialized),
+                    );
+                }
+                true
+            }
             Event::HarnessNotice(info) => {
                 if info.visible_at(self.notice_level) {
                     self.handle

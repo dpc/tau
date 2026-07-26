@@ -309,34 +309,38 @@ generations cannot mutate that projection. Pre-Ready declarations reserve bounde
 activation capacity until commit, drop, or disconnect, and no declaration enters semantic
 history or replay. See
 [SPEC-prompt-fragment-declarations-and-projection](specs/SPEC-prompt-fragment-declarations-and-projection.md).
-Every authenticated configured extension kind may also publish transient session-provider
-registration, skill, AGENTS.md, and session-readiness events without a capability.
-They commit before projection or barrier release and revalidate the exact run-local
-generation; only registered live non-socket Tool subscribers participate in the wait
-barrier. Pre-Ready declarations reserve bounded activation count/bytes until commit,
-drop, or disconnect. Raw events never enter semantic journals or replay. A connected
-effective waiter intentionally has no readiness deadline and can hold session
-initialization until acknowledgement or disconnect; a deadline or degraded mode requires
-a separate decision. Re-check reservation cleanup/reaccounting, wait-set admission, and
-disconnect/respawn generation checks whenever this flow changes. See
+Every authenticated configured extension kind may also publish transient
+session-provider registration, complete session/agent discovery source snapshots,
+per-agent keyed context, and readiness without a capability. Post-commit consumers
+revalidate the exact connection generation plus applicable session, agent, and
+process-unique initialization id before mutating state. Only registered live
+non-socket Tool subscribers participate in captured waits; per-agent readiness
+cannot release session readiness or another agent. A connected effective waiter
+has no deadline and can hold initialization until acknowledgement or disconnect.
+Pre-Ready declarations reserve bounded activation count/bytes, and snapshot
+validation additionally bounds item count, decoded bytes, and individual AGENTS.md
+content. Invalid items are diagnosed and omitted before one atomic source swap.
+Raw declarations never enter semantic journals or replay. Re-check reservation
+cleanup, wait admission, atomic source replacement, and disconnect/respawn
+generation checks whenever this flow changes. See
 [SPEC-session-discovery-declarations-and-readiness](specs/SPEC-session-discovery-declarations-and-readiness.md).
-The additive discovery-initialization scaffold already treats
+The harness treats
 `agent.initialization_context_set`, `harness.agent_context_initialized`, and
 `harness.session_skills_available` as protected harness-authored events:
 configured extensions and attached UIs cannot publish them, and interceptors
 cannot drop or mutate them. Only `agent.initialization_context_set` defaults to
-durable publication; both `harness.*` projections default to transient.
-Runtime admission and processing of the new extension snapshot declarations,
-plus canonical production, persistence folding, replay, and synthesis, remain
-deferred to the atomic migration phase.
-Configured extension kinds have the same authority to publish transient per-agent
-context registration, values, and readiness. The harness commits them before
-projection or wait release, revalidates the exact connection generation, bounds
-pre-Ready declarations, and excludes raw events from semantic replay. Values and
-readiness intentionally remain ungated by registration or loaded membership; a
-current-session `extension.context_ready` also preserves the legacy ability to
-release the source from session initialization. Treat these as trusted-local
-compatibility surfaces when reviewing changes. See
+durable publication and folds as replaceable agent side state rather than
+transcript history; every finalization appends the exact fresh initialization-ID
+replacement even when effective content is unchanged. Both `harness.*` events
+are transient current projections synthesized for late subscribers.
+Finalized agents consume one frozen snapshot for prompt skill listing, model/user
+skill lookup, and AGENTS.md bootstrap materialization.
+
+Skill metadata snapshots file paths and mtimes, not file bodies. A local file may
+change between scan and later skill loading, so discovery is not a content-integrity
+or filesystem sandbox boundary. AGENTS.md content is carried in the snapshot and
+frozen at initialization. Treat all discovered files as trusted local prompt input.
+See
 [SPEC-per-agent-context-declarations-and-readiness](specs/SPEC-per-agent-context-declarations-and-readiness.md).
 Every configured extension kind may publish transient internal-prompt requests.
 The harness commits them before loaded-agent validation, revalidates the exact

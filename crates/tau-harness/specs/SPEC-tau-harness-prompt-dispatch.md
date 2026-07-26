@@ -210,15 +210,25 @@ required typed provenance through the derived transcript. Prompt assembly alone
 projects each such entry as one fieldless `<user>...</user>` user-role text item,
 replacing only exact `</user>` collisions. Replay follows the same source-based path.
 
-Successful user skill commands are expanded before acceptance, so the canonical
-expanded `<skill>` block remains raw in the fact while the complete expansion is
-preserved inside the provider `<user>` body. Internal, injected, extension,
+Successful existing-agent skill commands expand against that agent's frozen
+initialization snapshot before acceptance. New-agent initial skill commands queue
+raw and expand only after the same agent's initialization finalizes, before the
+durable prompt fact is submitted. The canonical expanded `<skill>` block remains
+raw in the fact while the complete expansion is preserved inside the provider
+`<user>` body. Internal, injected, extension,
 external-message, agent-message, and watch domains retain their existing
 projections. UI/history/tree anchors, activation, queueing, and wake behavior do
 not consume the provider wrapper. See
 [DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
 Exact-sentinel framing and the conditional model-visible provenance rule follow
 [DECISION-exact-sentinel-prompt-envelopes](../../../specs/DECISION-exact-sentinel-prompt-envelopes.md).
+
+Prompt dispatch is blocked while the target agent has a pending discovery
+initialization. Prompt assembly reads model-visible skills and tool lookup from
+the frozen snapshot and materializes the reducer's latest AGENTS.md
+initialization side-state once as a user context block outside transcript nodes.
+See
+[SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 
 Compaction-triggered dispatch and continuation refine [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md); that record owns their transaction, checkpoint, replay, and model-correlation behavior.
 

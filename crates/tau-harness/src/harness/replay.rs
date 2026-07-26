@@ -247,9 +247,22 @@ impl Harness {
                     outcome.add_agent_error(agent_id.clone(), message);
                 }
             }
+            let Some(agent_initialization_id) = self
+                .pending_agent_discovery
+                .get(agent_id)
+                .map(|pending| pending.initialization_id.clone())
+                .or_else(|| {
+                    self.frozen_agent_discovery
+                        .get(agent_id)
+                        .map(|frozen| frozen.initialization_id.clone())
+                })
+            else {
+                continue;
+            };
             let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 session_id: self.current_session_id.clone(),
                 agent_id: agent_id.clone(),
+                agent_initialization_id,
                 ephemeral: self.agent_is_ephemeral(agent_id),
             });
             if selector_matches_event(selectors, &event) {
@@ -605,6 +618,23 @@ impl Harness {
             });
             if selector_matches_event(selectors, &provider_event) {
                 self.send_catch_up_event(client_id, Some(HARNESS_CONNECTION_ID), provider_event);
+            }
+        }
+        let session_skills =
+            Event::HarnessSessionSkillsAvailable(self.session_skills_available.clone());
+        if selector_matches_event(selectors, &session_skills) {
+            self.send_catch_up_event(client_id, Some(HARNESS_CONNECTION_ID), session_skills);
+        }
+        let mut initialized = self
+            .agent_context_initialized
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        initialized.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+        for projection in initialized {
+            let event = Event::HarnessAgentContextInitialized(projection);
+            if selector_matches_event(selectors, &event) {
+                self.send_catch_up_event(client_id, Some(HARNESS_CONNECTION_ID), event);
             }
         }
         let mut quota_snapshots = self

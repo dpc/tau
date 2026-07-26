@@ -1,153 +1,98 @@
-# SPEC-session-discovery-declarations-and-readiness: Session-discovery declarations and readiness
-
-## Status
-
-The protocol and client expose the additive atomic snapshot declarations and
-canonical projection DTOs required by
-[DECISION-agent-initialization-discovery-snapshots](DECISION-agent-initialization-discovery-snapshots.md),
-but no producer emits and no runtime consumer interprets them. The positive
-item events and behavior below remain operational only as temporary migration
-scaffolding. Phase 1 already protects the durable replacement and both
-canonical projections from peer authorship. The next phase must atomically
-switch producers and consumers, enforce raw-declaration admission and bounds,
-synthesize current state, and remove the old contract; this is not a supported
-dual interface.
+# SPEC-session-discovery-declarations-and-readiness: Atomic discovery snapshots and readiness
 
 ## Record justification
 
-Session discovery spans protocol defaults, generic peer admission and interception,
-extension activation, harness-owned skill and AGENTS.md projections, session readiness,
-client helpers, and the shell producer. No one component can document the complete
-authority, ordering, lifetime, and persistence contract.
+Discovery spans protocol admission, interception, extension activation, shell
+scanning, harness collision resolution, role preflight, agent initialization,
+prompt/tool consumers, and UI current-state projection; no component owns the
+complete contract.
 
 This specification implements
-[DECISION-session-discovery-declarations-and-readiness](DECISION-session-discovery-declarations-and-readiness.md)
-and the session-discovery row of
+[DECISION-agent-initialization-discovery-snapshots](DECISION-agent-initialization-discovery-snapshots.md),
+[DECISION-session-discovery-declarations-and-readiness](DECISION-session-discovery-declarations-and-readiness.md),
+and the discovery row of
 [DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
 
-## Authority and publication
+## Publication and atomic replacement
 
-Every authenticated configured extension entry kind, including configured Core, may
-publish `extension.session_context_provider_register`, `extension.skill_available`,
-`extension.agents_md_available`, and `extension.session_context_ready` without a
-capability. Unconfigured/socket peers have no authority; harness-internal publication
-remains outside peer admission. Registration does not gate publication or projection of
-the other three events.
+Configured local extensions may register with
+`extension.session_context_provider_register`, publish complete
+`extension.session_discovery_snapshot_declared` source snapshots, and acknowledge
+with `extension.session_context_ready`. Raw declarations are transient,
+interceptable observations. Admission captures the exact configured connection
+generation; stale, unconfigured, socket, wrong-session, dropped, malformed, or
+over-limit declarations cannot mutate discovery state.
 
-Generic Emit captures the stable configured publisher and exact run-local source
-`ConnectionId`, configured instance id, and kind before ordinary same-name interception.
-Every surviving event commits and broadcasts before downstream work. Replacement cannot
-change event name or publisher and repeats structural/authority admission. Drop performs
-no projection, diagnostic, injection, registration, or readiness work. A committed stale
-generation remains observable but cannot mutate current state.
+A committed valid snapshot atomically replaces that connection's complete skill
+and ordered AGENTS.md contribution. An empty list clears that contribution.
+Validation omits an invalid individual item without exposing partial replacement;
+duplicate names or canonical paths retain the first item. Snapshot item count,
+decoded bytes, individual AGENTS.md content, protocol frames, and activation
+staging are bounded.
 
-## Registration and readiness
+Skill winners retain stable source slots. The candidate with the greatest sampled
+mtime wins; first insertion wins when mtimes compare equal or are unavailable.
+Same-source updates replace surviving slots in place, deletion removes slots,
+rename appends the new name, and source disconnect recomputes fallback winners.
+The harness publishes a complete protected
+`harness.session_skills_available` projection after each accepted replacement and
+at session readiness. Role required-skill preflight and agentless CLI completion
+consume this session baseline.
 
-Session-provider registration is idempotent membership keyed by source `ConnectionId`.
-Repeated non-dropped registrations all commit; only membership coalesces. Effective wait
-sets contain registered, live, non-socket Tool connections whose live selectors match
-`session.started` exactly or by prefix. All other registrations are inert. Membership
-committed after one session-init wait snapshot participates only in later snapshots.
+## Readiness and agent initialization
 
-A committed matching-current-session readiness acknowledgement removes its exact source
-from the current wait set. Wrong-session, duplicate, unregistered, inert, or stale-source
-acknowledgements do not release a waiter. Removing the last waiter may complete session
-initialization and its existing derived work. Connected waiters have no deadline.
+Session wait sets contain registered live non-socket Tool connections whose live
+selectors match `session.started`. Only matching
+`extension.session_context_ready` releases that exact wait. Registration and
+snapshot declarations settle before readiness through the ordinary FIFO
+interception boundary.
 
-Readiness remains operational traffic and uses no declaration reservation. While global
-initial activation remains pending, operational messages retain global arrival order.
+Each live agent load carries a fresh mandatory `agent_initialization_id`. Its
+pending discovery state is seeded from the completed session baseline. Providers
+selected by `session.agent_loaded` may atomically replace their source in that
+pending state with `extension.agent_discovery_snapshot_declared`, publish
+correlated keyed context, and acknowledge the same initialization. One agent's
+snapshot or readiness cannot settle another agent.
 
-## Skill projection
+Ready-before-snapshot finalizes the seeded baseline. Duplicate snapshots replace
+the pending source; duplicate readiness is inert. Wrong session, agent,
+initialization id, connection generation, post-finalization declarations, and
+unload-time late traffic are effect-free. Disconnect removes the source from
+pending state and its wait set, but never mutates a frozen agent snapshot.
 
-A skill candidate slot is (`ConnectionId`, `SkillName`). After commit, the harness
-normalizes invocation flags, validates the skill name, samples the advertised file's
-mtime, and truncates descriptions above the existing bound. Invalid candidates do not
-enter state. Same-source/name publication replaces the existing slot. Across sources,
-the greatest available mtime wins; first insertion remains selected on equal or
-unavailable mtimes.
+## Finalized state and consumers
 
-Invalid-name and truncation diagnostics remain harness-sourced mandatory replayable
-notices. Collision diagnostics retain their separately defined live classification.
-Diagnostics derive only from a committed declaration.
+After the final waiter settles, the harness checks effective skill sources for
+loadability, falls back through collision candidates when possible, renders all
+ordered AGENTS.md files once, and publishes one durable
+`agent.initialization_context_set` replacement fact for that exact initialization,
+including an unchanged cold-restored initialization with a fresh ID. The reducer
+stores the latest durable fact as agent side state without creating a transcript
+node or advancing the branch
+head. Missing AGENTS.md files clear the bootstrap slot on the next initialization.
 
-## AGENTS.md projection
+The committed fact freezes the agent's effective skills and bootstrap block for
+the load attempt. Provider `<available_skills>`, the model `skill` tool,
+selected-agent `:skill` expansion, and the protected transient
+`harness.agent_context_initialized` projection all consume that frozen state.
+Initial non-literal `:skill` commands wait for finalization before expansion.
+Later session/source updates do not mutate an already-frozen agent.
 
-An AGENTS.md slot is (`ConnectionId`, `PathBuf`). Same-source/path publication replaces
-content without moving the slot. Other paths append in insertion order; equal paths from
-different sources coexist. After each committed declaration, the harness injects the
-complete post-replacement stack into every live agent as independently durable and
-replayable `agent.user_message_injected` facts with the existing internal source `None`.
-New-agent setup independently injects the then-current complete stack.
+The bootstrap block is materialized once as a provider user-context block outside
+ordinary transcript history. Branching and compaction retain the latest folded
+slot exactly once; attaching a UI cannot append or duplicate it.
 
-## Ordering and activation
+## Replay and current state
 
-The shell producer emits all skills, then all AGENTS.md declarations, then readiness on
-one serialized writer. Tau permits one pending interception and queues later publications
-FIFO, so every earlier declaration settles before readiness can commit and release the
-barrier.
+Cold resume refreshes session discovery and starts a new correlated initialization
+for every restored live agent before replay activations or prompts dispatch. Each
+refresh replaces the durable initialization side state rather than appending an
+ordinary AGENTS.md user message.
 
-Registration, skill, and AGENTS.md are startup declaration families. Each admitted
-pre-Ready publication reserves one frame and its encoded bytes under the existing
-1024-frame/4-MiB activation bounds before interception. Pending declarations block
-initial preflight and peer Ready activation. Replacement reaccounts the reservation;
-registration's empty payload has equal-size valid replacements. Every committed skill
-and AGENTS.md declaration stages in order; registration coalesces membership. Drop or
-publisher disconnect releases reservations.
+Raw declarations and readiness have no historical replay. Late subscribers receive
+one current `harness.session_skills_available` snapshot and one
+`harness.agent_context_initialized` projection per live initialized agent, with no
+raw declarations or prompt side effects.
 
-## Lifetime and failures
-
-The four inputs, provider membership, skill candidates/winners, AGENTS.md slots, and wait
-correlation are daemon-runtime-only. Disconnect removes the exact source's membership,
-skills, files, activation state, and wait membership; skill winners recompute. Final
-waiter disconnect may complete initialization. Session refresh removes and rebuilds only
-effective waiting providers' discovery contributions; inert and unregistered sources
-survive until replacement or disconnect. Respawn receives a new `ConnectionId` and must
-re-register, retain a matching live selector, and republish discovery.
-
-Publisher disconnect invalidates its generation and reservations. A publication parked
-at another interceptor may later commit only as stale observation. Active-interceptor
-disconnect preserves the existing pass behavior.
-
-Required initial malformed/protocol/quota failures, pre-Ready timeout, and harness-owned
-init/spawn/secret failures remain fatal. Optional initial failures disable the peer.
-Clean EOF from a required non-Provider, non-socket extension remains compatibility
-nonfatal. After global initial preflight, protocol failure isolates the connection.
-
-## Persistence and replay
-
-All four events default to `persist=false` and are unconditionally excluded from semantic agent,
-session, and restore journals for either caller `Emit.persist` value. Raw callers keep
-that value as generic publication metadata. First-party registration, skill, AGENTS.md,
-and readiness sends use `persist=false`.
-
-The raw events and runtime projections have no cold restore, historical replay, or
-subscribe-time synthesis. Derived diagnostics and AGENTS injections keep their
-independent persistence and replay classifications.
-
-The configured-local-extension trust boundary is documented in [`SECURITY.md`](../SECURITY.md).
-The per-agent context flow and all unrelated generic-emission rows remain outside this
-specification.
-
-## Additive snapshot wire scaffold
-
-`extension.session_discovery_snapshot_declared` carries one session id and
-complete skill-candidate and ordered AGENTS.md lists. Each skill candidate
-carries the legacy discovery metadata plus the discovery owner's optional
-signed Unix-epoch modification time in microseconds, including pre-epoch
-values. `harness.session_skills_available` carries a complete
-effective skill projection. Both default to `persist=false`.
-
-`extension.agent_discovery_snapshot_declared` carries the same complete source
-lists correlated to an exact session, agent, and `agent_initialization_id`.
-`harness.agent_context_initialized` carries that correlation plus the exact
-model-listed effective skills and ordered AGENTS.md path/line/byte summaries.
-It and `harness.session_skills_available` default to `persist=false`. Phase 1
-already rejects peer authorship of both canonical projections and protects them
-from interceptor drop or mutation; raw declaration admission and canonical
-production, consumption, replay, and synthesis remain deferred.
-
-The shared effective-skill DTO retains invocation flags, argument hint, and a
-tagged source: either an absolute file path or a built-in discriminator resolved
-from the enclosing skill name. It does not snapshot complete skill content. The
-protocol frame limit already applies; explicit item and decoded-byte bounds
-remain deferred to the atomic runtime switch.
+Configured extensions are trusted local executables subject to the authority and
+resource boundaries in [`SECURITY.md`](../SECURITY.md).

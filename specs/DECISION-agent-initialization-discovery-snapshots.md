@@ -44,12 +44,14 @@ does not snapshot complete skill contents. A later filesystem change may still
 make the `skill` tool read fail. This preserves Tau's current trusted mutable-path
 model rather than expanding this work into content-addressed skill storage.
 
-At finalization the harness commits one durable
+At every finalization the harness commits one durable
 `agent.initialization_context_set` replacement fact before releasing the first
 prompt. The fact carries the exact session, agent, and
 `agent_initialization_id` together with the bootstrap content and effective
-snapshot. The reducer folds its latest value into a dedicated per-agent bootstrap
-slot and frozen skill snapshot without advancing the conversation branch. Prompt
+snapshot. Cold-restored initialization therefore records its fresh exact
+initialization ID even when effective content is unchanged. The reducer folds
+the latest durable value into a dedicated per-agent bootstrap slot and frozen
+skill snapshot without advancing the conversation branch. Prompt
 assembly prepends the rendered AGENTS.md stack as a user-role instruction block
 outside ordinary compactable transcript history. Empty content clears the slot;
 AGENTS.md is never appended as an ordinary user transcript node by initialization.

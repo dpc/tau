@@ -326,8 +326,6 @@ impl ClientHandle {
                     tau_proto::Event::ActionSchemaPublished(_)
                         | tau_proto::Event::ToolRegistrationDeclared(_)
                         | tau_proto::Event::ToolUnregistrationDeclared(_)
-                        | tau_proto::Event::ExtSkillAvailable(_)
-                        | tau_proto::Event::ExtAgentsMdAvailable(_)
                         | tau_proto::Event::ExtensionSessionDiscoverySnapshotDeclared(_)
                         | tau_proto::Event::ExtensionAgentDiscoverySnapshotDeclared(_)
                         | tau_proto::Event::ProviderModelsDeclared(_)
@@ -563,11 +561,13 @@ impl ClientHandle {
         &self,
         session_id: tau_proto::SessionId,
         agent_id: tau_proto::AgentId,
+        agent_initialization_id: tau_proto::AgentInitializationId,
     ) -> ClientResult<()> {
         self.emit_transient(tau_proto::Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
                 session_id,
                 agent_id,
+                agent_initialization_id,
             },
         ))
     }
@@ -595,10 +595,6 @@ impl ClientHandle {
     /// local protocol writer admission and flush; interception and harness
     /// validation determine whether the snapshot becomes canonical state.
     ///
-    /// This helper is migration scaffolding until Tau switches discovery
-    /// producers and consumers atomically; callers must not publish the legacy
-    /// item events in parallel as a supported dual protocol.
-    ///
     /// # Errors
     ///
     /// Returns an error when sending the underlying protocol frame fails.
@@ -618,10 +614,6 @@ impl ClientHandle {
     /// local protocol writer admission and flush; interception, correlation,
     /// and harness validation determine whether the snapshot becomes
     /// canonical state.
-    ///
-    /// This helper is migration scaffolding until Tau switches discovery
-    /// producers and consumers atomically; callers must not publish the legacy
-    /// item events in parallel as a supported dual protocol.
     ///
     /// # Errors
     ///

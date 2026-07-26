@@ -16,7 +16,6 @@ pub(crate) enum DiscoveredSkillSource {
 
 impl DiscoveredSkillSource {
     #[cfg(test)]
-    #[expect(dead_code)]
     pub(crate) fn file_path(&self) -> Option<&std::path::Path> {
         match self {
             Self::File(path) => Some(path.as_path()),
@@ -41,10 +40,13 @@ pub(crate) struct DiscoveredSkill {
     pub(crate) add_to_prompt: bool,
     pub(crate) user_invocable: bool,
     pub(crate) disable_model_invocation: bool,
+    /// Optional argument synopsis shown by interactive completion.
+    pub(crate) argument_hint: Option<String>,
     pub(crate) modified: Option<SystemTime>,
 }
 
 /// One AGENTS.md file discovered by an extension.
+#[derive(Clone)]
 pub(crate) struct DiscoveredAgentsFile {
     pub(crate) source_id: tau_proto::ConnectionId,
     pub(crate) file_path: PathBuf,

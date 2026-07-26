@@ -149,11 +149,9 @@ fn cold_resume_repairs_interrupted_worker_tool_once() -> Result<(), Box<dyn std:
     daemon_c.finish()?;
 
     let snapshot_c = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
-    if snapshot_c != snapshot_b {
-        return Err("S6 Boot C changed membership, execution restore, or agent streams".into());
-    }
+    super::assert_initialization_only_refresh(&snapshot_b, &snapshot_c)?;
     if load_agent_events(&fixture, &identities.worker)? != worker_events_b {
-        return Err("S6 Boot C changed the worker journal".into());
+        return Err("S6 Boot C changed the unloaded worker journal".into());
     }
     fixture.assert_consumed()?;
     Ok(())
@@ -236,14 +234,19 @@ fn assert_boot_b_durable_state(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !after.session_events.starts_with(&before.session_events)
         || after.restore_events != before.restore_events
-        || after.agent_events.get(&identities.main) != before.agent_events.get(&identities.main)
+        || !super::suffix_after_initialization(before, after, &identities.main)?.is_empty()
     {
-        return Err("S6 Boot B changed membership, execution restore, or the main journal".into());
+        return Err("S6 Boot B changed membership, execution restore, or main state".into());
     }
     if !worker_events.starts_with(&before.agent_events[&identities.worker]) {
         return Err("S6 Boot B changed the worker journal prefix".into());
     }
-    let suffix = &worker_events[before.agent_events[&identities.worker].len()..];
+    let suffix = super::suffix_after_initialization_events(
+        &before.agent_events[&identities.worker],
+        worker_events,
+        &identities.worker,
+        &after.session_id,
+    )?;
     let errors = worker_events
         .iter()
         .filter_map(|record| match &record.event {

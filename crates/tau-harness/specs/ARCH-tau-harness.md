@@ -1,13 +1,5 @@
 # ARCH-tau-harness: tau-harness architecture
 
-## Status
-
-The harness rejects peer attempts to author the additive durable initialization
-replacement and canonical discovery projection events. It does not yet admit,
-stage, consume, persist, replay, or synthesize the new discovery contract; the
-next runtime phase must switch those semantics atomically with producers and
-remove the legacy positive item flow.
-
 The external-message, provider-model, provider-quota, provider-execution,
 tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, user-shell-report, prompt-fragment,
 session-discovery, per-agent-context, internal-prompt-request, start-agent-request,
@@ -46,11 +38,10 @@ their downstream semantics at one shared generation boundary. Process-global
 tool/prompt-fragment/model declarations and provider-quota current-state reports
 survive rollover and run only under exact live connection/instance checks.
 
-Per-agent context registration, values, and readiness commit before the harness
-updates runtime prompt projections or releases waits. Exact connection-generation
-checks prevent stale publishers from mutating successor state. Existing ungated
-value/readiness publication, arbitrary agent ids, and the compatibility
-session-init release performed by `extension.context_ready` are preserved under
+Per-agent context registration, correlated values, discovery snapshots, and
+readiness commit before the harness updates runtime prompt projections or releases
+waits. Exact connection-generation plus session/agent/initialization checks
+prevent stale publishers or old load attempts from mutating current state under
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 Internal-prompt requests commit before loaded-agent validation or hidden prompt
 submission, and stale publisher generations cannot submit work. See
@@ -261,9 +252,17 @@ The harness owns the live acyclic topology, endpoint retirement, sanitized provi
 
 ## Skills
 
-The harness owns canonical discovered-skill state. Extensions such as `tau-ext-shell` announce candidate skill files, but the harness validates names/descriptions, resolves collisions by selected winner, stores user/model invocation flags, and builds model-visible prompt/tool snapshots from the current winners. `disable-model-invocation` removes a winner from `<available_skills>` and from the internal `skill` tool snapshot, and makes it user-invocable; it is a prompt-surface policy, not a filesystem security boundary.
+The harness atomically replaces each extension connection's complete discovery
+source, validates bounded skill/AGENTS.md items, and resolves stable collision
+slots. Session winners drive role preflight and agentless UI completion. Every
+agent initialization starts from that baseline and freezes its own finalized
+skill/bootstrap state.
 
-User `:skill <name> [args]` and `:skill:<name> [args]` expansion is performed at harness prompt intake for both existing-agent prompts and new-agent initial prompts. Unknown, invalid, unreadable, or non-user-invocable commands emit `harness.notice` and are not submitted as model prompts. Successful invocations read a bounded skill-file prefix, strip frontmatter, and store the expanded Pi-style `<skill>` block in the normal prompt transcript. Typed `HumanUi` provenance preserves that complete accepted expansion inside the provider-only outer `<user>` envelope while replacing exact outer-close collisions; canonical and UI text remain raw under [DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
+User `:skill <name> [args]` and `:skill:<name> [args]` expansion uses the selected
+agent's frozen snapshot. New-agent initial commands defer expansion until
+finalization. The model skill tool and `<available_skills>` use the same frozen
+state. Unknown, invalid, unreadable, or non-user-invocable commands emit a notice
+and are not submitted.
 
 Extensions that register with `extension.session_context_provider_register`,
 subscribe to `session.started`, and publish session-wide prompt context such as
@@ -279,8 +278,10 @@ read/frontmatter rules as the `skill` tool. Roles with missing, hidden, or
 unreadable required skills are removed from role selection/delegation and get a
 mandatory replayable `harness.config_error` notice; if the selected/default
 startup role is removed, startup fails rather than falling back silently.
-Session registration, skills, AGENTS.md contents, and readiness cross ordinary
-interception and commit before they update these projections or release the barrier.
+Session registration, complete source snapshots, and readiness cross ordinary
+interception and commit before they atomically update projections or release the
+barrier. Finalization stores one durable replaceable bootstrap side-state fact;
+it does not append ordinary AGENTS.md transcript messages.
 See
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 

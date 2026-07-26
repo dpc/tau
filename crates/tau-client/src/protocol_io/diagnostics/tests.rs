@@ -476,6 +476,8 @@ fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
     meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
         UnixMicros::new(3),
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "session-1".into(),
             agent_id: agent_id(),
             ephemeral: false,

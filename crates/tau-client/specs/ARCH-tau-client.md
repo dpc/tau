@@ -1,14 +1,5 @@
 # ARCH-tau-client: tau-client architecture
 
-## Status
-
-Typed publication helpers for complete session and agent discovery snapshots
-and typed subscriptions for the new declaration, replacement, and canonical
-projection DTOs exist as additive migration scaffolding. No first-party
-producer uses the helpers and no runtime consumer handles these events yet.
-The next phase must switch the runtime atomically and remove the old positive
-item contract; this overlap is not a supported dual interface.
-
 Architectural or externally meaningful functional changes to this shared
 harness-extension interface require the separately reviewed, human-confirmed
 decision mandated by
@@ -24,6 +15,10 @@ state such as per-agent workdir metadata. The client runtime exposes committed
 metadata events and context publication to the extension; it does not choose a
 shared filesystem namespace or seed workdir state across instances. See
 [SPEC-per-agent-extension-workdirs](../../../specs/SPEC-per-agent-extension-workdirs.md).
+Typed discovery helpers publish complete transient session or correlated
+per-agent source snapshots. Context readiness requires the exact
+`AgentInitializationId` received with `session.agent_loaded`; helpers do not
+provide an uncorrelated compatibility path.
 
 The runner writes `Hello`, requires the initial harness `Configure`, installs an
 immutable logical-to-wire tool-name scope, constructs state, and dispatches

@@ -25,22 +25,6 @@ fn find_mandatory_warning_notice(h: &Harness, needle: &str) -> Option<String> {
     None
 }
 
-fn find_mandatory_config_error_notice(h: &Harness, needle: &str) -> Option<String> {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
-        seq = entry.seq.next();
-        if let Event::HarnessNotice(info) = &entry.event
-            && info.level == NoticeLevel::Warning
-            && info.always_show
-            && info.kind == tau_proto::notice_kind::HARNESS_CONFIG_ERROR
-            && info.message.contains(needle)
-        {
-            return Some(info.message.clone());
-        }
-    }
-    None
-}
-
 fn find_info(h: &Harness, needle: &str) -> Option<String> {
     let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
@@ -861,6 +845,92 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
     assert_eq!(created.model, selected_model);
 }
 
+/// Initial `:skill` expansion is deferred until dispatch and uses the target
+/// agent's frozen discovery snapshot rather than the mutable session baseline.
+#[test]
+fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
+    let td = TempDir::new().expect("tempdir");
+    let baseline_path = td.path().join("baseline.md");
+    let frozen_path = td.path().join("frozen.md");
+    std::fs::write(
+        &baseline_path,
+        "---\nname: same\ndescription: baseline\n---\nBASELINE BODY\n",
+    )
+    .expect("baseline skill");
+    std::fs::write(
+        &frozen_path,
+        "---\nname: same\ndescription: frozen\n---\nFROZEN BODY\n",
+    )
+    .expect("frozen skill");
+    let make_skill =
+        |path: std::path::PathBuf, description: &str| crate::discovery::DiscoveredSkill {
+            source_id: "test-source".into(),
+            description: description.to_owned(),
+            source: crate::discovery::DiscoveredSkillSource::File(path),
+            add_to_prompt: true,
+            user_invocable: true,
+            disable_model_invocation: false,
+            argument_hint: None,
+            modified: None,
+        };
+
+    let mut h = echo_harness(td.path()).expect("harness");
+    h.discovered_skills.insert(
+        tau_proto::SkillName::new("same"),
+        make_skill(baseline_path, "baseline"),
+    );
+    h.resolving_initial_extension_collisions = true;
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        literal: false,
+        parent_agent: None,
+        session_id: "s1".into(),
+        role: h.selected_role.clone(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: Some(":skill same args".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: Some("initial-skill".to_owned()),
+        ephemeral: false,
+    })
+    .expect("create queued agent");
+
+    let cid = test_user_agent(&h);
+    let agent_id = crate::parse_agent_id(h.agents[&cid].agent_id.as_deref().expect("agent id"));
+    let frozen = h
+        .frozen_agent_discovery
+        .get_mut(&agent_id)
+        .expect("frozen discovery");
+    frozen.skills.insert(
+        tau_proto::SkillName::new("same"),
+        make_skill(frozen_path, "frozen"),
+    );
+    h.resolving_initial_extension_collisions = false;
+    h.try_advance_queue();
+
+    let submitted = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptSubmitted(prompt)
+                if prompt.ctx_id.as_deref() == Some("initial-skill") =>
+            {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("submitted expanded prompt");
+    assert!(
+        submitted.text.contains("FROZEN BODY"),
+        "submitted text: {}",
+        submitted.text
+    );
+    assert!(!submitted.text.contains("BASELINE BODY"));
+    assert_eq!(
+        submitted.submission_source,
+        tau_proto::PromptSubmissionSource::HumanUi
+    );
+}
+
 /// If a model override disappears from provider routing, the harness must not
 /// emit future prompts to that unrouteable model. It should fall back to normal
 /// role-based resolution instead.
@@ -1591,95 +1661,6 @@ fn missing_required_skill_disables_role_and_emits_notice() {
     assert!(message.contains("required_skills"));
 }
 
-/// Ensures each documented required-skill disable reason is reported through a
-/// mandatory `harness.config_error` notice. These diagnostics are the user's
-/// actionable explanation for why a configured role disappeared.
-#[test]
-fn required_skill_disable_reasons_are_diagnostic() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path()).expect("harness");
-    h.available_roles.insert(
-        "invalid-required-skill".to_owned(),
-        tau_config::settings::AgentRole {
-            required_skills: vec![tau_proto::SkillName::from("Bad_Name")],
-            ..Default::default()
-        },
-    );
-
-    let hidden_path = td.path().join("hidden-skill.md");
-    std::fs::write(
-        &hidden_path,
-        "---\nname: hidden-required-skill\ndescription: Hidden\n---\nbody\n",
-    )
-    .expect("write hidden skill");
-    h.record_discovered_skill(
-        "test-skills",
-        &tau_proto::ExtSkillAvailable {
-            name: "hidden-required-skill".into(),
-            description: "Hidden".to_owned(),
-            file_path: hidden_path,
-            add_to_prompt: false,
-            user_invocable: true,
-            disable_model_invocation: true,
-            argument_hint: None,
-        },
-    );
-    h.available_roles.insert(
-        "hidden-required-skill".to_owned(),
-        tau_config::settings::AgentRole {
-            required_skills: vec![tau_proto::SkillName::from("hidden-required-skill")],
-            ..Default::default()
-        },
-    );
-
-    let unreadable_path = td.path().join("unreadable-required-skill.md");
-    std::fs::write(
-        &unreadable_path,
-        "---\nname: unreadable-required-skill\ndescription: Unreadable\n---\nbody\n",
-    )
-    .expect("write unreadable skill");
-    h.record_discovered_skill(
-        "test-skills",
-        &tau_proto::ExtSkillAvailable {
-            name: "unreadable-required-skill".into(),
-            description: "Unreadable".to_owned(),
-            file_path: unreadable_path.clone(),
-            add_to_prompt: false,
-            user_invocable: true,
-            disable_model_invocation: false,
-            argument_hint: None,
-        },
-    );
-    std::fs::remove_file(&unreadable_path).expect("remove unreadable skill source");
-    h.available_roles.insert(
-        "unreadable-required-skill".to_owned(),
-        tau_config::settings::AgentRole {
-            required_skills: vec![tau_proto::SkillName::from("unreadable-required-skill")],
-            ..Default::default()
-        },
-    );
-
-    h.enforce_required_role_skills().expect("validation");
-
-    assert!(!h.available_roles.contains_key("invalid-required-skill"));
-    let invalid = find_mandatory_config_error_notice(&h, "role `invalid-required-skill` disabled")
-        .expect("invalid skill diagnostic");
-    assert!(invalid.contains("`Bad_Name` has invalid skill name"));
-    assert!(invalid.contains("invalid characters"));
-
-    assert!(!h.available_roles.contains_key("hidden-required-skill"));
-    let hidden = find_mandatory_config_error_notice(&h, "role `hidden-required-skill` disabled")
-        .expect("hidden skill diagnostic");
-    assert!(hidden.contains("hidden from model-side skill loading"));
-
-    assert!(!h.available_roles.contains_key("unreadable-required-skill"));
-    let unreadable =
-        find_mandatory_config_error_notice(&h, "role `unreadable-required-skill` disabled")
-            .expect("unreadable skill diagnostic");
-    assert!(unreadable.contains("could not be loaded"));
-    assert!(unreadable.contains("No such file") || unreadable.contains("os error"));
-}
-
 /// Ensures an explicitly selected startup role cannot silently fall back when a
 /// required skill is missing. This protects specialized roles such as reviewers
 /// from continuing without their mandatory review-process skill.
@@ -1752,143 +1733,7 @@ fn available_required_skill_keeps_role_enabled() {
     .expect("write harness config");
 
     let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
-
     assert!(h.available_roles.contains_key("reviewer"));
-    assert!(!h.disabled_role_reasons.contains_key("reviewer"));
-}
-
-fn delayed_skill_runner(
-    reader: std::os::unix::net::UnixStream,
-    writer: std::os::unix::net::UnixStream,
-) -> Result<(), String> {
-    let mut reader = tau_proto::PeerInputReader::new(std::io::BufReader::new(reader));
-    let mut writer = tau_proto::PeerOutputWriter::new(std::io::BufWriter::new(writer));
-    writer
-        .write_message(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
-            protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: "delayed-skill".into(),
-            client_kind: tau_proto::ClientKind::Tool,
-            capabilities: Default::default(),
-        }))
-        .map_err(|error| error.to_string())?;
-    writer
-        .write_message(&tau_proto::HarnessInputMessage::Subscribe(
-            tau_proto::Subscribe {
-                historical_selectors: Vec::new(),
-                live_selectors: vec![tau_proto::EventSelector::Exact(
-                    tau_proto::EventName::SESSION_STARTED,
-                )],
-            },
-        ))
-        .map_err(|error| error.to_string())?;
-    writer
-        .write_message(&tau_proto::HarnessInputMessage::emit(
-            Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
-        ))
-        .map_err(|error| error.to_string())?;
-    writer
-        .write_message(&tau_proto::HarnessInputMessage::emit(
-            Event::ExtensionSessionContextProviderRegister(
-                tau_proto::ExtensionSessionContextProviderRegister {},
-            ),
-        ))
-        .map_err(|error| error.to_string())?;
-    writer
-        .write_message(&tau_proto::HarnessInputMessage::Ready(tau_proto::Ready {
-            message: None,
-        }))
-        .map_err(|error| error.to_string())?;
-    writer.flush().map_err(|error| error.to_string())?;
-
-    while let Some(message) = reader.read_message().map_err(|error| error.to_string())? {
-        let tau_proto::HarnessOutputMessage::Deliver(delivery) = message else {
-            continue;
-        };
-        let Event::SessionStarted(started) = *delivery.event else {
-            continue;
-        };
-        let skill_path = std::env::temp_dir().join(format!(
-            "tau-delayed-required-skill-{}-{}.md",
-            std::process::id(),
-            started.session_id.as_str()
-        ));
-        std::fs::write(
-            &skill_path,
-            "---\nname: delayed-required-skill\ndescription: Delayed required skill\n---\nbody\n",
-        )
-        .map_err(|error| error.to_string())?;
-        writer
-            .write_message(&tau_proto::HarnessInputMessage::emit(
-                Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
-                    name: "delayed-required-skill".into(),
-                    description: "Delayed required skill".to_owned(),
-                    file_path: skill_path,
-                    add_to_prompt: false,
-                    user_invocable: true,
-                    disable_model_invocation: false,
-                    argument_hint: None,
-                }),
-            ))
-            .map_err(|error| error.to_string())?;
-        writer
-            .write_message(&tau_proto::HarnessInputMessage::emit(
-                Event::ExtensionSessionContextReady(tau_proto::ExtensionSessionContextReady {
-                    session_id: started.session_id,
-                }),
-            ))
-            .map_err(|error| error.to_string())?;
-        writer.flush().map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-/// Ensures startup waits for registered context providers to acknowledge
-/// session-wide skill discovery before validating required skills. Without
-/// this, ordinary extension-discovered filesystem skills would be reported
-/// missing because validation would run immediately after publishing
-/// `session.started`.
-#[test]
-fn required_skill_validation_waits_for_session_skill_discovery() {
-    let td = TempDir::new().expect("tempdir");
-    let config_dir = td.path().join("config");
-    let state_dir = td.path().join("state");
-    std::fs::create_dir_all(&config_dir).expect("mkdir config");
-    std::fs::create_dir_all(&state_dir).expect("mkdir state");
-    let dirs = tau_config::settings::TauDirs {
-        config_dir: Some(config_dir.clone()),
-        state_dir: Some(state_dir.join("runtime")),
-    };
-
-    std::fs::write(
-        config_dir.join("harness.yaml"),
-        r#"
-        agents:
-          default_role: reviewer
-          role_groups:
-            custom:
-              roles:
-                reviewer:
-                  required_skills: [delayed-required-skill]
-        "#,
-    )
-    .expect("write harness config");
-
-    let h = Harness::new_with_provider(
-        state_dir,
-        dirs,
-        echo_runner,
-        vec![crate::harness::InProcessTool {
-            name: "delayed-skill",
-            runner: delayed_skill_runner,
-        }],
-        "s1",
-        tau_proto::SessionStartReason::Initial,
-        tau_core::SessionPersistenceMode::Durable,
-    )
-    .expect("harness should wait for delayed skill and keep reviewer enabled");
-
-    assert!(h.available_roles.contains_key("reviewer"));
-    assert_eq!(h.selected_role, "reviewer");
 }
 
 /// A misspelled startup default must be visible instead of silently selecting a

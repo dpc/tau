@@ -287,9 +287,7 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
     }
 
     let snapshot_c = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
-    if snapshot_c != snapshot_b {
-        return Err("S7 second resume appended a duplicate repair or durable suffix".into());
-    }
+    super::assert_initialization_only_refresh(&snapshot_b, &snapshot_c)?;
     interruption::assert_unfinished_worker_dispatch(&snapshot_c, &identities.uncertain, &dispatch)?;
 
     let continuation_start = observer_c.events.len();
@@ -661,12 +659,11 @@ fn assert_boot_b_durable_repair(
         &identities.quiescent,
         &identities.uncertain,
     ] {
-        if after.agent_events[agent_id] != before.agent_events[agent_id] {
+        if !super::suffix_after_initialization(before, after, agent_id)?.is_empty() {
             return Err(format!("S7 Boot B appended repair state to {agent_id}").into());
         }
     }
-    let suffix =
-        &after.agent_events[&identities.repair][before.agent_events[&identities.repair].len()..];
+    let suffix = super::suffix_after_initialization(before, after, &identities.repair)?;
     let [record] = suffix else {
         return Err(format!("S7 repair suffix contained {} records", suffix.len()).into());
     };

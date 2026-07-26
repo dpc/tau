@@ -8,7 +8,7 @@ use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
     AgentCompactionTriggered, AgentPromptCreated, AgentPromptQueued, AgentPromptSteered,
     AgentPromptSubmitted, AgentPromptTerminated, AgentPromptTerminationReason, CborValue,
-    ContentPart, ContextItem, ContextRole, Effort, Event, ExtAgentsMdAvailable, ExtensionReady,
+    ContentPart, ContextItem, ContextRole, Effort, Event, ExtensionReady,
     HarnessContextUsageChanged, HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable,
     MessageItem, OpaqueProviderItem, ProviderResponseFinished, ProviderResponseUpdated,
     ProviderStopReason, ServiceTier, SessionStartReason, SessionStarted, ThinkingSummary,
@@ -2811,6 +2811,8 @@ fn extension_context_ready_routes_to_agent_ui_state() {
     renderer.apply_setting("notice-level", "debug");
     renderer.handle(&Event::ExtensionContextReady(
         tau_proto::ExtensionContextReady {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: "s1".into(),
             agent_id: agent_id("worker-1"),
         },
@@ -5397,34 +5399,6 @@ fn new_session_clears_session_ui_state() {
     assert!(!vt.screen_contains(80, "read src/lib.rs"));
     assert!(!vt.screen_contains(80, "&s2"));
     assert!(!vt.screen_contains(80, "no role selected"));
-}
-
-#[test]
-fn new_session_replays_startup_context_and_kept_extensions() {
-    let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-
-    renderer.handle(&Event::ExtAgentsMdAvailable(ExtAgentsMdAvailable {
-        file_path: std::path::PathBuf::from("/tmp/AGENTS.md"),
-        content: "# Test\n".into(),
-    }));
-    renderer.handle(&Event::ExtensionReady(ExtensionReady {
-        instance_id: 1.into(),
-        extension_name: "core-shell".into(),
-        pid: Some(123),
-    }));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: "s2".into(),
-        reason: SessionStartReason::New,
-    }));
-    sync(&handle);
-
-    assert!(vt.screen_contains(80, "tau"));
-    assert!(vt.screen_contains(80, "extension core-shell kept"));
 }
 /// `notice-level=warning` hides routine informational chatter while mandatory
 /// warnings such as configuration errors still reach the UI.
@@ -10283,30 +10257,6 @@ fn streaming_block_does_not_duplicate_on_finish() {
         vt.screen_text(80)
     );
 }
-
-#[test]
-fn agents_md_loaded_event_shows_output_stats() {
-    let (_term, handle, vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-
-    renderer.handle(&Event::ExtAgentsMdAvailable(ExtAgentsMdAvailable {
-        file_path: "/tmp/AGENTS.md".into(),
-        content: "alpha\nbeta\n".into(),
-    }));
-    sync(&handle);
-
-    let rows = vt.screen_text(80);
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("loaded: /tmp/AGENTS.md 2L, 11B")),
-        "loaded event should include output stats: {rows:?}"
-    );
-}
-
 #[test]
 fn render_tool_use_state_assembles_chips_in_order() {
     use tau_proto::{ToolUseState, ToolUseStats, ToolUseStatus};

@@ -473,6 +473,7 @@ impl TauExtension for ContextReadyEmitExtension {
             cx.handle().emit_context_ready(
                 tau_proto::SessionId::new("session-1"),
                 tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                tau_proto::AgentInitializationId::new("init-1"),
             )?;
             cx.handle()
                 .emit_session_context_ready(tau_proto::SessionId::new("session-1"))?;
@@ -1145,6 +1146,8 @@ fn metadata_unset() -> Event {
 
 fn session_agent_loaded() -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
         session_id: "session-1".into(),
         agent_id: agent_id(),
         ephemeral: false,
@@ -1652,11 +1655,10 @@ fn client_handle_context_ready_helpers_emit_existing_events() {
     ) && !persist));
 }
 
-/// Ensures every additive discovery contract payload supports the typed
-/// subscription API, preventing canonical projections from requiring raw
-/// event matching while the migration scaffold is in place.
+/// Ensures every discovery contract payload supports the typed subscription
+/// API, preventing canonical projections from requiring raw event matching.
 #[test]
-fn discovery_scaffold_payloads_support_typed_subscriptions() {
+fn discovery_payloads_support_typed_subscriptions() {
     fn assert_payload<Payload: EventPayload>(event: &Event, expected: tau_proto::EventName) {
         assert_eq!(Payload::NAME, expected);
         assert!(Payload::from_event(event).is_some());

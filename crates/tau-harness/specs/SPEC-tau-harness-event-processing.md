@@ -69,12 +69,12 @@ session-bound observation or process-global current state.
 Declarations are excluded from semantic persistence and replay for either
 caller-supplied `persist` value; see
 [SPEC-prompt-fragment-declarations-and-projection](../../../specs/SPEC-prompt-fragment-declarations-and-projection.md).
-Session registration/discovery projection and readiness release likewise run only after
-ordinary commit; their raw events are excluded from semantic persistence for either
-caller `persist` value. See
+Session registration, complete discovery snapshots, canonical projection, and
+readiness release likewise run only after ordinary commit; their raw events are
+excluded from semantic persistence for either caller `persist` value. See
 [SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
-Per-agent context registration, value projection, and readiness release also
-run only after ordinary commit. The three raw events are excluded from semantic
+Per-agent context registration, correlated discovery/value projection, and
+readiness release also run only after ordinary commit. The raw events are excluded from semantic
 persistence for either caller `persist` value. See
 [SPEC-per-agent-context-declarations-and-readiness](../../../specs/SPEC-per-agent-context-declarations-and-readiness.md).
 Internal-prompt requests likewise cross ordinary commit before target

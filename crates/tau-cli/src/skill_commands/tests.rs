@@ -5,32 +5,26 @@ use super::*;
 #[test]
 fn completes_only_user_invocable_skills() {
     let state = SkillCommandState::new();
-    state.apply_skill_available(&ExtSkillAvailable {
-        name: "visible".into(),
-        description: "Visible skill".to_owned(),
-        file_path: "/tmp/visible/SKILL.md".into(),
-        add_to_prompt: false,
-        user_invocable: true,
-        disable_model_invocation: false,
-        argument_hint: Some("[topic]".to_owned()),
-    });
-    state.apply_skill_available(&ExtSkillAvailable {
-        name: "hidden".into(),
-        description: "Hidden skill".to_owned(),
-        file_path: "/tmp/hidden/SKILL.md".into(),
-        add_to_prompt: false,
-        user_invocable: false,
-        disable_model_invocation: false,
-        argument_hint: None,
-    });
-    state.apply_skill_available(&ExtSkillAvailable {
-        name: "manual".into(),
-        description: "Manual-only skill".to_owned(),
-        file_path: "/tmp/manual/SKILL.md".into(),
-        add_to_prompt: false,
-        user_invocable: false,
-        disable_model_invocation: true,
-        argument_hint: Some("<task>".to_owned()),
+    let skill = |name: &str, description: &str, user_invocable, argument_hint: Option<&str>| {
+        tau_proto::DiscoveryEffectiveSkill {
+            name: name.into(),
+            description: description.to_owned(),
+            source: tau_proto::DiscoveryEffectiveSkillSource::File {
+                path: format!("/tmp/{name}/SKILL.md").into(),
+            },
+            add_to_prompt: false,
+            user_invocable,
+            disable_model_invocation: name == "manual",
+            argument_hint: argument_hint.map(str::to_owned),
+        }
+    };
+    state.apply_session_snapshot(&tau_proto::HarnessSessionSkillsAvailable {
+        session_id: "session-1".into(),
+        skills: vec![
+            skill("visible", "Visible skill", true, Some("[topic]")),
+            skill("hidden", "Hidden skill", false, None),
+            skill("manual", "Manual-only skill", true, Some("<task>")),
+        ],
     });
 
     let completions = (state.arg_completer())(&[""]);

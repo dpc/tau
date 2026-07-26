@@ -9,8 +9,10 @@ lifecycle and recovery invariants coherently.
 
 ## Session and agent stores
 
-The session store owns durable membership facts such as
-`session.agent_loaded` and `session.agent_unloaded`. `session.started` and
+The session store owns first-transition durable membership facts such as
+`session.agent_loaded` and `session.agent_unloaded`. Restored initialization
+restates already-folded loaded membership transiently with a fresh initialization
+ID rather than appending a duplicate membership fact. `session.started` and
 `session.shutdown` are must-pass, immutable runtime/current-session snapshot
 facts, but they are not folded into the durable session membership store. Agent
 stores own durable transcript facts, including `agent.started`, prompt facts,
@@ -21,6 +23,16 @@ snapshot is replayed to subscribers before `session.agent_loaded`, and
 inheritable entries are copied to child agents when an explicit or derived
 parent is known. Tests should assert durable stores, not only runtime delivery,
 when changing durable facts.
+
+Agent stores also fold the latest `agent.initialization_context_set` as
+replaceable side state. It carries frozen effective skills and the optional
+rendered AGENTS.md bootstrap block but creates no transcript node and does not
+advance the branch head. Cold resume refreshes every loaded agent before prompt
+dispatch, and every finalization records its fresh process-unique initialization
+ID as a durable replacement even when effective content is unchanged. Branching
+and compaction still materialize the latest active bootstrap exactly once rather than
+compacting stale ordinary history. See
+[SPEC-session-discovery-declarations-and-readiness](../../../specs/SPEC-session-discovery-declarations-and-readiness.md).
 
 Loading an existing durable agent into a session that has not previously
 contained it queues a one-shot hidden notice for that agent's next user prompt.

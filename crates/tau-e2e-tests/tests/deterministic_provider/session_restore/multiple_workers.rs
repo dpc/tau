@@ -174,6 +174,8 @@ fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std
     disconnect_ui(&mut observer_c.peer)?;
     daemon_c.finish()?;
 
+    let snapshot_c = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+    super::assert_initialization_only_refresh(&snapshot_b, &snapshot_c)?;
     fixture.assert_consumed()?;
     Ok(())
 }
@@ -648,12 +650,12 @@ fn assert_s4_owned_suffixes(
     after: &DurableSessionSnapshot,
     identities: &S4Identities,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if after.agent_events[&identities.main].len() != before.agent_events[&identities.main].len() {
-        return Err("S4 worker activation appended to the main journal".into());
+    if !super::suffix_after_initialization(before, after, &identities.main)?.is_empty() {
+        return Err("S4 worker activation appended beyond the main initialization".into());
     }
     for owner in identities.workers() {
         let fresh = identities.fresh_case(owner)?;
-        let suffix = &after.agent_events[owner][before.agent_events[owner].len()..];
+        let suffix = super::suffix_after_initialization(before, after, owner)?;
         if count_prompt(suffix, owner, fresh.prompt) != 1
             || count_response(suffix, owner, fresh.response) != 1
             || suffix

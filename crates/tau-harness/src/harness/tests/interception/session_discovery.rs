@@ -1,42 +1,52 @@
-//! Contract tests for
-//! `SPEC-session-discovery-declarations-and-readiness`.
+//! Atomic discovery snapshot regressions.
 
 use super::*;
 
-/// Build one skill declaration whose name and description are easy to inspect.
-fn skill(name: &str, description: &str) -> Event {
-    Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+fn skill(
+    path: &std::path::Path,
+    name: &str,
+    modified: Option<i64>,
+) -> tau_proto::DiscoverySkillCandidate {
+    std::fs::write(
+        path,
+        format!("---\nname: {name}\ndescription: {name}\n---\nbody {name}\n"),
+    )
+    .expect("write skill");
+    tau_proto::DiscoverySkillCandidate {
         name: name.into(),
-        description: description.to_owned(),
-        file_path: format!("/tmp/{name}.md").into(),
+        description: format!("{name} description"),
+        file_path: path.to_path_buf(),
         add_to_prompt: true,
         user_invocable: true,
         disable_model_invocation: false,
-        argument_hint: None,
-    })
+        argument_hint: Some("[args]".to_owned()),
+        sampled_modified: modified.map(tau_proto::DiscoveryModifiedMicros::new),
+    }
 }
 
-/// Register one interceptor for all four session-discovery event names.
-fn connect_session_discovery_interceptor(h: &mut Harness) {
-    connect_test_tool(h, "session-discovery-interceptor");
+fn snapshot(
+    skills: Vec<tau_proto::DiscoverySkillCandidate>,
+    agents_files: Vec<tau_proto::DiscoveryAgentsFile>,
+) -> tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+    tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+        session_id: "s1".into(),
+        skills,
+        agents_files,
+    }
+}
+
+fn connect_snapshot_interceptor(h: &mut Harness, selector: tau_proto::EventName) {
+    connect_test_tool(h, "snapshot-interceptor");
     h.handle_extension_event(
-        "session-discovery-interceptor",
+        "snapshot-interceptor",
         TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![
-                EventSelector::Exact(
-                    tau_proto::EventName::EXTENSION_SESSION_CONTEXT_PROVIDER_REGISTER,
-                ),
-                EventSelector::Exact(tau_proto::EventName::EXTENSION_SKILL_AVAILABLE),
-                EventSelector::Exact(tau_proto::EventName::EXTENSION_AGENTS_MD_AVAILABLE),
-                EventSelector::Exact(tau_proto::EventName::EXTENSION_SESSION_CONTEXT_READY),
-            ],
+            selectors: vec![EventSelector::Exact(selector)],
             priority: InterceptionPriority::new(0),
         })),
     )
-    .expect("register interceptor");
+    .expect("register snapshot interceptor");
 }
 
-/// Return whether one source committed an event matching the predicate.
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
     let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
@@ -48,743 +58,912 @@ fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> boo
     false
 }
 
-/// Count committed harness notices so dropped declarations can prove they
-/// produce no downstream diagnostics.
-fn harness_notice_count(h: &Harness) -> usize {
-    event_log_events(h)
-        .into_iter()
-        .filter(|event| matches!(event, Event::HarnessNotice(_)))
-        .count()
+/// A complete source replacement supports every positive and removal mutation
+/// without exposing intermediate source state.
+#[test]
+fn complete_source_snapshot_atomically_adds_updates_deletes_renames_and_clears() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let one = tmp.path().join("one.md");
+    let two = tmp.path().join("two.md");
+
+    h.apply_session_discovery_snapshot(
+        "source",
+        snapshot(vec![skill(&one, "one", Some(1))], vec![]),
+    );
+    assert!(h.discovered_skills.contains_key("one"));
+
+    h.apply_session_discovery_snapshot(
+        "source",
+        snapshot(vec![skill(&two, "two", Some(2))], vec![]),
+    );
+    assert!(!h.discovered_skills.contains_key("one"));
+    assert!(h.discovered_skills.contains_key("two"));
+    assert_eq!(
+        h.discovered_skills[&tau_proto::SkillName::new("two")]
+            .argument_hint
+            .as_deref(),
+        Some("[args]")
+    );
+
+    h.apply_session_discovery_snapshot("source", snapshot(vec![], vec![]));
+    assert!(!h.discovered_skills.contains_key("two"));
 }
 
-/// A dropped skill declaration must remain absent from both the committed
-/// stream and the harness-owned winner projection.
+/// Equal timestamps preserve insertion order and source removal reveals the
+/// next collision candidate.
 #[test]
-fn dropped_skill_declaration_has_no_projection_or_diagnostic() {
+fn collision_update_and_source_clear_fall_back_with_stable_equal_mtime_order() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let first = tmp.path().join("first.md");
+    let second = tmp.path().join("second.md");
+
+    h.apply_session_discovery_snapshot(
+        "first",
+        snapshot(vec![skill(&first, "same", Some(7))], vec![]),
+    );
+    h.apply_session_discovery_snapshot(
+        "second",
+        snapshot(vec![skill(&second, "same", Some(7))], vec![]),
+    );
+    assert_eq!(
+        h.discovered_skills[&tau_proto::SkillName::new("same")]
+            .source
+            .file_path(),
+        Some(first.as_path())
+    );
+
+    h.apply_session_discovery_snapshot("first", snapshot(vec![], vec![]));
+    assert_eq!(
+        h.discovered_skills[&tau_proto::SkillName::new("same")]
+            .source
+            .file_path(),
+        Some(second.as_path())
+    );
+}
+
+/// Invalid and duplicate items are omitted while valid siblings still replace
+/// the source atomically.
+#[test]
+fn invalid_and_duplicate_items_are_omitted_without_rejecting_valid_replacement() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let valid = tmp.path().join("valid.md");
+    let duplicate = tmp.path().join("duplicate.md");
+    let invalid = tmp.path().join("invalid.md");
+    let agents = tmp.path().join("AGENTS.md");
+    let canonical_duplicate = tmp.path().join(".").join("AGENTS.md");
+
+    h.apply_session_discovery_snapshot(
+        "source",
+        snapshot(
+            vec![
+                skill(&valid, "valid", None),
+                skill(&duplicate, "valid", Some(9)),
+                skill(&invalid, "invalid name", None),
+            ],
+            vec![
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: agents.clone(),
+                    content: "first".to_owned(),
+                },
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: canonical_duplicate,
+                    content: "duplicate".to_owned(),
+                },
+            ],
+        ),
+    );
+
+    assert!(h.discovered_skills.contains_key("valid"));
+    assert!(!h.discovered_skills.contains_key("invalid name"));
+    assert_eq!(h.discovered_agents_files.len(), 1);
+    assert_eq!(h.discovered_agents_files[0].content, "first");
+}
+
+/// AGENTS.md ordering follows the complete producer snapshot and an empty
+/// replacement clears the source.
+#[test]
+fn agents_files_keep_declared_order_and_empty_snapshot_removes_them() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let broad = tmp.path().join("AGENTS.md");
+    let nested_dir = tmp.path().join("nested");
+    std::fs::create_dir(&nested_dir).expect("nested");
+    let nested = nested_dir.join("AGENTS.md");
+    std::fs::write(&broad, "broad").expect("broad");
+    std::fs::write(&nested, "nested").expect("nested");
+
+    h.apply_session_discovery_snapshot(
+        "source",
+        snapshot(
+            vec![],
+            vec![tau_proto::DiscoveryAgentsFile {
+                file_path: nested.clone(),
+                content: "old nested".to_owned(),
+            }],
+        ),
+    );
+    h.apply_session_discovery_snapshot(
+        "source",
+        snapshot(
+            vec![],
+            vec![
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: broad.clone(),
+                    content: "broad".to_owned(),
+                },
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: nested.clone(),
+                    content: "nested".to_owned(),
+                },
+            ],
+        ),
+    );
+    assert_eq!(
+        h.discovered_agents_files
+            .iter()
+            .map(|file| file.file_path.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            broad.canonicalize().expect("canonical broad AGENTS path"),
+            nested.canonicalize().expect("canonical nested AGENTS path")
+        ]
+    );
+
+    h.apply_session_discovery_snapshot("source", snapshot(vec![], vec![]));
+    assert!(h.discovered_agents_files.is_empty());
+}
+
+/// A snapshot for another session cannot change the current baseline.
+#[test]
+fn wrong_session_snapshot_is_effect_free() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let path = tmp.path().join("wrong.md");
+    let mut wrong = snapshot(vec![skill(&path, "wrong", None)], vec![]);
+    wrong.session_id = "other".into();
+    h.apply_session_discovery_snapshot("source", wrong);
+    assert!(!h.discovered_skills.contains_key("wrong"));
+}
+
+/// Late UIs receive canonical current state without raw declarations or prompt
+/// side effects.
+#[test]
+fn late_ui_gets_one_session_and_one_live_agent_projection_without_raw_declarations() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let _ = ensure_test_user_agent(&mut h);
+    let prompt_side_effects_before = event_log_events(&h)
+        .iter()
+        .filter(|event| matches!(event, Event::AgentUserMessageInjected(_)))
+        .count();
+    let sink = connect_test_client(&mut h, "late-discovery-ui", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "late-discovery-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::HARNESS_SESSION_SKILLS_AVAILABLE),
+                EventSelector::Exact(tau_proto::EventName::HARNESS_AGENT_CONTEXT_INITIALIZED),
+                EventSelector::Exact(
+                    tau_proto::EventName::EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED,
+                ),
+                EventSelector::Exact(
+                    tau_proto::EventName::EXTENSION_AGENT_DISCOVERY_SNAPSHOT_DECLARED,
+                ),
+            ],
+        })),
+    )
+    .expect("subscribe");
+
+    let events = sink
+        .lock()
+        .expect("sink")
+        .iter()
+        .filter_map(|frame| peel_inner_event(&frame.frame))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::HarnessSessionSkillsAvailable(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::HarnessAgentContextInitialized(_)))
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::ExtensionSessionDiscoverySnapshotDeclared(_)
+            | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
+    )));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentUserMessageInjected(_)))
+            .count(),
+        prompt_side_effects_before
+    );
+}
+
+/// Ordinary publication applies only the committed interceptor replacement and
+/// a later dropped snapshot has no state effect.
+#[test]
+fn session_snapshot_commit_boundary_honors_replace_and_drop() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     connect_ready_configured_extension(
         &mut h,
-        "discovery-owner",
-        "configured-discovery-owner",
+        "snapshot-owner",
+        "snapshot-owner",
         tau_proto::ClientKind::Action,
     );
-    connect_session_discovery_interceptor(&mut h);
-    let notices_before = harness_notice_count(&h);
-
-    h.handle_extension_event_inner("discovery-owner", skill("drop-me", "drop me"))
-        .expect("park skill");
-    assert!(!h.discovered_skills.contains_key("drop-me"));
-    assert_eq!(harness_notice_count(&h), notices_before);
+    connect_test_tool(&mut h, "snapshot-interceptor");
     h.handle_extension_event(
-        "session-discovery-interceptor",
+        "snapshot-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept");
+    let original = tmp.path().join("original.md");
+    let replacement = tmp.path().join("replacement.md");
+    h.handle_extension_event_inner(
+        "snapshot-owner",
+        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
+            vec![skill(&original, "original", None)],
+            vec![],
+        )),
+    )
+    .expect("park original");
+    assert!(!h.discovered_skills.contains_key("original"));
+    h.handle_extension_event(
+        "snapshot-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(
+                Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
+                    vec![skill(&replacement, "replacement", None)],
+                    vec![],
+                )),
+            ))),
+        })),
+    )
+    .expect("replace");
+    assert!(!h.discovered_skills.contains_key("original"));
+    assert!(h.discovered_skills.contains_key("replacement"));
+
+    h.handle_extension_event_inner(
+        "snapshot-owner",
+        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(vec![], vec![])),
+    )
+    .expect("park clear");
+    h.handle_extension_event(
+        "snapshot-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Drop,
         })),
     )
-    .expect("drop skill");
-
-    assert!(!h.discovered_skills.contains_key("drop-me"));
-    assert!(!source_committed(&h, "discovery-owner", |event| {
-        matches!(event, Event::ExtSkillAvailable(skill) if skill.name == "drop-me")
-    }));
-    assert_eq!(harness_notice_count(&h), notices_before);
+    .expect("drop clear");
+    assert!(h.discovered_skills.contains_key("replacement"));
 }
 
-/// Only a same-name replacement may commit and replace an AGENTS.md source/path
-/// slot after interception.
+/// Agent snapshots cross ordinary commit but only mutate the exact pending
+/// session/agent/initialization tuple.
 #[test]
-fn agents_replacement_projects_only_committed_payload() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    connect_ready_configured_extension(
-        &mut h,
-        "discovery-owner",
-        "configured-discovery-owner",
-        tau_proto::ClientKind::Provider,
-    );
-    let _agent = ensure_test_user_agent(&mut h);
-    h.discovered_agents_files.push(DiscoveredAgentsFile {
-        source_id: "discovery-owner".into(),
-        file_path: "/repo/AGENTS.md".into(),
-        content: "PREVIOUS".to_owned(),
-    });
-    let injected_before = loaded_agent_events(&h, "s1")
-        .into_iter()
-        .filter(|event| matches!(event, Event::AgentUserMessageInjected(_)))
-        .count();
-    connect_session_discovery_interceptor(&mut h);
-    let agents = |content: &str| {
-        Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
-            file_path: "/repo/AGENTS.md".into(),
-            content: content.to_owned(),
-        })
-    };
-
-    h.handle_extension_event_inner("discovery-owner", agents("ORIGINAL"))
-        .expect("park AGENTS declaration");
-    assert_eq!(h.discovered_agents_files.len(), 1);
-    assert_eq!(h.discovered_agents_files[0].content, "PREVIOUS");
-    assert_eq!(
-        loaded_agent_events(&h, "s1")
-            .into_iter()
-            .filter(|event| matches!(event, Event::AgentUserMessageInjected(_)))
-            .count(),
-        injected_before
-    );
-    h.handle_extension_event(
-        "session-discovery-interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(Some(Box::new(agents("REPLACEMENT")))),
-        })),
-    )
-    .expect("replace AGENTS declaration");
-
-    assert_eq!(h.discovered_agents_files.len(), 1);
-    assert_eq!(h.discovered_agents_files[0].content, "REPLACEMENT");
-    assert!(source_committed(&h, "discovery-owner", |event| {
-        matches!(event, Event::ExtAgentsMdAvailable(agents) if agents.content == "REPLACEMENT")
-    }));
-    let persisted_injection = h
-        .store
-        .session("s1")
-        .expect("session")
-        .loaded_agents()
-        .into_iter()
-        .flat_map(|agent_id| {
-            h.agent_store
-                .agent_events(agent_id.as_str())
-                .expect("agent events")
-        })
-        .find(|entry| {
-            matches!(
-                &entry.event,
-                Event::AgentUserMessageInjected(injected)
-                    if injected.text.contains("REPLACEMENT")
-            )
-        })
-        .expect("durable replacement injection");
-    assert_eq!(persisted_injection.source, None);
-}
-
-/// A parked skill emitted before readiness must settle before the later
-/// readiness acknowledgement can commit and complete session initialization.
-#[test]
-fn parked_skill_prevents_readiness_overtake() {
+fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     connect_ready_configured_extension(
         &mut h,
-        "discovery-owner",
-        "configured-discovery-owner",
-        tau_proto::ClientKind::Tool,
-    );
-    connect_session_discovery_interceptor(&mut h);
-    h.initialized_sessions.remove("s1");
-    h.turn_state = TurnState::InitializingSession {
-        session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
-        waiting_on: [tau_proto::ConnectionId::from("discovery-owner")]
-            .into_iter()
-            .collect(),
-    };
-
-    h.handle_extension_event_inner("discovery-owner", skill("ordered", "ordered"))
-        .expect("park skill");
-    h.handle_extension_event_inner(
-        "discovery-owner",
-        Event::ExtensionSessionContextReady(tau_proto::ExtensionSessionContextReady {
-            session_id: "s1".into(),
-        }),
-    )
-    .expect("queue readiness");
-    assert!(matches!(
-        h.turn_state,
-        TurnState::InitializingSession { .. }
-    ));
-    assert!(!source_committed(&h, "discovery-owner", |event| {
-        matches!(event, Event::ExtensionSessionContextReady(_))
-    }));
-
-    h.handle_extension_event(
-        "session-discovery-interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("commit skill");
-    h.handle_extension_event(
-        "session-discovery-interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("commit readiness");
-
-    assert!(h.discovered_skills.contains_key("ordered"));
-    assert!(h.initialized_sessions.contains("s1"));
-}
-
-/// A pre-Ready registration reservation must keep the peer handshaking until
-/// the committed declaration has staged its membership.
-#[test]
-fn parked_registration_blocks_ready_activation() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    connect_ready_configured_extension(
-        &mut h,
-        "discovery-owner",
-        "configured-discovery-owner",
+        "agent-snapshot-owner",
+        "agent-snapshot-owner",
         tau_proto::ClientKind::Core,
+    );
+    let agent_id = tau_proto::AgentId::parse("snapshot-agent").expect("agent");
+    let initialization_id = tau_proto::AgentInitializationId::new("current-init");
+    h.pending_agent_discovery.insert(
+        agent_id.clone(),
+        PendingAgentDiscovery {
+            initialization_id: initialization_id.clone(),
+            skill_candidates: Default::default(),
+            skills: Default::default(),
+            agents_files: Vec::new(),
+            waiting_on: ["agent-snapshot-owner".into()].into_iter().collect(),
+        },
+    );
+    let path = tmp.path().join("agent.md");
+    let event = |initialization_id| {
+        Event::ExtensionAgentDiscoverySnapshotDeclared(
+            tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                session_id: "s1".into(),
+                agent_id: agent_id.clone(),
+                agent_initialization_id: initialization_id,
+                skills: vec![skill(&path, "agent-skill", None)],
+                agents_files: Vec::new(),
+            },
+        )
+    };
+    h.handle_extension_event_inner(
+        "agent-snapshot-owner",
+        event(tau_proto::AgentInitializationId::new("stale-init")),
+    )
+    .expect("stale");
+    assert!(h.pending_agent_discovery[&agent_id].skills.is_empty());
+    h.handle_extension_event_inner("agent-snapshot-owner", event(initialization_id))
+        .expect("current");
+    assert!(
+        h.pending_agent_discovery[&agent_id]
+            .skills
+            .contains_key("agent-skill")
+    );
+}
+
+/// A pre-Ready session snapshot holds its activation reservation through a
+/// delayed interception and installs state only after the committed reply.
+#[test]
+fn pre_ready_session_snapshot_waits_for_commit_before_activation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "snapshot-owner",
+        "configured-snapshot-owner",
+        tau_proto::ClientKind::Action,
+    );
+    connect_snapshot_interceptor(
+        &mut h,
+        tau_proto::EventName::EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED,
     );
     h.extensions
         .entries
-        .get_mut("discovery-owner")
-        .expect("owner")
+        .get_mut("snapshot-owner")
+        .expect("snapshot owner")
         .state = crate::extension::ExtensionState::Handshaking;
-    connect_session_discovery_interceptor(&mut h);
+    let path = tmp.path().join("startup.md");
 
     h.handle_extension_event(
-        "discovery-owner",
-        TestProtocolItem::Event(Event::ExtensionSessionContextProviderRegister(
-            tau_proto::ExtensionSessionContextProviderRegister {},
-        )),
+        "snapshot-owner",
+        TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
+            event: Box::new(Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
+                vec![skill(&path, "startup", None)],
+                Vec::new(),
+            ))),
+            persist: false,
+        })),
     )
-    .expect("park registration");
-    h.handle_extension_message("discovery-owner", TestMessage::Ready(Default::default()))
-        .expect("record Ready");
+    .expect("park startup snapshot");
+    assert!(h.pending_intercept.is_some());
+    assert_eq!(
+        h.extensions
+            .pending_session_discovery_declarations
+            .get("snapshot-owner"),
+        Some(&1)
+    );
+    h.handle_extension_message("snapshot-owner", TestMessage::Ready(Default::default()))
+        .expect("record ready");
 
     assert_eq!(
-        h.extensions.entries["discovery-owner"].state,
+        h.extensions.entries["snapshot-owner"].state,
         crate::extension::ExtensionState::Handshaking
     );
     assert_eq!(
         h.extensions
             .pending_session_discovery_declarations
-            .get("discovery-owner"),
+            .get("snapshot-owner"),
         Some(&1)
     );
-    assert!(
-        !h.session_context_providers
-            .contains(&tau_proto::ConnectionId::from("discovery-owner"))
-    );
+    assert!(!h.discovered_skills.contains_key("startup"));
 
     h.handle_extension_event(
-        "session-discovery-interceptor",
+        "snapshot-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         })),
     )
-    .expect("commit registration");
+    .expect("commit startup snapshot");
 
     assert_eq!(
-        h.extensions.entries["discovery-owner"].state,
-        crate::extension::ExtensionState::Ready
-    );
-    assert!(
-        h.session_context_providers
-            .contains(&tau_proto::ConnectionId::from("discovery-owner"))
-    );
-}
-
-/// Session discovery declarations that already committed into a handshaking
-/// extension's activation stage keep their admission generation, so a later
-/// `Ready` cannot install old provider or skill state after rollover.
-#[test]
-fn rollover_rejects_already_staged_discovery_declarations_on_ready() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    connect_ready_configured_extension(
-        &mut h,
-        "discovery-owner",
-        "configured-discovery-owner",
-        tau_proto::ClientKind::Core,
-    );
-    h.extensions
-        .entries
-        .get_mut("discovery-owner")
-        .expect("owner")
-        .state = crate::extension::ExtensionState::Handshaking;
-
-    h.handle_extension_event(
-        "discovery-owner",
-        TestProtocolItem::Event(Event::ExtensionSessionContextProviderRegister(
-            tau_proto::ExtensionSessionContextProviderRegister {},
-        )),
-    )
-    .expect("stage provider registration");
-    h.handle_extension_event(
-        "discovery-owner",
-        TestProtocolItem::Event(skill("stale-skill", "old-session")),
-    )
-    .expect("stage skill");
-    assert_eq!(
-        h.extensions.activation_staging["discovery-owner"].retained_message_count,
-        2
-    );
-
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
-    h.handle_extension_message("discovery-owner", TestMessage::Ready(Default::default()))
-        .expect("activate owner");
-
-    assert!(source_committed(&h, "discovery-owner", |event| {
-        matches!(event, Event::ExtensionSessionContextProviderRegister(_))
-    }));
-    assert!(source_committed(&h, "discovery-owner", |event| {
-        matches!(event, Event::ExtSkillAvailable(skill) if skill.name == "stale-skill")
-    }));
-    assert!(
-        !h.session_context_providers
-            .contains(&tau_proto::ConnectionId::from("discovery-owner"))
-    );
-    assert!(!h.discovered_skills.contains_key("stale-skill"));
-    assert!(
-        !h.extensions
-            .activation_staging
-            .contains_key("discovery-owner")
-    );
-}
-
-/// Session readiness admitted before Ready keeps its original session
-/// generation, so releasing activation after rollover cannot finish the
-/// replacement session even when the payload names it.
-#[test]
-fn pre_ready_session_readiness_after_rollover_is_observation_only() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    connect_ready_configured_extension(
-        &mut h,
-        "discovery-owner",
-        "configured-discovery-owner",
-        tau_proto::ClientKind::Tool,
-    );
-    h.extensions
-        .entries
-        .get_mut("discovery-owner")
-        .expect("owner")
-        .state = crate::extension::ExtensionState::Handshaking;
-    h.handle_extension_event(
-        "discovery-owner",
-        TestProtocolItem::Event(Event::ExtensionSessionContextReady(
-            tau_proto::ExtensionSessionContextReady {
-                session_id: "replacement".into(),
-            },
-        )),
-    )
-    .expect("defer readiness before Ready");
-
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
-    h.turn_state = TurnState::InitializingSession {
-        session_id: "replacement".into(),
-        reason: tau_proto::SessionStartReason::New,
-        waiting_on: [tau_proto::ConnectionId::from("discovery-owner")]
-            .into_iter()
-            .collect(),
-    };
-    h.handle_extension_message("discovery-owner", TestMessage::Ready(Default::default()))
-        .expect("activate owner");
-
-    assert!(source_committed(&h, "discovery-owner", |event| {
-        matches!(
-            event,
-            Event::ExtensionSessionContextReady(ready)
-                if ready.session_id.as_str() == "replacement"
-        )
-    }));
-    assert!(matches!(
-        &h.turn_state,
-        TurnState::InitializingSession {
-            session_id,
-            waiting_on,
-            ..
-        } if session_id.as_str() == "replacement"
-            && waiting_on.contains("discovery-owner")
-    ));
-}
-
-/// Dropping a pre-Ready session-discovery declaration must release its count
-/// and byte reservation so a recorded Ready can activate the peer.
-#[test]
-fn dropped_startup_registration_releases_reservation_and_ready() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    connect_ready_configured_extension(
-        &mut h,
-        "discovery-owner",
-        "configured-discovery-owner",
-        tau_proto::ClientKind::Tool,
-    );
-    h.extensions
-        .entries
-        .get_mut("discovery-owner")
-        .expect("owner")
-        .state = crate::extension::ExtensionState::Handshaking;
-    connect_session_discovery_interceptor(&mut h);
-    h.handle_extension_event(
-        "discovery-owner",
-        TestProtocolItem::Event(Event::ExtensionSessionContextProviderRegister(
-            tau_proto::ExtensionSessionContextProviderRegister {},
-        )),
-    )
-    .expect("park registration");
-    h.handle_extension_message("discovery-owner", TestMessage::Ready(Default::default()))
-        .expect("record Ready");
-
-    h.handle_extension_event(
-        "session-discovery-interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Drop,
-        })),
-    )
-    .expect("drop registration");
-
-    assert_eq!(
-        h.extensions.entries["discovery-owner"].state,
+        h.extensions.entries["snapshot-owner"].state,
         crate::extension::ExtensionState::Ready
     );
     assert!(
         !h.extensions
             .pending_session_discovery_declarations
-            .contains_key("discovery-owner")
+            .contains_key("snapshot-owner")
     );
-    assert!(
-        !h.session_context_providers
-            .contains(&tau_proto::ConnectionId::from("discovery-owner"))
+    assert!(source_committed(&h, "snapshot-owner", |event| matches!(
+        event,
+        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot)
+            if snapshot.skills.iter().any(|skill| skill.name.as_str() == "startup")
+    )));
+}
+
+/// Agent snapshot replacement and drop remain effect-free until commit and
+/// preserve the last committed source snapshot when a later update is dropped.
+#[test]
+fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "snapshot-owner",
+        "configured-snapshot-owner",
+        tau_proto::ClientKind::Core,
     );
+    connect_snapshot_interceptor(
+        &mut h,
+        tau_proto::EventName::EXTENSION_AGENT_DISCOVERY_SNAPSHOT_DECLARED,
+    );
+    let agent_id = tau_proto::AgentId::parse("snapshot-agent").expect("agent");
+    let initialization_id = tau_proto::AgentInitializationId::new("init");
+    h.pending_agent_discovery.insert(
+        agent_id.clone(),
+        PendingAgentDiscovery {
+            initialization_id: initialization_id.clone(),
+            skill_candidates: Default::default(),
+            skills: Default::default(),
+            agents_files: Vec::new(),
+            waiting_on: ["snapshot-owner".into()].into_iter().collect(),
+        },
+    );
+    let original = tmp.path().join("original.md");
+    let replacement = tmp.path().join("replacement.md");
+    let event = |candidate| {
+        Event::ExtensionAgentDiscoverySnapshotDeclared(
+            tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                session_id: "s1".into(),
+                agent_id: agent_id.clone(),
+                agent_initialization_id: initialization_id.clone(),
+                skills: candidate,
+                agents_files: Vec::new(),
+            },
+        )
+    };
+
+    h.handle_extension_event_inner(
+        "snapshot-owner",
+        event(vec![skill(&original, "original", None)]),
+    )
+    .expect("park original");
+    assert!(h.pending_agent_discovery[&agent_id].skills.is_empty());
+    h.handle_extension_event(
+        "snapshot-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(event(vec![skill(
+                &replacement,
+                "replacement",
+                None,
+            )])))),
+        })),
+    )
+    .expect("commit replacement");
     assert!(
-        !h.extensions
-            .activation_staging
-            .contains_key("discovery-owner")
+        h.pending_agent_discovery[&agent_id]
+            .skills
+            .contains_key("replacement")
+    );
+
+    h.handle_extension_event_inner("snapshot-owner", event(Vec::new()))
+        .expect("park clear");
+    h.handle_extension_event(
+        "snapshot-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop clear");
+    assert!(
+        h.pending_agent_discovery[&agent_id]
+            .skills
+            .contains_key("replacement")
     );
 }
 
-/// An oversized same-name AGENTS.md replacement must fail required startup,
-/// settle its reservation, and leave no file projection.
+/// Disconnecting a configured publisher while its snapshot is parked makes
+/// the eventual old-generation commit observational and clears its source.
 #[test]
-fn oversized_startup_agents_replacement_fails_without_projection() {
+fn disconnected_snapshot_generation_cannot_mutate_discovery() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "old-generation",
+        "configured-snapshot-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    connect_snapshot_interceptor(
+        &mut h,
+        tau_proto::EventName::EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED,
+    );
+    let stale = tmp.path().join("stale.md");
+    h.handle_extension_event_inner(
+        "old-generation",
+        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
+            vec![skill(&stale, "stale", None)],
+            Vec::new(),
+        )),
+    )
+    .expect("park stale snapshot");
+
+    h.handle_disconnect("old-generation");
+    connect_ready_configured_extension(
+        &mut h,
+        "new-generation",
+        "configured-snapshot-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    h.handle_extension_event(
+        "snapshot-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit stale snapshot");
+
+    assert!(!h.discovered_skills.contains_key("stale"));
+}
+
+/// Unloading an agent while its configured snapshot is parked prevents the
+/// eventual committed observation from recreating pending discovery state.
+#[test]
+fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "snapshot-owner",
+        "configured-snapshot-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    h.handle_extension_message(
+        "snapshot-owner",
+        TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_AGENT_LOADED,
+            )],
+        }),
+    )
+    .expect("subscribe to agent loads");
+    h.handle_extension_event_inner(
+        "snapshot-owner",
+        Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
+    )
+    .expect("register context provider");
+    connect_snapshot_interceptor(
+        &mut h,
+        tau_proto::EventName::EXTENSION_AGENT_DISCOVERY_SNAPSHOT_DECLARED,
+    );
+    let cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
+    let initialization_id = h.pending_agent_discovery[&agent_id]
+        .initialization_id
+        .clone();
+    let path = tmp.path().join("unloaded.md");
+    h.handle_extension_event_inner(
+        "snapshot-owner",
+        Event::ExtensionAgentDiscoverySnapshotDeclared(
+            tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                session_id: "s1".into(),
+                agent_id: agent_id.clone(),
+                agent_initialization_id: initialization_id,
+                skills: vec![skill(&path, "unloaded", None)],
+                agents_files: Vec::new(),
+            },
+        ),
+    )
+    .expect("park agent snapshot");
+    let unloaded = Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+        session_id: "s1".into(),
+        agent_id: agent_id.clone(),
+    });
+    h.react_to_committed_event(None, &unloaded, true, None);
+    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
+
+    h.handle_extension_event(
+        "snapshot-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit snapshot after unload");
+    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
+    assert!(!h.frozen_agent_discovery.contains_key(&agent_id));
+}
+
+/// An oversized pre-Ready replacement fails activation accounting and releases
+/// the session-discovery reservation without exposing snapshot state.
+#[test]
+fn oversized_startup_snapshot_replacement_fails_activation() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     h.initial_extension_tool_preflight_complete = false;
     connect_ready_configured_extension(
         &mut h,
-        "discovery-owner",
-        "configured-discovery-owner",
+        "snapshot-owner",
+        "configured-snapshot-owner",
         tau_proto::ClientKind::Tool,
+    );
+    connect_snapshot_interceptor(
+        &mut h,
+        tau_proto::EventName::EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED,
     );
     h.extensions
         .entries
-        .get_mut("discovery-owner")
-        .expect("owner")
+        .get_mut("snapshot-owner")
+        .expect("snapshot owner")
         .state = crate::extension::ExtensionState::Handshaking;
-    connect_session_discovery_interceptor(&mut h);
-    let agents = |content: String| {
-        Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
-            file_path: "/repo/AGENTS.md".into(),
-            content,
+    let path = tmp.path().join("small.md");
+    h.handle_extension_event(
+        "snapshot-owner",
+        TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
+            event: Box::new(Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
+                vec![skill(&path, "small", None)],
+                Vec::new(),
+            ))),
+            persist: false,
+        })),
+    )
+    .expect("park startup snapshot");
+    let mut oversized = snapshot(Vec::new(), Vec::new());
+    oversized.agents_files.push(tau_proto::DiscoveryAgentsFile {
+        file_path: tmp.path().join("AGENTS.md"),
+        content: "x".repeat(super::super::super::MAX_EXTENSION_ACTIVATION_BYTES),
+    });
+
+    let result = h.handle_extension_event(
+        "snapshot-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(
+                Event::ExtensionSessionDiscoverySnapshotDeclared(oversized),
+            ))),
+        })),
+    );
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("activation staging exceeds"))
+            || h.extensions.entries["snapshot-owner"].state
+                == crate::extension::ExtensionState::Disconnected
+    );
+    assert!(
+        !h.extensions
+            .pending_session_discovery_declarations
+            .contains_key("snapshot-owner")
+    );
+    assert!(!h.discovered_skills.contains_key("small"));
+}
+
+/// Two simultaneous initializations retain independent snapshot/ready
+/// correlation; duplicate snapshots replace in place and a snapshot arriving
+/// after readiness cannot reopen or mutate a finalized initialization.
+#[test]
+fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "snapshot-owner",
+        "configured-snapshot-owner",
+        tau_proto::ClientKind::Tool,
+    );
+    h.handle_extension_message(
+        "snapshot-owner",
+        TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_AGENT_LOADED,
+            )],
+        }),
+    )
+    .expect("subscribe to agent loads");
+    h.handle_extension_event(
+        "snapshot-owner",
+        TestProtocolItem::Event(Event::ExtensionContextProviderRegister(
+            tau_proto::ExtensionContextProviderRegister {},
+        )),
+    )
+    .expect("register context provider");
+    assert!(
+        h.agent_context_providers
+            .contains(&tau_proto::ConnectionId::from("snapshot-owner"))
+    );
+    let first_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let second_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let first = durable_agent_id_for_conversation(&h, &first_cid);
+    let second = durable_agent_id_for_conversation(&h, &second_cid);
+    h.ensure_loaded_agent_for_agent(&first_cid, first.as_str());
+    h.ensure_loaded_agent_for_agent(&second_cid, second.as_str());
+    let first_init = h.pending_agent_discovery[&first].initialization_id.clone();
+    let second_init = h.pending_agent_discovery[&second].initialization_id.clone();
+    let first_path = tmp.path().join("first.md");
+    let late_path = tmp.path().join("late.md");
+    let event = |agent_id: tau_proto::AgentId,
+                 initialization_id: tau_proto::AgentInitializationId,
+                 skills| {
+        Event::ExtensionAgentDiscoverySnapshotDeclared(
+            tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                session_id: "s1".into(),
+                agent_id,
+                agent_initialization_id: initialization_id,
+                skills,
+                agents_files: Vec::new(),
+            },
+        )
+    };
+    let ready = |agent_id, agent_initialization_id| {
+        Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            session_id: "s1".into(),
+            agent_id,
+            agent_initialization_id,
         })
     };
-    h.handle_extension_event(
-        "discovery-owner",
-        TestProtocolItem::Event(agents("small".to_owned())),
-    )
-    .expect("park AGENTS declaration");
 
-    let error = h
-        .handle_extension_event(
-            "session-discovery-interceptor",
-            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-                action: InterceptAction::Pass(Some(Box::new(agents(
-                    "x".repeat(super::super::super::MAX_EXTENSION_ACTIVATION_BYTES),
-                )))),
-            })),
-        )
-        .expect_err("oversized replacement must fail required startup");
-
-    assert!(error.to_string().contains("activation staging exceeds"));
-    assert!(h.discovered_agents_files.is_empty());
-    assert!(
-        !h.extensions
-            .pending_session_discovery_declarations
-            .contains_key("discovery-owner")
-    );
-    let stage = &h.extensions.activation_staging["discovery-owner"];
-    assert_eq!(stage.retained_message_count, 0);
-    assert_eq!(stage.retained_message_bytes, 0);
-}
-
-/// Every configured client kind may publish discovery observations, while a
-/// Hello kind claim without a configured entry grants no authority.
-#[test]
-fn all_configured_kinds_have_discovery_authority_but_unconfigured_peer_does_not() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let kinds = [
-        tau_proto::ClientKind::Provider,
-        tau_proto::ClientKind::Tool,
-        tau_proto::ClientKind::Action,
-        tau_proto::ClientKind::Ui,
-        tau_proto::ClientKind::Core,
-        tau_proto::ClientKind::External,
-    ];
-    for (index, kind) in kinds.into_iter().enumerate() {
-        let source = format!("configured-{index}");
-        connect_ready_configured_extension(&mut h, &source, &source, kind);
-        h.handle_extension_event_inner(&source, skill(&format!("kind-{index}"), "kind"))
-            .expect("publish configured skill");
-        assert!(
-            h.discovered_skills
-                .contains_key(format!("kind-{index}").as_str())
-        );
-    }
-
-    connect_test_tool(&mut h, "unconfigured");
-    h.handle_extension_event_inner("unconfigured", skill("spoofed", "spoofed"))
-        .expect("reject unconfigured skill");
-    assert!(!h.discovered_skills.contains_key("spoofed"));
-}
-
-/// Registration participates in the session barrier only for live non-socket
-/// Tool subscribers whose exact or prefix selector matches `session.started`.
-#[test]
-fn session_wait_set_preserves_tool_and_selector_asymmetry() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let cases = [
-        (
-            "exact-tool",
-            tau_proto::ClientKind::Tool,
-            EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
-            true,
-        ),
-        (
-            "prefix-tool",
-            tau_proto::ClientKind::Tool,
-            EventSelector::Prefix("session.".to_owned()),
-            true,
-        ),
-        (
-            "wrong-prefix-tool",
-            tau_proto::ClientKind::Tool,
-            EventSelector::Prefix("agent.".to_owned()),
-            false,
-        ),
-        (
-            "provider-prefix",
-            tau_proto::ClientKind::Provider,
-            EventSelector::Prefix("session.".to_owned()),
-            false,
-        ),
-    ];
-    for (source, kind, selector, _) in &cases {
-        connect_ready_configured_extension(&mut h, source, source, kind.clone());
-        h.handle_extension_event(
-            source,
-            TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-                historical_selectors: Vec::new(),
-                live_selectors: vec![selector.clone()],
-            })),
-        )
-        .expect("subscribe");
+    for _ in 0..2 {
         h.handle_extension_event_inner(
-            source,
-            Event::ExtensionSessionContextProviderRegister(
-                tau_proto::ExtensionSessionContextProviderRegister {},
+            "snapshot-owner",
+            event(
+                first.clone(),
+                first_init.clone(),
+                vec![skill(&first_path, "first", None)],
             ),
         )
-        .expect("register session provider");
+        .expect("publish duplicate first snapshot");
     }
-    connect_ready_configured_extension(
-        &mut h,
-        "socket-tool",
-        "socket-tool",
-        tau_proto::ClientKind::Tool,
-    );
-    h.bus.disconnect("socket-tool");
-    h.bus.connect(Connection::new(
-        ConnectionMetadata {
-            id: "socket-tool".into(),
-            name: "socket-tool".to_owned(),
-            kind: tau_proto::ClientKind::Tool,
-            origin: ConnectionOrigin::Socket,
-        },
-        Box::new(TestSink {
-            events: Arc::new(Mutex::new(Vec::new())),
-        }),
-    ));
-    h.handle_extension_event(
-        "socket-tool",
-        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            historical_selectors: Vec::new(),
-            live_selectors: vec![EventSelector::Prefix("session.".to_owned())],
-        })),
-    )
-    .expect("subscribe socket tool");
+    h.handle_extension_event_inner("snapshot-owner", ready(first.clone(), first_init.clone()))
+        .expect("finalize first");
+    h.handle_extension_event_inner("snapshot-owner", ready(second.clone(), second_init.clone()))
+        .expect("finalize second before snapshot");
     h.handle_extension_event_inner(
-        "socket-tool",
-        Event::ExtensionSessionContextProviderRegister(
-            tau_proto::ExtensionSessionContextProviderRegister {},
+        "snapshot-owner",
+        event(
+            second.clone(),
+            second_init,
+            vec![skill(&late_path, "late", None)],
         ),
     )
-    .expect("reject socket registration");
+    .expect("publish late second snapshot");
 
-    let waiting = h.session_init_provider_ids();
-    for (source, _, _, expected) in cases {
-        assert_eq!(
-            waiting.contains(&tau_proto::ConnectionId::from(source)),
-            expected,
-            "unexpected wait participation for {source}"
-        );
-    }
-    assert!(!waiting.contains(&tau_proto::ConnectionId::from("socket-tool")));
     assert!(
-        !h.session_context_providers
-            .contains(&tau_proto::ConnectionId::from("socket-tool"))
+        h.frozen_agent_discovery[&first]
+            .skills
+            .contains_key("first")
     );
+    assert!(
+        !h.frozen_agent_discovery[&second]
+            .skills
+            .contains_key("late")
+    );
+    assert!(!h.pending_agent_discovery.contains_key(&first));
+    assert!(!h.pending_agent_discovery.contains_key(&second));
 }
 
-/// An unregistered readiness event remains committed and observable but cannot
-/// remove another source from the captured wait set.
+/// Configured publication enforces item, aggregate decoded-byte, and
+/// per-AGENTS-file bounds while atomically accepting valid siblings.
 #[test]
-fn unregistered_readiness_is_observable_without_releasing_barrier() {
+fn configured_snapshot_omits_items_beyond_all_discovery_bounds() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     connect_ready_configured_extension(
         &mut h,
-        "observer",
-        "configured-observer",
-        tau_proto::ClientKind::External,
+        "snapshot-owner",
+        "configured-snapshot-owner",
+        tau_proto::ClientKind::Action,
     );
-    h.initialized_sessions.remove("s1");
-    h.turn_state = TurnState::InitializingSession {
-        session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
-        waiting_on: [tau_proto::ConnectionId::from("actual-waiter")]
-            .into_iter()
-            .collect(),
-    };
+    let item_path = tmp.path().join("item.md");
+    let template = skill(&item_path, "item-0", None);
+    let skills = (0..super::super::super::MAX_DISCOVERY_SNAPSHOT_ITEMS + 10_000)
+        .map(|index| {
+            let mut candidate = template.clone();
+            candidate.name = format!("item-{index}").into();
+            candidate.description = format!("item {index}");
+            candidate
+        })
+        .collect();
+    let notices_before = h.replayable_harness_notices.len();
+    h.handle_extension_event_inner(
+        "snapshot-owner",
+        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(skills, Vec::new())),
+    )
+    .expect("publish item-bounded snapshot");
+    assert!(h.discovered_skills.contains_key("item-8191"));
+    assert!(!h.discovered_skills.contains_key("item-8192"));
+    assert_eq!(
+        h.replayable_harness_notices.len() - notices_before,
+        1,
+        "all excess items must share one aggregate truncation notice"
+    );
+
+    let oversized_path = tmp.path().join("oversized-description.md");
+    let accepted_path = tmp.path().join("accepted-after-bytes.md");
+    let mut oversized = skill(&oversized_path, "oversized-description", None);
+    oversized.description = "x".repeat(super::super::super::MAX_DISCOVERY_SNAPSHOT_BYTES + 1);
+    h.handle_extension_event_inner(
+        "snapshot-owner",
+        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
+            vec![
+                oversized,
+                skill(&accepted_path, "accepted-after-bytes", None),
+            ],
+            Vec::new(),
+        )),
+    )
+    .expect("publish byte-bounded snapshot");
+    assert!(!h.discovered_skills.contains_key("oversized-description"));
+    assert!(h.discovered_skills.contains_key("accepted-after-bytes"));
+
+    let oversized_agents = tmp.path().join("AGENTS.local.md");
+    let accepted_agents = tmp.path().join("AGENTS.md");
+    h.handle_extension_event_inner(
+        "snapshot-owner",
+        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
+            Vec::new(),
+            vec![
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: oversized_agents,
+                    content: "x".repeat(super::super::super::MAX_DISCOVERY_AGENTS_FILE_BYTES + 1),
+                },
+                tau_proto::DiscoveryAgentsFile {
+                    file_path: accepted_agents,
+                    content: "accepted".to_owned(),
+                },
+            ],
+        )),
+    )
+    .expect("publish AGENTS-size-bounded snapshot");
+    assert_eq!(h.discovered_agents_files.len(), 1);
+    assert_eq!(h.discovered_agents_files[0].content, "accepted");
+}
+
+/// Filling the aggregate byte budget cannot prevent raw-item accounting from
+/// reaching the traversal cap or produce diagnostics for the entire frame tail.
+#[test]
+fn byte_full_snapshot_still_stops_at_raw_item_limit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "snapshot-owner",
+        "configured-snapshot-owner",
+        tau_proto::ClientKind::Action,
+    );
+    let path = tmp.path().join("byte-fill.md");
+    let mut byte_fill = skill(&path, "byte-fill", None);
+    byte_fill.description = "x".repeat(super::super::super::MAX_DISCOVERY_SNAPSHOT_BYTES - 1024);
+    let template = skill(&path, "tail-0", None);
+    let mut skills = Vec::with_capacity(super::super::super::MAX_DISCOVERY_SNAPSHOT_ITEMS + 10_000);
+    skills.push(byte_fill);
+    skills.extend(
+        (0..super::super::super::MAX_DISCOVERY_SNAPSHOT_ITEMS + 10_000).map(|index| {
+            let mut candidate = template.clone();
+            candidate.name = format!("tail-{index}").into();
+            candidate
+        }),
+    );
+    let notices_before = h.replayable_harness_notices.len();
 
     h.handle_extension_event_inner(
-        "observer",
-        Event::ExtensionSessionContextReady(tau_proto::ExtensionSessionContextReady {
-            session_id: "s1".into(),
-        }),
+        "snapshot-owner",
+        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(skills, Vec::new())),
     )
-    .expect("publish readiness");
+    .expect("publish byte-full snapshot");
 
-    assert!(matches!(
-        h.turn_state,
-        TurnState::InitializingSession { .. }
-    ));
-    assert!(source_committed(&h, "observer", |event| {
-        matches!(event, Event::ExtensionSessionContextReady(_))
-    }));
-}
-
-/// A declaration parked across publisher disconnect may commit as a stale
-/// observation but cannot repopulate discovery for the disconnected generation.
-#[test]
-fn disconnected_generation_cannot_project_parked_skill() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    connect_ready_configured_extension(
-        &mut h,
-        "old-owner",
-        "stable-owner",
-        tau_proto::ClientKind::Tool,
-    );
-    h.extensions
-        .entries
-        .get_mut("old-owner")
-        .expect("old owner")
-        .state = crate::extension::ExtensionState::Handshaking;
-    connect_session_discovery_interceptor(&mut h);
-    h.handle_extension_event(
-        "old-owner",
-        TestProtocolItem::Event(skill("stale-skill", "stale")),
-    )
-    .expect("park skill");
-    assert_eq!(
-        h.extensions
-            .pending_session_discovery_declarations
-            .get("old-owner"),
-        Some(&1)
-    );
-
-    h.handle_disconnect("old-owner");
     assert!(
-        !h.extensions
-            .pending_session_discovery_declarations
-            .contains_key("old-owner")
+        h.replayable_harness_notices.len() - notices_before
+            <= super::super::super::MAX_DISCOVERY_SNAPSHOT_ITEMS + 1,
+        "validation must inspect only the raw-item cap and one aggregate tail"
     );
-    connect_ready_configured_extension(
-        &mut h,
-        "new-owner",
-        "stable-owner",
-        tau_proto::ClientKind::Tool,
-    );
-    h.extensions
-        .entries
-        .get_mut("new-owner")
-        .expect("new owner")
-        .state = crate::extension::ExtensionState::Handshaking;
-    h.handle_extension_event(
-        "new-owner",
-        TestProtocolItem::Event(skill("stale-skill", "current")),
-    )
-    .expect("queue current skill");
-    h.handle_extension_message("new-owner", TestMessage::Ready(Default::default()))
-        .expect("record successor Ready");
-    let successor_stage = &h.extensions.activation_staging["new-owner"];
-    let successor_count = successor_stage.retained_message_count;
-    let successor_bytes = successor_stage.retained_message_bytes;
-    assert_eq!(
-        h.extensions
-            .pending_session_discovery_declarations
-            .get("new-owner"),
-        Some(&1)
-    );
-    h.handle_extension_event(
-        "session-discovery-interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("commit stale skill");
-
-    assert!(source_committed(&h, "old-owner", |event| {
-        matches!(event, Event::ExtSkillAvailable(skill) if skill.name == "stale-skill")
-    }));
-    assert!(!h.discovered_skills.contains_key("stale-skill"));
-    assert_eq!(
-        h.extensions.entries["new-owner"].state,
-        crate::extension::ExtensionState::Handshaking
-    );
-    assert_eq!(
-        h.extensions
-            .pending_session_discovery_declarations
-            .get("new-owner"),
-        Some(&1)
-    );
-    assert_eq!(
-        h.extensions.activation_staging["new-owner"].retained_message_count,
-        successor_count
-    );
-    assert_eq!(
-        h.extensions.activation_staging["new-owner"].retained_message_bytes,
-        successor_bytes
-    );
-    h.handle_extension_event(
-        "session-discovery-interceptor",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("commit current skill");
-    assert_eq!(
-        h.extensions.entries["new-owner"].state,
-        crate::extension::ExtensionState::Ready
-    );
-    assert_eq!(h.discovered_skills["stale-skill"].description, "current");
 }

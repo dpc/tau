@@ -257,6 +257,8 @@ fn persisted_traversal_reports_missing_member_journal() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
                 session_id: SessionId::from("s1"),
                 agent_id: AgentId::parse("missing_0").expect("agent id"),
                 ephemeral: false,

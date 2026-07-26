@@ -185,6 +185,8 @@ fn seed_unloaded_worker(
         session_id.as_str(),
         None,
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
             session_id: session_id.clone(),
             agent_id: agent_id.clone(),
             ephemeral: false,

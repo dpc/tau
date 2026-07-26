@@ -30,8 +30,8 @@ pub(super) fn assert_snapshot_a(
         != expected
         || snapshot.session_events.len() != 2
         || snapshot.restore_events.len() != 2
-        || snapshot.agent_events[&identities.main].len() != 26
-        || snapshot.agent_events[&identities.worker].len() != 8
+        || snapshot.agent_events[&identities.main].len() != 27
+        || snapshot.agent_events[&identities.worker].len() != 9
     {
         return Err(format!(
             "S8 Boot A durable record counts changed: session={}, restore={}, main={}, worker={}",
@@ -130,6 +130,7 @@ fn assert_exact_event_names(
     use EventName as E;
     let main_expected = [
         E::AGENT_STARTED,
+        E::AGENT_INITIALIZATION_CONTEXT_SET,
         E::AGENT_USER_INTERACTION_RECORDED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
@@ -158,6 +159,7 @@ fn assert_exact_event_names(
     ];
     let worker_expected = [
         E::AGENT_STARTED,
+        E::AGENT_INITIALIZATION_CONTEXT_SET,
         E::AGENT_DISPLAY_NAME_SET,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
@@ -200,6 +202,11 @@ fn assert_boot_a_agent_payloads(
                 && !started.ephemeral
     ) || !matches!(
         &main[1].event,
+        Event::AgentInitializationContextSet(context)
+            if context.agent_id == identities.main
+                && context.session_id == snapshot.session_id
+    ) || !matches!(
+        &main[2].event,
         Event::AgentUserInteractionRecorded(value) if value.agent_id == identities.main
     ) || !matches!(
         &worker[0].event,
@@ -212,6 +219,11 @@ fn assert_boot_a_agent_payloads(
                 && !started.ephemeral
     ) || !matches!(
         &worker[1].event,
+        Event::AgentInitializationContextSet(context)
+            if context.agent_id == identities.worker
+                && context.session_id == snapshot.session_id
+    ) || !matches!(
+        &worker[2].event,
         Event::AgentDisplayNameSet(name)
             if name.agent_id == identities.worker
                 && name.display_name == "deterministic worker"
@@ -251,7 +263,7 @@ fn assert_boot_a_agent_payloads(
                     }
             })
         || !matches!(
-            &worker[2].event,
+            &worker[3].event,
             Event::AgentPromptSubmitted(prompt)
                 if prompt.agent_id == identities.worker
                     && prompt.inference_activation
@@ -269,7 +281,7 @@ fn assert_boot_a_agent_payloads(
                     && prompt.ctx_id.is_none()
         )
         || !exact_text_response(
-            &worker[6].event,
+            &worker[7].event,
             &identities.worker,
             "worker boot-a complete",
             false,
@@ -565,11 +577,21 @@ pub(super) fn assert_snapshot_suffix(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if after.session_events != before.session_events
         || after.restore_events != before.restore_events
-        || after.agent_events[&identities.main] != before.agent_events[&identities.main]
     {
-        return Err(
-            "S8 resume changed membership, restore state, or the untargeted main journal".into(),
-        );
+        return Err("S8 resume changed membership or restore state".into());
+    }
+    let main_before = &before.agent_events[&identities.main];
+    let main_after = &after.agent_events[&identities.main];
+    let [main_initialization] = &main_after[main_before.len()..] else {
+        return Err("S8 resume did not append exactly one main initialization replacement".into());
+    };
+    if !matches!(
+        &main_initialization.event,
+        Event::AgentInitializationContextSet(context)
+            if context.agent_id == identities.main
+                && context.session_id == after.session_id
+    ) {
+        return Err("S8 resumed main initialization replacement changed".into());
     }
     let worker_before = &before.agent_events[&identities.worker];
     let worker_after = &after.agent_events[&identities.worker];
@@ -592,6 +614,7 @@ pub(super) fn assert_snapshot_suffix(
         return Err("S8 cold resume reused its Boot A accounting runtime identity".into());
     }
     let [
+        initialization,
         interaction,
         notice,
         prompt,
@@ -603,12 +626,17 @@ pub(super) fn assert_snapshot_suffix(
     ] = suffix
     else {
         return Err(format!(
-            "S8 worker durable suffix has {} records instead of eight",
+            "S8 worker durable suffix has {} records instead of nine",
             suffix.len()
         )
         .into());
     };
     if !matches!(
+        &initialization.event,
+        Event::AgentInitializationContextSet(context)
+            if context.agent_id == identities.worker
+                && context.session_id == after.session_id
+    ) || !matches!(
         &interaction.event,
         Event::AgentUserInteractionRecorded(value) if value.agent_id == identities.worker
     ) || !matches!(

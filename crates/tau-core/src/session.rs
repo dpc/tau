@@ -314,6 +314,9 @@ pub struct AgentTree {
     pub(crate) nodes: Vec<AgentNode>,
     pub(crate) head: Option<NodeId>,
     pub(crate) display_name: Option<String>,
+    /// Latest durable initialization bootstrap and frozen discovery
+    /// replacement.
+    initialization_context: Option<tau_proto::AgentInitializationContextSet>,
     /// Sequence the next durable event appended to this agent's log
     /// should receive. Cached here so that
     /// [`AgentStore::append_agent_event_at`] doesn't have to
@@ -709,6 +712,13 @@ impl AgentTree {
         self.display_name.as_deref()
     }
 
+    /// Returns the latest durable initialization replacement without treating
+    /// it as compactable transcript history.
+    #[must_use]
+    pub fn initialization_context(&self) -> Option<&tau_proto::AgentInitializationContextSet> {
+        self.initialization_context.as_ref()
+    }
+
     /// Returns latest committed durable metadata entries for this agent.
     #[must_use]
     pub fn metadata(&self) -> &BTreeMap<tau_proto::AgentMetadataKey, AgentMetadataEntry> {
@@ -1070,6 +1080,7 @@ impl AgentTree {
             nodes: Vec::new(),
             head: None,
             display_name: None,
+            initialization_context: None,
             next_event_seq: PersistedAgentEventSeq::new(0),
             ordinary_inference_generation: 0,
             prompt_starts: HashMap::new(),
@@ -1350,6 +1361,9 @@ impl AgentTree {
                 self.active_outer_turn = None;
             }
             Event::AgentDisplayNameSet(name) => self.update_display_name(&name.display_name),
+            Event::AgentInitializationContextSet(context) => {
+                self.initialization_context = Some(context.clone());
+            }
             Event::AgentMetadataSet(set) => {
                 self.metadata.insert(
                     set.key.clone(),
@@ -1924,6 +1938,9 @@ impl AgentTree {
         event: &Event,
     ) -> Option<Result<(), AgentEventValidationError>> {
         match event {
+            Event::AgentInitializationContextSet(context) if context.agent_id == self.agent_id => {
+                Some(Ok(()))
+            }
             Event::AgentPromptSubmitted(prompt) if prompt.agent_id == self.agent_id => Some(Ok(())),
             Event::AgentPromptStarted(started) if started.agent_id == self.agent_id => {
                 Some(self.validate_prompt_started(started))
@@ -2532,6 +2549,7 @@ impl AgentTree {
         matches!(
             event,
             Event::AgentStarted(_)
+                | Event::AgentInitializationContextSet(_)
                 | Event::AgentUserInteractionRecorded(_)
                 | Event::AgentDisplayNameSet(_)
                 | Event::AgentPromptSubmitted(_)

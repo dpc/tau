@@ -578,7 +578,8 @@ impl SessionStore {
     ///
     /// In a wholly ephemeral store, all accepted session facts remain in
     /// memory. In a durable store, an ephemeral event is restricted to
-    /// `SessionAgentLoaded { ephemeral: true }` and a matched unload lifecycle.
+    /// `SessionAgentLoaded { ephemeral: true, .. }` and a matched unload
+    /// lifecycle.
     /// Such records enter a separately sequenced process-local overlay and
     /// never consume a durable journal sequence.
     ///

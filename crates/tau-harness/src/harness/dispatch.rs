@@ -321,6 +321,9 @@ impl Harness {
             let prompt = self
                 .pop_next_runnable_prompt(&agent_id)
                 .expect("runnable agent has a prompt");
+            let Some(prompt) = self.resolve_pending_user_skill_for_agent(&agent_id, prompt) else {
+                continue;
+            };
             if let Err(error) = self.dispatch_prompt_for_agent(&agent_id, prompt) {
                 self.emit_harness_failure(&format!("failed to dispatch queued prompt: {error}"));
                 // Reset the agent so it doesn't wedge as

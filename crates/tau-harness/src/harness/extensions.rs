@@ -65,11 +65,14 @@ pub(super) struct ExtensionActivationStage {
     /// Action schema received before `Ready`. Schema publishing is a
     /// replacement, so only the latest staged schema matters.
     pub(super) action_schema: Option<tau_actions::ActionSchema>,
-    /// Session-bound skill declarations awaiting activation, in commit order.
-    pub(super) skill_announcements: Vec<StagedSessionBound<tau_proto::ExtSkillAvailable>>,
-    /// Session-bound AGENTS.md declarations awaiting activation, in commit
-    /// order.
-    pub(super) agents_files: Vec<StagedSessionBound<tau_proto::ExtAgentsMdAvailable>>,
+    /// Latest complete session discovery replacement.
+    pub(super) session_discovery_snapshot:
+        Option<StagedSessionBound<tau_proto::ExtensionSessionDiscoverySnapshotDeclared>>,
+    /// Latest complete discovery replacement per agent initialization.
+    pub(super) agent_discovery_snapshots: BTreeMap<
+        (tau_proto::AgentId, tau_proto::AgentInitializationId),
+        StagedSessionBound<tau_proto::ExtensionAgentDiscoverySnapshotDeclared>,
+    >,
     /// Session binding of the latest staged agent-context provider
     /// registration.
     pub(super) agent_context_provider_admission: Option<ExtensionFrameAdmission>,

@@ -4257,10 +4257,10 @@ fn interception_cannot_retarget_user_interaction_fact() {
     );
 }
 
-/// Ensures the additive initialization replacement and canonical projections
+/// Ensures the initialization replacement and canonical projections
 /// cannot be forged or rewritten before their runtime producers exist.
 #[test]
-fn discovery_scaffold_canonical_events_are_protected() {
+fn discovery_canonical_events_are_protected() {
     let agent_id = crate::parse_agent_id("agent-1");
     let initialization_id = tau_proto::AgentInitializationId::new("init-1");
     let events = [
@@ -4575,6 +4575,8 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
 
 fn session_agent_loaded_event(agent_id: &str) -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
         session_id: "session-intercept".into(),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         ephemeral: false,

@@ -297,6 +297,8 @@ mod tests {
                 "old",
                 None,
                 Event::SessionAgentLoaded(SessionAgentLoaded {
+                    agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+
                     session_id: SessionId::from("old"),
                     agent_id: AgentId::parse("old-agent").expect("agent id"),
                     ephemeral: false,
@@ -335,6 +337,10 @@ mod tests {
                         "old",
                         None,
                         Event::SessionAgentLoaded(SessionAgentLoaded {
+                            agent_initialization_id: tau_proto::AgentInitializationId::new(
+                                "test-init",
+                            ),
+
                             session_id: SessionId::from("old"),
                             agent_id: AgentId::parse("new-agent").expect("agent id"),
                             ephemeral: false,
