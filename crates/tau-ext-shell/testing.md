@@ -38,11 +38,12 @@ compatibility test.
 
 ## Processes, locking, and scheduling
 
-Process tests cover foreground exit, timeout, cancellation, signals, bounded output,
-truncation, and descendants retaining pipes. Unix-only helpers are gated and may
-skip when unavailable. Supported non-Unix targets cover equivalent foreground and
-bounded-drain behavior; Windows-only changes are compiled for Windows when
-practical. See
+Process tests cover Linux/Android TTY-backed output descriptors, persistent
+stdin EOF/readiness, separated stdout/stderr capture, foreground exit, timeout,
+cancellation, signals, bounded output, truncation, and descendants retaining PTY
+user endpoints. Unix-only helpers are gated and may skip when unavailable.
+Other targets cover equivalent foreground and bounded-drain behavior;
+Windows-only changes are compiled for Windows when practical. See
 [`SPEC-tau-ext-shell-process-lifecycle`](specs/SPEC-tau-ext-shell-process-lifecycle.md).
 
 Directory-lock tests cover manual and automatic lifecycle, ancestry conflicts,

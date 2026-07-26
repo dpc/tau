@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::isolation::{apply_command_isolation, apply_read_only_cwd_mount};
+use crate::shell_process::ShellProcess;
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -111,7 +112,7 @@ impl ShellConfig {
     }
 
     /// Single spawn point for shell-style child processes: builds the
-    /// configured shell invocation, attaches piped stdio, applies
+    /// configured shell invocation, attaches platform shell endpoints, applies
     /// command isolation, and optionally sets a working directory.
     /// Used by both the agent-facing `shell` tool and the user-facing
     /// `!`/`!!` path so they can't silently diverge on isolation.
@@ -121,11 +122,8 @@ impl ShellConfig {
         cwd: Option<&str>,
         read_only_cwd: bool,
         enforce_ro_bind: bool,
-    ) -> std::io::Result<std::process::Child> {
+    ) -> std::io::Result<ShellProcess> {
         let mut child_cmd = self.command_for(command);
-        child_cmd
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
         if let Some(cwd) = cwd {
             child_cmd.current_dir(cwd);
         }
@@ -150,7 +148,7 @@ impl ShellConfig {
                 child_cmd.env(key, value);
             }
         }
-        let child = child_cmd.spawn();
+        let child = ShellProcess::spawn(&mut child_cmd);
         if let Some(read_only_warning) = read_only_warning {
             read_only_warning.log_after_spawn();
         }
@@ -184,6 +182,7 @@ mod tests {
         let output = config
             .spawn_isolated("printf \"${HOME+set}\"", None, false, false)
             .expect("spawn isolated shell")
+            .child
             .wait_with_output()
             .expect("wait shell");
         assert!(output.status.success());

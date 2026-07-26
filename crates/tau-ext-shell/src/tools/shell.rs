@@ -12,6 +12,7 @@ use crate::Output;
 use crate::argument::{argument_text, optional_argument_int_strict, optional_argument_text};
 use crate::config::ShellConfig;
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
+use crate::shell_process::{ShellProcess, ShellStderr, ShellStdout};
 use crate::tools::world::{ShellWorld, WorldShellOutcome};
 use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_line_oriented_lines};
 
@@ -249,7 +250,7 @@ pub(crate) fn run_command_live_for_surface(
                 }))
         })?;
 
-    let child_id = child.id();
+    let child_id = child.child.id();
     debug!(child_id, "shell command spawned");
     let started = std::time::Instant::now();
     let wait = wait_with_timeout(child, timeout, cancel_rx);
@@ -733,8 +734,8 @@ fn push_user_shell_poll_fd(poll_fds: &mut Vec<libc::pollfd>, fd: std::os::fd::Ra
 
 #[cfg(unix)]
 fn user_shell_poll_fds(
-    stdout_pipe: Option<&std::process::ChildStdout>,
-    stderr_pipe: Option<&std::process::ChildStderr>,
+    stdout_pipe: Option<&ShellStdout>,
+    stderr_pipe: Option<&ShellStderr>,
     wake_read: Option<&std::os::fd::OwnedFd>,
 ) -> Vec<libc::pollfd> {
     use std::os::fd::AsRawFd;
@@ -755,7 +756,7 @@ fn user_shell_poll_fds(
 #[cfg(unix)]
 fn dispatch_user_shell_command_unix(
     cmd: tau_proto::UiShellCommand,
-    mut child: std::process::Child,
+    mut process: ShellProcess,
     timeout_secs: u64,
     tx: &Output,
     cancel_rx: mpsc::Receiver<()>,
@@ -765,15 +766,17 @@ fn dispatch_user_shell_command_unix(
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let timeout = std::time::Duration::from_secs(timeout_secs);
-    let pid = child.id();
+    let pid = process.child.id();
     debug!(
         pid,
         timeout_ms = timeout.as_millis(),
         "waiting for user shell child"
     );
 
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
+    let mut stdout_pipe = process.stdout.take();
+    let mut stderr_pipe = process.stderr.take();
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    let mut output_users = process.output_users.take();
     if let Some(pipe) = stdout_pipe.as_ref() {
         set_user_shell_nonblocking(pipe.as_raw_fd());
     }
@@ -846,7 +849,7 @@ fn dispatch_user_shell_command_unix(
 
     let _waiter = std::thread::spawn(move || {
         let _wake_read_guard = waiter_wake_read;
-        let status = child.wait();
+        let status = process.child.wait();
         debug!(pid, status = ?status, "user shell child waiter finished");
         match status {
             Ok(status) => {
@@ -944,6 +947,8 @@ fn dispatch_user_shell_command_unix(
         }
     }
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    drop(output_users.take());
     let drain_deadline = std::time::Instant::now() + USER_SHELL_DRAIN_AFTER_DONE;
     loop {
         read_available_user_shell(
@@ -1000,7 +1005,7 @@ fn dispatch_user_shell_command_unix(
 #[cfg(not(unix))]
 fn dispatch_user_shell_command_blocking(
     cmd: tau_proto::UiShellCommand,
-    mut child: std::process::Child,
+    mut process: ShellProcess,
     timeout_secs: u64,
     tx: &Output,
     cancel_rx: mpsc::Receiver<()>,
@@ -1059,8 +1064,8 @@ fn dispatch_user_shell_command_blocking(
         });
     }
 
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
+    let stdout_pipe = process.stdout.take();
+    let stderr_pipe = process.stderr.take();
     let stdout = std::sync::Arc::new(std::sync::Mutex::new(UserStreamCapture::default()));
     let stderr = std::sync::Arc::new(std::sync::Mutex::new(UserStreamCapture::default()));
     let stop_pipe_readers = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1098,8 +1103,8 @@ fn dispatch_user_shell_command_blocking(
     }
 
     let timeout = std::time::Duration::from_secs(timeout_secs);
-    let child_wait = NonUnixChildWait::start(&child, timeout, Some(cancel_rx));
-    let pid = child.id();
+    let child_wait = NonUnixChildWait::start(&process.child, timeout, Some(cancel_rx));
+    let pid = process.child.id();
     debug!(
         pid,
         timeout_ms = timeout.as_millis(),
@@ -1107,32 +1112,36 @@ fn dispatch_user_shell_command_blocking(
     );
     let child_event = child_wait.recv();
     let (status, status_note, cancelled) = match child_event {
-        NonUnixChildEvent::Exited => (child.wait().ok(), None, false),
-        NonUnixChildEvent::Cancelled => match child.try_wait() {
+        NonUnixChildEvent::Exited => (process.child.wait().ok(), None, false),
+        NonUnixChildEvent::Cancelled => match process.child.try_wait() {
             Ok(Some(status)) => (Some(status), None, false),
             _ => {
-                let _ = child.kill();
+                let _ = process.child.kill();
                 (
-                    child.wait().ok(),
+                    process.child.wait().ok(),
                     Some("command cancelled".to_owned()),
                     true,
                 )
             }
         },
-        NonUnixChildEvent::TimedOut => match child.try_wait() {
+        NonUnixChildEvent::TimedOut => match process.child.try_wait() {
             Ok(Some(status)) => (Some(status), None, false),
             _ => {
-                let _ = child.kill();
+                let _ = process.child.kill();
                 (
-                    child.wait().ok(),
+                    process.child.wait().ok(),
                     Some(format!("command killed after {timeout_secs}s timeout")),
                     true,
                 )
             }
         },
         NonUnixChildEvent::WaitFailed => {
-            let _ = child.kill();
-            (child.wait().ok(), Some("wait failed".to_owned()), false)
+            let _ = process.child.kill();
+            (
+                process.child.wait().ok(),
+                Some("wait failed".to_owned()),
+                false,
+            )
         }
     };
     child_wait.join_exit_and_timeout_watchers();
@@ -1390,10 +1399,13 @@ enum ShellWaitPoll {
 struct ShellWaitState {
     /// Child process id used as process-group id for termination.
     pid: u32,
-    /// Nonblocking stdout pipe owned by the foreground wait loop.
-    stdout_pipe: Option<std::process::ChildStdout>,
-    /// Nonblocking stderr pipe owned by the foreground wait loop.
-    stderr_pipe: Option<std::process::ChildStderr>,
+    /// Nonblocking stdout endpoint owned by the foreground wait loop.
+    stdout_pipe: Option<ShellStdout>,
+    /// Nonblocking stderr endpoint owned by the foreground wait loop.
+    stderr_pipe: Option<ShellStderr>,
+    /// Linux/Android PTY user guards retained across child pre-exec.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    output_users: Option<[std::fs::File; 2]>,
     /// Wake fd signalled when the child exits or cancellation arrives.
     wake_read: Option<std::os::fd::OwnedFd>,
     /// Receiver for child-exit and cancellation events.
@@ -1404,20 +1416,20 @@ struct ShellWaitState {
 
 #[cfg(unix)]
 impl ShellWaitState {
-    fn start(mut child: std::process::Child, cancel_rx: Option<mpsc::Receiver<()>>) -> Self {
+    fn start(mut process: ShellProcess, cancel_rx: Option<mpsc::Receiver<()>>) -> Self {
         use std::os::fd::AsRawFd;
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
 
-        let pid = child.id();
+        let pid = process.child.id();
         debug!(
             pid,
             cancel_enabled = cancel_rx.is_some(),
             "starting shell wait state"
         );
 
-        let stdout_pipe = child.stdout.take();
-        let stderr_pipe = child.stderr.take();
+        let stdout_pipe = process.stdout.take();
+        let stderr_pipe = process.stderr.take();
         if let Some(pipe) = stdout_pipe.as_ref() {
             shell_wait_set_nonblocking(pipe.as_raw_fd());
         }
@@ -1445,11 +1457,13 @@ impl ShellWaitState {
         let (wake_read, wake_write) = wake_pipe
             .map(|wake_pipe| (Some(wake_pipe.read), Some(wake_pipe.write)))
             .unwrap_or((None, None));
-        spawn_shell_child_waiter(pid, child, wake_write, waiter_wake_read, event_tx);
+        spawn_shell_child_waiter(pid, process.child, wake_write, waiter_wake_read, event_tx);
         Self {
             pid,
             stdout_pipe,
             stderr_pipe,
+            #[cfg(any(target_os = "android", target_os = "linux"))]
+            output_users: process.output_users,
             wake_read,
             event_rx,
             cancelled_by_request,
@@ -1483,6 +1497,8 @@ impl ShellWaitState {
             }
         }
 
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        drop(self.output_users.take());
         self.drain_after_terminal(&mut output, &mut status);
         output.finish();
         debug!(pid = self.pid, status = ?status, timed_out, cancelled, "shell wait completed");
@@ -1686,14 +1702,14 @@ fn spawn_shell_child_waiter(
 
 #[cfg(unix)]
 fn wait_with_timeout(
-    child: std::process::Child,
+    child: ShellProcess,
     timeout: std::time::Duration,
     cancel_rx: Option<mpsc::Receiver<()>>,
 ) -> WaitResult {
     // On Unix the shell tool must not wait for stdout/stderr EOF: background
-    // or detached descendants can inherit those pipe write ends long after the
+    // or detached descendants can retain output endpoints long after the
     // foreground shell exits or is killed. The wait state therefore polls
-    // nonblocking pipes and an internal child-exit wake pipe together, then
+    // nonblocking outputs and an internal child-exit wake pipe together, then
     // returns after foreground exit or timeout with only a brief nonblocking
     // drain.
     ShellWaitState::start(child, cancel_rx).wait(timeout)
@@ -1706,42 +1722,42 @@ fn wait_with_timeout(
 /// performs only a bounded drain after the child reaches a terminal state.
 #[cfg(not(unix))]
 fn wait_with_timeout(
-    mut child: std::process::Child,
+    mut process: ShellProcess,
     timeout: std::time::Duration,
     cancel_rx: Option<mpsc::Receiver<()>>,
 ) -> WaitResult {
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
+    let stdout_pipe = process.stdout.take();
+    let stderr_pipe = process.stderr.take();
 
     let output = std::sync::Arc::new(std::sync::Mutex::new(CapturedOutput::default()));
     let stop_pipe_readers = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let pipe_done_rx =
         spawn_nonunix_shell_pipe_captures(stdout_pipe, stderr_pipe, &output, &stop_pipe_readers);
 
-    let child_wait = NonUnixChildWait::start(&child, timeout, cancel_rx);
+    let child_wait = NonUnixChildWait::start(&process.child, timeout, cancel_rx);
     let mut timed_out = false;
     let mut cancelled = false;
     let status = match child_wait.recv() {
-        NonUnixChildEvent::Exited => child.wait().ok(),
-        NonUnixChildEvent::Cancelled => match child.try_wait() {
+        NonUnixChildEvent::Exited => process.child.wait().ok(),
+        NonUnixChildEvent::Cancelled => match process.child.try_wait() {
             Ok(Some(status)) => Some(status),
             _ => {
                 cancelled = true;
-                let _ = child.kill();
-                child.wait().ok()
+                let _ = process.child.kill();
+                process.child.wait().ok()
             }
         },
-        NonUnixChildEvent::TimedOut => match child.try_wait() {
+        NonUnixChildEvent::TimedOut => match process.child.try_wait() {
             Ok(Some(status)) => Some(status),
             _ => {
                 timed_out = true;
-                let _ = child.kill();
-                child.wait().ok()
+                let _ = process.child.kill();
+                process.child.wait().ok()
             }
         },
         NonUnixChildEvent::WaitFailed => {
-            let _ = child.kill();
-            child.wait().ok()
+            let _ = process.child.kill();
+            process.child.wait().ok()
         }
     };
     child_wait.join_exit_and_timeout_watchers();

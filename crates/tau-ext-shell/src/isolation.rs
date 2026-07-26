@@ -48,8 +48,8 @@ const CARGO_BUILD_ENV_VARS: &[&str] = &[
 ///   and TTY-only fancy output.
 /// - Clears Cargo build-time variables that can confuse tools executed outside
 ///   the extension's build context.
-/// - Closes stdin so interactive prompts (`sudo`, `ssh`, `read`) fail fast
-///   instead of hanging on input that will never arrive.
+/// - The spawn layer closes stdin on every platform, so interactive prompts
+///   fail fast.
 /// - On Unix, runs `setsid()` in the child so it becomes the leader of a new
 ///   session with no controlling terminal — even an explicit `open("/dev/tty")`
 ///   will fail rather than reach the harness's tty.
@@ -64,8 +64,6 @@ pub(crate) fn apply_command_isolation(cmd: &mut Command) {
     for env_var in CARGO_BUILD_ENV_VARS {
         cmd.env_remove(env_var);
     }
-
-    cmd.stdin(std::process::Stdio::null());
 
     #[cfg(unix)]
     {

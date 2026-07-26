@@ -72,6 +72,17 @@ mpsc-backed adapter for direct state-machine coverage.
 
 ## User-shell reports
 
+On Linux and Android, model and user shell commands attach independent
+pseudo-terminals to stdout and stderr. This makes both output descriptors
+TTY-like without merging the captured streams. Stdin remains closed, preserving
+persistent EOF/readiness for the input-less tool surface. Output PTYs disable
+terminal newline translation to preserve the line-ending, byte-count, and
+truncation contracts. The child still starts in its own session without gaining
+the harness terminal as a controlling terminal. Other targets retain pipe
+capture and closed stdin.
+See
+[DECISION-tau-ext-shell-pty-execution](DECISION-tau-ext-shell-pty-execution.md).
+
 For harness-routed `!`/`!!` work, the extension echoes the private command route
 and immutable request fields through transient
 `shell.command_progress_reported` / `shell.command_finished_reported` events.

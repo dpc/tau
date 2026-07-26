@@ -6148,6 +6148,100 @@ fn shell_tool_use_state_mode_can_show_inferred_access_mode() {
     assert_eq!(output.display.args, "printf hello");
 }
 
+/// Ensures PTY-supported shell commands see TTY-backed output descriptors while
+/// stdin stays closed and the result still distinguishes stdout from stderr.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+#[test]
+fn shell_tool_runs_with_tty_outputs_closed_stdin_and_separate_streams() {
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text(
+            "[ ! -t 0 ] && [ -t 1 ] && [ -t 2 ] \
+             && printf 'tty stdout\\n' \
+             && printf 'tty stderr\\n' >&2"
+                .to_owned(),
+        ),
+    )]);
+
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run TTY probe") else {
+        panic!("expected finished shell outcome");
+    };
+
+    assert_eq!(cbor_int_field(&output.result, "status"), Some(0));
+    assert_eq!(
+        cbor_map_text(&output.result, "output"),
+        Some("out tty stdout\nerr tty stderr")
+    );
+}
+
+/// Ensures closed stdin presents persistent poll-visible readiness rather than
+/// leaving event-driven consumers waiting for input forever.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+#[test]
+fn shell_tool_closed_stdin_provides_poll_visible_readiness() {
+    let helper = std::env::current_exe()
+        .expect("current test executable")
+        .to_string_lossy()
+        .replace('\'', "'\"'\"'");
+    let command = format!(
+        "'{helper}' --ignored --exact tests::shell_tool_poll_stdin_helper \
+         >/dev/null 2>&1 && printf 'after poll\\n'"
+    );
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text(command),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer(2.into()),
+        ),
+    ]);
+
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run stdin hangup probe") else {
+        panic!("expected finished shell outcome");
+    };
+
+    assert_eq!(cbor_int_field(&output.result, "status"), Some(0));
+    assert_eq!(
+        cbor_map_text(&output.result, "output"),
+        Some("out after poll")
+    );
+    assert!(cbor_bool_field(&output.result, "timed_out").is_none());
+}
+
+/// Repository-owned subprocess helper that asserts closed stdin is immediately
+/// poll-ready without depending on an external interpreter.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+#[test]
+#[ignore = "invoked explicitly by shell_tool_closed_stdin_provides_poll_visible_readiness"]
+fn shell_tool_poll_stdin_helper() {
+    let mut poll_fd = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+        revents: 0,
+    };
+    // SAFETY: `poll_fd` points to one initialized `pollfd`, fd 0 is borrowed
+    // rather than owned, and a zero timeout cannot block.
+    #[allow(unsafe_code)]
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+    assert_eq!(ready, 1);
+}
+
 #[test]
 fn shell_tool_marks_invalid_utf8_stdout_line_and_marks_output_invalid() {
     // Regression coverage for agent-facing shell output collection: stdout
@@ -6206,7 +6300,7 @@ fn shell_tool_replaces_invalid_utf8_stderr_and_marks_output_invalid() {
 
 #[test]
 fn shell_tool_replaces_invalid_utf8_both_streams_in_combined_output() {
-    // Regression coverage for commands that write invalid bytes to both pipes:
+    // Regression coverage for commands that write invalid bytes to both streams:
     // the agent should see both decoded streams and one concise warning.
     let args = CborValue::Map(vec![(
         CborValue::Text("command".to_owned()),
@@ -6422,12 +6516,11 @@ fn shell_tool_timeout_preserves_partial_output() {
     );
 }
 
+/// Ensures a foreground model shell result does not wait for EOF from a
+/// background descendant that retains an output endpoint.
 #[cfg(unix)]
 #[test]
-fn shell_tool_returns_after_foreground_exit_even_if_background_holds_pipe() {
-    // Regression coverage for background pipe holders: once the foreground
-    // shell exits, inherited stdout fds in background jobs must not make the
-    // shell tool wait for pipe EOF or capture late output.
+fn shell_tool_returns_after_foreground_exit_even_if_background_holds_output_endpoint() {
     let args = CborValue::Map(vec![
         (
             CborValue::Text("command".to_owned()),
@@ -6454,19 +6547,18 @@ fn shell_tool_returns_after_foreground_exit_even_if_background_holds_pipe() {
     let elapsed = started.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(2),
-        "background pipe holder delayed shell result for {elapsed:?}"
+        "background output holder delayed shell result for {elapsed:?}"
     );
     let output = cbor_map_text(&output.result, "output").expect("output");
     assert_eq!(output, "out(no_nl) early");
     assert!(!output.contains("late"));
 }
 
+/// Ensures user `!` completion does not wait for stream EOF or capture late
+/// output from a detached descendant that inherits stdout.
 #[cfg(unix)]
 #[test]
-fn user_shell_returns_after_foreground_exit_even_if_background_holds_pipe() {
-    // Regression coverage for user `!` shell dispatch: detached descendants can
-    // inherit stdout after the foreground shell exits, but UI command completion
-    // must not wait for pipe EOF or capture late background output.
+fn user_shell_returns_after_foreground_exit_even_if_background_holds_output_endpoint() {
     if !std::process::Command::new("sh")
         .arg("-c")
         .arg("command -v setsid >/dev/null")
@@ -6498,7 +6590,7 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_pipe() {
     let elapsed = started.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(2),
-        "background pipe holder delayed user shell result for {elapsed:?}"
+        "background output holder delayed user shell result for {elapsed:?}"
     );
 
     let mut finished = None;
@@ -6516,12 +6608,11 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_pipe() {
     assert!(!finished.cancelled);
 }
 
+/// Ensures timeout returns after killing the foreground process group even when
+/// an escaped descendant retains an inherited stdout endpoint.
 #[cfg(unix)]
 #[test]
-fn shell_tool_timeout_returns_without_waiting_for_escaped_pipe_holder() {
-    // Regression coverage for timeout with an escaped pipe holder: process-group
-    // kill does not reach a setsid child, but timeout return must still be
-    // independent from that child's inherited stdout pipe closing.
+fn shell_tool_timeout_returns_without_waiting_for_escaped_output_holder() {
     if !std::process::Command::new("sh")
         .arg("-c")
         .arg("command -v setsid >/dev/null")
@@ -6559,7 +6650,7 @@ fn shell_tool_timeout_returns_without_waiting_for_escaped_pipe_holder() {
     let elapsed = started.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(2),
-        "escaped pipe holder delayed timeout result for {elapsed:?}"
+        "escaped output holder delayed timeout result for {elapsed:?}"
     );
     assert_eq!(result.display.status, ToolUseStatus::Error);
     assert_eq!(result.display.status_text, "timeout");

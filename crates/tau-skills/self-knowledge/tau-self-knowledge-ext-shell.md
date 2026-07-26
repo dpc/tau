@@ -48,6 +48,12 @@ User `!`/`!!` commands are routed to exactly one generic shell instance. They
 fail without execution when none is available, when several are ambiguous, or
 when the target session/agent workdir is not ready.
 
+On Linux and Android, the model-visible `shell` / `shell_command` surfaces and user
+`!`/`!!` commands use independent stdout/stderr PTYs. Commands detect TTY output
+descriptors while stream identity remains intact. Stdin stays closed because the
+surfaces do not accept interactive input. Other platforms retain closed stdin
+and output pipes.
+
 `tau-ext-shell` runs tool work through a bounded priority scheduler. Short bursts can queue instead of failing immediately when workers are busy; queued model tool calls can be canceled before they start; user `!` shell work and control-sensitive `dir_lock` calls have higher-priority lanes than bulk model work. If bounded queue or queued-argument budgets are exhausted, the tool reports a clear backpressure error instead of spawning unbounded threads.
 
 Selected shell tools such as `read` and `edit` attach compact repair examples to

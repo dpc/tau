@@ -56,6 +56,17 @@ timeout operations that take longer than timeout argument, but currently 100%
 reliable child process termination is not implemented and will require advanced
 techniques to implement in the future (e.g. cgroups).
 
+On Linux and Android, ext-shell shell commands use independent PTYs for stdout
+and stderr while stdin remains closed. Verify `[ ! -t 0 ]`, `[ -t 1 ]`, and
+`[ -t 2 ]`; verify stdout and stderr remain separately prefixed in captured
+output; and verify a poll/select-driven input consumer sees persistent readiness
+rather than hanging.
+Also re-check timeout,
+cancellation, signal, background-descendant, invalid-UTF-8, line-ending, and
+output-bound behavior through the PTY path. Terminal output newline translation
+must not rewrite the command's original bytes. Other implementations retain
+their platform pipe behavior.
+
 #### Shell mutation and directory-lock mode
 
 Older Tau versions exposed explicit `shell` `mode: ro` / `mode: rw` arguments.

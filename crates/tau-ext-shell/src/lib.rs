@@ -32,8 +32,11 @@ mod diff;
 mod dir_lock;
 mod display;
 mod isolation;
+#[cfg(any(target_os = "android", target_os = "linux"))]
+mod pty_stdio;
 mod runtime;
 mod scheduler;
+mod shell_process;
 mod tools;
 mod truncate;
 
