@@ -363,6 +363,32 @@ fn agent_trace_command_parses_all_options() {
     ));
 }
 
+/// Agent trace accepts both compact model-visible tool-call projections. This
+/// prevents CLI value names from drifting away from the documented formats.
+#[test]
+fn agent_trace_command_parses_agent_tool_formats() {
+    for (name, expected) in [
+        (
+            "agent-tools-lite",
+            super::cli::AgentTraceFormat::AgentToolsLite,
+        ),
+        (
+            "agent-tools-full",
+            super::cli::AgentTraceFormat::AgentToolsFull,
+        ),
+    ] {
+        let cli =
+            super::cli::Cli::parse_from(["tau", "agent", "trace", "agent-root", "--format", name]);
+
+        assert!(matches!(
+            cli.command,
+            Some(super::cli::Command::Agent {
+                command: super::cli::AgentCommand::Trace(args),
+            }) if args.format == expected
+        ));
+    }
+}
+
 /// Session inspection operations share the same noun-first nested command shape
 /// as agent inspection.
 #[test]

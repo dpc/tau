@@ -1,5 +1,6 @@
 //! Complete native and lossy OTLP exports of durable agent journals.
 
+mod agent_tools;
 mod native;
 mod otlp;
 #[cfg(test)]
@@ -22,6 +23,10 @@ pub enum AgentTraceFormat {
     TauJsonl,
     /// Lossy OTLP/OpenInference visualization adapter.
     OtlpJson,
+    /// Compact model-visible tool-call overview without output bodies.
+    AgentToolsLite,
+    /// Compact model-visible tool-call overview with output bodies.
+    AgentToolsFull,
 }
 
 /// Whether to include the recursively creator-owned agent workflow.
@@ -75,6 +80,12 @@ pub fn prepare_agent_trace(
     match format {
         AgentTraceFormat::TauJsonl => native::write_jsonl(root_agent_id, &snapshot, &mut file)?,
         AgentTraceFormat::OtlpJson => otlp::write_json(root_agent_id, &snapshot, &mut file)?,
+        AgentTraceFormat::AgentToolsLite => {
+            agent_tools::write_lite_jsonl(root_agent_id, &snapshot, &mut file)?
+        }
+        AgentTraceFormat::AgentToolsFull => {
+            agent_tools::write_full_jsonl(root_agent_id, &snapshot, &mut file)?
+        }
     }
     file.rewind()?;
     drop(snapshot);

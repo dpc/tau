@@ -19,7 +19,7 @@ fn activity_counts_serialize_estimated_cost_as_rounded_dollars() {
         (18_728_643_000_000, serde_json::json!(18.728643)),
         (18_728_643_499_999, serde_json::json!(18.728643)),
         (18_728_643_500_000, serde_json::json!(18.728644)),
-        (u64::MAX, serde_json::json!(18_446_744.07371)),
+        (u64::MAX, serde_json::json!(18_446_744.073_71)),
     ] {
         let counts = super::ActivityCounts {
             estimated_api_cost: EstimatedApiCost::from_picodollars(picodollars),

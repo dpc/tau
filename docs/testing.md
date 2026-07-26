@@ -467,7 +467,7 @@ independently parseable native lines, creator-only recursive descendants,
 per-agent order, focused typed lifecycle correlation, decreasing-time handling,
 and protobuf-JSON decoding as one `ExportTraceServiceRequest`.
 
-CLI coverage verifies parser defaults and both formats, custom agent roots,
+CLI coverage verifies parser defaults and every format, custom agent roots,
 descendant selection, and successful broken-pipe termination. Large-record and
 many-record regressions
 should assert that validation and raw projection stream records, payload-bearing
@@ -475,3 +475,8 @@ OTLP correlation data goes to anonymous staging, and heap correlation state
 contains only compact offsets and identifiers. The accepted heap model is
 proportional to unique typed operation ID count and bytes rather than journal
 payload bytes; output is never truncated.
+Compact agent-tool coverage additionally checks relative timing, model-visible
+call filtering, shell command projection, lite counts, full output, call-ID
+reuse, background completion, ambiguous background generations, and faithful
+tagged-CBOR fallback. Payload-bearing
+state uses compact anonymous-file offsets by construction.

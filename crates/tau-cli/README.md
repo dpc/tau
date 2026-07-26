@@ -67,6 +67,9 @@ artifact and preserves every persisted event and its journal-local ordering.
 `otlp-json` is a lossy OpenTelemetry/OpenInference visualization adapter: it
 derives spans only from durable IDs and journal wall-clock timestamps, while
 retaining every raw journal occurrence as a span event.
+`agent-tools-lite` and `agent-tools-full` provide compact, trace-relative JSON
+Lines over only model-visible tool calls. Lite reports output byte/line counts;
+full includes rendered output.
 See [`docs/agent-trace.md`](../../docs/agent-trace.md) for the output contracts,
 failure behavior, and sensitive-data warning.
 

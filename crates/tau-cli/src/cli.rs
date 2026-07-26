@@ -281,6 +281,10 @@ pub enum AgentTraceFormat {
     TauJsonl,
     /// Lossy OTLP/OpenInference JSON visualization adapter.
     OtlpJson,
+    /// Compact model-visible tool calls with output sizes.
+    AgentToolsLite,
+    /// Compact model-visible tool calls with complete outputs.
+    AgentToolsFull,
 }
 
 /// Filters for `tau agent list`.

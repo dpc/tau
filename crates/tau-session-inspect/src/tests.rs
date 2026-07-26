@@ -205,6 +205,159 @@ fn append_background_tool_calls(
     }
 }
 
+/// Builds one durable provider response containing one model-visible tool call.
+fn provider_tool_call_event(agent_id: &AgentId, prompt_id: &str, call_id: &str) -> Event {
+    Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+        agent_prompt_id: prompt_id.into(),
+        agent_id: agent_id.clone(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: call_id.into(),
+            name: tau_proto::ToolName::new("background_test"),
+            tool_type: ToolType::Function,
+            arguments: CborValue::Null,
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        estimated_api_cost_increment: None,
+        estimated_api_cost_rates: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+}
+
+/// Appends one timestamp-controlled shell call for compact trace regression
+/// coverage.
+fn append_compact_shell_trace(agents_dir: &std::path::Path, agent_id: &str) {
+    let agent_id = AgentId::parse(agent_id).expect("agent id");
+    let arguments = CborValue::Map(vec![
+        (
+            CborValue::Text("command".into()),
+            CborValue::Text("printf 'one\\ntwo\\n'".into()),
+        ),
+        (
+            CborValue::Text("workdir".into()),
+            CborValue::Text("/work".into()),
+        ),
+    ]);
+    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                agent_prompt_id: "prompt-tools".into(),
+                agent_id: agent_id.clone(),
+                output_items: vec![
+                    assistant_message("ignored prose"),
+                    ContextItem::ToolCall(ToolCallItem {
+                        call_id: "call-shell".into(),
+                        name: tau_proto::ToolName::new("shell_command"),
+                        tool_type: ToolType::Function,
+                        arguments: arguments.clone(),
+                        raw_arguments_json: None,
+                        responses_envelope: None,
+                    }),
+                ],
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                error: None,
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                originator: tau_proto::PromptOriginator::User,
+                usage: None,
+                estimated_api_cost_increment: None,
+                estimated_api_cost_rates: None,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+            tau_proto::UnixMicros::new(11),
+        )
+        .expect("provider tool call");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderToolResult(tau_proto::ToolResult {
+                call_id: "call-shell".into(),
+                tool_name: tau_proto::ToolName::new("shell_command"),
+                tool_type: ToolType::Function,
+                result: CborValue::Text("one\ntwo\n".into()),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::Final,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            tau_proto::UnixMicros::new(21),
+        )
+        .expect("tool result");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                agent_prompt_id: "prompt-tools-reused".into(),
+                agent_id: agent_id.clone(),
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: "call-shell".into(),
+                    name: tau_proto::ToolName::new("shell_command"),
+                    tool_type: ToolType::Function,
+                    arguments,
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                })],
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                error: None,
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                originator: tau_proto::PromptOriginator::User,
+                usage: None,
+                estimated_api_cost_increment: None,
+                estimated_api_cost_rates: None,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+            tau_proto::UnixMicros::new(31),
+        )
+        .expect("reused provider tool call");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderToolError(tau_proto::ToolError {
+                call_id: "call-shell".into(),
+                tool_name: tau_proto::ToolName::new("shell_command"),
+                tool_type: ToolType::Function,
+                message: "second failed".into(),
+                details: Some(CborValue::Text("detail".into())),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            tau_proto::UnixMicros::new(41),
+        )
+        .expect("reused tool error");
+}
+
 fn assistant_message(text: impl Into<String>) -> ContextItem {
     ContextItem::Message(MessageItem {
         role: ContextRole::Assistant,
@@ -657,6 +810,459 @@ fn otlp_multi_tool_response_projects_each_call_once() {
         }
         assert!(attribute("output.value").contains(&format!("result-{call_id}")));
     }
+}
+
+/// The lite agent-tools format keeps only model-visible calls, exposes shell
+/// commands directly, uses trace-relative timing, and replaces output with
+/// exact byte and logical-line counts.
+#[test]
+fn agent_tools_lite_is_compact_relative_and_output_free() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    append_compact_shell_trace(temp.path(), "agent-root");
+
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentToolsLite,
+    )
+    .expect("compact trace");
+    let lines = output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(lines.len(), 3, "header plus two reused model-visible calls");
+    assert_eq!(lines[0]["schema"], "tau.agent_tools");
+    assert_eq!(lines[0]["output"], "counts");
+    assert_eq!(lines[1]["at_us"], 10);
+    assert_eq!(lines[1]["duration_us"], 10);
+    assert_eq!(lines[1]["tool"], "shell_command");
+    assert_eq!(lines[1]["command"], "printf 'one\\ntwo\\n'");
+    assert_eq!(
+        lines[1]["arguments"],
+        serde_json::json!({
+            "command": "printf 'one\\ntwo\\n'",
+            "workdir": "/work",
+        })
+    );
+    assert_eq!(lines[1]["status"], "ok");
+    assert_eq!(lines[1]["output_bytes"], 8);
+    assert_eq!(lines[1]["output_lines"], 2);
+    assert!(lines[1].get("output").is_none());
+    assert!(!output.contains("ignored prose"));
+    assert_eq!(lines[2]["at_us"], 30);
+    assert_eq!(lines[2]["status"], "error");
+    assert_eq!(lines[2]["output_bytes"], 28);
+    assert_eq!(lines[2]["output_lines"], 3);
+}
+
+/// The full agent-tools format retains the same flat call shape while replacing
+/// lite counters with the complete provider-facing tool output.
+#[test]
+fn agent_tools_full_includes_rendered_output() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    append_compact_shell_trace(temp.path(), "agent-root");
+
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentToolsFull,
+    )
+    .expect("compact full trace");
+    let lines = output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(lines[0]["output"], "full");
+    assert_eq!(lines[1]["output"], "one\ntwo\n");
+    assert!(lines[1].get("output_bytes").is_none());
+    assert!(lines[1].get("output_lines").is_none());
+    assert_eq!(lines[2]["output"], "error: second failed\n\ndetail");
+}
+
+/// A background placeholder keeps the model-visible call open until the real
+/// background result, so the compact trace exposes one call with the real
+/// output.
+#[test]
+fn agent_tools_background_placeholder_waits_for_real_result() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    append_background_tool_lifecycle(temp.path(), "agent-root", "call-background");
+
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentToolsFull,
+    )
+    .expect("compact full trace");
+    let calls = output
+        .lines()
+        .skip(1)
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["status"], "ok");
+    assert_eq!(calls[0]["output"], "result-call-background");
+}
+
+/// Two unresolved background generations cannot be correlated by call ID alone,
+/// so compact projection fails rather than assigning a terminal to the wrong
+/// model-visible occurrence.
+#[test]
+fn agent_tools_rejects_ambiguous_concurrent_background_id_reuse() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    let agent_id = AgentId::parse("agent-root").expect("agent id");
+    let mut store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
+    for (prompt_id, timestamp) in [("prompt-first", 2), ("prompt-second", 4)] {
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                tau_core::AgentEventParent::InheritHead,
+                provider_tool_call_event(&agent_id, prompt_id, "call-reused"),
+                tau_proto::UnixMicros::new(timestamp),
+            )
+            .expect("provider tool call");
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                tau_core::AgentEventParent::InheritHead,
+                Event::ProviderToolResult(tau_proto::ToolResult {
+                    call_id: "call-reused".into(),
+                    tool_name: tau_proto::ToolName::new("background_test"),
+                    tool_type: ToolType::Function,
+                    result: CborValue::Null,
+                    provider_content: Vec::new(),
+                    kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+                tau_proto::UnixMicros::new(timestamp + 1),
+            )
+            .expect("background placeholder");
+    }
+    drop(store);
+
+    let error = export_trace(
+        temp.path(),
+        &agent_id,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentToolsLite,
+    )
+    .expect_err("ambiguous generations must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ambiguous concurrent background tool call ID `call-reused`")
+    );
+}
+
+/// A reused foreground ID remains distinct from its unresolved background
+/// predecessor regardless of which typed terminal arrives first.
+#[test]
+fn agent_tools_routes_reused_foreground_and_background_terminals() {
+    for foreground_first in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        create_trace_agent(
+            temp.path(),
+            "agent-root",
+            tau_proto::AgentCreator::User,
+            None,
+            1,
+        );
+        let agent_id = AgentId::parse("agent-root").expect("agent id");
+        let mut store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                tau_core::AgentEventParent::InheritHead,
+                provider_tool_call_event(&agent_id, "prompt-background", "call-reused"),
+                tau_proto::UnixMicros::new(2),
+            )
+            .expect("first call");
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                tau_core::AgentEventParent::InheritHead,
+                Event::ProviderToolResult(tau_proto::ToolResult {
+                    call_id: "call-reused".into(),
+                    tool_name: tau_proto::ToolName::new("background_test"),
+                    tool_type: ToolType::Function,
+                    result: CborValue::Null,
+                    provider_content: Vec::new(),
+                    kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+                tau_proto::UnixMicros::new(3),
+            )
+            .expect("placeholder");
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                tau_core::AgentEventParent::InheritHead,
+                provider_tool_call_event(&agent_id, "prompt-foreground", "call-reused"),
+                tau_proto::UnixMicros::new(4),
+            )
+            .expect("reused foreground");
+
+        let foreground = Event::ProviderToolError(tau_proto::ToolError {
+            call_id: "call-reused".into(),
+            tool_name: tau_proto::ToolName::new("background_test"),
+            tool_type: ToolType::Function,
+            message: "foreground failed".into(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        });
+        let background = Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+            call_id: "call-reused".into(),
+            tool_name: tau_proto::ToolName::new("background_test"),
+            tool_type: ToolType::Function,
+            result: CborValue::Text("background done".into()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        });
+        let terminals = if foreground_first {
+            [foreground, background]
+        } else {
+            [background, foreground]
+        };
+        for (offset, terminal) in terminals.into_iter().enumerate() {
+            store
+                .append_agent_event_at(
+                    agent_id.as_str(),
+                    None,
+                    tau_core::AgentEventParent::InheritHead,
+                    terminal,
+                    tau_proto::UnixMicros::new(5 + offset as u64),
+                )
+                .expect("typed terminal");
+        }
+        drop(store);
+
+        let output = export_trace(
+            temp.path(),
+            &agent_id,
+            DescendantSelection::RootOnly,
+            AgentTraceFormat::AgentToolsFull,
+        )
+        .expect("compact trace");
+        let calls = output
+            .lines()
+            .skip(1)
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["status"], "ok");
+        assert_eq!(calls[0]["output"], "background done");
+        assert_eq!(
+            calls[0]["duration_us"],
+            if foreground_first { 4 } else { 3 }
+        );
+        assert_eq!(calls[1]["status"], "error");
+        assert_eq!(calls[1]["output"], "error: foreground failed\n\n");
+        assert_eq!(
+            calls[1]["duration_us"],
+            if foreground_first { 1 } else { 2 }
+        );
+    }
+}
+
+/// One combined stable-schema fixture protects provider-item tie ordering,
+/// cancellation, incomplete calls, and decreasing terminal clocks in both
+/// modes.
+#[test]
+fn agent_tools_stable_records_cover_non_success_branches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    let agent_id = AgentId::parse("agent-root").expect("agent id");
+    let mut tied = provider_tool_call_event(&agent_id, "prompt-tied", "call-cancelled");
+    let Event::ProviderResponseFinished(finished) = &mut tied else {
+        unreachable!("helper returns provider response")
+    };
+    finished
+        .output_items
+        .push(ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-incomplete".into(),
+            name: tau_proto::ToolName::new("incomplete_tool"),
+            tool_type: ToolType::Function,
+            arguments: CborValue::Text("pending".into()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        }));
+    let mut store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            tied,
+            tau_proto::UnixMicros::new(10),
+        )
+        .expect("tied calls");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ToolCancelled(tau_proto::ToolCancelled {
+                call_id: "call-cancelled".into(),
+                tool_name: tau_proto::ToolName::new("background_test"),
+                tool_type: ToolType::Function,
+            }),
+            tau_proto::UnixMicros::new(11),
+        )
+        .expect("cancelled");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderToolResult(tau_proto::ToolResult {
+                call_id: "call-incomplete".into(),
+                tool_name: tau_proto::ToolName::new("incomplete_tool"),
+                tool_type: ToolType::Function,
+                result: CborValue::Null,
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            tau_proto::UnixMicros::new(12),
+        )
+        .expect("incomplete background placeholder");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            provider_tool_call_event(&agent_id, "prompt-decreasing", "call-decreasing"),
+            tau_proto::UnixMicros::new(20),
+        )
+        .expect("decreasing call");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderToolResult(tau_proto::ToolResult {
+                call_id: "call-decreasing".into(),
+                tool_name: tau_proto::ToolName::new("background_test"),
+                tool_type: ToolType::Function,
+                result: CborValue::Text("done".into()),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::Final,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            tau_proto::UnixMicros::new(19),
+        )
+        .expect("decreasing terminal");
+    drop(store);
+
+    let export = |format| {
+        export_trace(
+            temp.path(),
+            &agent_id,
+            DescendantSelection::RootOnly,
+            format,
+        )
+        .expect("compact trace")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
+        .collect::<Vec<_>>()
+    };
+    let lite = export(AgentTraceFormat::AgentToolsLite);
+    let full = export(AgentTraceFormat::AgentToolsFull);
+
+    let header = |output| {
+        serde_json::json!({
+            "schema": "tau.agent_tools",
+            "schema_version": 0,
+            "record_type": "header",
+            "root_agent_id": "agent-root",
+            "included_agent_ids": ["agent-root"],
+            "output": output,
+            "time_unit": "microseconds",
+        })
+    };
+    assert_eq!(lite[0], header("counts"));
+    assert_eq!(full[0], header("full"));
+    assert_eq!(
+        lite[1],
+        serde_json::json!({
+            "record_type": "call", "at_us": 9, "agent_id": "agent-root",
+            "call_id": "call-cancelled", "tool": "background_test",
+            "arguments": null, "status": "cancelled", "duration_us": 1,
+            "output_bytes": 22, "output_lines": 2,
+        })
+    );
+    assert_eq!(
+        full[1],
+        serde_json::json!({
+            "record_type": "call", "at_us": 9, "agent_id": "agent-root",
+            "call_id": "call-cancelled", "tool": "background_test",
+            "arguments": null, "status": "cancelled", "duration_us": 1,
+            "output": "cancelled: cancelled\n\n",
+        })
+    );
+    assert_eq!(lite[2]["call_id"], "call-incomplete");
+    assert_eq!(lite[2]["status"], "incomplete");
+    assert_eq!(lite[2]["output_bytes"], 0);
+    assert_eq!(lite[2]["output_lines"], 0);
+    assert_eq!(full[2]["call_id"], "call-incomplete");
+    assert_eq!(full[2]["status"], "incomplete");
+    assert!(full[2].get("duration_us").is_none());
+    assert!(full[2].get("output").is_none());
+    assert_eq!(lite[3]["call_id"], "call-decreasing");
+    assert!(lite[3].get("duration_us").is_none());
+    assert_eq!(full[3]["output"], "done");
+    assert!(full[3].get("duration_us").is_none());
 }
 
 /// Trace preparation rejects missing, active, and corrupt durable journals

@@ -791,6 +791,12 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     cli::AgentTraceFormat::OtlpJson => {
                         tau_session_inspect::AgentTraceFormat::OtlpJson
                     }
+                    cli::AgentTraceFormat::AgentToolsLite => {
+                        tau_session_inspect::AgentTraceFormat::AgentToolsLite
+                    }
+                    cli::AgentTraceFormat::AgentToolsFull => {
+                        tau_session_inspect::AgentTraceFormat::AgentToolsFull
+                    }
                 };
                 let mut output = tau_session_inspect::prepare_agent_trace(
                     &args.agents_dir,
