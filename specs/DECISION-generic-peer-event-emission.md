@@ -50,13 +50,13 @@ broadcast nor passed to downstream domain consumers.
 
 There is no new catch-all durable event journal. Existing event-schema policy
 continues to select agent, session, restore, current-state, or no durable
-storage. `Emit.persist` applies uniformly as generic publication metadata;
-`Emit` intake must not override it for a concrete event. Peer requests and
+storage. `Emit.persist` is positive publication metadata: `true` requests
+ordinary eligible semantic persistence and `false` requests live-only
+publication. Event-family classification remains authoritative, and `Emit`
+intake must not override it for a concrete event. Peer requests and
 reports use `persist=false` unless a separately approved contract defines
 idempotent durable recovery. A committed event with `persist=false` has runtime
 ordering and live delivery but no cold-restart replay guarantee.
-The field spelling, polarity, and no-compatibility transition are governed by
-[DECISION-positive-persistence-publication-metadata](DECISION-positive-persistence-publication-metadata.md).
 
 `tool.request` retains its existing caller-selected session-restore
 classification as an explicit exception. Generic intake preserves

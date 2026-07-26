@@ -2,16 +2,15 @@
 
 Authority: confirmed, 2026-07-14, dpc
 
-Slack receive and initiation policy uses one bounded `conversations` list. Each
-record binds a stable alias to one exact native conversation and optional fixed
-thread, declares its explicit `channel`, `mpim`, or `dm` kind, and independently
-enables `receive` and `proactive_send`. Dynamic direct-message discovery is a
-separate explicit, bounded, exact-user-bound policy.
+## Decision
 
-Aliases, not native identifiers, are proactive selectors. Receive creates
-source-bound reply authority but no proactive authority; proactive send grants no
-receive or reply authority. Current policy is revalidated at use time.
+Slack receive and initiation policy uses bounded, exact routes named by stable
+aliases. Receive and proactive-send authority are independent. Dynamic
+direct-message authority is separate, explicit, and bounded. Proactive callers
+select aliases rather than native identifiers.
 
-This trades explicit configuration for atomic conflict validation and avoids
-asymmetric global grants. Exact behavior is specified by
+## Rationale
+
+Explicit exact grants avoid asymmetric global authority. Exact behavior is
+specified by
 [SPEC-tau-ext-slack-conversation-routing](SPEC-tau-ext-slack-conversation-routing.md).

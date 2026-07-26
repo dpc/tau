@@ -13,9 +13,9 @@ are subject to
 
 ## Event sequencing, interception, and persistence
 
-[DECISION-positive-persistence-publication-metadata](../../../specs/DECISION-positive-persistence-publication-metadata.md)
-governs publication metadata spelling and polarity; event-family exclusions and
-persistence exceptions remain independent.
+[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
+governs publication metadata; event-family exclusions and persistence exceptions
+remain independent.
 
 All ordinary event publication should flow through the central publish path:
 `enqueue_publish` runs interceptors in priority order, `commit_event` stamps a

@@ -54,8 +54,8 @@ Provider/Tool/Core extensions. Its enclosing `Emit.persist` selects live-only
 (`false`) or session-restore (`true`) publication; durable replay carries stable configured
 publisher provenance but never requests execution. See
 [SPEC-tool-requests-and-routing](../../../specs/SPEC-tool-requests-and-routing.md).
-[DECISION-positive-persistence-publication-metadata](../../../specs/DECISION-positive-persistence-publication-metadata.md)
-governs the positive publication field and polarity.
+[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
+governs publication metadata and persistence classification.
 
 Architectural or externally meaningful functional changes to protocol-facing
 event persistence or the harness-extension interface require the separately

@@ -42,8 +42,8 @@ a call depending on a successful workdir change must be made in a later turn.
 The generic shell's call-level `cwd` and the ChatGPT-facing
 `shell_command.workdir` remain invocation-local overrides and must never mutate
 workdir metadata. The latter is distinct from the top-level persistent
-`workdir(path)` tool, as recorded by
-[DECISION-model-native-tool-surfaces](DECISION-model-native-tool-surfaces.md).
+`workdir(path)` tool, as required by
+[REQ-model-trained-tool-compatibility](REQ-model-trained-tool-compatibility.md).
 
 The verified Codex CLI interface at revision `2f7d89b141` uses an
 invocation-local argument named `workdir` for both legacy `shell_command` and

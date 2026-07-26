@@ -27,8 +27,8 @@ accepted Configure-derived declarations, and `Ready`, in that order.
 `startup_event` preserves durable `Emit` metadata, while
 `startup_transient_event` sets `Emit.persist=false` for runtime-only declarations;
 both retain their builder order before `Ready`.
-[DECISION-positive-persistence-publication-metadata](../../../specs/DECISION-positive-persistence-publication-metadata.md)
-governs the positive publication field and polarity.
+[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
+governs publication metadata and persistence classification.
 Tool helpers always publish transient `tool.registration_declared` /
 `tool.unregistration_declared` inputs rather than harness-owned canonical state;
 the complete downstream contract is

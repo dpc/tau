@@ -129,7 +129,7 @@ only where that row retains the old event names and lacks the snapshot-to-canoni
 projection split; its generic publication, authorship, interception, and
 commit-before-effects rules remain governing. The decision follows
 [DECISION-event-log-first-extension-state](DECISION-event-log-first-extension-state.md),
-[DECISION-positive-persistence-publication-metadata](DECISION-positive-persistence-publication-metadata.md),
+[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md),
 [DECISION-instruction-symlink-discovery](DECISION-instruction-symlink-discovery.md),
 and [DECISION-no-backward-compatibility](DECISION-no-backward-compatibility.md).
 It was separately reviewed and confirmed under

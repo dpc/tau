@@ -111,8 +111,7 @@ The existing prompt-start fact already denotes a fully materialized request
 admitted before provider receipt, so reusing it avoids a new protocol concept
 with no distinct authority.
 
-This decision supersedes only the `agent.prompt_created` persistence exception
-in
-[DECISION-positive-persistence-publication-metadata](DECISION-positive-persistence-publication-metadata.md)
+This decision refines the generic publication and persistence contract in
+[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md)
 and is governed by
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).

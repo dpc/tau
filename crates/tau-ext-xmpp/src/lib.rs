@@ -1,10 +1,9 @@
 //! Personal XMPP bridge extension for Tau agents.
 //!
 //! The extension declares logical `xmpp_register` and `xmpp_send` tools, which
-//! `ToolNameScope` maps to final per-instance wire names. Under
-//! `DECISION-tau-ext-xmpp-opt-in-bridge`, it is disabled by default; it also
-//! uses a mandatory JID allowlist and treats XMPP text as external untrusted
-//! prompt input.
+//! `ToolNameScope` maps to final per-instance wire names. It is disabled by
+//! default, uses a mandatory JID allowlist, and treats XMPP text as external
+//! untrusted prompt input.
 //! Allowlist matching and default-recipient validation follow
 //! `SPEC-tau-ext-xmpp-allowlist-and-default-recipient`.
 //! Its transport, routing, lifecycle, and trust boundaries are summarized in
