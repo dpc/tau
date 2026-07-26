@@ -1,6 +1,6 @@
 # DECISION-agent-initialization-discovery-snapshots: Atomic agent initialization discovery
 
-Authority: unconfirmed
+Authority: confirmed, 2026-07-26, dpc
 
 ## Decision
 
@@ -126,9 +126,7 @@ commit-before-effects rules remain governing. The decision follows
 [DECISION-positive-persistence-publication-metadata](DECISION-positive-persistence-publication-metadata.md),
 [DECISION-instruction-symlink-discovery](DECISION-instruction-symlink-discovery.md),
 and [DECISION-no-backward-compatibility](DECISION-no-backward-compatibility.md).
-It requires separate review and human confirmation under
+It was separately reviewed and confirmed under
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md)
-before implementation. Until confirmation and implementation, the current
-Linked Specs continue to describe the active interface and behavior. Confirmation
-must synchronize the superseded decisions before implementation; current-state
-architecture and specifications change with the implementing change.
+before implementation. Current-state architecture and specifications change
+with the implementing change.
