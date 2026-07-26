@@ -8,6 +8,27 @@ use tau_proto::{AgentCreator, AgentId, AgentStarted, Event, UnixMicros};
 
 use super::*;
 
+/// A trace with no virtual calls still emits one strict TOON document with an
+/// explicit empty counted array.
+#[test]
+fn compact_toon_frames_zero_calls() {
+    let (root, _native) = prepare_fixture();
+    let mut toon = prepare_agent_trace(
+        root.path(),
+        &AgentId::parse("agent-stage").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentToolsToon(AgentTraceMode::Lite),
+    )
+    .expect("TOON trace");
+    let mut bytes = Vec::new();
+    toon.copy_to(&mut bytes).expect("copy TOON");
+    let text = String::from_utf8(bytes).expect("UTF-8 TOON");
+    let decoded: serde_json::Value = serde_toon::from_str(&text).expect("strict TOON");
+
+    assert!(text.contains("calls[0]:"));
+    assert_eq!(decoded["calls"], serde_json::json!([]));
+}
+
 fn prepare_fixture() -> (tempfile::TempDir, PreparedAgentTrace) {
     let root = tempfile::tempdir().expect("state root");
     let agent_id = AgentId::parse("agent-stage").expect("agent id");

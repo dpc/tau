@@ -1,5 +1,6 @@
 use std::io::Write as _;
 
+use base64::Engine as _;
 use tau_proto::{
     AgentId, ContextRole, Event, MessageItem, SessionAgentLoaded, SessionId, ToolType,
 };
@@ -831,7 +832,7 @@ fn agent_tools_lite_is_compact_relative_and_output_free() {
         temp.path(),
         &AgentId::parse("agent-root").expect("agent id"),
         DescendantSelection::RootOnly,
-        AgentTraceFormat::AgentToolsLite,
+        AgentTraceFormat::AgentToolsJsonl(AgentTraceMode::Lite),
     )
     .expect("compact trace");
     let lines = output
@@ -882,7 +883,7 @@ fn agent_tools_full_includes_rendered_output() {
         temp.path(),
         &AgentId::parse("agent-root").expect("agent id"),
         DescendantSelection::RootOnly,
-        AgentTraceFormat::AgentToolsFull,
+        AgentTraceFormat::AgentToolsJsonl(AgentTraceMode::Full),
     )
     .expect("compact full trace");
     let lines = output
@@ -895,6 +896,149 @@ fn agent_tools_full_includes_rendered_output() {
     assert!(lines[1].get("output_bytes").is_none());
     assert!(lines[1].get("output_lines").is_none());
     assert_eq!(lines[2]["output"], "error: second failed\n\ndetail");
+
+    let toon = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentToolsToon(AgentTraceMode::Full),
+    )
+    .expect("compact full TOON");
+    assert!(toon.contains(r#"output: "one\ntwo\n""#));
+    let decoded: serde_json::Value = serde_toon::from_str(&toon).expect("strict TOON");
+    assert_eq!(decoded["calls"][0]["output"], "one\ntwo\n");
+}
+
+/// TOON uses one counted calls array, escapes multiline full output inside one
+/// scalar, and round-trips complete tagged-CBOR arguments that ordinary JSON
+/// cannot represent faithfully.
+#[test]
+fn agent_tools_toon_frames_multiline_and_lossless_arguments() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    let agent_id = AgentId::parse("agent-root").expect("agent id");
+    let mut call = provider_tool_call_event(&agent_id, "prompt-toon", "call-toon");
+    let Event::ProviderResponseFinished(finished) = &mut call else {
+        unreachable!("helper returns provider response")
+    };
+    let ContextItem::ToolCall(call_item) = &mut finished.output_items[0] else {
+        unreachable!("helper returns tool call")
+    };
+    call_item.arguments = CborValue::Map(vec![(
+        CborValue::Bytes(vec![1, 2]),
+        CborValue::Tag(42, Box::new(CborValue::Float(f64::NAN))),
+    )]);
+    let mut store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            call,
+            tau_proto::UnixMicros::new(2),
+        )
+        .expect("tool call");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderToolResult(tau_proto::ToolResult {
+                call_id: "call-toon".into(),
+                tool_name: tau_proto::ToolName::new("background_test"),
+                tool_type: ToolType::Function,
+                result: CborValue::Text("first\nsecond\n".into()),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::Final,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+            tau_proto::UnixMicros::new(3),
+        )
+        .expect("tool result");
+    drop(store);
+
+    let full = export_trace(
+        temp.path(),
+        &agent_id,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentToolsToon(AgentTraceMode::Full),
+    )
+    .expect("full TOON");
+    assert!(full.contains("calls[1]:"));
+    assert!(full.contains("arguments_json_base64:"));
+    let decoded: serde_json::Value = serde_toon::from_str(&full).expect("strict TOON round trip");
+    let call = &decoded["calls"][0];
+    let arguments: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(
+                call["arguments_json_base64"]
+                    .as_str()
+                    .expect("lossless arguments JSON base64 scalar"),
+            )
+            .expect("base64 arguments JSON"),
+    )
+    .expect("lossless arguments JSON");
+    let jsonl = export_trace(
+        temp.path(),
+        &agent_id,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentToolsJsonl(AgentTraceMode::Full),
+    )
+    .expect("full JSONL");
+    let jsonl_call: serde_json::Value =
+        serde_json::from_str(jsonl.lines().nth(1).expect("call line")).expect("JSONL call");
+    assert_eq!(call["call_id"], jsonl_call["call_id"]);
+    assert_eq!(call["status"], jsonl_call["status"]);
+    assert_eq!(call["output"], "first\nsecond\n");
+    assert_eq!(arguments["type"], "map");
+    assert_eq!(arguments["value"][0]["key"]["type"], "bytes");
+    assert_eq!(arguments["value"][0]["value"]["type"], "tag");
+    assert_eq!(
+        arguments,
+        serde_json::json!({
+            "type": "map",
+            "value": [{
+                "key": {"type": "bytes", "encoding": "base64", "value": "AQI="},
+                "value": {
+                    "type": "tag",
+                    "tag": "42",
+                    "value": {"type": "float64_bits", "value": "7ff8000000000000"},
+                },
+            }],
+        })
+    );
+
+    let lite = export_trace(
+        temp.path(),
+        &agent_id,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentToolsToon(AgentTraceMode::Lite),
+    )
+    .expect("lite TOON");
+    let decoded: serde_json::Value = serde_toon::from_str(&lite).expect("strict TOON round trip");
+    assert_eq!(decoded["output"], "counts");
+    let call = &decoded["calls"][0];
+    let arguments: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(
+                call["arguments_json_base64"]
+                    .as_str()
+                    .expect("lossless arguments JSON base64 scalar"),
+            )
+            .expect("base64 arguments JSON"),
+    )
+    .expect("lossless arguments JSON");
+    assert_eq!(arguments, jsonl_call["arguments"]);
+    assert_eq!(call["output_bytes"], 13);
+    assert_eq!(call["output_lines"], 2);
+    assert!(call.get("output").is_none());
 }
 
 /// A background placeholder keeps the model-visible call open until the real
@@ -916,7 +1060,7 @@ fn agent_tools_background_placeholder_waits_for_real_result() {
         temp.path(),
         &AgentId::parse("agent-root").expect("agent id"),
         DescendantSelection::RootOnly,
-        AgentTraceFormat::AgentToolsFull,
+        AgentTraceFormat::AgentToolsJsonl(AgentTraceMode::Full),
     )
     .expect("compact full trace");
     let calls = output
@@ -980,7 +1124,7 @@ fn agent_tools_rejects_ambiguous_concurrent_background_id_reuse() {
         temp.path(),
         &agent_id,
         DescendantSelection::RootOnly,
-        AgentTraceFormat::AgentToolsLite,
+        AgentTraceFormat::AgentToolsJsonl(AgentTraceMode::Lite),
     )
     .expect_err("ambiguous generations must fail");
 
@@ -1082,7 +1226,7 @@ fn agent_tools_routes_reused_foreground_and_background_terminals() {
             temp.path(),
             &agent_id,
             DescendantSelection::RootOnly,
-            AgentTraceFormat::AgentToolsFull,
+            AgentTraceFormat::AgentToolsJsonl(AgentTraceMode::Full),
         )
         .expect("compact trace");
         let calls = output
@@ -1205,20 +1349,20 @@ fn agent_tools_stable_records_cover_non_success_branches() {
         .expect("decreasing terminal");
     drop(store);
 
-    let export = |format| {
+    let export = |mode| {
         export_trace(
             temp.path(),
             &agent_id,
             DescendantSelection::RootOnly,
-            format,
+            AgentTraceFormat::AgentToolsJsonl(mode),
         )
         .expect("compact trace")
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
         .collect::<Vec<_>>()
     };
-    let lite = export(AgentTraceFormat::AgentToolsLite);
-    let full = export(AgentTraceFormat::AgentToolsFull);
+    let lite = export(AgentTraceMode::Lite);
+    let full = export(AgentTraceMode::Full);
 
     let header = |output| {
         serde_json::json!({

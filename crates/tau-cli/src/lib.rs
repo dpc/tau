@@ -349,6 +349,25 @@ fn reject_harness_config_overrides(
     )))
 }
 
+fn validate_agent_trace_mode(
+    format: cli::AgentTraceFormat,
+    mode: cli::AgentTraceMode,
+) -> Result<(), CliError> {
+    if mode == cli::AgentTraceMode::Full
+        && !matches!(
+            format,
+            cli::AgentTraceFormat::AgentToolsJsonl | cli::AgentTraceFormat::AgentToolsToon
+        )
+    {
+        return Err(CliError::Participant(
+            "`agent trace --mode full` requires `--format agent-tools-jsonl` or \
+             `--format agent-tools-toon`"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn reject_dev_tmux_startup_overrides(
     startup_role: Option<&str>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
@@ -784,6 +803,10 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 command: cli::AgentCommand::Trace(args),
             } => {
                 reject_harness_config_overrides(&harness_config_overrides, "agent trace")?;
+                let mode = match args.mode {
+                    cli::AgentTraceMode::Lite => tau_session_inspect::AgentTraceMode::Lite,
+                    cli::AgentTraceMode::Full => tau_session_inspect::AgentTraceMode::Full,
+                };
                 let format = match args.format {
                     cli::AgentTraceFormat::TauJsonl => {
                         tau_session_inspect::AgentTraceFormat::TauJsonl
@@ -791,13 +814,14 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     cli::AgentTraceFormat::OtlpJson => {
                         tau_session_inspect::AgentTraceFormat::OtlpJson
                     }
-                    cli::AgentTraceFormat::AgentToolsLite => {
-                        tau_session_inspect::AgentTraceFormat::AgentToolsLite
+                    cli::AgentTraceFormat::AgentToolsJsonl => {
+                        tau_session_inspect::AgentTraceFormat::AgentToolsJsonl(mode)
                     }
-                    cli::AgentTraceFormat::AgentToolsFull => {
-                        tau_session_inspect::AgentTraceFormat::AgentToolsFull
+                    cli::AgentTraceFormat::AgentToolsToon => {
+                        tau_session_inspect::AgentTraceFormat::AgentToolsToon(mode)
                     }
                 };
+                validate_agent_trace_mode(args.format, args.mode)?;
                 let mut output = tau_session_inspect::prepare_agent_trace(
                     &args.agents_dir,
                     &args.agent_id,

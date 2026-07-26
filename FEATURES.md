@@ -234,5 +234,6 @@ marks unavailable legacy facts rather than inferring them.
 Complete offline durable-agent exports are available through
 `tau agent trace <agent-id>`. See [Durable agent trace export](docs/agent-trace.md)
 for snapshot guarantees, the canonical native JSONL schema, and the lossy OTLP
-visualization adapter. `agent-tools-lite` and `agent-tools-full` provide dense,
-trace-relative JSON Lines containing only model-visible tool calls.
+visualization adapter. `agent-tools-toon` and `agent-tools-jsonl` provide dense,
+trace-relative views containing only model-visible tool calls, with independently
+selected lite/full output detail. Agent trace defaults to TOON lite.

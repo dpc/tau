@@ -651,9 +651,11 @@ usage accounting, and the no-write behavior of offline inspection.
 
 `tau agent trace` exports unredacted durable journals. Output can contain full
 prompts, reasoning, images, tool arguments and results, messages, model
-parameters, usage, and cost data. Treat both native and OTLP output as sensitive
-as the original state directory; redirect or transmit it only to trusted
-destinations.
+parameters, usage, and cost data. Treat native, OTLP, compact JSONL, and compact
+TOON output as sensitive as the original state directory; redirect or transmit
+it only to trusted destinations. Compact lite mode exposes tool names, arguments,
+commands, statuses, and output sizes; full mode additionally exposes complete
+normalized output and rendered error details.
 
 The exporter opens only existing state, takes nonblocking exclusive locks in
 lexical agent-ID order, rechecks descendant discovery under lock, and validates
@@ -668,6 +670,27 @@ Heap use is proportional to unique operation-ID count and bytes in the largest
 included journal; IDs have no separate cap beyond the record framing limit.
 A pathological journal can therefore exhaust exporter process memory. The
 exporter never truncates accepted records.
+
+Compact projections stage payload-bearing arguments and full output in anonymous
+files; lite output bodies are transient while their counts are computed. Heap
+still grows with call count and encoded call-ID/tool-name bytes across the
+selected workflow. TOON materializes one call at a time from staging. It directly
+encodes safe readable calls, escapes multiline text, and Base64-frames only the
+exceptional call ID, arguments, command, or output field whenever tagged-CBOR, exact
+floats, or unsafe controls cannot round-trip directly. TOON must never print
+payload C0/C1 controls raw.
+
+For one exceptional near-limit argument, per-call materialization can
+simultaneously retain the decoded value, amplified `TaggedCbor`, compact JSON
+bytes, roughly 4/3-size Base64 text, and TOON scalar while the anonymous final
+artifact grows on temporary storage. A pathological frame-valid call can exhaust
+memory or disk. Projection failure remains before stdout, and anonymous files are
+delete-on-close.
+
+Changes to compact projection must re-check zero/many-call framing, arbitrary
+strings and controls, strict TOON semantic round trips, exact tagged-CBOR and
+float-bit reconstruction, multiline full output, and parity with independently
+parseable JSONL call records.
 
 Revisit this boundary before adding live/follow capture, user-selected output
 files, redaction modes, range selection, provider HTTP-body or streaming-delta

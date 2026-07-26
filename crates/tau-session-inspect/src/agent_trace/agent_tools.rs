@@ -1,38 +1,22 @@
 //! Compact model-visible tool-call trace projection.
 
 mod payload_store;
+mod toon;
+
+// Keep test-only modules after every production module.
 #[cfg(test)]
 mod tests;
 
 use std::collections::BTreeMap;
 
 use payload_store::{Endpoint, PayloadStore};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tau_core::{AgentJournalSnapshot, PersistedAgentEventSeq};
 use tau_proto::{AgentId, CborValue, ContextItem, Event, ToolCallId, ToolName, UnixMicros};
 
 use crate::InspectError;
 
 const SCHEMA: &str = "tau.agent_tools";
-
-/// Output payload policy for a compact agent-tool trace.
-#[derive(Clone, Copy)]
-enum OutputMode {
-    /// Emit byte and logical-line counts only.
-    Counts,
-    /// Emit complete rendered output text.
-    Full,
-}
-
-impl OutputMode {
-    /// Returns the stable header label.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Counts => "counts",
-            Self::Full => "full",
-        }
-    }
-}
 
 /// First-line metadata for a compact tool trace.
 #[derive(Serialize)]
@@ -51,6 +35,25 @@ struct Header<'a> {
     output: &'static str,
     /// Unit used by all relative timing fields.
     time_unit: &'static str,
+}
+
+impl<'a> Header<'a> {
+    /// Builds shared metadata for either compact encoding.
+    fn new(
+        root_agent_id: &'a AgentId,
+        snapshot: &'a AgentJournalSnapshot,
+        mode: super::AgentTraceMode,
+    ) -> Self {
+        Self {
+            schema: SCHEMA,
+            schema_version: 0,
+            record_type: "header",
+            root_agent_id,
+            included_agent_ids: snapshot.agent_ids().iter().collect(),
+            output: mode.label(),
+            time_unit: "microseconds",
+        }
+    }
 }
 
 /// Closed terminal state labels in the stable output schema.
@@ -104,7 +107,7 @@ struct CallRecord<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<String>,
     /// Complete provider-declared arguments.
-    arguments: serde_json::Value,
+    arguments: ArgumentsProjection,
     /// Terminal state.
     status: Status,
     /// Time from provider declaration to the durable terminal.
@@ -113,6 +116,65 @@ struct CallRecord<'a> {
     /// Mode-specific output projection.
     #[serde(flatten)]
     output: OutputProjection,
+}
+
+/// Semantic argument projection used by JSONL and TOON.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ArgumentsProjection {
+    /// Concise ordinary JSON value.
+    Ordinary(serde_json::Value),
+    /// Complete Tau tagged-CBOR JSON value.
+    TaggedCbor(serde_json::Value),
+}
+
+/// Correlation-staging form that preserves the semantic argument variant.
+#[derive(Deserialize, Serialize)]
+enum StagedArguments {
+    /// Concise ordinary JSON value.
+    Ordinary(serde_json::Value),
+    /// Complete Tau tagged-CBOR JSON value.
+    TaggedCbor(serde_json::Value),
+}
+
+impl From<ArgumentsProjection> for StagedArguments {
+    fn from(value: ArgumentsProjection) -> Self {
+        match value {
+            ArgumentsProjection::Ordinary(value) => Self::Ordinary(value),
+            ArgumentsProjection::TaggedCbor(value) => Self::TaggedCbor(value),
+        }
+    }
+}
+
+impl From<StagedArguments> for ArgumentsProjection {
+    fn from(value: StagedArguments) -> Self {
+        match value {
+            StagedArguments::Ordinary(value) => Self::Ordinary(value),
+            StagedArguments::TaggedCbor(value) => Self::TaggedCbor(value),
+        }
+    }
+}
+
+impl ArgumentsProjection {
+    /// Projects CBOR as concise JSON or complete tagged-CBOR.
+    fn from_cbor(value: &CborValue) -> Self {
+        match faithful_json(value) {
+            Some(value) => Self::Ordinary(value),
+            None => Self::TaggedCbor(crate::lossless_json::typed_cbor(value)),
+        }
+    }
+
+    /// Returns the projected JSON value.
+    fn value(&self) -> &serde_json::Value {
+        match self {
+            Self::Ordinary(value) | Self::TaggedCbor(value) => value,
+        }
+    }
+
+    /// Returns whether the projection uses complete tagged-CBOR.
+    fn is_tagged(&self) -> bool {
+        matches!(self, Self::TaggedCbor(_))
+    }
 }
 
 /// Correlated metadata retained in heap until chronological serialization.
@@ -155,49 +217,41 @@ enum TerminalOutput {
     Full(Endpoint),
 }
 
-/// Writes the lite compact model-visible tool-call overview.
-pub(super) fn write_lite_jsonl(
-    root_agent_id: &AgentId,
-    snapshot: &AgentJournalSnapshot,
-    output: &mut impl std::io::Write,
-) -> Result<(), InspectError> {
-    write_jsonl(root_agent_id, snapshot, OutputMode::Counts, output)
-}
-
-/// Writes the full compact model-visible tool-call overview.
-pub(super) fn write_full_jsonl(
-    root_agent_id: &AgentId,
-    snapshot: &AgentJournalSnapshot,
-    output: &mut impl std::io::Write,
-) -> Result<(), InspectError> {
-    write_jsonl(root_agent_id, snapshot, OutputMode::Full, output)
-}
-
 /// Writes one selected compact JSON Lines projection.
-fn write_jsonl(
+pub(super) fn write_jsonl(
     root_agent_id: &AgentId,
     snapshot: &AgentJournalSnapshot,
-    mode: OutputMode,
+    mode: super::AgentTraceMode,
     output: &mut impl std::io::Write,
 ) -> Result<(), InspectError> {
     let origin = trace_origin(snapshot)?;
-    serde_json::to_writer(
-        &mut *output,
-        &Header {
-            schema: SCHEMA,
-            schema_version: 0,
-            record_type: "header",
-            root_agent_id,
-            included_agent_ids: snapshot.agent_ids().iter().collect(),
-            output: mode.label(),
-            time_unit: "microseconds",
-        },
-    )
-    .map_err(json_error)?;
+    serde_json::to_writer(&mut *output, &Header::new(root_agent_id, snapshot, mode))
+        .map_err(json_error)?;
     writeln!(output)?;
 
     let mut payloads = PayloadStore::new()?;
     let mut calls = collect_calls(snapshot, mode, &mut payloads)?;
+    sort_calls(&mut calls);
+    for call in &calls {
+        let record = call.project(origin, mode, &mut payloads)?;
+        serde_json::to_writer(&mut *output, &record).map_err(json_error)?;
+        writeln!(output)?;
+    }
+    Ok(())
+}
+
+/// Writes one strict TOON document with a counted calls array.
+pub(super) fn write_toon(
+    root_agent_id: &AgentId,
+    snapshot: &AgentJournalSnapshot,
+    mode: super::AgentTraceMode,
+    output: &mut impl std::io::Write,
+) -> Result<(), InspectError> {
+    toon::write(root_agent_id, snapshot, mode, output)
+}
+
+/// Sorts projected calls by relative journal wall-clock and deterministic ties.
+fn sort_calls(calls: &mut [Call]) {
     calls.sort_by(|left, right| {
         (
             left.started_at,
@@ -212,13 +266,23 @@ fn write_jsonl(
                 right.item_index,
             ))
     });
-    for call in &calls {
-        let arguments: serde_json::Value = payloads.load(call.arguments)?;
-        let command = call
+}
+
+impl Call {
+    /// Loads one call's staged payloads into its selected output record.
+    fn project<'a>(
+        &'a self,
+        origin: UnixMicros,
+        mode: super::AgentTraceMode,
+        payloads: &mut PayloadStore,
+    ) -> Result<CallRecord<'a>, InspectError> {
+        let arguments =
+            ArgumentsProjection::from(payloads.load::<StagedArguments>(self.arguments)?);
+        let command = self
             .command
             .map(|endpoint| payloads.load(endpoint))
             .transpose()?;
-        let (status, duration_us, projected_output) = match &call.terminal {
+        let (status, duration_us, output) = match &self.terminal {
             Some(terminal) => {
                 let output = match terminal.output {
                     TerminalOutput::Counts { bytes, lines } => OutputProjection::Counts {
@@ -231,7 +295,7 @@ fn write_jsonl(
                 };
                 (
                     terminal.status,
-                    terminal.at.get().checked_sub(call.started_at.get()),
+                    terminal.at.get().checked_sub(self.started_at.get()),
                     output,
                 )
             }
@@ -239,33 +303,27 @@ fn write_jsonl(
                 Status::Incomplete,
                 None,
                 match mode {
-                    OutputMode::Counts => OutputProjection::Counts {
+                    super::AgentTraceMode::Lite => OutputProjection::Counts {
                         output_bytes: 0,
                         output_lines: 0,
                     },
-                    OutputMode::Full => OutputProjection::Absent {},
+                    super::AgentTraceMode::Full => OutputProjection::Absent {},
                 },
             ),
         };
-        serde_json::to_writer(
-            &mut *output,
-            &CallRecord {
-                record_type: "call",
-                at_us: call.started_at.get().saturating_sub(origin.get()),
-                agent_id: &call.agent_id,
-                call_id: &call.call_id,
-                tool: &call.tool,
-                command,
-                arguments,
-                status,
-                duration_us,
-                output: projected_output,
-            },
-        )
-        .map_err(json_error)?;
-        writeln!(output)?;
+        Ok(CallRecord {
+            record_type: "call",
+            at_us: self.started_at.get().saturating_sub(origin.get()),
+            agent_id: &self.agent_id,
+            call_id: &self.call_id,
+            tool: &self.tool,
+            command,
+            arguments,
+            status,
+            duration_us,
+            output,
+        })
     }
-    Ok(())
 }
 
 /// Finds the earliest included journal timestamp.
@@ -285,7 +343,7 @@ fn trace_origin(snapshot: &AgentJournalSnapshot) -> Result<UnixMicros, InspectEr
 /// Collects provider-declared calls and correlates eligible durable terminals.
 fn collect_calls(
     snapshot: &AgentJournalSnapshot,
-    mode: OutputMode,
+    mode: super::AgentTraceMode,
     payloads: &mut PayloadStore,
 ) -> Result<Vec<Call>, InspectError> {
     let mut calls = Vec::new();
@@ -312,7 +370,9 @@ fn collect_calls(
                             .as_ref()
                             .map(|command| payloads.append(command))
                             .transpose()?,
-                        arguments: payloads.append(&faithful_arguments(&call.arguments))?,
+                        arguments: payloads.append(&StagedArguments::from(
+                            ArgumentsProjection::from_cbor(&call.arguments),
+                        ))?,
                         started_at: record.recorded_at,
                         started_seq: record.seq,
                         item_index,
@@ -339,7 +399,7 @@ fn collect_calls(
 fn apply_terminal(
     event: &Event,
     at: UnixMicros,
-    mode: OutputMode,
+    mode: super::AgentTraceMode,
     foreground: &mut BTreeMap<ToolCallId, usize>,
     background: &mut BTreeMap<ToolCallId, usize>,
     calls: &mut [Call],
@@ -393,11 +453,11 @@ fn apply_terminal(
         return Ok(());
     };
     let output = match mode {
-        OutputMode::Counts => TerminalOutput::Counts {
+        super::AgentTraceMode::Lite => TerminalOutput::Counts {
             bytes: rendered.len(),
             lines: rendered.lines().count(),
         },
-        OutputMode::Full => TerminalOutput::Full(payloads.append(&rendered)?),
+        super::AgentTraceMode::Full => TerminalOutput::Full(payloads.append(&rendered)?),
     };
     calls[index].terminal = Some(Terminal { at, status, output });
     Ok(())
@@ -441,13 +501,6 @@ fn shell_command(tool: &ToolName, arguments: &CborValue) -> Option<String> {
     Some(command.clone())
 }
 
-/// Uses concise JSON only when every nested CBOR value is represented
-/// faithfully; otherwise uses Tau's lossless tagged-CBOR JSON for the complete
-/// argument value.
-fn faithful_arguments(value: &CborValue) -> serde_json::Value {
-    faithful_json(value).unwrap_or_else(|| crate::lossless_json::typed_cbor(value))
-}
-
 /// Recursively converts the JSON-compatible subset without coercion or loss.
 fn faithful_json(value: &CborValue) -> Option<serde_json::Value> {
     match value {
@@ -461,9 +514,7 @@ fn faithful_json(value: &CborValue) -> Option<serde_json::Value> {
                 u64::try_from(value).ok().map(Into::into)
             }
         }
-        CborValue::Float(value) if value.is_finite() => {
-            serde_json::Number::from_f64(*value).map(Into::into)
-        }
+        CborValue::Float(_) => None,
         CborValue::Text(value) => Some(value.clone().into()),
         CborValue::Array(values) => values
             .iter()
@@ -483,7 +534,7 @@ fn faithful_json(value: &CborValue) -> Option<serde_json::Value> {
             }
             Some(object.into())
         }
-        CborValue::Float(_) | CborValue::Bytes(_) | CborValue::Tag(_, _) | _ => None,
+        CborValue::Bytes(_) | CborValue::Tag(_, _) | _ => None,
     }
 }
 

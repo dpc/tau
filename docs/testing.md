@@ -478,5 +478,6 @@ payload bytes; output is never truncated.
 Compact agent-tool coverage additionally checks relative timing, model-visible
 call filtering, shell command projection, lite counts, full output, call-ID
 reuse, background completion, ambiguous background generations, and faithful
-tagged-CBOR fallback. Payload-bearing
-state uses compact anonymous-file offsets by construction.
+tagged-CBOR fallback. TOON coverage round-trips the strict counted-call document
+and protects multiline full-output escaping. Payload-bearing state uses compact
+anonymous-file offsets by construction.

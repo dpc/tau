@@ -753,6 +753,8 @@ fn load_from_dirs_skips_oversized_unclosed_frontmatter() {
     }));
 }
 
+/// Embedded self-knowledge must remain discoverable in deterministic order with
+/// the documented hidden/prompt visibility and task-specific guidance.
 #[test]
 fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     let skills = built_in_skills();
@@ -778,6 +780,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge-source-code",
             "tau-self-knowledge-community",
             "tau-self-knowledge-debugging",
+            "tau-self-knowledge-tracing",
             "tau-self-knowledge-e2e-testing",
         ]
     );
@@ -827,6 +830,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     assert!(skill.content.contains("tau-self-knowledge-source-code"));
     assert!(skill.content.contains("tau-self-knowledge-community"));
     assert!(skill.content.contains("tau-self-knowledge-debugging"));
+    assert!(skill.content.contains("tau-self-knowledge-tracing"));
     assert!(skill.content.contains("tau-self-knowledge-e2e-testing"));
 
     let slack = skills
@@ -968,6 +972,16 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .expect("built-in debugging skill");
     assert!(!debugging.add_to_prompt);
     assert!(debugging.content.contains("## Important paths"));
+
+    let tracing = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-tracing")
+        .expect("built-in tracing skill");
+    assert!(!tracing.add_to_prompt);
+    assert!(tracing.content.contains("--format agent-tools-toon"));
+    assert!(tracing.content.contains("--format agent-tools-jsonl"));
+    assert!(tracing.content.contains("jq -c"));
+    assert!(tracing.content.contains("output_bytes"));
 
     let e2e_testing = skills
         .iter()

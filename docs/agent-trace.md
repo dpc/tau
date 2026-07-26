@@ -1,17 +1,20 @@
 # Durable agent trace export
 
-`tau agent trace <agent-id>` exports existing durable agent journals offline. It
+`tau agent trace <agent-id>` projects from a validated snapshot of existing
+durable agent journals offline. It defaults to a compact TOON-lite virtual-tool
+overview; use explicit `--format tau-jsonl` for the complete journal artifact. It
 does not contact or attach to a harness and does not capture transient provider
 HTTP bodies, streaming deltas, or harness phase timing.
 
 ```console
 tau agent trace <agent-id> \
   [--include-descendants] \
-  [--format tau-jsonl|otlp-json|agent-tools-lite|agent-tools-full] \
+  [--format tau-jsonl|otlp-json|agent-tools-toon|agent-tools-jsonl] \
+  [--mode lite|full] \
   [--agents-dir <path>]
 ```
 
-The defaults select only the requested agent, `tau-jsonl`, and
+The defaults select only the requested agent, `agent-tools-toon`, `lite`, and
 `<state-dir>/agents`. Machine output goes to stdout; diagnostics go to stderr.
 A closed stdout pipe is a successful early consumer exit.
 
@@ -43,6 +46,13 @@ timing/order keys, tool names, and file offsets. Lite computes output counts whi
 reading terminals and does not retain their bodies. Heap still grows with call
 count plus encoded call-ID and tool-name bytes across the selected workflow, so
 pathological high-cardinality journals can exhaust memory.
+
+TOON materializes one call at a time. An exceptional near-limit argument can
+simultaneously occupy its decoded value, amplified `TaggedCbor`, compact JSON
+bytes, roughly 4/3-size Base64 text, and TOON scalar while the anonymous final
+artifact also grows on disk. A pathological but frame-valid call can exhaust
+memory or temporary storage. Such projection failure occurs before stdout; all
+anonymous files remain delete-on-close.
 
 
 ## Native JSON Lines
@@ -132,54 +142,89 @@ only its matching call item; response-wide payloads are not repeated per call.
 
 ## Compact agent tool traces
 
-`agent-tools-lite` and `agent-tools-full` emit stable JSON Lines optimized for
-quick logical reconstruction of agent activity. They include only virtual tool
-calls declared in durable provider responses. Extension-originated tool requests,
-assistant prose, prompts, messages, compactions, and low-level lifecycle events
-are omitted.
+`agent-tools-toon` and `agent-tools-jsonl` emit the same stable compact projection
+optimized for quick logical reconstruction of agent activity. They include only
+virtual tool calls declared in durable provider responses. Extension-originated
+tool requests, assistant prose, prompts, messages, compactions, and low-level
+lifecycle events are omitted. `--mode` selects `lite` (the default) or `full`;
+`--mode full` is invalid with `tau-jsonl` and `otlp-json`.
 
-Each artifact starts with a `tau.agent_tools` schema-version-0 header. Call lines
-then appear by projected journal wall-clock across included agents. This is not a
-causal or authoritative cross-agent chronology. Equal timestamps order by agent
-ID, journal sequence, then provider item position. `at_us` is measured from the
-earliest journal occurrence in the trace and `duration_us` is measured from the
-provider declaration to its terminal fact. Neither format emits an absolute
-timestamp. A decreasing terminal clock leaves `duration_us` absent.
+Each artifact starts with a `tau.agent_tools` schema-version-0 header. JSONL emits
+the header and every call as independently parseable lines. TOON emits one strict
+document whose header fields precede a counted `calls[N]` array. Calls appear by
+projected journal wall-clock across included agents. This is not a causal or
+authoritative cross-agent chronology. Equal timestamps order by agent ID, journal
+sequence, then provider item position. `at_us` is measured from the earliest
+included journal occurrence and `duration_us` from provider declaration to its
+terminal fact. Neither encoding emits an absolute timestamp. A decreasing terminal
+clock leaves `duration_us` absent.
 
 The lite variant omits output bodies and reports `output_bytes` (UTF-8 bytes) and
 `output_lines` (Rust `str::lines` logical lines). The full variant emits an
-event-native normalized text projection as `output` and omits those counters:
+event-native normalized text projection as `output` (or exceptional
+`output_base64`) and omits those counters:
 successful CBOR uses `ToolResponse`, errors prepend an `error` header to normalized
 details, and cancellation renders `cancelled: cancelled`.
 Incomplete calls have status `incomplete`; their lite counts are zero and their
-full `output` field is absent. Other statuses are `ok`, `error`, and `cancelled`.
+full output field is absent. Other statuses are `ok`, `error`, and `cancelled`.
 
 Header fields are `schema: string`, `schema_version: integer`,
 `record_type: "header"`, `root_agent_id: string`,
 `included_agent_ids: string[]`, `output: "counts"|"full"`, and
 `time_unit: "microseconds"`. Call fields are `record_type: "call"`,
-`at_us: u64`, `agent_id: string`, `call_id: string`, `tool: string`,
-optional `command: string`, `arguments: JSON|TaggedCbor`, `status`,
+`at_us: u64`, `agent_id: string`, call identity, `tool: string`,
+optional command, arguments, `status`,
 and optional `duration_us: u64`. Lite always adds `output_bytes: u64` and
-`output_lines: u64`; full adds `output: string` only for completed calls.
-Arguments use ordinary JSON only when every nested value is represented
-faithfully; otherwise the complete value uses the `TaggedCbor` form above.
-Schema version `0` follows the same internal compatibility policy as native JSONL.
+`output_lines: u64`; full adds output only for completed calls.
+Arguments use the concise ordinary JSON-shaped value only when every nested value
+is represented faithfully and contains no float. JSONL otherwise places complete
+`TaggedCbor` in `arguments`, including exact float bits. TOON retains the readable
+call envelope and uses `call_id_base64` instead of `call_id` for a control-bearing
+ID. It uses `arguments_json_base64` instead of `arguments` for Base64 compact JSON whenever
+arguments contain tagged-CBOR or unsafe controls. Rare control-bearing commands
+and outputs similarly use `command_base64` and `output_base64` as Base64 UTF-8.
+Consumers decode only that exceptional field. This avoids ambiguous
+nested-object-array framing, numeric normalization, raw terminal controls, and
+Base64 expansion of the rest of the call while remaining lossless. Direct TOON quotes and escapes embedded
+full-output LF, CR, tab, quote, and backslash characters; multiline output remains
+one structurally framed scalar inside `calls[N]`. Schema version `0` follows the
+same internal compatibility policy as native JSONL.
 
 Shell tools named `shell`, `shell_command`, or the internal `gpt_shell` surface
-expose their `command` argument as a top-level field for immediate readability.
-The complete provider-declared argument value remains in `arguments`, including
-the command.
+normally expose their `command` argument as a top-level field for immediate
+readability. The complete provider-declared argument value normally remains in
+`arguments`, including the command; exceptional Base64 fields replace either one
+as described above.
 
 ```console
-$ tau agent trace agent-root --format agent-tools-lite
-{"schema":"tau.agent_tools","schema_version":0,"record_type":"header","root_agent_id":"agent-root","included_agent_ids":["agent-root"],"output":"counts","time_unit":"microseconds"}
-{"record_type":"call","at_us":2419,"agent_id":"agent-root","call_id":"call_1","tool":"shell_command","command":"cargo test -p tau-core","arguments":{"command":"cargo test -p tau-core","workdir":"/work"},"status":"ok","duration_us":180442,"output_bytes":1372,"output_lines":24}
+$ tau agent trace agent-root --format agent-tools-toon
+schema: tau.agent_tools
+schema_version: 0
+record_type: header
+root_agent_id: agent-root
+included_agent_ids[1]: agent-root
+output: counts
+time_unit: microseconds
+calls[1]:
+  - record_type: call
+    at_us: 2419
+    agent_id: agent-root
+    call_id: call_1
+    tool: shell_command
+    command: cargo test -p tau-core
+    arguments:
+      command: cargo test -p tau-core
+      workdir: /work
+    status: ok
+    duration_us: 180442
+    output_bytes: 1372
+    output_lines: 24
 ```
 
 Use `--include-descendants` to obtain one relative journal-wall-clock projection
 for a complete creator-owned workflow.
 
-> **Sensitive data:** Both compact formats expose unredacted tool names,
-> arguments, commands, and error details. `agent-tools-full` additionally exposes
-> complete unredacted tool output. Treat either artifact as sensitive.
+> **Sensitive data:** Both compact encodings expose unredacted tool names,
+> arguments, and commands. `--mode full` additionally exposes complete
+> unredacted output, including rendered error details. Treat either artifact as
+> sensitive.

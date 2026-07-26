@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use clap::Parser;
+use clap::{CommandFactory as _, Parser};
 use tau_cli_term::TermHandle;
 use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
@@ -318,7 +318,7 @@ fn list_agents_command_parses_filters() {
     ));
 }
 
-/// Agent trace defaults select the complete native format and the ordinary
+/// Agent trace defaults select the compact TOON lite overview and the ordinary
 /// state-directory journal root.
 #[test]
 fn agent_trace_command_parses_defaults() {
@@ -331,9 +331,27 @@ fn agent_trace_command_parses_defaults() {
         })
             if args.agent_id.as_str() == "agent-root"
                 && !args.include_descendants
-                && args.format == super::cli::AgentTraceFormat::TauJsonl
+                && args.format == super::cli::AgentTraceFormat::AgentToolsToon
+                && args.mode == super::cli::AgentTraceMode::Lite
                 && args.agents_dir == tau_session_inspect::default_agents_dir()
     ));
+}
+
+/// Agent-trace help must advertise the compact-overview semantics and both
+/// default values so generated help cannot drift from parser behavior.
+#[test]
+fn agent_trace_help_shows_compact_toon_lite_defaults() {
+    let command = super::cli::Cli::command();
+    let mut trace = command
+        .find_subcommand("agent")
+        .and_then(|agent| agent.find_subcommand("trace"))
+        .expect("agent trace command")
+        .clone();
+    let help = trace.render_long_help().to_string();
+
+    assert!(help.contains("Project a validated durable agent snapshot"));
+    assert!(help.contains("[default: agent-tools-toon]"));
+    assert!(help.contains("[default: lite]"));
 }
 
 /// Agent trace accepts the lossy OTLP adapter, descendant workflow inclusion,
@@ -348,6 +366,8 @@ fn agent_trace_command_parses_all_options() {
         "--include-descendants",
         "--format",
         "otlp-json",
+        "--mode",
+        "lite",
         "--agents-dir",
         "/tmp/agents",
     ]);
@@ -359,22 +379,23 @@ fn agent_trace_command_parses_all_options() {
         })
             if args.include_descendants
                 && args.format == super::cli::AgentTraceFormat::OtlpJson
+                && args.mode == super::cli::AgentTraceMode::Lite
                 && args.agents_dir == std::path::Path::new("/tmp/agents")
     ));
 }
 
-/// Agent trace accepts both compact model-visible tool-call projections. This
-/// prevents CLI value names from drifting away from the documented formats.
+/// Agent trace accepts both compact encodings, defaults their detail to lite,
+/// and parses explicit full detail independently from encoding.
 #[test]
-fn agent_trace_command_parses_agent_tool_formats() {
+fn agent_trace_command_parses_compact_formats_and_modes() {
     for (name, expected) in [
         (
-            "agent-tools-lite",
-            super::cli::AgentTraceFormat::AgentToolsLite,
+            "agent-tools-jsonl",
+            super::cli::AgentTraceFormat::AgentToolsJsonl,
         ),
         (
-            "agent-tools-full",
-            super::cli::AgentTraceFormat::AgentToolsFull,
+            "agent-tools-toon",
+            super::cli::AgentTraceFormat::AgentToolsToon,
         ),
     ] {
         let cli =
@@ -384,8 +405,51 @@ fn agent_trace_command_parses_agent_tool_formats() {
             cli.command,
             Some(super::cli::Command::Agent {
                 command: super::cli::AgentCommand::Trace(args),
-            }) if args.format == expected
+            }) if args.format == expected && args.mode == super::cli::AgentTraceMode::Lite
         ));
+    }
+
+    let full = super::cli::Cli::parse_from([
+        "tau",
+        "agent",
+        "trace",
+        "agent-root",
+        "--format",
+        "agent-tools-toon",
+        "--mode",
+        "full",
+    ]);
+    assert!(matches!(
+        full.command,
+        Some(super::cli::Command::Agent {
+            command: super::cli::AgentCommand::Trace(args),
+        }) if args.format == super::cli::AgentTraceFormat::AgentToolsToon
+            && args.mode == super::cli::AgentTraceMode::Full
+    ));
+}
+
+/// Dispatch validation rejects full detail for both noncompact encodings with
+/// the tailored diagnostic while accepting both compact encodings.
+#[test]
+fn agent_trace_mode_validation_matches_format_semantics() {
+    for format in [
+        super::cli::AgentTraceFormat::TauJsonl,
+        super::cli::AgentTraceFormat::OtlpJson,
+    ] {
+        let error = super::validate_agent_trace_mode(format, super::cli::AgentTraceMode::Full)
+            .expect_err("full noncompact trace");
+        assert_eq!(
+            error.to_string(),
+            "participant error: `agent trace --mode full` requires `--format \
+             agent-tools-jsonl` or `--format agent-tools-toon`"
+        );
+    }
+    for format in [
+        super::cli::AgentTraceFormat::AgentToolsJsonl,
+        super::cli::AgentTraceFormat::AgentToolsToon,
+    ] {
+        super::validate_agent_trace_mode(format, super::cli::AgentTraceMode::Full)
+            .expect("full compact trace");
     }
 }
 

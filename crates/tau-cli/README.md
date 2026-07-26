@@ -61,15 +61,17 @@ overview remains the input target for starting a new agent. The underlying
 picker actions remain configurable, and the all-agent action has no default
 key binding.
 
-`tau agent trace <agent-id>` operates offline and exports a stable, validated
-snapshot of existing durable agent journals. `tau-jsonl` is the complete native
+`tau agent trace <agent-id>` operates offline and projects from a stable,
+validated snapshot of existing durable agent journals. It defaults to the compact
+`agent-tools-toon` encoding in lite mode, which is an overview rather than complete
+forensic evidence. Explicit `tau-jsonl` is the complete native
 artifact and preserves every persisted event and its journal-local ordering.
 `otlp-json` is a lossy OpenTelemetry/OpenInference visualization adapter: it
 derives spans only from durable IDs and journal wall-clock timestamps, while
 retaining every raw journal occurrence as a span event.
-`agent-tools-lite` and `agent-tools-full` provide compact, trace-relative JSON
-Lines over only model-visible tool calls. Lite reports output byte/line counts;
-full includes rendered output.
+`agent-tools-toon` and `agent-tools-jsonl` provide compact, trace-relative
+encodings over only model-visible tool calls. `--mode lite` is the default and
+reports output byte/line counts; `--mode full` includes rendered output.
 See [`docs/agent-trace.md`](../../docs/agent-trace.md) for the output contracts,
 failure behavior, and sensitive-data warning.
 

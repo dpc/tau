@@ -250,7 +250,8 @@ fn parse_canonical_directory(value: &str) -> Result<PathBuf, String> {
 pub enum AgentCommand {
     /// List agents known to a running session.
     List(AgentListArgs),
-    /// Export one complete durable agent journal trace.
+    /// Project a validated durable agent snapshot (defaults to compact TOON
+    /// lite).
     Trace(AgentTraceArgs),
 }
 
@@ -268,6 +269,10 @@ pub struct AgentTraceArgs {
     #[arg(long, value_enum, default_value_t)]
     pub format: AgentTraceFormat,
 
+    /// Compact agent-tool output detail.
+    #[arg(long, value_enum, default_value_t)]
+    pub mode: AgentTraceMode,
+
     /// Durable agent journal root.
     #[arg(long, default_value_os_t = default_agents_dir())]
     pub agents_dir: PathBuf,
@@ -277,14 +282,24 @@ pub struct AgentTraceArgs {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum AgentTraceFormat {
     /// Complete canonical Tau JSON Lines.
-    #[default]
     TauJsonl,
     /// Lossy OTLP/OpenInference JSON visualization adapter.
     OtlpJson,
-    /// Compact model-visible tool calls with output sizes.
-    AgentToolsLite,
-    /// Compact model-visible tool calls with complete outputs.
-    AgentToolsFull,
+    /// Compact model-visible tool calls as JSON Lines.
+    AgentToolsJsonl,
+    /// Compact model-visible tool calls as TOON.
+    #[default]
+    AgentToolsToon,
+}
+
+/// Output detail for compact agent-tool trace formats.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum AgentTraceMode {
+    /// Omit output bodies and report byte/line counts.
+    #[default]
+    Lite,
+    /// Include complete normalized output bodies.
+    Full,
 }
 
 /// Filters for `tau agent list`.

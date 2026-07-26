@@ -1,4 +1,4 @@
-//! Complete native and lossy OTLP exports of durable agent journals.
+//! Native, OTLP, and compact exports of durable agent journals.
 
 mod agent_tools;
 mod native;
@@ -23,10 +23,36 @@ pub enum AgentTraceFormat {
     TauJsonl,
     /// Lossy OTLP/OpenInference visualization adapter.
     OtlpJson,
-    /// Compact model-visible tool-call overview without output bodies.
-    AgentToolsLite,
-    /// Compact model-visible tool-call overview with output bodies.
-    AgentToolsFull,
+    /// Compact model-visible tool-call JSON Lines.
+    AgentToolsJsonl(
+        /// Output detail encoded in each JSONL call record.
+        AgentTraceMode,
+    ),
+    /// Compact model-visible tool-call TOON.
+    AgentToolsToon(
+        /// Output detail encoded in each TOON call item.
+        AgentTraceMode,
+    ),
+}
+
+/// Output detail retained by compact agent-tool trace formats.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AgentTraceMode {
+    /// Omit output bodies and emit byte and line counts.
+    #[default]
+    Lite,
+    /// Emit complete normalized output bodies.
+    Full,
+}
+
+impl AgentTraceMode {
+    /// Returns the stable compact-schema detail label.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Lite => "counts",
+            Self::Full => "full",
+        }
+    }
 }
 
 /// Whether to include the recursively creator-owned agent workflow.
@@ -80,11 +106,11 @@ pub fn prepare_agent_trace(
     match format {
         AgentTraceFormat::TauJsonl => native::write_jsonl(root_agent_id, &snapshot, &mut file)?,
         AgentTraceFormat::OtlpJson => otlp::write_json(root_agent_id, &snapshot, &mut file)?,
-        AgentTraceFormat::AgentToolsLite => {
-            agent_tools::write_lite_jsonl(root_agent_id, &snapshot, &mut file)?
+        AgentTraceFormat::AgentToolsJsonl(mode) => {
+            agent_tools::write_jsonl(root_agent_id, &snapshot, mode, &mut file)?
         }
-        AgentTraceFormat::AgentToolsFull => {
-            agent_tools::write_full_jsonl(root_agent_id, &snapshot, &mut file)?
+        AgentTraceFormat::AgentToolsToon(mode) => {
+            agent_tools::write_toon(root_agent_id, &snapshot, mode, &mut file)?
         }
     }
     file.rewind()?;
