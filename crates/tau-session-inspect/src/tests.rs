@@ -681,6 +681,45 @@ fn agent_trace_descendants_reject_reachable_corrupt_journal() {
     ));
 }
 
+/// Creator-rooted membership changing after journal capture must return the
+/// typed race error before any prepared artifact becomes visible.
+#[test]
+fn agent_trace_descendants_reject_membership_change_during_snapshot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root_id = AgentId::parse("agent-root").expect("agent id");
+    create_trace_agent(
+        temp.path(),
+        root_id.as_str(),
+        tau_proto::AgentCreator::User,
+        None,
+        10,
+    );
+
+    let result = prepare_agent_trace_for_test(
+        temp.path(),
+        &root_id,
+        DescendantSelection::Include,
+        AgentTraceFormat::TauJsonl,
+        || {
+            create_trace_agent(
+                temp.path(),
+                "agent-late-child",
+                tau_proto::AgentCreator::Agent {
+                    session_id: "session-child".into(),
+                    agent_id: root_id.clone(),
+                },
+                None,
+                11,
+            );
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(InspectError::Trace(AgentTraceError::DescendantsChanged))
+    ));
+}
+
 /// OTLP trace output is one request object, retains every durable occurrence as
 /// a span event, and never invents cross-agent timestamp ordering.
 #[test]
@@ -1499,8 +1538,8 @@ fn agent_tools_stable_records_cover_non_success_branches() {
     assert!(full[3].get("duration_us").is_none());
 }
 
-/// Trace preparation rejects missing, active, and corrupt durable journals
-/// before it yields any artifact that the CLI could copy to stdout.
+/// Trace preparation exports a lock-held committed prefix while rejecting
+/// missing and corrupt journals before yielding caller-visible output.
 #[test]
 fn agent_trace_failures_produce_no_prepared_output() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1529,15 +1568,35 @@ fn agent_trace_failures_produce_no_prepared_output() {
             }),
         )
         .expect("active creation");
-    assert!(
+    let active = export_trace(
+        temp.path(),
+        &active_id,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::TauJsonl,
+    )
+    .expect("lock-held committed prefix");
+    assert_eq!(active.lines().count(), 2);
+    let checkpoint_path = temp.path().join(active_id.as_str()).join("meta.json");
+    let mut checkpoint: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&checkpoint_path).expect("checkpoint"))
+            .expect("checkpoint JSON");
+    checkpoint["journal"]["boundary_blake3_128"] = serde_json::Value::String("0".repeat(32));
+    std::fs::write(
+        &checkpoint_path,
+        serde_json::to_vec(&checkpoint).expect("encode checkpoint"),
+    )
+    .expect("rewrite checkpoint");
+    assert!(matches!(
         prepare_agent_trace(
             temp.path(),
             &active_id,
             DescendantSelection::RootOnly,
             AgentTraceFormat::TauJsonl,
-        )
-        .is_err()
-    );
+        ),
+        Err(InspectError::AgentStore(
+            tau_core::AgentStoreError::Read { .. }
+        ))
+    ));
     drop(active_store);
 
     let path = temp.path().join(active_id.as_str()).join("events.cbor");

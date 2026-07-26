@@ -113,6 +113,11 @@ pub enum AgentStoreError {
         /// Path whose absence prevents a stable snapshot.
         path: PathBuf,
     },
+    /// A snapshot reader requested an agent outside its captured selection.
+    JournalNotIncluded {
+        /// Agent absent from the captured snapshot.
+        agent_id: AgentId,
+    },
 }
 
 #[cfg(test)]
@@ -203,6 +208,12 @@ impl fmt::Display for AgentStoreError {
             Self::JournalMissing { path } => {
                 write!(f, "agent journal not found at {}", path.display())
             }
+            Self::JournalNotIncluded { agent_id } => {
+                write!(
+                    f,
+                    "agent journal `{agent_id}` is not included in this snapshot"
+                )
+            }
         }
     }
 }
@@ -223,6 +234,7 @@ impl Error for AgentStoreError {
             | Self::InvalidAgentDir { .. }
             | Self::InvalidSequence { .. }
             | Self::JournalMissing { .. }
+            | Self::JournalNotIncluded { .. }
             | Self::PersistenceConflict { .. }
             | Self::UnsupportedRawEvent { .. }
             | Self::MessageFactTargetMismatch { .. } => None,

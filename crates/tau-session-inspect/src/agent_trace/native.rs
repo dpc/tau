@@ -64,7 +64,7 @@ pub(super) fn write_jsonl(
             schema_version: 0,
             record_type: "header",
             root_agent_id,
-            included_agent_ids: snapshot.agent_ids().iter().collect(),
+            included_agent_ids: snapshot.agent_ids().collect(),
             timing: "journal_wall_clock",
         },
     )

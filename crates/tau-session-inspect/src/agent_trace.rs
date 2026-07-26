@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::io::Seek as _;
 use std::path::Path;
 
-use tau_core::{AgentJournalLocks, read_agent_creation_record};
+use tau_core::{AgentJournalSnapshot, read_agent_creation_record};
 use tau_proto::{AgentCreator, AgentId, Event};
 
 use crate::InspectError;
@@ -88,15 +88,26 @@ pub fn prepare_agent_trace(
     descendants: DescendantSelection,
     format: AgentTraceFormat,
 ) -> Result<PreparedAgentTrace, InspectError> {
+    prepare_agent_trace_with_after_capture(agents_dir, root_agent_id, descendants, format, || {})
+}
+
+/// Prepares a trace with a deterministic test hook after journal capture.
+fn prepare_agent_trace_with_after_capture(
+    agents_dir: &Path,
+    root_agent_id: &AgentId,
+    descendants: DescendantSelection,
+    format: AgentTraceFormat,
+    after_capture: impl FnOnce(),
+) -> Result<PreparedAgentTrace, InspectError> {
     let included = discover_agents(agents_dir, root_agent_id, descendants)?;
-    let locks = AgentJournalLocks::acquire(agents_dir, included.iter().cloned())?;
+    let snapshot = AgentJournalSnapshot::capture(agents_dir, included.iter().cloned())?;
+    after_capture();
     let rechecked = discover_agents(agents_dir, root_agent_id, descendants)?;
     if included != rechecked {
         return Err(InspectError::Trace(
             crate::AgentTraceError::DescendantsChanged,
         ));
     }
-    let snapshot = locks.validate()?;
     let mut file = tempfile::tempfile()?;
     #[cfg(unix)]
     file.set_permissions({
@@ -116,6 +127,24 @@ pub fn prepare_agent_trace(
     file.rewind()?;
     drop(snapshot);
     Ok(PreparedAgentTrace { file })
+}
+
+/// Runs trace preparation with a deterministic post-capture race hook.
+#[cfg(test)]
+pub(crate) fn prepare_agent_trace_for_test(
+    agents_dir: &Path,
+    root_agent_id: &AgentId,
+    descendants: DescendantSelection,
+    format: AgentTraceFormat,
+    after_capture: impl FnOnce(),
+) -> Result<PreparedAgentTrace, InspectError> {
+    prepare_agent_trace_with_after_capture(
+        agents_dir,
+        root_agent_id,
+        descendants,
+        format,
+        after_capture,
+    )
 }
 
 fn discover_agents(
@@ -144,7 +173,7 @@ fn discover_agents(
         };
         // An unreadable sequence-zero record cannot authenticate a creation edge.
         // Ignore that unrelated artifact here; any journal whose valid edge makes
-        // it reachable undergoes strict full validation below.
+        // it reachable has its selected prefix strictly validated below.
         let Some(record) = read_agent_creation_record(agents_dir, &agent_id).unwrap_or(None) else {
             continue;
         };

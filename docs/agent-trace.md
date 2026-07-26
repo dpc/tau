@@ -1,9 +1,9 @@
 # Durable agent trace export
 
-`tau agent trace <agent-id>` projects from a validated snapshot of existing
-durable agent journals offline. It defaults to a compact TOON-lite virtual-tool
-overview; use explicit `--format tau-jsonl` for the complete journal artifact. It
-does not contact or attach to a harness and does not capture transient provider
+`tau agent trace <agent-id>` projects offline from a validated finite snapshot
+of existing durable agent journals. It defaults to a compact TOON-lite
+virtual-tool overview; use explicit `--format tau-jsonl` for the complete journal
+artifact. It does not contact or attach to a harness and does not capture transient provider
 HTTP bodies, streaming deltas, or harness phase timing.
 
 ```console
@@ -21,18 +21,27 @@ A closed stdout pipe is a successful early consumer exit.
 
 ## Snapshot and failure behavior
 
-Tau opens only existing lock and journal files. It acquires all selected locks
-nonblocking in lexical agent-ID order, rechecks creator-based descendant
-discovery under those locks, and strictly validates every complete journal.
-Missing, ephemeral-only, active, corrupt, torn, or concurrently changed
-workflows fail without stdout output. `parent_agent`, session membership, and
-message peers do not imply descendant membership.
+Tau opens only existing lock, journal, and checkpoint files. It first attempts
+each selected lock nonblocking in lexical agent-ID order. For an inactive
+journal it acquires the exclusive lock before selecting the current EOF. When a
+writer still holds the lock, Tau uses the existing atomic, journal-bound
+checkpoint to select the last published committed prefix. It retains each exact
+opened journal identity and strictly validates every selected prefix before
+output.
+
+The command is a one-shot snapshot: it reads through one finite committed cut
+and never waits for writer exit or includes records appended after that cut. No
+follow mode is implemented. Missing, ephemeral-only, unsupported, corrupt,
+torn, or concurrently replaced selected prefixes fail without stdout output,
+as does a lock-held journal without a usable committed checkpoint.
+`parent_agent`, session membership, and message peers do not imply descendant
+membership.
 
 Discovery treats only a valid sequence-zero `AgentStarted.creator` fact as an
 authenticated edge. Unreadable or unsupported artifacts that cannot establish
 an edge remain outside the rooted workflow and cannot abort its trace. Once an
-edge makes a journal reachable, any unsupported or corrupt content in that
-journal fails the trace explicitly during strict full validation.
+edge makes a journal reachable, its selected prefix undergoes strict validation;
+unsupported or corrupt content inside that prefix fails the trace explicitly.
 
 Tau stages the finished artifact in a private process-owned temporary file
 before stdout delivery. The anonymous file has no pathname to survive process

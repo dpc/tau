@@ -657,25 +657,33 @@ it only to trusted destinations. Compact lite mode exposes tool names, arguments
 commands, statuses, and output sizes; full mode additionally exposes complete
 normalized output and rendered error details.
 
-The exporter opens only existing state, takes nonblocking exclusive locks in
-lexical agent-ID order, rechecks descendant discovery under lock, and validates
-all journals before stdout. Active, missing, ephemeral-only, corrupt, torn, or
-racy workflows produce no machine output. Private staging is an anonymous
-process-owned file with no pathname to survive termination and is never durable
-trace state. Validation and projection stream journal records. OTLP keeps every
-correlated occurrence in anonymous staging, including auxiliary occurrences
-whose offsets are not retained; heap correlation state
-retains compact offsets and identifiers, one per unique typed operation key.
+The exporter opens only existing state and never repairs or writes it. Only
+writer-lock contention selects checkpoint mode. Inactive journals acquire their
+exclusive locks before opening the journal and selecting EOF; lock-held journals
+retain one exact opened journal identity and select a finite prefix through the
+existing bound checkpoint. Bounded positional reads and strict replay validate
+every selected prefix, descendant discovery is rechecked after capture, and all
+failures occur before stdout. Capture never waits for lock release or includes
+records committed after its selected cuts. A snapshot retains one journal file
+descriptor per included agent plus lock descriptors for inactive agents until
+private staging finishes. A very large selected workflow can exhaust process
+file descriptors and fail before output.
 
 Descendant discovery accepts only a valid matching sequence-zero
 `AgentStarted.creator` record as an authenticated edge. Missing, unreadable,
 unsupported, or invalid candidate first records establish no edge and remain
-outside the rooted workflow. Every selected journal still requires nonblocking
-lock acquisition and strict full validation, so unsupported or corrupt content
-after an authenticated creation record fails before output. Keep
-`agent_trace_descendants_ignore_unrelated_legacy_creation_record` and
-`agent_trace_descendants_reject_reachable_corrupt_journal` as regression
+outside the rooted workflow. Every selected prefix still requires strict
+semantic validation, so unsupported or corrupt content inside that prefix fails
+before output. Keep `agent_trace_descendants_ignore_unrelated_legacy_creation_record`
+and `agent_trace_descendants_reject_reachable_corrupt_journal` as regression
 safeguards when this boundary changes.
+
+Private staging is an anonymous process-owned file with no pathname to survive
+termination and is never durable trace state. Validation and projection stream
+journal records. OTLP keeps every correlated occurrence in anonymous staging,
+including auxiliary occurrences whose offsets are not retained; heap
+correlation state retains compact offsets and identifiers, one per unique typed
+operation key.
 
 Heap use is proportional to unique operation-ID count and bytes in the largest
 included journal; IDs have no separate cap beyond the record framing limit.
@@ -703,6 +711,6 @@ strings and controls, strict TOON semantic round trips, exact tagged-CBOR and
 float-bit reconstruction, multiline full output, and parity with independently
 parseable JSONL call records.
 
-Revisit this boundary before adding live/follow capture, user-selected output
-files, redaction modes, range selection, provider HTTP-body or streaming-delta
-capture, new timing authority, or any persisted trace state.
+Revisit this boundary before adding user-selected output files, redaction modes,
+provider HTTP-body or streaming-delta capture, new timing authority, or any
+persisted trace state.

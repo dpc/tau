@@ -36,7 +36,7 @@ pub enum InspectError {
 /// Typed failures specific to stable agent-trace preparation.
 #[derive(Debug)]
 pub enum AgentTraceError {
-    /// Creator-based workflow membership changed during lock acquisition.
+    /// Creator-based workflow membership changed during snapshot preparation.
     DescendantsChanged,
     /// A typed event could not be represented or an output format failed.
     Projection(String),
@@ -46,7 +46,7 @@ impl fmt::Display for AgentTraceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DescendantsChanged => {
-                f.write_str("agent descendants changed while acquiring journal locks")
+                f.write_str("agent descendants changed during snapshot preparation")
             }
             Self::Projection(message) => f.write_str(message),
         }

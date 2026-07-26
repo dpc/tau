@@ -480,10 +480,10 @@ fn journal_snapshot_does_not_create_missing_paths() {
     assert!(!temp.path().join(agent_id.as_str()).exists());
 }
 
-/// Snapshot acquisition must reject an active writer before reading any
-/// potentially changing journal bytes.
+/// A lock-held journal must expose its last checkpointed committed prefix
+/// without waiting for the writer to exit or including later appends.
 #[test]
-fn journal_snapshot_rejects_active_agent() {
+fn journal_snapshot_reads_lock_held_committed_prefix() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-active").expect("agent id");
     let mut store = AgentStore::open_lazy(temp.path()).expect("store");
@@ -491,10 +491,120 @@ fn journal_snapshot_rejects_active_agent() {
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
         .expect("creation");
 
-    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id])
-        .expect_err("held writer lock must fail");
+    let snapshot = AgentJournalSnapshot::capture(temp.path(), [agent_id.clone()])
+        .expect("checkpointed committed prefix");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "after-cut"),
+        )
+        .expect("writer remains appendable");
 
-    assert!(matches!(error, AgentStoreError::Locked { .. }));
+    assert_eq!(
+        snapshot
+            .records(&agent_id)
+            .expect("snapshot records")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid committed prefix")
+            .len(),
+        1
+    );
+}
+
+/// A lock-held journal must reject a checkpoint whose boundary witness no
+/// longer authenticates the selected committed prefix.
+#[test]
+fn journal_snapshot_rejects_lock_held_checkpoint_boundary_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-active-boundary").expect("agent id");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation");
+    let checkpoint_path = temp.path().join(agent_id.as_str()).join("meta.json");
+    let mut checkpoint = read_checkpoint(&checkpoint_path).expect("checkpoint");
+    checkpoint.journal.boundary_blake3_128 = "0".repeat(32);
+    fs::write(
+        &checkpoint_path,
+        serde_json::to_vec(&checkpoint).expect("encode checkpoint"),
+    )
+    .expect("rewrite checkpoint");
+
+    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id])
+        .expect_err("mismatched live checkpoint must fail");
+
+    assert!(matches!(error, AgentStoreError::Read { .. }));
+}
+
+/// A structurally valid lock-held checkpoint must not select a prefix whose
+/// decoded record count disagrees with its advertised next sequence.
+#[test]
+fn journal_snapshot_rejects_lock_held_checkpoint_sequence_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-active-sequence").expect("agent id");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation");
+    let checkpoint_path = temp.path().join(agent_id.as_str()).join("meta.json");
+    let mut checkpoint = read_checkpoint(&checkpoint_path).expect("checkpoint");
+    checkpoint.journal.next_seq += 1;
+    fs::write(
+        &checkpoint_path,
+        serde_json::to_vec(&checkpoint).expect("encode checkpoint"),
+    )
+    .expect("rewrite checkpoint");
+
+    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id])
+        .expect_err("wrong live checkpoint sequence must fail");
+
+    assert!(matches!(error, AgentStoreError::InvalidSequence { .. }));
+}
+
+/// Inactive capture must acquire the exclusive lock before selecting EOF, so
+/// an append and writer release immediately before acquisition are included.
+#[test]
+fn journal_snapshot_selects_inactive_eof_after_lock_acquisition() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-race").expect("agent id");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation");
+    let journal_path = temp.path().join(agent_id.as_str()).join("events.cbor");
+    let before_append = fs::metadata(&journal_path).expect("journal metadata").len();
+    let mut store = Some(store);
+
+    let snapshot = AgentJournalSnapshot::capture_for_test(temp.path(), [agent_id.clone()], |_| {
+        store
+            .as_mut()
+            .expect("writer")
+            .append_agent_event(
+                agent_id.as_str(),
+                None,
+                display_name_event(&agent_id, "before-lock"),
+            )
+            .expect("append before snapshot lock");
+        drop(store.take());
+    })
+    .expect("inactive snapshot after writer release");
+
+    assert!(
+        before_append
+            < fs::metadata(&journal_path)
+                .expect("updated journal metadata")
+                .len()
+    );
+    assert_eq!(
+        snapshot
+            .records(&agent_id)
+            .expect("snapshot records")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("complete locked EOF")
+            .len(),
+        2
+    );
 }
 
 /// Snapshot validation must reject a journal whose stored sequence no longer
@@ -567,10 +677,15 @@ fn journal_snapshot_prevents_changes_during_read() {
     let snapshot = AgentJournalSnapshot::capture(temp.path(), [second.clone(), first.clone()])
         .expect("stable snapshot");
     assert_eq!(
-        snapshot.agent_ids().iter().collect::<Vec<_>>(),
+        snapshot.agent_ids().collect::<Vec<_>>(),
         vec![&first, &second],
         "snapshot identities use lexical agent order"
     );
+    let absent = AgentId::parse("agent-absent").expect("agent id");
+    assert!(matches!(
+        snapshot.records(&absent),
+        Err(AgentStoreError::JournalNotIncluded { agent_id }) if agent_id == absent
+    ));
 
     let mut writer = AgentStore::open_lazy(temp.path()).expect("writer");
     let error = writer

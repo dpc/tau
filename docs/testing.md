@@ -460,12 +460,15 @@ cases.
 ## Agent trace export
 
 Agent-trace integration tests exercise durable journals through `AgentStore`.
-Core coverage checks non-creating missing paths, nonblocking active-agent
-failure, torn/corrupt/non-monotonic rejection, sorted snapshot identities, and
-retained-lock stability. Projection coverage checks lossless CBOR edge types,
-independently parseable native lines, creator-only recursive descendants,
-per-agent order, focused typed lifecycle correlation, decreasing-time handling,
-and protobuf-JSON decoding as one `ExportTraceServiceRequest`.
+Core coverage checks non-creating missing paths, lock-held checkpoint-bounded
+prefixes, append/release before inactive lock acquisition, torn/corrupt/
+non-monotonic rejection, sorted snapshot identities, and retained-lock
+stability. Projection coverage checks lossless CBOR edge types, independently
+parseable native lines, creator-only recursive descendants, unrelated invalid
+creation artifacts, strict reachable-journal failure, descendant change during
+snapshot preparation, per-agent order, focused typed lifecycle correlation,
+decreasing-time handling, and protobuf-JSON decoding as one
+`ExportTraceServiceRequest`.
 
 CLI coverage verifies parser defaults and every format, custom agent roots,
 descendant selection, and successful broken-pipe termination. Large-record and

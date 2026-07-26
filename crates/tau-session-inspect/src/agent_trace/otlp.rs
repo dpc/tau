@@ -273,7 +273,7 @@ pub(super) fn write_json(
             last = record;
         }
         let parent_span_id = creator_agent(&first)
-            .filter(|creator| snapshot.agent_ids().contains(*creator))
+            .filter(|creator| snapshot.contains_agent(creator))
             .map_or_else(Vec::new, |creator| {
                 hashed_id(&format!("agent:{creator}"), 8)
             });

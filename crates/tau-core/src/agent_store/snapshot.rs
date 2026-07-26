@@ -1,14 +1,15 @@
 //! Stable, read-only snapshots of durable agent journals.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
+use fs2::FileExt as Fs2FileExt;
 use tau_proto::AgentId;
 
 use super::{AgentStoreError, records_begin_with_creation};
+use crate::agent_checkpoint::read_journal_bound_checkpoint;
 use crate::record_log::{MAX_RECORD_BYTES, read_record_length};
 use crate::{AgentTree, PersistedAgentEvent, PersistedAgentEventSeq};
 
@@ -57,7 +58,7 @@ impl AgentJournalLocks {
                         }
                     }
                 })?;
-            if FileExt::try_lock_exclusive(&lock).is_err() {
+            if Fs2FileExt::try_lock_exclusive(&lock).is_err() {
                 let mut holder = String::new();
                 let _ = lock.by_ref().take(4 * 1024).read_to_string(&mut holder);
                 return Err(AgentStoreError::Locked {
@@ -85,8 +86,283 @@ impl AgentJournalLocks {
     /// bounding validation memory by the largest included journal rather
     /// than the workflow.
     pub fn validate(self) -> Result<AgentJournalSnapshot, AgentStoreError> {
-        for agent_id in &self.agent_ids {
-            let mut records = open_reader(&self, agent_id)?;
+        let Self {
+            agents_dir,
+            agent_ids,
+            _locks,
+        } = self;
+        let mut journals = BTreeMap::new();
+        for agent_id in &agent_ids {
+            let path = agents_dir.join(agent_id.as_str()).join("events.cbor");
+            let file = open_existing_journal(&path)?;
+            let covered_bytes = journal_len(&file, &path)?;
+            journals.insert(
+                agent_id.clone(),
+                SnapshotJournal {
+                    path,
+                    file,
+                    covered_bytes,
+                    checkpoint_next_seq: None,
+                },
+            );
+        }
+        AgentJournalSnapshot {
+            journals,
+            _inactive_locks: _locks,
+        }
+        .validate()
+    }
+}
+
+/// One opened journal and the exact finite prefix selected for a snapshot.
+#[derive(Debug)]
+struct SnapshotJournal {
+    /// Path used only for typed diagnostics.
+    path: PathBuf,
+    /// Exact opened journal identity retained for every later read.
+    file: File,
+    /// Finite byte boundary selected under lock or from a bound checkpoint.
+    covered_bytes: u64,
+    /// Checkpoint sequence immediately after a live committed prefix.
+    checkpoint_next_seq: Option<PersistedAgentEventSeq>,
+}
+
+/// A fully validated multi-journal snapshot at fixed committed boundaries.
+#[derive(Debug)]
+pub struct AgentJournalSnapshot {
+    /// Open journal identities and their selected finite boundaries.
+    journals: BTreeMap<AgentId, SnapshotJournal>,
+    /// Locks retained only for journals that were inactive during capture.
+    _inactive_locks: Vec<File>,
+}
+
+/// Streaming reader for one already-opened, globally validated journal prefix.
+pub struct AgentJournalReader<'snapshot> {
+    /// Journal path retained for typed diagnostics.
+    path: &'snapshot Path,
+    /// Exact open journal identity retained by the snapshot.
+    file: &'snapshot File,
+    /// Current positional-read offset.
+    offset: u64,
+    /// Bytes remaining before the selected committed boundary.
+    remaining_bytes: u64,
+    /// Next authoritative sequence expected from the stream.
+    expected: PersistedAgentEventSeq,
+    /// Whether iteration has reached EOF or an error.
+    finished: bool,
+}
+
+impl Iterator for AgentJournalReader<'_> {
+    type Item = Result<PersistedAgentEvent, AgentStoreError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        if self.remaining_bytes == 0 {
+            self.finished = true;
+            return None;
+        }
+        if self.remaining_bytes < 8 {
+            return self.fail_read("snapshot boundary ends inside a record length");
+        }
+        let mut length_bytes = [0; 8];
+        if let Err(source) = read_exact_at(self.file, &mut length_bytes, self.offset) {
+            self.finished = true;
+            return Some(Err(AgentStoreError::Read {
+                path: self.path.to_path_buf(),
+                source,
+            }));
+        }
+        let length = u64::from_le_bytes(length_bytes);
+        if MAX_RECORD_BYTES < length {
+            self.finished = true;
+            return Some(Err(AgentStoreError::RecordTooLarge {
+                path: self.path.to_path_buf(),
+                record_length: length,
+                maximum: MAX_RECORD_BYTES,
+            }));
+        }
+        if self.remaining_bytes - 8 < length {
+            return self.fail_read("snapshot boundary ends inside a record payload");
+        }
+        let mut bytes = vec![0; length as usize];
+        if let Err(source) = read_exact_at(self.file, &mut bytes, self.offset + 8) {
+            self.finished = true;
+            return Some(Err(AgentStoreError::Read {
+                path: self.path.to_path_buf(),
+                source,
+            }));
+        }
+        self.offset += 8 + length;
+        self.remaining_bytes -= 8 + length;
+        let record = match tau_proto::decode_message_from_slice::<PersistedAgentEvent>(&bytes) {
+            Ok(record) => record,
+            Err(source) => {
+                self.finished = true;
+                return Some(Err(AgentStoreError::Decode {
+                    path: self.path.to_path_buf(),
+                    source,
+                }));
+            }
+        };
+        if record.seq != self.expected {
+            self.finished = true;
+            return Some(Err(AgentStoreError::InvalidSequence {
+                path: self.path.to_path_buf(),
+                expected: self.expected,
+                actual: record.seq,
+            }));
+        }
+        self.expected = self.expected.next();
+        Some(Ok(record))
+    }
+}
+
+impl AgentJournalReader<'_> {
+    /// Finishes iteration with a typed invalid-boundary read failure.
+    fn fail_read(
+        &mut self,
+        message: &'static str,
+    ) -> Option<Result<PersistedAgentEvent, AgentStoreError>> {
+        self.finished = true;
+        Some(Err(AgentStoreError::Read {
+            path: self.path.to_path_buf(),
+            source: io::Error::new(io::ErrorKind::UnexpectedEof, message),
+        }))
+    }
+}
+
+impl AgentJournalSnapshot {
+    /// Captures and validates finite committed prefixes for requested journals.
+    ///
+    /// Inactive journals select EOF only after acquiring their exclusive lock.
+    /// A journal whose writer lock remains held uses its existing atomic,
+    /// journal-bound checkpoint as the committed boundary. The snapshot retains
+    /// each exact opened file identity and never waits for writer completion.
+    pub fn capture(
+        agents_dir: &Path,
+        agent_ids: impl IntoIterator<Item = AgentId>,
+    ) -> Result<Self, AgentStoreError> {
+        Self::capture_with_before_lock(agents_dir, agent_ids, |_| {})
+    }
+
+    /// Testable capture implementation with a hook immediately before lock
+    /// acquisition for each journal.
+    fn capture_with_before_lock(
+        agents_dir: &Path,
+        agent_ids: impl IntoIterator<Item = AgentId>,
+        mut before_lock: impl FnMut(&AgentId),
+    ) -> Result<Self, AgentStoreError> {
+        let agent_ids = agent_ids.into_iter().collect::<BTreeSet<_>>();
+        let mut journals = BTreeMap::new();
+        let mut inactive_locks = Vec::with_capacity(agent_ids.len());
+        for agent_id in &agent_ids {
+            let agent_dir = agents_dir.join(agent_id.as_str());
+            let lock_path = agent_dir.join("lock");
+            let lock = open_existing_lock(&lock_path)?;
+            before_lock(agent_id);
+            let journal_path = agent_dir.join("events.cbor");
+            let (journal, retained_lock) = match Fs2FileExt::try_lock_exclusive(&lock) {
+                Ok(()) => {
+                    let file = open_existing_journal(&journal_path)?;
+                    let covered_bytes = journal_len(&file, &journal_path)?;
+                    (
+                        SnapshotJournal {
+                            path: journal_path,
+                            file,
+                            covered_bytes,
+                            checkpoint_next_seq: None,
+                        },
+                        Some(lock),
+                    )
+                }
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                    let mut file = open_existing_journal(&journal_path)?;
+                    let checkpoint = read_journal_bound_checkpoint(
+                        &agent_dir.join("meta.json"),
+                        agent_id,
+                        &mut file,
+                    )
+                    .map_err(|source| AgentStoreError::Read {
+                        path: agent_dir.join("meta.json"),
+                        source,
+                    })?;
+                    (
+                        SnapshotJournal {
+                            path: journal_path,
+                            file,
+                            covered_bytes: checkpoint.journal.covered_bytes,
+                            checkpoint_next_seq: Some(PersistedAgentEventSeq::new(
+                                checkpoint.journal.next_seq,
+                            )),
+                        },
+                        None,
+                    )
+                }
+                Err(source) => {
+                    return Err(AgentStoreError::Open {
+                        path: lock_path,
+                        source,
+                    });
+                }
+            };
+            journals.insert(agent_id.clone(), journal);
+            inactive_locks.extend(retained_lock);
+        }
+        Self {
+            journals,
+            _inactive_locks: inactive_locks,
+        }
+        .validate()
+    }
+
+    /// Runs one capture with a deterministic pre-lock race hook.
+    #[cfg(test)]
+    pub(super) fn capture_for_test(
+        agents_dir: &Path,
+        agent_ids: impl IntoIterator<Item = AgentId>,
+        before_lock: impl FnMut(&AgentId),
+    ) -> Result<Self, AgentStoreError> {
+        Self::capture_with_before_lock(agents_dir, agent_ids, before_lock)
+    }
+
+    /// Streams one included journal after all requested journals validated.
+    ///
+    /// The returned reader borrows the snapshot's exact opened file identity
+    /// and allocates only one length-bounded record at a time.
+    pub fn records(&self, agent_id: &AgentId) -> Result<AgentJournalReader<'_>, AgentStoreError> {
+        let Some(journal) = self.journals.get(agent_id) else {
+            return Err(AgentStoreError::JournalNotIncluded {
+                agent_id: agent_id.clone(),
+            });
+        };
+        Ok(AgentJournalReader {
+            path: &journal.path,
+            file: &journal.file,
+            offset: 0,
+            remaining_bytes: journal.covered_bytes,
+            expected: PersistedAgentEventSeq::new(0),
+            finished: false,
+        })
+    }
+
+    /// Returns included agent identities in lexical order.
+    #[must_use]
+    pub fn agent_ids(&self) -> impl ExactSizeIterator<Item = &AgentId> {
+        self.journals.keys()
+    }
+
+    /// Returns whether the snapshot includes the selected agent.
+    #[must_use]
+    pub fn contains_agent(&self, agent_id: &AgentId) -> bool {
+        self.journals.contains_key(agent_id)
+    }
+
+    /// Strictly validates every selected prefix before exposing the snapshot.
+    fn validate(self) -> Result<Self, AgentStoreError> {
+        for agent_id in self.journals.keys() {
+            let mut records = self.records(agent_id)?;
             let mut tree = AgentTree::try_from_events(agent_id.clone(), &[])
                 .expect("an empty replay initializes a valid tree");
             let mut first = true;
@@ -110,152 +386,81 @@ impl AgentJournalLocks {
                     )),
                 });
             }
+            if let Some(checkpoint_next_seq) = self.journals[agent_id].checkpoint_next_seq
+                && tree.next_event_seq() != checkpoint_next_seq
+            {
+                return Err(AgentStoreError::InvalidSequence {
+                    path: self.journals[agent_id].path.clone(),
+                    expected: checkpoint_next_seq,
+                    actual: tree.next_event_seq(),
+                });
+            }
         }
-        Ok(AgentJournalSnapshot { locks: self })
+        Ok(self)
     }
 }
 
-/// A fully validated multi-journal snapshot retaining every acquired lock.
-#[derive(Debug)]
-pub struct AgentJournalSnapshot {
-    /// Validated lock-set state.
-    locks: AgentJournalLocks,
+/// Opens one existing lock file without creating or modifying it.
+fn open_existing_lock(path: &Path) -> Result<File, AgentStoreError> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|source| missing_or_open(path, source))
 }
 
-/// Streaming reader for one already-locked and globally validated journal.
-pub struct AgentJournalReader<'snapshot> {
-    /// Journal path retained for typed diagnostics.
-    path: std::path::PathBuf,
-    /// Open journal stream.
-    file: File,
-    /// Next authoritative sequence expected from the stream.
-    expected: PersistedAgentEventSeq,
-    /// Whether iteration has reached EOF or an error.
-    finished: bool,
-    /// Prevents the validated snapshot and its locks from being dropped while
-    /// this reader remains usable.
-    _locks: std::marker::PhantomData<&'snapshot AgentJournalLocks>,
+/// Opens one existing journal file without creating or modifying it.
+fn open_existing_journal(path: &Path) -> Result<File, AgentStoreError> {
+    File::open(path).map_err(|source| missing_or_open(path, source))
 }
 
-impl Iterator for AgentJournalReader<'_> {
-    type Item = Result<PersistedAgentEvent, AgentStoreError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.finished {
-            return None;
+/// Preserves missing-journal diagnostics for either required file.
+fn missing_or_open(path: &Path, source: io::Error) -> AgentStoreError {
+    if source.kind() == io::ErrorKind::NotFound {
+        AgentStoreError::JournalMissing {
+            path: path.to_path_buf(),
         }
-        let length = match read_record_length(&mut self.file) {
-            Ok(Some(length)) => length,
-            Ok(None) => {
-                self.finished = true;
-                return None;
-            }
-            Err(source) => {
-                self.finished = true;
-                return Some(Err(AgentStoreError::Read {
-                    path: self.path.clone(),
-                    source,
-                }));
-            }
+    } else {
+        AgentStoreError::Open {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+/// Returns the current EOF of one already-opened journal.
+fn journal_len(file: &File, path: &Path) -> Result<u64, AgentStoreError> {
+    file.metadata()
+        .map(|metadata| metadata.len())
+        .map_err(|source| AgentStoreError::Read {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// Reads one exact byte range without changing the shared file cursor.
+fn read_exact_at(file: &File, mut bytes: &mut [u8], mut offset: u64) -> io::Result<()> {
+    while !bytes.is_empty() {
+        #[cfg(unix)]
+        let read = match std::os::unix::fs::FileExt::read_at(file, bytes, offset) {
+            Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
+            result => result?,
         };
-        if MAX_RECORD_BYTES < length {
-            self.finished = true;
-            return Some(Err(AgentStoreError::RecordTooLarge {
-                path: self.path.clone(),
-                record_length: length,
-                maximum: MAX_RECORD_BYTES,
-            }));
-        }
-        let mut bytes = vec![0; length as usize];
-        if let Err(source) = self.file.read_exact(&mut bytes) {
-            self.finished = true;
-            return Some(Err(AgentStoreError::Read {
-                path: self.path.clone(),
-                source,
-            }));
-        }
-        let record = match tau_proto::decode_message_from_slice::<PersistedAgentEvent>(&bytes) {
-            Ok(record) => record,
-            Err(source) => {
-                self.finished = true;
-                return Some(Err(AgentStoreError::Decode {
-                    path: self.path.clone(),
-                    source,
-                }));
-            }
+        #[cfg(windows)]
+        let read = match std::os::windows::fs::FileExt::seek_read(file, bytes, offset) {
+            Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
+            result => result?,
         };
-        if record.seq != self.expected {
-            self.finished = true;
-            return Some(Err(AgentStoreError::InvalidSequence {
-                path: self.path.clone(),
-                expected: self.expected,
-                actual: record.seq,
-            }));
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "journal ended before the selected snapshot boundary",
+            ));
         }
-        self.expected = self.expected.next();
-        Some(Ok(record))
+        offset += read as u64;
+        bytes = &mut bytes[read..];
     }
-}
-
-impl AgentJournalSnapshot {
-    /// Acquires and validates every requested durable journal.
-    pub fn capture(
-        agents_dir: &Path,
-        agent_ids: impl IntoIterator<Item = AgentId>,
-    ) -> Result<Self, AgentStoreError> {
-        AgentJournalLocks::acquire(agents_dir, agent_ids)?.validate()
-    }
-
-    /// Streams one included journal after all requested journals validated.
-    ///
-    /// The returned reader borrows this snapshot, so the complete lock set
-    /// remains held until the reader is dropped. It allocates only one
-    /// length-bounded record at a time.
-    pub fn records(&self, agent_id: &AgentId) -> Result<AgentJournalReader<'_>, AgentStoreError> {
-        open_reader(&self.locks, agent_id)
-    }
-
-    /// Returns locked agent identities in lexical order.
-    #[must_use]
-    pub fn agent_ids(&self) -> &BTreeSet<AgentId> {
-        &self.locks.agent_ids
-    }
-}
-
-fn checked_agent_path(
-    agents_dir: &Path,
-    agent_ids: &BTreeSet<AgentId>,
-    agent_id: &AgentId,
-) -> Result<std::path::PathBuf, AgentStoreError> {
-    let path = agents_dir.join(agent_id.as_str()).join("events.cbor");
-    if !agent_ids.contains(agent_id) {
-        return Err(AgentStoreError::JournalMissing { path });
-    }
-    if !path.try_exists().map_err(|source| AgentStoreError::Read {
-        path: path.clone(),
-        source,
-    })? {
-        return Err(AgentStoreError::JournalMissing { path });
-    }
-    Ok(path)
-}
-
-fn open_reader<'snapshot>(
-    locks: &'snapshot AgentJournalLocks,
-    agent_id: &AgentId,
-) -> Result<AgentJournalReader<'snapshot>, AgentStoreError> {
-    let path = checked_agent_path(&locks.agents_dir, &locks.agent_ids, agent_id)?;
-    let file = File::open(&path).map_err(|source| AgentStoreError::Open {
-        path: path.clone(),
-        source,
-    })?;
-    Ok(AgentJournalReader {
-        path,
-        file,
-        expected: PersistedAgentEventSeq::new(0),
-        finished: false,
-        _locks: std::marker::PhantomData,
-    })
+    Ok(())
 }
 
 /// Reads and validates only one agent's bounded sequence-zero creation record.
@@ -263,7 +468,7 @@ fn open_reader<'snapshot>(
 /// This read-only discovery helper never creates paths or reads past the first
 /// length-bounded journal record. `Ok(None)` means the journal is missing or
 /// empty at the instant of the read. Callers needing a stable multi-agent view
-/// must recheck discovery after acquiring the corresponding journal locks.
+/// must recheck discovery after capturing the selected journal boundaries.
 pub fn read_agent_creation_record(
     agents_dir: &Path,
     agent_id: &AgentId,
