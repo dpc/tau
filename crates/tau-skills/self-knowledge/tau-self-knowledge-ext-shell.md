@@ -52,7 +52,13 @@ On Linux and Android, the model-visible `shell` / `shell_command` surfaces and u
 `!`/`!!` commands use independent stdout/stderr PTYs. Commands detect TTY output
 descriptors while stream identity remains intact. Stdin stays closed because the
 surfaces do not accept interactive input. Other platforms retain closed stdin
-and output pipes.
+and output pipes. Both model and user shell children normally override `PAGER`,
+`GIT_PAGER`, `GH_PAGER`, `JJ_PAGER`, and `SYSTEMD_PAGER` with `cat` after
+ordinary `shell.extra_env`, while preserving `TERM`. Setting
+`shell.non_interactive_pager: false` is the explicit opt-out from this
+protection. `MANPAGER`, `BAT_PAGER`, and arbitrary application-specific pager
+variables remain ordinary. The protected `cat` must resolve through the child's
+effective `PATH`.
 
 `tau-ext-shell` runs tool work through a bounded priority scheduler. Short bursts can queue instead of failing immediately when workers are busy; queued model tool calls can be canceled before they start; user `!` shell work and control-sensitive `dir_lock` calls have higher-priority lanes than bulk model work. If bounded queue or queued-argument budgets are exhausted, the tool reports a clear backpressure error instead of spawning unbounded threads.
 
@@ -114,7 +120,8 @@ extensions: {
         command: "bash",
         prefix: ["nix", "develop", "-c"],
         user_command_timeout_secs: 3600,
-        extra_env: { PAGER: "cat" },
+        non_interactive_pager: true,
+        extra_env: { PATH: "/custom/bin:/usr/bin" },
       },
       dir_lock: { enable: false, backend: "memory", enforce_ro_bind: true },
     },
@@ -122,4 +129,4 @@ extensions: {
 }
 ```
 
-`working_directory` changes the extension process cwd only during startup config and therefore its missing-key fallback; it never overrides restored per-agent state. Late changes after runtime events are rejected. `shell.command` is invoked as `<command> -c <user command>` after `shell.prefix`. `shell.extra_env` is applied to shell-tool and user `!`/`!!` child processes after the inherited environment; empty values remove variables from the child environment. `user_command_timeout_secs` affects UI-initiated shell commands; agent tool calls use their own `timeout` argument.
+`working_directory` changes the extension process cwd only during startup config and therefore its missing-key fallback; it never overrides restored per-agent state. Late changes after runtime events are rejected. `shell.command` is invoked as `<command> -c <user command>` after `shell.prefix`. `shell.extra_env` is applied to shell-tool and user `!`/`!!` child processes after the inherited environment; empty values remove variables from the child environment. The protected pager overlay follows `extra_env` unless `shell.non_interactive_pager` is explicitly false. `user_command_timeout_secs` affects UI-initiated shell commands; agent tool calls use their own `timeout` argument.

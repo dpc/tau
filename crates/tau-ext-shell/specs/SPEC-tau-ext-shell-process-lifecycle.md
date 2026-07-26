@@ -25,6 +25,9 @@ bounded post-terminal pipe drain; descendants outside the direct child may still
 survive, but they must not make the shell result wait indefinitely for pipe EOF.
 See
 [DECISION-tau-ext-shell-pty-execution](DECISION-tau-ext-shell-pty-execution.md).
+Before spawning either a model or user shell command, the shared boundary
+normally applies the protected non-interactive pager environment governed by
+[DECISION-tau-ext-shell-non-interactive-pager-environment](DECISION-tau-ext-shell-non-interactive-pager-environment.md).
 After the bounded drain, a terminal flag prevents non-Unix pipe readers from
 mutating final captures or publishing user-shell progress; a reader already
 blocked in the OS may remain dormant until the descendant-held pipe wakes or

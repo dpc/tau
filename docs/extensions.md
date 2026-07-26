@@ -47,6 +47,28 @@ Extension-specific settings remain under `config`. For example, std-slack's
 `prefix_agent_id` defaults to `false`; set it to `true` only when Slack posts
 should retain the legacy `[agent-id] ` presentation.
 
+Core-shell protects non-interactive model and user shell commands from pager
+prompts by applying `PAGER=cat`, `GIT_PAGER=cat`, `GH_PAGER=cat`,
+`JJ_PAGER=cat`, and `SYSTEMD_PAGER=cat` after inherited variables and
+`config.shell.extra_env`. It preserves `TERM`. To intentionally run a configured
+pager, set `config.shell.non_interactive_pager: false`; this explicit opt-out
+forfeits Tau's protection for these pagers:
+
+```yaml
+extensions:
+  core-shell:
+    config:
+      shell:
+        non_interactive_pager: false
+        extra_env:
+          PAGER: less
+```
+
+The protected `cat` command must resolve through the child's effective `PATH`;
+an environment without `cat` fails normally with a shell “not found” error.
+`MANPAGER`, `BAT_PAGER`, and other application-specific pager variables remain
+ordinary configuration.
+
 Configured extension processes are trusted local executables with the user's OS
 authority. Tau limits their protocol authority and injects only declared
 Tau-managed secrets, but it does not make them an operating-system sandbox. See

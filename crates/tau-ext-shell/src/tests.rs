@@ -6181,6 +6181,194 @@ fn shell_tool_runs_with_tty_outputs_closed_stdin_and_separate_streams() {
     );
 }
 
+/// Ensures model shell calls and user `!` / `!!` children receive the same
+/// protected pager overlay after hostile ordinary configuration, without
+/// replacing the configured TERM value.
+#[test]
+fn model_and_user_shells_share_protected_pager_environment() {
+    let shell_config: crate::config::ShellConfig = serde_json::from_value(serde_json::json!({
+        "extra_env": {
+            "PAGER": "hostile-pager",
+            "GIT_PAGER": "hostile-git-pager",
+            "GH_PAGER": "hostile-gh-pager",
+            "JJ_PAGER": "hostile-jj-pager",
+            "SYSTEMD_PAGER": "hostile-systemd-pager",
+            "TERM": "tau-test-term"
+        }
+    }))
+    .expect("parse shell config");
+    let command = "printf '%s|%s|%s|%s|%s|%s' \"$PAGER\" \"$GIT_PAGER\" \"$GH_PAGER\" \
+         \"$JJ_PAGER\" \"$SYSTEMD_PAGER\" \"$TERM\"";
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text(command.to_owned()),
+    )]);
+
+    let CommandOutcome::Finished(model_output) = run_command_live(
+        &args,
+        &shell_config,
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run model shell environment probe") else {
+        panic!("expected finished model shell outcome");
+    };
+    assert_eq!(
+        cbor_map_text(&model_output.result, "output"),
+        Some("out(no_nl) cat|cat|cat|cat|cat|tau-test-term")
+    );
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let user_command = tau_proto::UiShellCommand {
+        session_id: "s1".into(),
+        command_id: "ui-sh-pager-env".into(),
+        command: command.to_owned(),
+        include_in_context: true,
+        target_agent_id: None,
+    };
+    let output = Output::channel(tx);
+    let (_cancel_tx, cancel_rx) = std::sync::mpsc::channel();
+    crate::tools::shell::dispatch_user_shell_command(
+        user_command,
+        shell_config,
+        &output,
+        cancel_rx,
+        std::env::current_dir().expect("current dir"),
+    );
+    let finished = rx
+        .try_iter()
+        .find_map(|message| match message {
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::ShellCommandFinishedReported(event) => Some(event),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("user shell finished event");
+    assert_eq!(finished.output, "cat|cat|cat|cat|cat|tau-test-term");
+    assert_eq!(finished.exit_code, Some(0));
+}
+
+/// Ensures the default overlay bypasses a deterministic hostile pager, while
+/// the explicit opt-out exposes that pager and lets the normal timeout bound
+/// it.
+#[cfg(unix)]
+#[test]
+fn protected_pager_overlay_prevents_stall_and_opt_out_forfeits_guarantee() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let pager = tempdir.path().join("hostile-pager");
+    fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/hostile-pager.sh"
+        ),
+        &pager,
+    )
+    .expect("copy hostile pager fixture");
+    fs::set_permissions(&pager, fs::Permissions::from_mode(0o700))
+        .expect("make hostile pager executable");
+    let pager = pager.to_string_lossy();
+    let command = "printf 'pager payload\\n' | \"$PAGER\"";
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text(command.to_owned()),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer(1.into()),
+        ),
+    ]);
+    let protected: crate::config::ShellConfig = serde_json::from_value(serde_json::json!({
+        "extra_env": { "PAGER": pager.as_ref() }
+    }))
+    .expect("parse protected config");
+
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &protected,
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run protected pager probe") else {
+        panic!("expected finished protected shell outcome");
+    };
+    assert_eq!(cbor_int_field(&output.result, "status"), Some(0));
+    assert_eq!(
+        cbor_map_text(&output.result, "output"),
+        Some("out pager payload")
+    );
+    assert!(cbor_bool_field(&output.result, "timed_out").is_none());
+
+    let unprotected: crate::config::ShellConfig = serde_json::from_value(serde_json::json!({
+        "non_interactive_pager": false,
+        "extra_env": { "PAGER": pager.as_ref() }
+    }))
+    .expect("parse opt-out config");
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &unprotected,
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run opt-out pager probe") else {
+        panic!("expected finished opt-out shell outcome");
+    };
+    assert_eq!(cbor_bool_field(&output.result, "timed_out"), Some(true));
+    assert_eq!(
+        cbor_map_text(&output.result, "termination_reason"),
+        Some("timeout")
+    );
+}
+
+/// Ensures the documented bare-`cat` dependency fails as an ordinary missing
+/// command when the configured child PATH contains no `cat`.
+#[cfg(unix)]
+#[test]
+fn protected_pager_reports_command_not_found_when_cat_is_absent() {
+    let shell = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("command -v sh")
+        .output()
+        .expect("locate shell");
+    assert!(shell.status.success());
+    let shell = String::from_utf8(shell.stdout)
+        .expect("shell path is utf8")
+        .trim()
+        .to_owned();
+    let empty_path = TempDir::new().expect("empty PATH directory");
+    let shell_config: crate::config::ShellConfig = serde_json::from_value(serde_json::json!({
+        "command": shell,
+        "extra_env": { "PATH": empty_path.path() }
+    }))
+    .expect("parse missing-cat config");
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text("printf payload | \"$PAGER\"".to_owned()),
+    )]);
+
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &shell_config,
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run missing-cat probe") else {
+        panic!("expected finished missing-cat shell outcome");
+    };
+    assert_eq!(cbor_int_field(&output.result, "status"), Some(127));
+    assert!(
+        cbor_map_text(&output.result, "output")
+            .is_some_and(|output| output.contains("cat") && output.contains("not found"))
+    );
+}
+
 /// Ensures closed stdin presents persistent poll-visible readiness rather than
 /// leaving event-driven consumers waiting for input forever.
 #[cfg(any(target_os = "android", target_os = "linux"))]

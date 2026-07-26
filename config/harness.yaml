@@ -88,7 +88,10 @@
 # --harness-config overrides.
 # extensions:
 #   core-shell:
-#     enable: false
+#     config:
+#       shell:
+#         # Defaults true. Setting false permits the protected pagers to prompt.
+#         non_interactive_pager: true
 #   provider-builtin:
 #     enable: false
 #   test-dummy:

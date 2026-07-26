@@ -83,6 +83,14 @@ capture and closed stdin.
 See
 [DECISION-tau-ext-shell-pty-execution](DECISION-tau-ext-shell-pty-execution.md).
 
+At the shared spawn boundary for both model and user shell commands, ext-shell
+applies ordinary `shell.extra_env`, then normally protects `PAGER`, `GIT_PAGER`,
+`GH_PAGER`, `JJ_PAGER`, and `SYSTEMD_PAGER` with `cat`. It preserves `TERM`.
+The explicit `shell.non_interactive_pager: false` opt-out disables this
+protection. `MANPAGER`, `BAT_PAGER`, and arbitrary application-specific pagers
+remain ordinary. See
+[DECISION-tau-ext-shell-non-interactive-pager-environment](DECISION-tau-ext-shell-non-interactive-pager-environment.md).
+
 For harness-routed `!`/`!!` work, the extension echoes the private command route
 and immutable request fields through transient
 `shell.command_progress_reported` / `shell.command_finished_reported` events.

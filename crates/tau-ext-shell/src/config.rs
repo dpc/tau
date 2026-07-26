@@ -7,6 +7,18 @@ use std::process::Command;
 use crate::isolation::{apply_command_isolation, apply_read_only_cwd_mount};
 use crate::shell_process::ShellProcess;
 
+/// Pager variables protected at the shared model/user shell spawn boundary.
+///
+/// Governed by
+/// `DECISION-tau-ext-shell-non-interactive-pager-environment`.
+const NON_INTERACTIVE_PAGER_ENV: [(&str, &str); 5] = [
+    ("PAGER", "cat"),
+    ("GIT_PAGER", "cat"),
+    ("GH_PAGER", "cat"),
+    ("JJ_PAGER", "cat"),
+    ("SYSTEMD_PAGER", "cat"),
+];
+
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ExtConfig {
@@ -78,11 +90,15 @@ pub(crate) struct ShellConfig {
     pub(crate) user_command_timeout_secs: u64,
     /// Extra environment variables injected into shell-tool / `!`
     /// command children, applied after the inherited environment so
-    /// they override or supplement it. Use this to set a custom
-    /// `PAGER` or adjust paths. Keys with an empty value still clear
-    /// the variable in the child env. Does not affect the `rg` child
-    /// used by `grep`.
+    /// they override or supplement it. Keys with an empty value still
+    /// clear the variable in the child env. Protected pager variables
+    /// override this map unless `non_interactive_pager` is false. Does
+    /// not affect the `rg` child used by `grep`.
     extra_env: BTreeMap<String, String>,
+    /// Whether Tau overrides common pager variables with `cat` after
+    /// `extra_env`. This defaults to true. Setting it to false is the single
+    /// explicit opt-out from the protected pager environment.
+    non_interactive_pager: bool,
 }
 
 impl Default for ShellConfig {
@@ -92,6 +108,7 @@ impl Default for ShellConfig {
             prefix: Vec::new(),
             user_command_timeout_secs: 60 * 60,
             extra_env: BTreeMap::new(),
+            non_interactive_pager: true,
         }
     }
 }
@@ -109,6 +126,21 @@ impl ShellConfig {
         let mut child_cmd = Command::new(program);
         child_cmd.args(args).arg("-c").arg(command);
         child_cmd
+    }
+
+    /// Applies ordinary configured environment followed by the protected pager
+    /// overlay, unless the user explicitly opted out.
+    fn apply_environment(&self, child_cmd: &mut Command) {
+        for (key, value) in &self.extra_env {
+            if value.is_empty() {
+                child_cmd.env_remove(key);
+            } else {
+                child_cmd.env(key, value);
+            }
+        }
+        if self.non_interactive_pager {
+            child_cmd.envs(NON_INTERACTIVE_PAGER_ENV);
+        }
     }
 
     /// Single spawn point for shell-style child processes: builds the
@@ -141,13 +173,7 @@ impl ShellConfig {
         } else {
             None
         };
-        for (key, value) in &self.extra_env {
-            if value.is_empty() {
-                child_cmd.env_remove(key);
-            } else {
-                child_cmd.env(key, value);
-            }
-        }
+        self.apply_environment(&mut child_cmd);
         let child = ShellProcess::spawn(&mut child_cmd);
         if let Some(read_only_warning) = read_only_warning {
             read_only_warning.log_after_spawn();
@@ -187,6 +213,82 @@ mod tests {
             .expect("wait shell");
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    }
+
+    /// Ensures the protected overlay wins over both inherited and ordinary
+    /// configured values while preserving TERM and unrelated pager variables.
+    #[test]
+    fn non_interactive_pager_overlay_has_final_precedence_and_narrow_scope() {
+        let config: ShellConfig = serde_json::from_value(serde_json::json!({
+            "extra_env": {
+                "PAGER": "configured-pager",
+                "GIT_PAGER": "configured-git-pager",
+                "GH_PAGER": "configured-gh-pager",
+                "SYSTEMD_PAGER": "configured-systemd-pager",
+                "TERM": "tau-term",
+                "JJ_PAGER": "configured-jj-pager",
+                "MANPAGER": "configured-man-pager",
+                "BAT_PAGER": "configured-bat-pager"
+            }
+        }))
+        .expect("parse shell config");
+        let mut command = config.command_for(
+            "printf '%s\\n' \"$PAGER\" \"$GIT_PAGER\" \"$GH_PAGER\" \
+             \"$SYSTEMD_PAGER\" \"$TERM\" \"$JJ_PAGER\" \"$MANPAGER\" \"$BAT_PAGER\"",
+        );
+        command
+            .env("PAGER", "inherited-pager")
+            .env("GIT_PAGER", "inherited-git-pager");
+        config.apply_environment(&mut command);
+
+        let output = command.output().expect("run environment probe");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "cat\ncat\ncat\ncat\ntau-term\ncat\nconfigured-man-pager\nconfigured-bat-pager\n"
+        );
+    }
+
+    /// Ensures the full shared preparation sequence preserves an inherited TERM
+    /// even when ordinary shell configuration does not mention TERM.
+    #[test]
+    fn shell_isolation_preserves_inherited_term_by_default() {
+        let config = ShellConfig::default();
+        let mut command = config.command_for("printf '%s' \"$TERM\"");
+        command.env("TERM", "inherited-test-term");
+        apply_command_isolation(&mut command);
+        config.apply_environment(&mut command);
+
+        let output = command.output().expect("run inherited TERM probe");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "inherited-test-term"
+        );
+    }
+
+    /// Ensures the documented opt-out is explicit and leaves ordinary
+    /// `extra_env` pager and TERM choices intact.
+    #[test]
+    fn non_interactive_pager_opt_out_preserves_configured_environment() {
+        let config: ShellConfig = serde_json::from_value(serde_json::json!({
+            "non_interactive_pager": false,
+            "extra_env": {
+                "PAGER": "custom-pager",
+                "GIT_PAGER": "custom-git-pager",
+                "TERM": "custom-term"
+            }
+        }))
+        .expect("parse shell config");
+        let mut command = config.command_for("printf '%s\\n' \"$PAGER\" \"$GIT_PAGER\" \"$TERM\"");
+        config.apply_environment(&mut command);
+
+        let output = command.output().expect("run opt-out probe");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "custom-pager\ncustom-git-pager\ncustom-term\n"
+        );
     }
 
     /// Ensures directory-lock backend config keeps memory as the default while

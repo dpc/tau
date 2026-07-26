@@ -67,6 +67,45 @@ output-bound behavior through the PTY path. Terminal output newline translation
 must not rewrite the command's original bytes. Other implementations retain
 their platform pipe behavior.
 
+For both model shell calls and user `!`/`!!` commands, verify the default
+protected overlay wins over inherited values and `shell.extra_env` by exposing
+`PAGER=cat`, `GIT_PAGER=cat`, `GH_PAGER=cat`, `JJ_PAGER=cat`, and
+`SYSTEMD_PAGER=cat`. Verify it preserves `TERM` and leaves `MANPAGER` and
+`BAT_PAGER` ordinary.
+
+Run every focused internal regression:
+
+```console
+cargo nextest run -p tau-ext-shell -E 'test(non_interactive_pager_overlay_has_final_precedence_and_narrow_scope) or test(shell_isolation_preserves_inherited_term_by_default) or test(model_and_user_shells_share_protected_pager_environment) or test(protected_pager)'
+```
+
+Then verify the live surfaces. Configure every listed variable to a distinct
+hostile value under `extensions.core-shell.config.shell.extra_env`, configure
+`TERM: tau-verification-term`, restart Tau, and run this exact command once
+through an exposed model `shell` / `shell_command` and once as user
+`!! <command>`:
+
+```sh
+printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+  "$PAGER" "$GIT_PAGER" "$GH_PAGER" "$JJ_PAGER" "$SYSTEMD_PAGER" \
+  "$TERM" "$MANPAGER" "$BAT_PAGER"
+```
+
+Both surfaces must print five `cat` values, the configured TERM, and the two
+ordinary tool-specific values in that order.
+
+To verify the explicit opt-out, copy
+`crates/tau-ext-shell/tests/fixtures/hostile-pager.sh` to an executable temporary
+path, set `non_interactive_pager: false`, set `PAGER` to that path, and set
+`user_command_timeout_secs: 2`. After restart, `printf payload | "$PAGER"` must
+reach the fixture and time out through both a two-second model call and user
+`!!`; with protection enabled it must instead complete through `cat`. The
+fixture consumes EOF and then stalls, so this procedure does not rely on host
+pager configuration.
+
+The protected `cat` must resolve on the child's effective `PATH`; otherwise an
+ordinary command-not-found failure is expected.
+
 #### Shell mutation and directory-lock mode
 
 Older Tau versions exposed explicit `shell` `mode: ro` / `mode: rw` arguments.

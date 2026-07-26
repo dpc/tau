@@ -43,9 +43,9 @@ const CARGO_BUILD_ENV_VARS: &[&str] = &[
 /// Sanitize a `Command` so the child is fully detached from the
 /// harness's controlling terminal:
 ///
-/// - Overrides display-related environment variables with `TERM=dumb` /
-///   `NO_COLOR=1` / `CLICOLOR=0` so well-behaved tools suppress ANSI escapes
-///   and TTY-only fancy output.
+/// - Overrides color-request environment variables with `NO_COLOR=1` /
+///   `CLICOLOR=0` while preserving `TERM` so output PTYs retain useful terminal
+///   formatting.
 /// - Clears Cargo build-time variables that can confuse tools executed outside
 ///   the extension's build context.
 /// - The spawn layer closes stdin on every platform, so interactive prompts
@@ -54,9 +54,7 @@ const CARGO_BUILD_ENV_VARS: &[&str] = &[
 ///   session with no controlling terminal — even an explicit `open("/dev/tty")`
 ///   will fail rather than reach the harness's tty.
 pub(crate) fn apply_command_isolation(cmd: &mut Command) {
-    cmd.env("TERM", "dumb")
-        .env("NO_COLOR", "1")
-        .env("CLICOLOR", "0");
+    cmd.env("NO_COLOR", "1").env("CLICOLOR", "0");
 
     // Work around Cargo leaking build-time environment into commands run during
     // development, which can make nested Cargo invocations rebuild needlessly:
