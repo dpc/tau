@@ -1,5 +1,18 @@
 # SPEC-session-discovery-declarations-and-readiness: Session-discovery declarations and readiness
 
+## Status
+
+The protocol and client expose the additive atomic snapshot declarations and
+canonical projection DTOs required by
+[DECISION-agent-initialization-discovery-snapshots](DECISION-agent-initialization-discovery-snapshots.md),
+but no producer emits and no runtime consumer interprets them. The positive
+item events and behavior below remain operational only as temporary migration
+scaffolding. Phase 1 already protects the durable replacement and both
+canonical projections from peer authorship. The next phase must atomically
+switch producers and consumers, enforce raw-declaration admission and bounds,
+synthesize current state, and remove the old contract; this is not a supported
+dual interface.
+
 ## Record justification
 
 Session discovery spans protocol defaults, generic peer admission and interception,
@@ -114,3 +127,27 @@ independent persistence and replay classifications.
 The configured-local-extension trust boundary is documented in [`SECURITY.md`](../SECURITY.md).
 The per-agent context flow and all unrelated generic-emission rows remain outside this
 specification.
+
+## Additive snapshot wire scaffold
+
+`extension.session_discovery_snapshot_declared` carries one session id and
+complete skill-candidate and ordered AGENTS.md lists. Each skill candidate
+carries the legacy discovery metadata plus the discovery owner's optional
+signed Unix-epoch modification time in microseconds, including pre-epoch
+values. `harness.session_skills_available` carries a complete
+effective skill projection. Both default to `persist=false`.
+
+`extension.agent_discovery_snapshot_declared` carries the same complete source
+lists correlated to an exact session, agent, and `agent_initialization_id`.
+`harness.agent_context_initialized` carries that correlation plus the exact
+model-listed effective skills and ordered AGENTS.md path/line/byte summaries.
+It and `harness.session_skills_available` default to `persist=false`. Phase 1
+already rejects peer authorship of both canonical projections and protects them
+from interceptor drop or mutation; raw declaration admission and canonical
+production, consumption, replay, and synthesis remain deferred.
+
+The shared effective-skill DTO retains invocation flags, argument hint, and a
+tagged source: either an absolute file path or a built-in discriminator resolved
+from the enclosing skill name. It does not snapshot complete skill content. The
+protocol frame limit already applies; explicit item and decoded-byte bounds
+remain deferred to the atomic runtime switch.

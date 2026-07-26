@@ -100,6 +100,31 @@ impl_event_payload!(
     tau_proto::Event::SessionReplayComplete
 );
 impl_event_payload!(
+    tau_proto::ExtensionSessionDiscoverySnapshotDeclared,
+    tau_proto::EventName::EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED,
+    tau_proto::Event::ExtensionSessionDiscoverySnapshotDeclared
+);
+impl_event_payload!(
+    tau_proto::ExtensionAgentDiscoverySnapshotDeclared,
+    tau_proto::EventName::EXTENSION_AGENT_DISCOVERY_SNAPSHOT_DECLARED,
+    tau_proto::Event::ExtensionAgentDiscoverySnapshotDeclared
+);
+impl_event_payload!(
+    tau_proto::AgentInitializationContextSet,
+    tau_proto::EventName::AGENT_INITIALIZATION_CONTEXT_SET,
+    tau_proto::Event::AgentInitializationContextSet
+);
+impl_event_payload!(
+    tau_proto::HarnessAgentContextInitialized,
+    tau_proto::EventName::HARNESS_AGENT_CONTEXT_INITIALIZED,
+    tau_proto::Event::HarnessAgentContextInitialized
+);
+impl_event_payload!(
+    tau_proto::HarnessSessionSkillsAvailable,
+    tau_proto::EventName::HARNESS_SESSION_SKILLS_AVAILABLE,
+    tau_proto::Event::HarnessSessionSkillsAvailable
+);
+impl_event_payload!(
     tau_proto::StartAgentAccepted,
     tau_proto::EventName::AGENT_START_ACCEPTED,
     tau_proto::Event::StartAgentAccepted

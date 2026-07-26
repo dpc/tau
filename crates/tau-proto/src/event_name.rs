@@ -294,6 +294,17 @@ impl EventName {
         Self::from_static(EventCategory::Extension, "skill_available");
     pub const EXTENSION_AGENTS_MD_AVAILABLE: Self =
         Self::from_static(EventCategory::Extension, "agents_md_available");
+    /// Complete extension-authored session discovery source snapshot.
+    pub const EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED: Self = Self::from_static(
+        EventCategory::Extension,
+        "session_discovery_snapshot_declared",
+    );
+    /// Complete extension-authored agent-initialization discovery source
+    /// snapshot.
+    pub const EXTENSION_AGENT_DISCOVERY_SNAPSHOT_DECLARED: Self = Self::from_static(
+        EventCategory::Extension,
+        "agent_discovery_snapshot_declared",
+    );
     pub const EXTENSION_CONTEXT_PROVIDER_REGISTER: Self =
         Self::from_static(EventCategory::Extension, "context_provider_register");
     pub const EXTENSION_SESSION_CONTEXT_PROVIDER_REGISTER: Self = Self::from_static(
@@ -321,6 +332,9 @@ impl EventName {
     pub const AGENT_WATCHES_UPDATED: Self =
         Self::from_static(EventCategory::Agent, "watches_updated");
     pub const AGENT_STATS_UPDATED: Self = Self::from_static(EventCategory::Agent, "stats_updated");
+    /// Durable harness-authored replacement of initialized agent context.
+    pub const AGENT_INITIALIZATION_CONTEXT_SET: Self =
+        Self::from_static(EventCategory::Agent, "initialization_context_set");
     pub const PROVIDER_MODELS_DECLARED: Self =
         Self::from_static(EventCategory::Provider, "models_declared");
     pub const PROVIDER_MODELS_UPDATED: Self =
@@ -361,6 +375,12 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "models_available");
     pub const HARNESS_ROLES_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "roles_available");
+    /// Current harness-owned projection for one initialized agent.
+    pub const HARNESS_AGENT_CONTEXT_INITIALIZED: Self =
+        Self::from_static(EventCategory::Harness, "agent_context_initialized");
+    /// Current harness-owned complete session skill snapshot.
+    pub const HARNESS_SESSION_SKILLS_AVAILABLE: Self =
+        Self::from_static(EventCategory::Harness, "session_skills_available");
     pub const HARNESS_ROLE_SELECTED: Self =
         Self::from_static(EventCategory::Harness, "role_selected");
     pub const HARNESS_CONTEXT_USAGE_CHANGED: Self =

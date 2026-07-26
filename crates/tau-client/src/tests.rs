@@ -476,6 +476,22 @@ impl TauExtension for ContextReadyEmitExtension {
             )?;
             cx.handle()
                 .emit_session_context_ready(tau_proto::SessionId::new("session-1"))?;
+            cx.handle().declare_session_discovery_snapshot(
+                tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+                    session_id: tau_proto::SessionId::new("session-1"),
+                    skills: Vec::new(),
+                    agents_files: Vec::new(),
+                },
+            )?;
+            cx.handle().declare_agent_discovery_snapshot(
+                tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+                    session_id: tau_proto::SessionId::new("session-1"),
+                    agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                    agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+                    skills: Vec::new(),
+                    agents_files: Vec::new(),
+                },
+            )?;
             Ok(())
         });
     }
@@ -1592,8 +1608,8 @@ fn shell_runtime_event_payloads_subscribe_and_dispatch_with_replay_policy() {
     );
 }
 
-/// Ensures context-ready emit helpers produce the existing readiness DTOs
-/// without taking ownership of readiness policy.
+/// Ensures context and discovery emit helpers produce transient declaration
+/// DTOs without taking ownership of readiness or snapshot acceptance policy.
 #[test]
 fn client_handle_context_ready_helpers_emit_existing_events() {
     let (_, frames) = run_messages(
@@ -1618,6 +1634,96 @@ fn client_handle_context_ready_helpers_emit_existing_events() {
         event,
         Event::ExtensionSessionContextReady(ready) if ready.session_id == "session-1"
     ) && !persist));
+    assert!(ready_events.iter().any(|(event, persist)| matches!(
+        event,
+        Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot)
+            if snapshot.session_id == "session-1"
+                && snapshot.skills.is_empty()
+                && snapshot.agents_files.is_empty()
+    ) && !persist));
+    assert!(ready_events.iter().any(|(event, persist)| matches!(
+        event,
+        Event::ExtensionAgentDiscoverySnapshotDeclared(snapshot)
+            if snapshot.session_id == "session-1"
+                && snapshot.agent_id.as_str() == "agent-1"
+                && snapshot.agent_initialization_id.as_str() == "init-1"
+                && snapshot.skills.is_empty()
+                && snapshot.agents_files.is_empty()
+    ) && !persist));
+}
+
+/// Ensures every additive discovery contract payload supports the typed
+/// subscription API, preventing canonical projections from requiring raw
+/// event matching while the migration scaffold is in place.
+#[test]
+fn discovery_scaffold_payloads_support_typed_subscriptions() {
+    fn assert_payload<Payload: EventPayload>(event: &Event, expected: tau_proto::EventName) {
+        assert_eq!(Payload::NAME, expected);
+        assert!(Payload::from_event(event).is_some());
+    }
+
+    let session = Event::ExtensionSessionDiscoverySnapshotDeclared(
+        tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
+            session_id: "session-1".into(),
+            skills: Vec::new(),
+            agents_files: Vec::new(),
+        },
+    );
+    assert_payload::<tau_proto::ExtensionSessionDiscoverySnapshotDeclared>(
+        &session,
+        tau_proto::EventName::EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED,
+    );
+
+    let agent = Event::ExtensionAgentDiscoverySnapshotDeclared(
+        tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
+            session_id: "session-1".into(),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+            skills: Vec::new(),
+            agents_files: Vec::new(),
+        },
+    );
+    assert_payload::<tau_proto::ExtensionAgentDiscoverySnapshotDeclared>(
+        &agent,
+        tau_proto::EventName::EXTENSION_AGENT_DISCOVERY_SNAPSHOT_DECLARED,
+    );
+
+    let replacement =
+        Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            session_id: "session-1".into(),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+            agents_message: None,
+            effective_skills: Vec::new(),
+            agents_files: Vec::new(),
+        });
+    assert_payload::<tau_proto::AgentInitializationContextSet>(
+        &replacement,
+        tau_proto::EventName::AGENT_INITIALIZATION_CONTEXT_SET,
+    );
+
+    let agent_projection =
+        Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            session_id: "session-1".into(),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+            listed_skills: Vec::new(),
+            agents_files: Vec::new(),
+        });
+    assert_payload::<tau_proto::HarnessAgentContextInitialized>(
+        &agent_projection,
+        tau_proto::EventName::HARNESS_AGENT_CONTEXT_INITIALIZED,
+    );
+
+    let session_projection =
+        Event::HarnessSessionSkillsAvailable(tau_proto::HarnessSessionSkillsAvailable {
+            session_id: "session-1".into(),
+            skills: Vec::new(),
+        });
+    assert_payload::<tau_proto::HarnessSessionSkillsAvailable>(
+        &session_projection,
+        tau_proto::EventName::HARNESS_SESSION_SKILLS_AVAILABLE,
+    );
 }
 
 /// Ensures detached notice requests still flow through the writer before runner

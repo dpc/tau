@@ -320,6 +320,15 @@ initialization until acknowledgement or disconnect; a deadline or degraded mode 
 a separate decision. Re-check reservation cleanup/reaccounting, wait-set admission, and
 disconnect/respawn generation checks whenever this flow changes. See
 [SPEC-session-discovery-declarations-and-readiness](specs/SPEC-session-discovery-declarations-and-readiness.md).
+The additive discovery-initialization scaffold already treats
+`agent.initialization_context_set`, `harness.agent_context_initialized`, and
+`harness.session_skills_available` as protected harness-authored events:
+configured extensions and attached UIs cannot publish them, and interceptors
+cannot drop or mutate them. Only `agent.initialization_context_set` defaults to
+durable publication; both `harness.*` projections default to transient.
+Runtime admission and processing of the new extension snapshot declarations,
+plus canonical production, persistence folding, replay, and synthesis, remain
+deferred to the atomic migration phase.
 Configured extension kinds have the same authority to publish transient per-agent
 context registration, values, and readiness. The harness commits them before
 projection or wait release, revalidates the exact connection generation, bounds

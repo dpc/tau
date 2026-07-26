@@ -4257,6 +4257,155 @@ fn interception_cannot_retarget_user_interaction_fact() {
     );
 }
 
+/// Ensures the additive initialization replacement and canonical projections
+/// cannot be forged or rewritten before their runtime producers exist.
+#[test]
+fn discovery_scaffold_canonical_events_are_protected() {
+    let agent_id = crate::parse_agent_id("agent-1");
+    let initialization_id = tau_proto::AgentInitializationId::new("init-1");
+    let events = [
+        Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            session_id: "session-1".into(),
+            agent_id: agent_id.clone(),
+            agent_initialization_id: initialization_id.clone(),
+            agents_message: None,
+            effective_skills: Vec::new(),
+            agents_files: Vec::new(),
+        }),
+        Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            session_id: "session-1".into(),
+            agent_id,
+            agent_initialization_id: initialization_id,
+            listed_skills: Vec::new(),
+            agents_files: Vec::new(),
+        }),
+        Event::HarnessSessionSkillsAvailable(tau_proto::HarnessSessionSkillsAvailable {
+            session_id: "session-1".into(),
+            skills: Vec::new(),
+        }),
+    ];
+
+    for event in &events {
+        assert!(Harness::is_peer_forbidden_harness_fact(event));
+        assert!(crate::harness::interception::event_must_pass_by_default(
+            &event.name()
+        ));
+        let mut replacement = event.clone();
+        match &mut replacement {
+            Event::AgentInitializationContextSet(value) => {
+                value.session_id = "forged-session".into();
+            }
+            Event::HarnessAgentContextInitialized(value) => {
+                value.session_id = "forged-session".into();
+            }
+            Event::HarnessSessionSkillsAvailable(value) => {
+                value.session_id = "forged-session".into();
+            }
+            _ => unreachable!("discovery scaffold fixture"),
+        }
+        assert!(
+            crate::harness::interception::immutable_protected_fact_was_modified(
+                event,
+                &replacement,
+            )
+        );
+    }
+
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut h,
+        "configured-tool",
+        "configured-tool",
+        tau_proto::ClientKind::Tool,
+    );
+    connect_test_client_with_origin(
+        &mut h,
+        "attached-ui",
+        tau_proto::ClientKind::Ui,
+        ConnectionOrigin::Socket,
+    );
+    let baseline = h.event_log.next_seq();
+    for event in &events {
+        let emit = TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_persist(
+            event.clone(),
+            event.defaults_to_persist(),
+        )));
+        h.handle_extension_event("configured-tool", emit.clone())
+            .expect("configured extension forged event is ignored");
+        h.handle_client_event("attached-ui", emit)
+            .expect("attached UI forged event is ignored");
+    }
+    assert!(h.event_log.get_next_from(baseline).is_none());
+
+    let interceptor = connect_test_tool(&mut h, "discovery-interceptor");
+    h.handle_extension_event(
+        "discovery-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: events
+                .iter()
+                .map(|event| EventSelector::Exact(event.name()))
+                .collect(),
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register discovery interceptor");
+
+    for event in events {
+        let baseline = h.event_log.next_seq();
+        h.publish_event(None, event.clone());
+        let (intercepted, _) = intercepted_payload(&interceptor);
+        assert_eq!(intercepted, event);
+        h.handle_extension_event(
+            "discovery-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Drop,
+            })),
+        )
+        .expect("drop is overridden");
+        assert_eq!(
+            h.event_log
+                .get_next_from(baseline)
+                .expect("must-pass event committed")
+                .event,
+            event
+        );
+
+        interceptor.lock().expect("interceptor frames").clear();
+        let baseline = h.event_log.next_seq();
+        h.publish_event(None, event.clone());
+        let _ = intercepted_payload(&interceptor);
+        let mut replacement = event.clone();
+        match &mut replacement {
+            Event::AgentInitializationContextSet(value) => {
+                value.session_id = "forged-session".into();
+            }
+            Event::HarnessAgentContextInitialized(value) => {
+                value.session_id = "forged-session".into();
+            }
+            Event::HarnessSessionSkillsAvailable(value) => {
+                value.session_id = "forged-session".into();
+            }
+            _ => unreachable!("discovery scaffold fixture"),
+        }
+        h.handle_extension_event(
+            "discovery-interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(Some(Box::new(replacement))),
+            })),
+        )
+        .expect("same-variant mutation is rejected");
+        assert_eq!(
+            h.event_log
+                .get_next_from(baseline)
+                .expect("immutable event committed")
+                .event,
+            event
+        );
+        interceptor.lock().expect("interceptor frames").clear();
+    }
+}
+
 /// Outer-turn accounting boundaries survive actual interception Drop and
 /// replacement replies, while peer publication rejects both event families.
 #[test]

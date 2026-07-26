@@ -17,9 +17,11 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
-    CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
-    ExtensionName, HarnessProviderQuotaChanged, InternalPromptKind, MessageDeleted,
+    ActionInvocationId, AgentContextKey, AgentId, AgentInitializationContextSet, AgentMessageId,
+    AgentMetadataKey, AgentPromptId, CborValue, ContextItem, DiffSummary, EventCategory, EventName,
+    ExtensionAgentDiscoverySnapshotDeclared, ExtensionInstanceId, ExtensionName,
+    ExtensionSessionDiscoverySnapshotDeclared, HarnessAgentContextInitialized,
+    HarnessProviderQuotaChanged, HarnessSessionSkillsAvailable, InternalPromptKind, MessageDeleted,
     MessageDelivered, MessageEdited, MessagePhase, MessageReactionAdded, MessageReactionRemoved,
     MessageSent, ModelId, ModelTag, PromptContext, PromptFragment, PromptSubmissionSource,
     ProviderQuotaClear, ProviderQuotaPatch, ProviderQuotaReplace, ProviderTokenUsage,
@@ -4908,6 +4910,10 @@ pub enum Event {
     ExtSkillAvailable(ExtSkillAvailable),
     #[serde(rename = "extension.agents_md_available")]
     ExtAgentsMdAvailable(ExtAgentsMdAvailable),
+    #[serde(rename = "extension.session_discovery_snapshot_declared")]
+    ExtensionSessionDiscoverySnapshotDeclared(ExtensionSessionDiscoverySnapshotDeclared),
+    #[serde(rename = "extension.agent_discovery_snapshot_declared")]
+    ExtensionAgentDiscoverySnapshotDeclared(ExtensionAgentDiscoverySnapshotDeclared),
     #[serde(rename = "extension.context_provider_register")]
     ExtensionContextProviderRegister(ExtensionContextProviderRegister),
     #[serde(rename = "extension.session_context_provider_register")]
@@ -4928,6 +4934,8 @@ pub enum Event {
     StartAgentAccepted(StartAgentAccepted),
     #[serde(rename = "agent.start_result")]
     StartAgentResult(StartAgentResult),
+    #[serde(rename = "agent.initialization_context_set")]
+    AgentInitializationContextSet(AgentInitializationContextSet),
     #[serde(rename = "agent.message_sent")]
     AgentMessageSent(AgentMessageSent),
     #[serde(rename = "agent.message_received")]
@@ -4963,6 +4971,10 @@ pub enum Event {
     HarnessModelsAvailable(HarnessModelsAvailable),
     #[serde(rename = "harness.roles_available")]
     HarnessRolesAvailable(HarnessRolesAvailable),
+    #[serde(rename = "harness.agent_context_initialized")]
+    HarnessAgentContextInitialized(HarnessAgentContextInitialized),
+    #[serde(rename = "harness.session_skills_available")]
+    HarnessSessionSkillsAvailable(HarnessSessionSkillsAvailable),
     #[serde(rename = "harness.role_selected")]
     HarnessRoleSelected(HarnessRoleSelected),
     #[serde(rename = "harness.context_usage_changed")]
@@ -5334,6 +5346,12 @@ impl Event {
             Self::ExtensionRestarting(_) => EventName::EXTENSION_RESTARTING,
             Self::ExtSkillAvailable(_) => EventName::EXTENSION_SKILL_AVAILABLE,
             Self::ExtAgentsMdAvailable(_) => EventName::EXTENSION_AGENTS_MD_AVAILABLE,
+            Self::ExtensionSessionDiscoverySnapshotDeclared(_) => {
+                EventName::EXTENSION_SESSION_DISCOVERY_SNAPSHOT_DECLARED
+            }
+            Self::ExtensionAgentDiscoverySnapshotDeclared(_) => {
+                EventName::EXTENSION_AGENT_DISCOVERY_SNAPSHOT_DECLARED
+            }
             Self::ExtensionContextProviderRegister(_) => {
                 EventName::EXTENSION_CONTEXT_PROVIDER_REGISTER
             }
@@ -5378,6 +5396,8 @@ impl Event {
             Self::HarnessUiDir(_) => EventName::HARNESS_UI_DIR,
             Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,
             Self::HarnessRolesAvailable(_) => EventName::HARNESS_ROLES_AVAILABLE,
+            Self::HarnessAgentContextInitialized(_) => EventName::HARNESS_AGENT_CONTEXT_INITIALIZED,
+            Self::HarnessSessionSkillsAvailable(_) => EventName::HARNESS_SESSION_SKILLS_AVAILABLE,
             Self::HarnessRoleSelected(_) => EventName::HARNESS_ROLE_SELECTED,
             Self::HarnessContextUsageChanged(_) => EventName::HARNESS_CONTEXT_USAGE_CHANGED,
             Self::HarnessProviderQuotaChanged(_) => EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
@@ -5471,6 +5491,7 @@ impl Event {
             Self::AgentMetadataUnset(_) => EventName::AGENT_METADATA_UNSET,
             Self::AgentMetadataSetRequest(_) => EventName::AGENT_METADATA_SET_REQUEST,
             Self::AgentMetadataUnsetRequest(_) => EventName::AGENT_METADATA_UNSET_REQUEST,
+            Self::AgentInitializationContextSet(_) => EventName::AGENT_INITIALIZATION_CONTEXT_SET,
             Self::AgentReplayComplete(_) => EventName::AGENT_REPLAY_COMPLETE,
             _ => return None,
         }
@@ -5560,6 +5581,8 @@ impl Event {
                 | Self::ExtPromptFragmentPublish(_)
                 | Self::ExtSkillAvailable(_)
                 | Self::ExtAgentsMdAvailable(_)
+                | Self::ExtensionSessionDiscoverySnapshotDeclared(_)
+                | Self::ExtensionAgentDiscoverySnapshotDeclared(_)
                 | Self::ExtensionSessionContextProviderRegister(_)
                 | Self::ExtensionSessionContextReady(_)
                 | Self::ExtensionContextProviderRegister(_)
@@ -5582,6 +5605,8 @@ impl Event {
                 | Self::AgentState(_)
                 | Self::AgentWatchesUpdated(_)
                 | Self::AgentStatsUpdated(_)
+                | Self::HarnessAgentContextInitialized(_)
+                | Self::HarnessSessionSkillsAvailable(_)
                 | Self::AgentReplayComplete(_)
                 | Self::SessionReplayComplete(_)
                 | Self::UiCompactRequest(_)

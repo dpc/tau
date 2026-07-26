@@ -16,6 +16,7 @@
 
 mod context;
 mod diff;
+mod discovery_snapshot;
 mod duration_format;
 mod estimated_cost;
 mod event_name;
@@ -39,6 +40,7 @@ use std::marker::PhantomData;
 pub use ciborium::value::Value as CborValue;
 pub use context::*;
 pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary, FileDiffSummary};
+pub use discovery_snapshot::*;
 pub use duration_format::format_approximate_duration_secs;
 pub use estimated_cost::*;
 pub use event_name::*;

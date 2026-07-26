@@ -2,6 +2,12 @@
 
 ## Status
 
+The harness rejects peer attempts to author the additive durable initialization
+replacement and canonical discovery projection events. It does not yet admit,
+stage, consume, persist, replay, or synthesize the new discovery contract; the
+next runtime phase must switch those semantics atomically with producers and
+remove the legacy positive item flow.
+
 The external-message, provider-model, provider-quota, provider-execution,
 tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, user-shell-report, prompt-fragment,
 session-discovery, per-agent-context, internal-prompt-request, start-agent-request,

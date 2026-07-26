@@ -2,6 +2,13 @@
 
 ## Status
 
+Atomic session/agent discovery declarations, initialization replacement state,
+protected canonical projections, and `AgentInitializationId` exist as additive
+migration scaffolding. Runtime producers and consumers still use the old
+positive item events and uncorrelated context/readiness fields; the next phase
+must switch them atomically and remove the old surface. This intermediate wire
+overlap is not a supported dual interface.
+
 The protocol now separates transient `message.*_reported` inputs from
 harness-authored canonical `message.*` facts, carries declared
 `PeerCapability::MessageBridge` authority in `Hello`, and separates transient

@@ -1,5 +1,14 @@
 # SPEC-per-agent-context-declarations-and-readiness: Per-agent context publication
 
+## Status
+
+`AgentInitializationId` and the new agent discovery/replacement/projection DTOs
+exist as additive migration scaffolding, but existing `session.agent_loaded`,
+`extension.agent_context_publish`, and `extension.context_ready` payloads remain
+uncorrelated and retain the behavior below. The next atomic runtime phase must
+add mandatory initialization correlation while switching their producers and
+consumers; the current overlap is not a supported final interface.
+
 ## Record justification
 
 The contract spans protocol defaults, client helpers, generic harness admission
@@ -69,3 +78,10 @@ First-party registration, value, and readiness sends use `persist=false`.
 The local configured-extension trust boundary and bounded-wait risk are
 documented in [`SECURITY.md`](../SECURITY.md). Unrelated authority-matrix rows
 remain outside this specification.
+
+`agent.initialization_context_set` is the durable replacement DTO for an exact
+session, agent, and initialization correlation. It carries the optional
+bootstrap message, frozen effective skills, and ordered AGENTS.md summaries.
+No reducer folds it during this scaffold phase. The corresponding
+`harness.agent_context_initialized` current projection remains transient and
+unpublished until the runtime switch.

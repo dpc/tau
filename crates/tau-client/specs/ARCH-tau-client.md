@@ -1,5 +1,14 @@
 # ARCH-tau-client: tau-client architecture
 
+## Status
+
+Typed publication helpers for complete session and agent discovery snapshots
+and typed subscriptions for the new declaration, replacement, and canonical
+projection DTOs exist as additive migration scaffolding. No first-party
+producer uses the helpers and no runtime consumer handles these events yet.
+The next phase must switch the runtime atomically and remove the old positive
+item contract; this overlap is not a supported dual interface.
+
 Architectural or externally meaningful functional changes to this shared
 harness-extension interface require the separately reviewed, human-confirmed
 decision mandated by

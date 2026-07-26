@@ -328,6 +328,8 @@ impl ClientHandle {
                         | tau_proto::Event::ToolUnregistrationDeclared(_)
                         | tau_proto::Event::ExtSkillAvailable(_)
                         | tau_proto::Event::ExtAgentsMdAvailable(_)
+                        | tau_proto::Event::ExtensionSessionDiscoverySnapshotDeclared(_)
+                        | tau_proto::Event::ExtensionAgentDiscoverySnapshotDeclared(_)
                         | tau_proto::Event::ProviderModelsDeclared(_)
                         | tau_proto::Event::ExtensionContextProviderRegister(_)
                         | tau_proto::Event::ExtensionSessionContextProviderRegister(_)
@@ -584,6 +586,52 @@ impl ClientHandle {
     pub fn emit_session_context_ready(&self, session_id: tau_proto::SessionId) -> ClientResult<()> {
         self.emit_transient(tau_proto::Event::ExtensionSessionContextReady(
             tau_proto::ExtensionSessionContextReady { session_id },
+        ))
+    }
+
+    /// Publishes one complete transient session discovery source snapshot.
+    ///
+    /// Empty lists represent an explicit empty source. Success confirms only
+    /// local protocol writer admission and flush; interception and harness
+    /// validation determine whether the snapshot becomes canonical state.
+    ///
+    /// This helper is migration scaffolding until Tau switches discovery
+    /// producers and consumers atomically; callers must not publish the legacy
+    /// item events in parallel as a supported dual protocol.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn declare_session_discovery_snapshot(
+        &self,
+        snapshot: tau_proto::ExtensionSessionDiscoverySnapshotDeclared,
+    ) -> ClientResult<()> {
+        self.emit_transient(tau_proto::Event::ExtensionSessionDiscoverySnapshotDeclared(
+            snapshot,
+        ))
+    }
+
+    /// Publishes one complete transient source snapshot for an agent
+    /// initialization.
+    ///
+    /// Empty lists represent an explicit empty source. Success confirms only
+    /// local protocol writer admission and flush; interception, correlation,
+    /// and harness validation determine whether the snapshot becomes
+    /// canonical state.
+    ///
+    /// This helper is migration scaffolding until Tau switches discovery
+    /// producers and consumers atomically; callers must not publish the legacy
+    /// item events in parallel as a supported dual protocol.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn declare_agent_discovery_snapshot(
+        &self,
+        snapshot: tau_proto::ExtensionAgentDiscoverySnapshotDeclared,
+    ) -> ClientResult<()> {
+        self.emit_transient(tau_proto::Event::ExtensionAgentDiscoverySnapshotDeclared(
+            snapshot,
         ))
     }
 

@@ -76,6 +76,16 @@ for control of the emit/intercept pipeline.
   as `provider/model_id` strings. Re-emitted when provider snapshots change.
 - **`harness.roles_available`** — Snapshot of roles currently available from
   effective configuration, including their display descriptions for UIs.
+- **`harness.agent_context_initialized`** — Protected transient current-state
+  projection for one exact agent initialization, carrying model-listed skills
+  and ordered AGENTS.md path/line/byte summaries. The harness does not publish
+  this scaffold event until the runtime migration lands.
+- **`harness.session_skills_available`** — Protected transient complete
+  validated session skill snapshot for role preflight and manual completion.
+  The harness does not publish this scaffold event until the runtime migration
+  lands. Effective skill sources are tagged as file-backed absolute paths or a
+  built-in discriminator; built-in content is resolved by skill name and is not
+  carried in projection events.
 - **`harness.role_selected`** — Which role is currently selected, plus
   the model it resolves to and that model's context-window size if known.
 - **`harness.context_usage_changed`** — Updated input/cached token counts
@@ -174,6 +184,10 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   like user input. It uses the same immutable harness-owned, default-false
   activation marker: false is passive/legacy context and cannot independently
   wake replay.
+- **`agent.initialization_context_set`** — Durable harness-authored replacement
+  DTO for one exact `agent_initialization_id`, carrying an optional bootstrap
+  block, frozen effective skills, and ordered AGENTS.md summaries. The reducer
+  does not interpret this scaffold event until the runtime migration lands.
 - **`agent.prompt_recalled`** — A queued prompt was recalled for editing.
 - **`agent.prompt_created`** — The harness assembled a provider prompt and
   assigned it an `agent_prompt_id`; payload carries `agent_id`, `session_id`,
@@ -500,6 +514,13 @@ facts, or readiness release.
 See
 [`SPEC-session-discovery-declarations-and-readiness`](../specs/SPEC-session-discovery-declarations-and-readiness.md).
 
+The snapshot events below are temporary migration scaffolding for
+[`DECISION-agent-initialization-discovery-snapshots`](../specs/DECISION-agent-initialization-discovery-snapshots.md).
+No producer emits them and no runtime consumer interprets them yet. The legacy
+positive item events remain operational only until the next phase atomically
+switches producers and consumers and removes them; this intermediate state is
+not a supported dual discovery interface.
+
 Every authenticated configured extension kind may also author the three
 per-agent context events without a capability; unconfigured/socket peers may
 not. Registration controls captured wait participation but does not gate value
@@ -519,6 +540,14 @@ transient runtime observations and never enter semantic replay. See
   AGENTS.md file and is shipping its contents eagerly so the harness
   can inject them without a tool round-trip. The transient declaration commits before
   slot replacement and durable per-agent instruction injection.
+- **`extension.session_discovery_snapshot_declared`** — A complete transient
+  session-baseline source snapshot containing skill candidates and ordered
+  AGENTS.md files. Optional sampled modification times are signed microseconds
+  from the Unix epoch, so negative values represent pre-epoch files. Empty
+  lists mean clear once runtime handling lands.
+- **`extension.agent_discovery_snapshot_declared`** — A complete transient
+  source snapshot for one exact session, agent, and
+  `agent_initialization_id`. Empty lists mean clear once runtime handling lands.
 - **`extension.context_provider_register`** — A transient declaration that commits
   before the extension registers as a
   per-agent context provider that can publish context after

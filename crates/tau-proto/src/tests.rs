@@ -1229,6 +1229,44 @@ fn representative_events() -> Vec<Event> {
             file_path: "/home/user/src/project/AGENTS.md".into(),
             content: "# Project instructions\n- Run tests".to_owned(),
         }),
+        Event::ExtensionSessionDiscoverySnapshotDeclared(
+            ExtensionSessionDiscoverySnapshotDeclared {
+                session_id: "s1".into(),
+                skills: vec![DiscoverySkillCandidate {
+                    name: "brave-search".into(),
+                    description: "Web search via Brave API".to_owned(),
+                    file_path: "/home/user/.agents/skills/brave-search/SKILL.md".into(),
+                    add_to_prompt: true,
+                    user_invocable: true,
+                    disable_model_invocation: false,
+                    argument_hint: Some("<query>".to_owned()),
+                    sampled_modified: Some(DiscoveryModifiedMicros::new(123_000_000)),
+                }],
+                agents_files: vec![DiscoveryAgentsFile {
+                    file_path: "/home/user/src/project/AGENTS.md".into(),
+                    content: "# Project instructions\n- Run tests".to_owned(),
+                }],
+            },
+        ),
+        Event::ExtensionAgentDiscoverySnapshotDeclared(ExtensionAgentDiscoverySnapshotDeclared {
+            session_id: "s1".into(),
+            agent_id: agent_id("agent-1"),
+            agent_initialization_id: AgentInitializationId::new("init-1"),
+            skills: vec![DiscoverySkillCandidate {
+                name: "local-search".into(),
+                description: "Search locally".to_owned(),
+                file_path: "/project/.agents/skills/local-search/SKILL.md".into(),
+                add_to_prompt: false,
+                user_invocable: true,
+                disable_model_invocation: true,
+                argument_hint: None,
+                sampled_modified: Some(DiscoveryModifiedMicros::new(-1)),
+            }],
+            agents_files: vec![DiscoveryAgentsFile {
+                file_path: "/project/AGENTS.md".into(),
+                content: "Run local checks.".to_owned(),
+            }],
+        }),
         Event::ExtensionContextProviderRegister(ExtensionContextProviderRegister {}),
         Event::ExtensionSessionContextProviderRegister(ExtensionSessionContextProviderRegister {}),
         Event::ExtensionContextReady(ExtensionContextReady {
@@ -1273,6 +1311,39 @@ fn representative_events() -> Vec<Event> {
             text: "looks good".to_owned(),
             error: None,
         }),
+        Event::AgentInitializationContextSet(AgentInitializationContextSet {
+            session_id: "s1".into(),
+            agent_id: agent_id("agent-1"),
+            agent_initialization_id: AgentInitializationId::new("init-1"),
+            agents_message: Some("project instructions".to_owned()),
+            effective_skills: vec![
+                DiscoveryEffectiveSkill {
+                    name: "brave-search".into(),
+                    description: "Web search via Brave API".to_owned(),
+                    source: DiscoveryEffectiveSkillSource::File {
+                        path: "/home/user/.agents/skills/brave-search/SKILL.md".into(),
+                    },
+                    add_to_prompt: true,
+                    user_invocable: true,
+                    disable_model_invocation: false,
+                    argument_hint: Some("<query>".to_owned()),
+                },
+                DiscoveryEffectiveSkill {
+                    name: "tau-self-knowledge".into(),
+                    description: "Explain Tau".to_owned(),
+                    source: DiscoveryEffectiveSkillSource::BuiltIn,
+                    add_to_prompt: true,
+                    user_invocable: true,
+                    disable_model_invocation: false,
+                    argument_hint: None,
+                },
+            ],
+            agents_files: vec![DiscoveryAgentsFileSummary {
+                file_path: "/home/user/src/project/AGENTS.md".into(),
+                lines: 2,
+                bytes: 32,
+            }],
+        }),
         Event::ExtensionEvent(
             CustomEvent::try_new(
                 "demo.progress".parse().expect("event name"),
@@ -1303,6 +1374,39 @@ fn representative_events() -> Vec<Event> {
                 est_uncached_input_cost_1m_usd: Default::default(),
                 est_cached_input_cost_1m_usd: Default::default(),
                 est_output_cost_1m_usd: Default::default(),
+            }],
+        }),
+        Event::HarnessAgentContextInitialized(HarnessAgentContextInitialized {
+            session_id: "s1".into(),
+            agent_id: agent_id("agent-1"),
+            agent_initialization_id: AgentInitializationId::new("init-1"),
+            listed_skills: vec![DiscoveryEffectiveSkill {
+                name: "tau-self-knowledge".into(),
+                description: "Explain Tau".to_owned(),
+                source: DiscoveryEffectiveSkillSource::BuiltIn,
+                add_to_prompt: true,
+                user_invocable: true,
+                disable_model_invocation: false,
+                argument_hint: None,
+            }],
+            agents_files: vec![DiscoveryAgentsFileSummary {
+                file_path: "/project/AGENTS.md".into(),
+                lines: 1,
+                bytes: 17,
+            }],
+        }),
+        Event::HarnessSessionSkillsAvailable(HarnessSessionSkillsAvailable {
+            session_id: "s1".into(),
+            skills: vec![DiscoveryEffectiveSkill {
+                name: "brave-search".into(),
+                description: "Web search via Brave API".to_owned(),
+                source: DiscoveryEffectiveSkillSource::File {
+                    path: "/home/user/.agents/skills/brave-search/SKILL.md".into(),
+                },
+                add_to_prompt: true,
+                user_invocable: true,
+                disable_model_invocation: false,
+                argument_hint: Some("<query>".to_owned()),
             }],
         }),
         Event::ProviderQuotaReplaceReported(ProviderQuotaReplace {
@@ -1934,6 +2038,100 @@ fn first_party_event_wire_tags_match_event_names_and_persistence() {
     assert_eq!(seen, expected_first_party_event_names());
 }
 
+/// Ensures every additive discovery event preserves its complete nested wire
+/// payload through JSON and CBOR, including both effective-skill source kinds.
+#[test]
+fn discovery_snapshot_events_round_trip_complete_wire_payloads() {
+    let events = representative_events()
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::ExtensionSessionDiscoverySnapshotDeclared(_)
+                    | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
+                    | Event::AgentInitializationContextSet(_)
+                    | Event::HarnessAgentContextInitialized(_)
+                    | Event::HarnessSessionSkillsAvailable(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 5);
+
+    for event in events {
+        let json = serde_json::to_vec(&event).expect("encode discovery event as JSON");
+        assert_eq!(
+            serde_json::from_slice::<Event>(&json).expect("decode discovery event from JSON"),
+            event
+        );
+
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&event, &mut cbor).expect("encode discovery event as CBOR");
+        assert_eq!(
+            ciborium::from_reader::<Event, _>(cbor.as_slice())
+                .expect("decode discovery event from CBOR"),
+            event
+        );
+    }
+}
+
+/// Ensures sampled modification times use an explicit signed-microsecond wire
+/// value and optional empty replacement fields remain representable.
+#[test]
+fn discovery_snapshot_timestamp_and_empty_replacement_wire_shapes_are_stable() {
+    for micros in [-1, 0, 1] {
+        let candidate = DiscoverySkillCandidate {
+            name: "sample".into(),
+            description: "sample".to_owned(),
+            file_path: "/sample/SKILL.md".into(),
+            add_to_prompt: false,
+            user_invocable: true,
+            disable_model_invocation: false,
+            argument_hint: None,
+            sampled_modified: Some(DiscoveryModifiedMicros::new(micros)),
+        };
+        let json = serde_json::to_value(&candidate).expect("serialize timestamp candidate");
+        assert_eq!(json["sampled_modified"], micros);
+        assert_eq!(
+            serde_json::from_value::<DiscoverySkillCandidate>(json).expect("deserialize candidate"),
+            candidate
+        );
+    }
+
+    let absent = DiscoverySkillCandidate {
+        name: "sample".into(),
+        description: "sample".to_owned(),
+        file_path: "/sample/SKILL.md".into(),
+        add_to_prompt: false,
+        user_invocable: true,
+        disable_model_invocation: false,
+        argument_hint: None,
+        sampled_modified: None,
+    };
+    let absent_json = serde_json::to_value(&absent).expect("serialize absent timestamp");
+    assert!(absent_json.get("sampled_modified").is_none());
+
+    let empty = Event::AgentInitializationContextSet(AgentInitializationContextSet {
+        session_id: "s1".into(),
+        agent_id: agent_id("agent-1"),
+        agent_initialization_id: AgentInitializationId::new("init-empty"),
+        agents_message: None,
+        effective_skills: Vec::new(),
+        agents_files: Vec::new(),
+    });
+    let json = serde_json::to_vec(&empty).expect("serialize empty replacement as JSON");
+    assert_eq!(
+        serde_json::from_slice::<Event>(&json).expect("deserialize empty replacement from JSON"),
+        empty
+    );
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&empty, &mut cbor).expect("serialize empty replacement as CBOR");
+    assert_eq!(
+        ciborium::from_reader::<Event, _>(cbor.as_slice())
+            .expect("deserialize empty replacement from CBOR"),
+        empty
+    );
+}
+
 fn expected_default_persist(event: &Event) -> bool {
     !event.is_message_report()
         && !matches!(
@@ -1961,6 +2159,8 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::HarnessProviderQuotaChanged(_)
                 | Event::AgentWatchesUpdated(_)
                 | Event::AgentStatsUpdated(_)
+                | Event::HarnessAgentContextInitialized(_)
+                | Event::HarnessSessionSkillsAvailable(_)
                 | Event::AgentReplayComplete(_)
                 | Event::SessionReplayComplete(_)
                 | Event::ToolProgressReported(_)
@@ -1974,6 +2174,8 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::ExtPromptFragmentPublish(_)
                 | Event::ExtSkillAvailable(_)
                 | Event::ExtAgentsMdAvailable(_)
+                | Event::ExtensionSessionDiscoverySnapshotDeclared(_)
+                | Event::ExtensionAgentDiscoverySnapshotDeclared(_)
                 | Event::ExtensionSessionContextProviderRegister(_)
                 | Event::ExtensionSessionContextReady(_)
                 | Event::ExtensionContextProviderRegister(_)
@@ -2013,6 +2215,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.display_name_set",
         "agent.head_moved",
         "agent.inference_dispatch_started",
+        "agent.initialization_context_set",
         "agent.message_received",
         "agent.message_sent",
         "agent.metadata_set",
@@ -2039,6 +2242,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.user_message_injected",
         "agent.watches_updated",
         "extension.agent_context_publish",
+        "extension.agent_discovery_snapshot_declared",
         "extension.agents_md_available",
         "extension.context_provider_register",
         "extension.context_ready",
@@ -2048,10 +2252,12 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "extension.restarting",
         "extension.session_context_provider_register",
         "extension.session_context_ready",
+        "extension.session_discovery_snapshot_declared",
         "extension.skill_available",
         "extension.starting",
         "extension.exited",
         "harness.agent_context_usage_changed",
+        "harness.agent_context_initialized",
         "harness.context_usage_changed",
         "harness.efforts_available",
         "harness.models_available",
@@ -2060,6 +2266,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "harness.role_selected",
         "harness.roles_available",
         "harness.session_dir",
+        "harness.session_skills_available",
         "harness.thinking_summaries_available",
         "harness.ui_dir",
         "harness.verbosities_available",
