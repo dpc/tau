@@ -14,26 +14,16 @@ function job_cargo() {
     selfci step fail
   fi
 
-  selfci step start "build"
-  nix build -L .#ci.workspace
-
-  selfci step start "clippy"
-  if ! nix build -L .#ci.clippy ; then
-    selfci step fail
-  fi
-
-  selfci step start "nextest"
-  if ! nix build -L .#ci.tests ; then
-    selfci step fail
-  fi
-
-  selfci step start "curated provider VCR replay"
-  if ! nix build -L .#ci.vcrTests ; then
-    selfci step fail
-  fi
-
-  selfci step start "deterministic provider E2E"
-  if ! nix build -L .#ci.deterministicE2eTests ; then
+  # Submit independent checks together so Nix can schedule them concurrently
+  # after their shared workspace build completes.
+  selfci step start "Nix cargo checks"
+  if ! nix build -L --no-link \
+    .#ci.workspace \
+    .#ci.clippy \
+    .#ci.tests \
+    .#ci.vcrTests \
+    .#ci.deterministicE2eTests
+  then
     selfci step fail
   fi
 }
