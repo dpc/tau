@@ -386,12 +386,17 @@ impl Extension {
         }
         let mut installation_preflight_attempted = false;
         let prepared = loop {
+            let submission = self
+                .output_submission_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             match self.replay_send_locked(&mut state, &invoke, &send_tool) {
                 SendReplay::New => {}
                 SendReplay::Coalesced => return None,
                 SendReplay::Event(event) => return Some(*event),
             }
+            drop(submission);
             if state.send_ledger.len() >= SEND_LEDGER_LIMIT {
                 return Some(tool_error(
                     invoke,
