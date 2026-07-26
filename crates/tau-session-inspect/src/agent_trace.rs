@@ -142,7 +142,10 @@ fn discover_agents(
         let Ok(agent_id) = AgentId::parse(&name) else {
             continue;
         };
-        let Some(record) = read_agent_creation_record(agents_dir, &agent_id)? else {
+        // An unreadable sequence-zero record cannot authenticate a creation edge.
+        // Ignore that unrelated artifact here; any journal whose valid edge makes
+        // it reachable undergoes strict full validation below.
+        let Some(record) = read_agent_creation_record(agents_dir, &agent_id).unwrap_or(None) else {
             continue;
         };
         let Event::AgentStarted(started) = record.event else {

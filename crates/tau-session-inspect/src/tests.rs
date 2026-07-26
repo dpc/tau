@@ -591,6 +591,96 @@ fn agent_trace_descendants_use_creator_not_parent_agent() {
     );
 }
 
+/// An unrelated legacy journal without `seq` cannot abort authenticated
+/// descendant traversal rooted at a healthy agent.
+#[test]
+fn agent_trace_descendants_ignore_unrelated_legacy_creation_record() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        10,
+    );
+    create_trace_agent(
+        temp.path(),
+        "agent-child",
+        tau_proto::AgentCreator::Agent {
+            session_id: "session-child".into(),
+            agent_id: AgentId::parse("agent-root").expect("agent id"),
+        },
+        None,
+        11,
+    );
+    let legacy_dir = temp.path().join("agent-unrelated-legacy");
+    std::fs::create_dir(&legacy_dir).expect("legacy agent directory");
+    let mut legacy = std::fs::File::create(legacy_dir.join("events.cbor")).expect("legacy journal");
+    legacy
+        .write_all(&1_u64.to_le_bytes())
+        .and_then(|()| legacy.write_all(&[0xa0]))
+        .expect("legacy record missing seq");
+
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::Include,
+        AgentTraceFormat::TauJsonl,
+    )
+    .expect("unrelated legacy journal is outside the rooted workflow");
+    let header: serde_json::Value =
+        serde_json::from_str(output.lines().next().expect("header")).expect("header JSON");
+
+    assert_eq!(
+        header["included_agent_ids"],
+        serde_json::json!(["agent-child", "agent-root"])
+    );
+}
+
+/// A descendant with an authenticated creation edge remains in scope and must
+/// fail locally when strict full-journal validation finds corruption.
+#[test]
+fn agent_trace_descendants_reject_reachable_corrupt_journal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        10,
+    );
+    create_trace_agent(
+        temp.path(),
+        "agent-child",
+        tau_proto::AgentCreator::Agent {
+            session_id: "session-child".into(),
+            agent_id: AgentId::parse("agent-root").expect("agent id"),
+        },
+        None,
+        11,
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(temp.path().join("agent-child/events.cbor"))
+        .expect("reachable journal")
+        .write_all(&[1, 2, 3])
+        .expect("corrupt reachable suffix");
+
+    let result = prepare_agent_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::Include,
+        AgentTraceFormat::TauJsonl,
+    );
+
+    assert!(matches!(
+        result,
+        Err(InspectError::AgentStore(
+            tau_core::AgentStoreError::Read { .. }
+        ))
+    ));
+}
+
 /// OTLP trace output is one request object, retains every durable occurrence as
 /// a span event, and never invents cross-agent timestamp ordering.
 #[test]

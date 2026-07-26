@@ -666,6 +666,17 @@ trace state. Validation and projection stream journal records. OTLP keeps every
 correlated occurrence in anonymous staging, including auxiliary occurrences
 whose offsets are not retained; heap correlation state
 retains compact offsets and identifiers, one per unique typed operation key.
+
+Descendant discovery accepts only a valid matching sequence-zero
+`AgentStarted.creator` record as an authenticated edge. Missing, unreadable,
+unsupported, or invalid candidate first records establish no edge and remain
+outside the rooted workflow. Every selected journal still requires nonblocking
+lock acquisition and strict full validation, so unsupported or corrupt content
+after an authenticated creation record fails before output. Keep
+`agent_trace_descendants_ignore_unrelated_legacy_creation_record` and
+`agent_trace_descendants_reject_reachable_corrupt_journal` as regression
+safeguards when this boundary changes.
+
 Heap use is proportional to unique operation-ID count and bytes in the largest
 included journal; IDs have no separate cap beyond the record framing limit.
 A pathological journal can therefore exhaust exporter process memory. The

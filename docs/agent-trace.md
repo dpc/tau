@@ -28,6 +28,12 @@ Missing, ephemeral-only, active, corrupt, torn, or concurrently changed
 workflows fail without stdout output. `parent_agent`, session membership, and
 message peers do not imply descendant membership.
 
+Discovery treats only a valid sequence-zero `AgentStarted.creator` fact as an
+authenticated edge. Unreadable or unsupported artifacts that cannot establish
+an edge remain outside the rooted workflow and cannot abort its trace. Once an
+edge makes a journal reachable, any unsupported or corrupt content in that
+journal fails the trace explicitly during strict full validation.
+
 Tau stages the finished artifact in a private process-owned temporary file
 before stdout delivery. The anonymous file has no pathname to survive process
 termination, is never durable trace state, and cannot be selected as an output
