@@ -6843,7 +6843,12 @@ impl EventRenderer {
                 if self.initialized_discovery_epochs.insert(key) {
                     self.handle.print_output(
                         "agent-context-initialized",
-                        agent_context_initialized_block(&self.theme, initialized),
+                        agent_context_initialized_block(
+                            &self.theme,
+                            initialized,
+                            self.skill_state
+                                .unadvertised_count(&initialized.listed_skills),
+                        ),
                     );
                 }
                 true

@@ -81,12 +81,14 @@ required skill does not retire a new agent, block a restored agent, or add a
 second role-validity gate. The finalized agent snapshot remains truthful even
 when it is narrower than the baseline.
 
-**The initialization display contains only model-listed skills and bootstrap
-AGENTS.md files.** It renders exactly the skills in that agent's
-`<available_skills>` plus the AGENTS.md summaries used for bootstrap. Separately
+**The initialization display names only model-listed skills and bootstrap
+AGENTS.md files.** It renders exactly the skill names in that agent's
+`<available_skills>` plus the AGENTS.md paths used for bootstrap. When canonical
+session skills remain, it summarizes all of them with exactly one count line, but
+must not list their names or imply that they were included in the agent prompt.
+Separately
 user-invocable/manual skills remain available through canonical session skill
-state for `:skill` completion, but the UI must not present them as skills listed
-to the model.
+state for `:skill` completion.
 
 The old `extension.skill_available` and `extension.agents_md_available` events
 are removed rather than supported in parallel. No persisted-data or protocol
@@ -111,10 +113,10 @@ same durable agent from settling or mutating a later load.
 
 The session-baseline required-skill rule is the narrowest extension of the
 existing session-global role contract; per-agent retirement and restore blocking
-would add lifecycle policy not required by this feature. Restricting the display
-to `<available_skills>` and bootstrap files implements the ticket's literal
-“listed to the agent” scope without conflating manual command completion with
-model-visible context.
+would add lifecycle policy not required by this feature. Restricting individually
+named skills to `<available_skills>` and showing the canonical-session remainder
+only as one aggregate count implements the ticket's literal “listed to the agent”
+scope without conflating manual command completion with model-visible context.
 
 This decision supersedes the item-declaration and append-only injection choices in
 [DECISION-session-discovery-declarations-and-readiness](DECISION-session-discovery-declarations-and-readiness.md)

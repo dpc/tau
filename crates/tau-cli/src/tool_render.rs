@@ -1437,33 +1437,45 @@ fn system_path_block(
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 
+/// Render initial-prompt context plus the count of other canonical session
+/// skills.
 pub(crate) fn agent_context_initialized_block(
     theme: &tau_themes::Theme,
     initialized: &tau_proto::HarnessAgentContextInitialized,
+    unadvertised_skill_count: usize,
 ) -> tau_cli_term::StyledBlock {
     use tau_themes::{ThemedText, names};
 
     let mut text = ThemedText::new();
     let info = text.add_style(names::SYSTEM_INFO);
     let path_style = text.add_style(names::SYSTEM_PATH);
-    let stats = text.add_style(names::TOOL_STATUS_INFO);
-    text.push(
-        info,
-        format!("initialized {}\\nskills:", initialized.agent_id),
-    );
-    for skill in &initialized.listed_skills {
-        text.push(info, "\\n  ");
-        text.push(path_style, skill.name.to_string());
-        text.push(stats, format!(" — {}", skill.description));
+    text.push(info, format!("initialized {}", initialized.agent_id));
+    if !initialized.listed_skills.is_empty() || 0 < unadvertised_skill_count {
+        text.push(info, "\nskills:");
+        for skill in &initialized.listed_skills {
+            text.push(info, "\n  ");
+            text.push(path_style, skill.name.to_string());
+        }
+        if 0 < unadvertised_skill_count {
+            text.push(
+                info,
+                format!(
+                    "\n  {unadvertised_skill_count} other session skill{} available",
+                    if unadvertised_skill_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+            );
+        }
     }
-    text.push(info, "\\nAGENTS.md:");
-    for file in &initialized.agents_files {
-        text.push(info, "\\n  ");
-        text.push(path_style, file.file_path.display().to_string());
-        text.push(
-            stats,
-            format!(" ({} lines, {} bytes)", file.lines, file.bytes),
-        );
+    if !initialized.agents_files.is_empty() {
+        text.push(info, "\nAGENTS.md:");
+        for file in &initialized.agents_files {
+            text.push(info, "\n  ");
+            text.push(path_style, file.file_path.display().to_string());
+        }
     }
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }

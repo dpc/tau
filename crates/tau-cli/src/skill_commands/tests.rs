@@ -34,3 +34,30 @@ fn completes_only_user_invocable_skills() {
     assert_eq!(completions[1].value, "visible");
     assert!(completions[1].description.contains("[topic]"));
 }
+
+/// The initialization summary must aggregate every available skill omitted from
+/// the agent prompt, including skills that are not user-invocable.
+#[test]
+fn counts_available_skills_not_advertised_to_the_agent() {
+    let state = SkillCommandState::new();
+    let skill = |name: &str, user_invocable| tau_proto::DiscoveryEffectiveSkill {
+        name: name.into(),
+        description: format!("{name} description"),
+        source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
+        add_to_prompt: true,
+        user_invocable,
+        disable_model_invocation: false,
+        argument_hint: None,
+    };
+    let advertised = skill("advertised", true);
+    state.apply_session_snapshot(&tau_proto::HarnessSessionSkillsAvailable {
+        session_id: "session-1".into(),
+        skills: vec![
+            advertised.clone(),
+            skill("manual", true),
+            skill("hidden", false),
+        ],
+    });
+
+    assert_eq!(state.unadvertised_count(&[advertised]), 2);
+}

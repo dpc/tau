@@ -2896,6 +2896,130 @@ fn extension_context_ready_routes_to_agent_ui_state() {
     assert!(vt.screen_contains(80, "agent @worker-1 context ready"));
 }
 
+/// The initialization UI must use real line breaks, expose only advertised
+/// skill names, aggregate other skills, and put each bootstrap path on its own
+/// concise line without leaking skill descriptions or file statistics.
+#[test]
+fn agent_context_initialization_summary_is_concise_and_literal() {
+    let advertised = tau_proto::DiscoveryEffectiveSkill {
+        name: "advertised".into(),
+        description: "description must stay hidden".to_owned(),
+        source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
+        add_to_prompt: true,
+        user_invocable: true,
+        disable_model_invocation: false,
+        argument_hint: None,
+    };
+    let initialized = tau_proto::HarnessAgentContextInitialized {
+        session_id: "session-1".into(),
+        agent_id: agent_id("agent-1"),
+        agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+        listed_skills: vec![advertised],
+        agents_files: vec![
+            tau_proto::DiscoveryAgentsFileSummary {
+                file_path: "/home/dpc/.config/agents/AGENTS.md".into(),
+                lines: 10,
+                bytes: 100,
+            },
+            tau_proto::DiscoveryAgentsFileSummary {
+                file_path: "/repo/AGENTS.md".into(),
+                lines: 20,
+                bytes: 200,
+            },
+        ],
+    };
+
+    let block =
+        crate::tool_render::agent_context_initialized_block(&cli_test_theme(), &initialized, 2);
+    let text = block
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+    assert_eq!(
+        text,
+        "initialized agent-1\nskills:\n  advertised\n  2 other session skills available\nAGENTS.md:\n  /home/dpc/.config/agents/AGENTS.md\n  /repo/AGENTS.md"
+    );
+    assert!(!text.contains("\\n"));
+    assert!(!text.contains("description must stay hidden"));
+    assert!(!text.contains("lines"));
+    assert!(!text.contains("bytes"));
+}
+
+/// Empty sections stay omitted, while a singular aggregate remains grammatical.
+#[test]
+fn agent_context_initialization_summary_omits_empty_sections() {
+    let initialized = tau_proto::HarnessAgentContextInitialized {
+        session_id: "session-1".into(),
+        agent_id: agent_id("agent-1"),
+        agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+        listed_skills: Vec::new(),
+        agents_files: Vec::new(),
+    };
+    let text = |count| {
+        crate::tool_render::agent_context_initialized_block(&cli_test_theme(), &initialized, count)
+            .content
+            .spans()
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>()
+    };
+
+    assert_eq!(text(0), "initialized agent-1");
+    assert_eq!(
+        text(1),
+        "initialized agent-1\nskills:\n  1 other session skill available"
+    );
+}
+
+/// The event renderer must combine the canonical session snapshot with the
+/// agent-specific prompt projection in the observable terminal summary.
+#[test]
+fn agent_context_initialization_event_aggregates_session_skills() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let skill = |name: &str| tau_proto::DiscoveryEffectiveSkill {
+        name: name.into(),
+        description: format!("{name} description"),
+        source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
+        add_to_prompt: true,
+        user_invocable: true,
+        disable_model_invocation: false,
+        argument_hint: None,
+    };
+    renderer.handle(&Event::HarnessSessionSkillsAvailable(
+        tau_proto::HarnessSessionSkillsAvailable {
+            session_id: "session-1".into(),
+            skills: vec![skill("advertised"), skill("other")],
+        },
+    ));
+    renderer.handle(&Event::HarnessAgentContextInitialized(
+        tau_proto::HarnessAgentContextInitialized {
+            session_id: "session-1".into(),
+            agent_id: agent_id("agent-1"),
+            agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+            listed_skills: vec![skill("advertised")],
+            agents_files: vec![tau_proto::DiscoveryAgentsFileSummary {
+                file_path: "/repo/AGENTS.md".into(),
+                lines: 20,
+                bytes: 200,
+            }],
+        },
+    ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "initialized agent-1"));
+    assert!(vt.screen_contains(80, "advertised"));
+    assert!(vt.screen_contains(80, "1 other session skill available"));
+    assert!(vt.screen_contains(80, "/repo/AGENTS.md"));
+    assert!(!vt.screen_contains(80, "other description"));
+}
+
 /// Extension lifecycle completion must update the same snapshot that received
 /// the starting block. Otherwise switching the viewed agent between
 /// `extension.starting` and `extension.ready` leaves a stale starting line in
