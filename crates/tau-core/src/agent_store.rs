@@ -8,6 +8,8 @@
 //! [`AgentStore::append_agent_message_fact_at`] so their canonical append
 //! precedes and cannot be vetoed by post-commit projection.
 
+mod snapshot;
+
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -18,6 +20,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+pub use snapshot::{
+    AgentJournalLocks, AgentJournalReader, AgentJournalSnapshot, read_agent_creation_record,
+};
 use tau_proto::{
     AgentId, AgentIdParseError, ConnectionId, Event, EventName, MessageAgentTarget, NodeId,
     UnixMicros,
@@ -101,6 +106,11 @@ pub enum AgentStoreError {
     /// Requested memory-only storage for an id already reserved on disk.
     PersistenceConflict {
         agent_id: AgentId,
+        path: PathBuf,
+    },
+    /// A requested durable journal or its pre-existing lock file is absent.
+    JournalMissing {
+        /// Path whose absence prevents a stable snapshot.
         path: PathBuf,
     },
 }
@@ -190,6 +200,9 @@ impl fmt::Display for AgentStoreError {
                 "cannot mark agent `{agent_id}` ephemeral because durable state already exists at {}",
                 path.display()
             ),
+            Self::JournalMissing { path } => {
+                write!(f, "agent journal not found at {}", path.display())
+            }
         }
     }
 }
@@ -209,6 +222,7 @@ impl Error for AgentStoreError {
             | Self::Locked { .. }
             | Self::InvalidAgentDir { .. }
             | Self::InvalidSequence { .. }
+            | Self::JournalMissing { .. }
             | Self::PersistenceConflict { .. }
             | Self::UnsupportedRawEvent { .. }
             | Self::MessageFactTargetMismatch { .. } => None,

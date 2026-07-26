@@ -230,3 +230,8 @@ Persisted activity accounting is available through
 `tau session stats --session <id>`. The versioned TOON report traverses immutable
 session membership and member agent journals without a cumulative sidecar, and
 marks unavailable legacy facts rather than inferring them.
+
+Complete offline durable-agent exports are available through
+`tau agent trace <agent-id>`. See [Durable agent trace export](docs/agent-trace.md)
+for snapshot guarantees, the canonical native JSONL schema, and the lossy OTLP
+visualization adapter.

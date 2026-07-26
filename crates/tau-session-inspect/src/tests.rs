@@ -1,8 +1,209 @@
+use std::io::Write as _;
+
 use tau_proto::{
     AgentId, ContextRole, Event, MessageItem, SessionAgentLoaded, SessionId, ToolType,
 };
 
 use super::*;
+
+fn export_trace(
+    agents_dir: &std::path::Path,
+    agent_id: &AgentId,
+    descendants: DescendantSelection,
+    format: AgentTraceFormat,
+) -> Result<String, InspectError> {
+    let mut prepared = prepare_agent_trace(agents_dir, agent_id, descendants, format)?;
+    let mut bytes = Vec::new();
+    prepared.copy_to(&mut bytes)?;
+    String::from_utf8(bytes).map_err(|error| {
+        InspectError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    })
+}
+
+fn create_trace_agent(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    creator: tau_proto::AgentCreator,
+    parent_agent: Option<&str>,
+    timestamp: u64,
+) {
+    let agent_id = AgentId::parse(agent_id).expect("agent id");
+    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: agent_id.clone(),
+                creator: Some(creator),
+                parent_agent: parent_agent.map(|id| AgentId::parse(id).expect("parent id")),
+                role: "trace-test".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+            tau_proto::UnixMicros::new(timestamp),
+        )
+        .expect("agent creation");
+}
+
+fn append_trace_prompt(agents_dir: &std::path::Path, agent_id: &str, text: &str, timestamp: u64) {
+    let agent_id = AgentId::parse(agent_id).expect("agent id");
+    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                agent_id: agent_id.clone(),
+                inference_activation: false,
+                text: text.to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: Default::default(),
+                display_name: None,
+                ctx_id: None,
+            }),
+            tau_proto::UnixMicros::new(timestamp + 1),
+        )
+        .expect("prompt append");
+}
+
+fn append_trace_prompt_lifecycle(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    prompt_id: &str,
+    timestamp: u64,
+) {
+    let agent_id = AgentId::parse(agent_id).expect("agent id");
+    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id: agent_id.clone(),
+                transaction_id: None,
+                agent_prompt_id: prompt_id.into(),
+                through: tau_proto::AgentHead::Root,
+                model: Some("provider/model".into()),
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut: Some(tau_proto::AgentHead::Root),
+            }),
+            tau_proto::UnixMicros::new(timestamp),
+        )
+        .expect("inference dispatch");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                agent_prompt_id: prompt_id.into(),
+                agent_id: agent_id.clone(),
+                session_id: "trace-session".into(),
+                model: "provider/model".into(),
+                model_params: Some(Default::default()),
+                outer_turn_id: None,
+                operation: tau_proto::PromptOperation::Inference,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            }),
+            tau_proto::UnixMicros::new(timestamp),
+        )
+        .expect("prompt start");
+}
+
+fn append_background_tool_lifecycle(agents_dir: &std::path::Path, agent_id: &str, call_id: &str) {
+    append_background_tool_calls(
+        agents_dir,
+        agent_id,
+        &[(call_id, "background_test", "argument")],
+    );
+}
+
+fn append_background_tool_calls(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    calls: &[(&str, &str, &str)],
+) {
+    let agent_id = AgentId::parse(agent_id).expect("agent id");
+    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                agent_prompt_id: "prompt-background".into(),
+                agent_id: agent_id.clone(),
+                output_items: calls
+                    .iter()
+                    .map(|(call_id, name, argument)| {
+                        ContextItem::ToolCall(tau_proto::ToolCallItem {
+                            call_id: (*call_id).into(),
+                            name: tau_proto::ToolName::new(*name),
+                            tool_type: ToolType::Function,
+                            arguments: tau_proto::CborValue::Text((*argument).to_owned()),
+                            raw_arguments_json: None,
+                            responses_envelope: None,
+                        })
+                    })
+                    .collect(),
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                error: None,
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                originator: tau_proto::PromptOriginator::User,
+                usage: None,
+                estimated_api_cost_increment: None,
+                estimated_api_cost_rates: None,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+        )
+        .expect("provider tool call");
+    for (call_id, name, _) in calls {
+        let tool_name = tau_proto::ToolName::new(*name);
+        store
+            .append_agent_event(
+                agent_id.as_str(),
+                None,
+                Event::ProviderToolResult(tau_proto::ToolResult {
+                    call_id: (*call_id).into(),
+                    tool_name: tool_name.clone(),
+                    tool_type: ToolType::Function,
+                    result: tau_proto::CborValue::Null,
+                    provider_content: Vec::new(),
+                    kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+            )
+            .expect("background placeholder");
+        store
+            .append_agent_event(
+                agent_id.as_str(),
+                None,
+                Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+                    call_id: (*call_id).into(),
+                    tool_name,
+                    tool_type: ToolType::Function,
+                    result: tau_proto::CborValue::Text(format!("result-{call_id}")),
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+            )
+            .expect("real background result");
+    }
+}
 
 fn assistant_message(text: impl Into<String>) -> ContextItem {
     ContextItem::Message(MessageItem {
@@ -123,6 +324,398 @@ fn invalid_inspection_roots_return_errors() {
     assert!(session_list_lines(&sessions_dir).is_err());
     assert!(session_lines(&sessions_dir, "default").is_err());
     assert!(policy_lines(&policy_path).is_err());
+}
+
+/// Native trace output keeps complete prompt content, emits independently
+/// parseable lines, and preserves authoritative per-agent sequence order.
+#[test]
+fn native_agent_trace_preserves_complete_records_and_order() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        10,
+    );
+    let content = "full prompt\nreasoning marker; tool args/results; image:data:image/png;base64,AA==; \
+                   compaction marker; inter-agent message marker";
+    append_trace_prompt(temp.path(), "agent-root", content, 11);
+
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::TauJsonl,
+    )
+    .expect("native export");
+    let lines = output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("independent JSON line"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0]["schema_version"], 0);
+    assert_eq!(lines[1]["seq"], 0);
+    assert_eq!(lines[2]["seq"], 1);
+    fn contains_exact_text(value: &serde_json::Value, expected: &str) -> bool {
+        value.as_str() == Some(expected)
+            || value.as_array().is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| contains_exact_text(value, expected))
+            })
+            || value.as_object().is_some_and(|values| {
+                values
+                    .values()
+                    .any(|value| contains_exact_text(value, expected))
+            })
+    }
+    assert!(contains_exact_text(&lines[2]["event"], content));
+}
+
+/// Descendant discovery follows immutable creator provenance recursively and
+/// excludes inheritance-only relations and unrelated durable agents.
+#[test]
+fn agent_trace_descendants_use_creator_not_parent_agent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        10,
+    );
+    create_trace_agent(
+        temp.path(),
+        "agent-child",
+        tau_proto::AgentCreator::Agent {
+            session_id: "session-child".into(),
+            agent_id: AgentId::parse("agent-root").expect("agent id"),
+        },
+        None,
+        10,
+    );
+    create_trace_agent(
+        temp.path(),
+        "agent-grandchild",
+        tau_proto::AgentCreator::Agent {
+            session_id: "session-grandchild".into(),
+            agent_id: AgentId::parse("agent-child").expect("agent id"),
+        },
+        None,
+        9,
+    );
+    create_trace_agent(
+        temp.path(),
+        "agent-parent-only",
+        tau_proto::AgentCreator::User,
+        Some("agent-root"),
+        8,
+    );
+    create_trace_agent(
+        temp.path(),
+        "agent-unrelated",
+        tau_proto::AgentCreator::User,
+        None,
+        7,
+    );
+
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::Include,
+        AgentTraceFormat::TauJsonl,
+    )
+    .expect("workflow export");
+    let header: serde_json::Value =
+        serde_json::from_str(output.lines().next().expect("header")).expect("header JSON");
+
+    assert_eq!(
+        header["included_agent_ids"],
+        serde_json::json!(["agent-child", "agent-grandchild", "agent-root"])
+    );
+}
+
+/// OTLP trace output is one request object, retains every durable occurrence as
+/// a span event, and never invents cross-agent timestamp ordering.
+#[test]
+fn otlp_agent_trace_is_one_lossy_request_with_raw_events() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        20,
+    );
+    append_trace_prompt(
+        temp.path(),
+        "agent-root",
+        "later sequence, earlier clock",
+        10,
+    );
+
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::OtlpJson,
+    )
+    .expect("OTLP export");
+    let _: opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest =
+        serde_json::from_str(&output).expect("standard OTLP protobuf JSON");
+    let request: serde_json::Value = serde_json::from_str(&output).expect("one OTLP request");
+    let spans = request["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        .as_array()
+        .expect("spans");
+    let root = &spans[0];
+
+    assert_eq!(root["startTimeUnixNano"], root["endTimeUnixNano"]);
+    assert_eq!(root["events"].as_array().expect("raw events").len(), 2);
+    assert!(
+        root["attributes"]
+            .as_array()
+            .expect("attributes")
+            .iter()
+            .any(|attribute| attribute["key"] == "tau.incomplete"
+                && attribute["value"]["boolValue"] == true)
+    );
+}
+
+/// A store-backed valid prompt lifecycle exposes only durable lifecycle
+/// metadata as OTLP input; non-persisted materialized prompts are never
+/// claimed.
+#[test]
+fn otlp_prompt_input_is_durable_lifecycle_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    append_trace_prompt_lifecycle(temp.path(), "agent-root", "prompt-1", 2);
+
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::OtlpJson,
+    )
+    .expect("OTLP export");
+    let request: serde_json::Value = serde_json::from_str(&output).expect("OTLP request");
+    let llm = request["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        .as_array()
+        .expect("spans")
+        .iter()
+        .find(|span| {
+            span["attributes"].as_array().is_some_and(|attributes| {
+                attributes.iter().any(|attribute| {
+                    attribute["key"] == "openinference.span.kind"
+                        && attribute["value"]["stringValue"] == "LLM"
+                })
+            })
+        })
+        .expect("LLM span");
+    let input_scope = llm["attributes"]
+        .as_array()
+        .expect("attributes")
+        .iter()
+        .find(|attribute| attribute["key"] == "tau.input.scope")
+        .expect("input scope");
+
+    assert_eq!(
+        input_scope["value"]["stringValue"],
+        "lifecycle_metadata_only"
+    );
+}
+
+/// A valid store-backed background lifecycle serializes exactly one TOOL span
+/// whose input is the original start and whose output is the real completion.
+#[test]
+fn otlp_background_tool_is_one_span_with_real_terminal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    append_background_tool_lifecycle(temp.path(), "agent-root", "call-background");
+
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::OtlpJson,
+    )
+    .expect("OTLP export");
+    let request: serde_json::Value = serde_json::from_str(&output).expect("OTLP request");
+    let tool_spans = request["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        .as_array()
+        .expect("spans")
+        .iter()
+        .filter(|span| {
+            span["attributes"].as_array().is_some_and(|attributes| {
+                attributes.iter().any(|attribute| {
+                    attribute["key"] == "openinference.span.kind"
+                        && attribute["value"]["stringValue"] == "TOOL"
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(tool_spans.len(), 1);
+    let attributes = tool_spans[0]["attributes"].as_array().expect("attributes");
+    let attribute = |key| {
+        attributes
+            .iter()
+            .find(|attribute| attribute["key"] == key)
+            .and_then(|attribute| attribute["value"]["stringValue"].as_str())
+            .expect("string attribute")
+    };
+    assert!(
+        attribute("input.value").contains("\"record_type\":\"provider_tool_call\""),
+        "{}",
+        attribute("input.value")
+    );
+    assert!(attribute("output.value").contains("tool.background_result"));
+    assert!(attribute("output.value").contains("result-call-background"));
+}
+
+/// Multiple provider-declared calls retain only their own compact input and
+/// OpenInference tool attributes, avoiding response-wide quadratic expansion.
+#[test]
+fn otlp_multi_tool_response_projects_each_call_once() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    let calls = [
+        ("call-a", "tool_a", "argument-a"),
+        ("call-b", "tool_b", "argument-b"),
+        ("call-c", "tool_c", "argument-c"),
+    ];
+    append_background_tool_calls(temp.path(), "agent-root", &calls);
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::OtlpJson,
+    )
+    .expect("OTLP export");
+    let request: serde_json::Value = serde_json::from_str(&output).expect("OTLP request");
+    let tool_spans = request["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        .as_array()
+        .expect("spans")
+        .iter()
+        .filter(|span| {
+            span["attributes"].as_array().is_some_and(|attributes| {
+                attributes.iter().any(|attribute| {
+                    attribute["key"] == "openinference.span.kind"
+                        && attribute["value"]["stringValue"] == "TOOL"
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(tool_spans.len(), calls.len());
+    for (call_id, name, argument) in calls {
+        let span = tool_spans
+            .iter()
+            .find(|span| {
+                span["attributes"].as_array().is_some_and(|attributes| {
+                    attributes.iter().any(|attribute| {
+                        attribute["key"] == "tau.tool.call_id"
+                            && attribute["value"]["stringValue"] == call_id
+                    })
+                })
+            })
+            .expect("call span");
+        let attributes = span["attributes"].as_array().expect("attributes");
+        let attribute = |key| {
+            attributes
+                .iter()
+                .find(|attribute| attribute["key"] == key)
+                .and_then(|attribute| attribute["value"]["stringValue"].as_str())
+                .expect("string attribute")
+        };
+        assert_eq!(attribute("tool.name"), name);
+        assert!(attribute("tool.parameters").contains(argument));
+        assert!(attribute("input.value").contains(call_id));
+        for (other_id, _, _) in calls {
+            if other_id != call_id {
+                assert!(!attribute("input.value").contains(other_id));
+            }
+        }
+        assert!(attribute("output.value").contains(&format!("result-{call_id}")));
+    }
+}
+
+/// Trace preparation rejects missing, active, and corrupt durable journals
+/// before it yields any artifact that the CLI could copy to stdout.
+#[test]
+fn agent_trace_failures_produce_no_prepared_output() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = prepare_agent_trace(
+        temp.path(),
+        &AgentId::parse("agent-missing").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::TauJsonl,
+    );
+    assert!(missing.is_err());
+
+    let active_id = AgentId::parse("agent-active").expect("agent id");
+    let mut active_store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
+    active_store
+        .append_agent_event(
+            active_id.as_str(),
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: active_id.clone(),
+                creator: Some(tau_proto::AgentCreator::User),
+                parent_agent: None,
+                role: "test".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("active creation");
+    assert!(
+        prepare_agent_trace(
+            temp.path(),
+            &active_id,
+            DescendantSelection::RootOnly,
+            AgentTraceFormat::TauJsonl,
+        )
+        .is_err()
+    );
+    drop(active_store);
+
+    let path = temp.path().join(active_id.as_str()).join("events.cbor");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("journal")
+        .write_all(&[1, 2, 3])
+        .expect("torn frame");
+    assert!(
+        prepare_agent_trace(
+            temp.path(),
+            &active_id,
+            DescendantSelection::RootOnly,
+            AgentTraceFormat::TauJsonl,
+        )
+        .is_err()
+    );
 }
 
 /// Ensures one corrupt journal cannot prevent `session list` from reporting

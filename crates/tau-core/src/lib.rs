@@ -28,8 +28,9 @@ pub use agent_checkpoint::{
 };
 pub use agent_store::{
     AgentAppendOutcome, AgentCreationFacts, AgentCreationFactsBudget,
-    AgentCreationFactsBudgetExceeded, AgentPersistenceMode, AgentStore, AgentStoreError,
-    agent_is_locked, list_agent_metas,
+    AgentCreationFactsBudgetExceeded, AgentJournalLocks, AgentJournalReader, AgentJournalSnapshot,
+    AgentPersistenceMode, AgentStore, AgentStoreError, agent_is_locked, list_agent_metas,
+    read_agent_creation_record,
 };
 pub use bus::EventBus;
 pub use connection::{

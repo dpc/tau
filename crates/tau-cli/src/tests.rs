@@ -318,6 +318,51 @@ fn list_agents_command_parses_filters() {
     ));
 }
 
+/// Agent trace defaults select the complete native format and the ordinary
+/// state-directory journal root.
+#[test]
+fn agent_trace_command_parses_defaults() {
+    let cli = super::cli::Cli::parse_from(["tau", "agent", "trace", "agent-root"]);
+
+    assert!(matches!(
+        cli.command,
+        Some(super::cli::Command::Agent {
+            command: super::cli::AgentCommand::Trace(args),
+        })
+            if args.agent_id.as_str() == "agent-root"
+                && !args.include_descendants
+                && args.format == super::cli::AgentTraceFormat::TauJsonl
+                && args.agents_dir == tau_session_inspect::default_agents_dir()
+    ));
+}
+
+/// Agent trace accepts the lossy OTLP adapter, descendant workflow inclusion,
+/// and an explicit offline journal root together.
+#[test]
+fn agent_trace_command_parses_all_options() {
+    let cli = super::cli::Cli::parse_from([
+        "tau",
+        "agent",
+        "trace",
+        "agent-root",
+        "--include-descendants",
+        "--format",
+        "otlp-json",
+        "--agents-dir",
+        "/tmp/agents",
+    ]);
+
+    assert!(matches!(
+        cli.command,
+        Some(super::cli::Command::Agent {
+            command: super::cli::AgentCommand::Trace(args),
+        })
+            if args.include_descendants
+                && args.format == super::cli::AgentTraceFormat::OtlpJson
+                && args.agents_dir == std::path::Path::new("/tmp/agents")
+    ));
+}
+
 /// Session inspection operations share the same noun-first nested command shape
 /// as agent inspection.
 #[test]

@@ -596,8 +596,12 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 };
                 reject_harness_config_overrides(&harness_config_overrides, command_name)?;
             }
-            cli::Command::Agent { .. } => {
-                reject_harness_config_overrides(&harness_config_overrides, "agent list")?;
+            cli::Command::Agent { command } => {
+                let command_name = match command {
+                    cli::AgentCommand::List(_) => "agent list",
+                    cli::AgentCommand::Trace(_) => "agent trace",
+                };
+                reject_harness_config_overrides(&harness_config_overrides, command_name)?;
             }
             cli::Command::PolicyShow { .. } => {
                 reject_harness_config_overrides(&harness_config_overrides, "policy-show")?;
@@ -775,6 +779,30 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             } => {
                 reject_harness_config_overrides(&harness_config_overrides, "agent list")?;
                 list_agents::run(&args)
+            }
+            cli::Command::Agent {
+                command: cli::AgentCommand::Trace(args),
+            } => {
+                reject_harness_config_overrides(&harness_config_overrides, "agent trace")?;
+                let format = match args.format {
+                    cli::AgentTraceFormat::TauJsonl => {
+                        tau_session_inspect::AgentTraceFormat::TauJsonl
+                    }
+                    cli::AgentTraceFormat::OtlpJson => {
+                        tau_session_inspect::AgentTraceFormat::OtlpJson
+                    }
+                };
+                let mut output = tau_session_inspect::prepare_agent_trace(
+                    &args.agents_dir,
+                    &args.agent_id,
+                    if args.include_descendants {
+                        tau_session_inspect::DescendantSelection::Include
+                    } else {
+                        tau_session_inspect::DescendantSelection::RootOnly
+                    },
+                    format,
+                )?;
+                line_output::stream_stdout(|writer| output.copy_to(writer).map(|_| ()))
             }
 
             cli::Command::PolicyShow { state_dir } => {

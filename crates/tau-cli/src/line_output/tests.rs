@@ -1,4 +1,4 @@
-use super::{escape_field, write_output};
+use super::{escape_field, stream_output, write_output};
 
 /// Line-oriented identifiers escape record separators and terminal controls.
 #[test]
@@ -7,6 +7,19 @@ fn hostile_field_stays_on_one_ansi_control_safe_line() {
         escape_field("line\ncarriage\r\u{1b}[31m"),
         "line\\ncarriage\\r\\u{1b}[31m"
     );
+}
+
+/// Streaming a privately staged agent trace uses the same successful
+/// broken-pipe semantics as small line-oriented output.
+#[test]
+fn streamed_broken_pipe_is_success() {
+    stream_output(&mut std::io::sink(), |_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "closed pipeline",
+        ))
+    })
+    .expect("streamed broken pipe is successful");
 }
 
 /// Closing a pipeline early is a successful CLI write rather than a panic or

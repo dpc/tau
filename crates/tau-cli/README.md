@@ -58,6 +58,15 @@ overview remains the input target for starting a new agent. The underlying
 picker actions remain configurable, and the all-agent action has no default
 key binding.
 
+`tau agent trace <agent-id>` operates offline and exports a stable, validated
+snapshot of existing durable agent journals. `tau-jsonl` is the complete native
+artifact and preserves every persisted event and its journal-local ordering.
+`otlp-json` is a lossy OpenTelemetry/OpenInference visualization adapter: it
+derives spans only from durable IDs and journal wall-clock timestamps, while
+retaining every raw journal occurrence as a span event.
+See [`docs/agent-trace.md`](../../docs/agent-trace.md) for the output contracts,
+failure behavior, and sensitive-data warning.
+
 `tau session list` prints one escaped row per distinct current session id
 reported by responsive local harnesses. Runtime paths only locate socket
 candidates; each daemon reports its in-memory current session and immutable

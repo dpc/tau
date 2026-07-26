@@ -465,3 +465,125 @@ fn display_name_event(agent_id: &AgentId, display_name: &str) -> Event {
         display_name: display_name.to_owned(),
     })
 }
+
+/// A read-only snapshot of a missing durable agent must fail without creating
+/// the requested agent directory or lock file.
+#[test]
+fn journal_snapshot_does_not_create_missing_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-missing").expect("agent id");
+
+    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id.clone()])
+        .expect_err("missing journal must fail");
+
+    assert!(matches!(error, AgentStoreError::JournalMissing { .. }));
+    assert!(!temp.path().join(agent_id.as_str()).exists());
+}
+
+/// Snapshot acquisition must reject an active writer before reading any
+/// potentially changing journal bytes.
+#[test]
+fn journal_snapshot_rejects_active_agent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-active").expect("agent id");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation");
+
+    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id])
+        .expect_err("held writer lock must fail");
+
+    assert!(matches!(error, AgentStoreError::Locked { .. }));
+}
+
+/// Snapshot validation must reject a journal whose stored sequence no longer
+/// matches its authoritative file position.
+#[test]
+fn journal_snapshot_rejects_non_monotonic_journal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-corrupt").expect("agent id");
+    {
+        let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+        store
+            .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+            .expect("creation");
+    }
+    let path = temp.path().join(agent_id.as_str()).join("events.cbor");
+    let mut bytes = fs::read(&path).expect("journal");
+    let seq = bytes
+        .windows(5)
+        .position(|window| window == b"\x63seq\x00")
+        .map(|offset| offset + 4)
+        .expect("sequence encoding");
+    bytes[seq] = 1;
+    fs::write(&path, bytes).expect("corrupt sequence");
+
+    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id])
+        .expect_err("corrupt journal must fail");
+
+    assert!(matches!(error, AgentStoreError::InvalidSequence { .. }));
+}
+
+/// Snapshot validation must reject a crash-torn frame rather than exporting a
+/// valid prefix as though it were the complete journal.
+#[test]
+fn journal_snapshot_rejects_torn_journal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-torn").expect("agent id");
+    {
+        let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+        store
+            .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+            .expect("creation");
+    }
+    let path = temp.path().join(agent_id.as_str()).join("events.cbor");
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("journal")
+        .write_all(&[1, 2, 3])
+        .expect("torn header");
+
+    let error =
+        AgentJournalSnapshot::capture(temp.path(), [agent_id]).expect_err("torn journal must fail");
+
+    assert!(matches!(error, AgentStoreError::Read { .. }));
+}
+
+/// A captured snapshot retains all journal locks, preventing records from
+/// changing until the consumer has finished with the validated data.
+#[test]
+fn journal_snapshot_prevents_changes_during_read() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let first = AgentId::parse("agent-a").expect("agent id");
+    let second = AgentId::parse("agent-b").expect("agent id");
+    for agent_id in [&second, &first] {
+        let mut store = AgentStore::open_lazy(temp.path()).expect("store");
+        store
+            .append_agent_event(agent_id.as_str(), None, started_event(agent_id))
+            .expect("creation");
+    }
+    let snapshot = AgentJournalSnapshot::capture(temp.path(), [second.clone(), first.clone()])
+        .expect("stable snapshot");
+    assert_eq!(
+        snapshot.agent_ids().iter().collect::<Vec<_>>(),
+        vec![&first, &second],
+        "snapshot identities use lexical agent order"
+    );
+
+    let mut writer = AgentStore::open_lazy(temp.path()).expect("writer");
+    let error = writer
+        .append_agent_event(first.as_str(), None, display_name_event(&first, "changed"))
+        .expect_err("snapshot lock must prevent append");
+    assert!(matches!(error, AgentStoreError::Locked { .. }));
+    assert_eq!(
+        snapshot
+            .records(&first)
+            .expect("stable records")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("records")
+            .len(),
+        1
+    );
+}

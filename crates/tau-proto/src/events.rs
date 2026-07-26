@@ -98,7 +98,7 @@ pub const MAX_COMPACTION_TRANSACTION_ID_LEN: usize = 128;
 pub const MAX_COMPACTION_REQUEST_ID_LEN: usize = 128;
 
 /// Durable correlation identifier for one standalone-compaction transaction.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct CompactionTransactionId(String);
 
@@ -143,7 +143,7 @@ impl fmt::Display for CompactionTransactionId {
 }
 
 /// Durable correlation identifier for one model-requested compaction.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct CompactionRequestId(
     /// Validated path-safe request identifier.

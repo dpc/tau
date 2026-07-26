@@ -646,3 +646,29 @@ Changes to this boundary must re-check strict replay lifecycle joins, cross-sess
 prompt/response/tool isolation (including reused call IDs), interception
 drop/replacement and peer-forgery rejection, response-local rather than cumulative
 usage accounting, and the no-write behavior of offline inspection.
+
+## Offline agent trace export
+
+`tau agent trace` exports unredacted durable journals. Output can contain full
+prompts, reasoning, images, tool arguments and results, messages, model
+parameters, usage, and cost data. Treat both native and OTLP output as sensitive
+as the original state directory; redirect or transmit it only to trusted
+destinations.
+
+The exporter opens only existing state, takes nonblocking exclusive locks in
+lexical agent-ID order, rechecks descendant discovery under lock, and validates
+all journals before stdout. Active, missing, ephemeral-only, corrupt, torn, or
+racy workflows produce no machine output. Private staging is an anonymous
+process-owned file with no pathname to survive termination and is never durable
+trace state. Validation and projection stream journal records. OTLP keeps every
+correlated occurrence in anonymous staging, including auxiliary occurrences
+whose offsets are not retained; heap correlation state
+retains compact offsets and identifiers, one per unique typed operation key.
+Heap use is proportional to unique operation-ID count and bytes in the largest
+included journal; IDs have no separate cap beyond the record framing limit.
+A pathological journal can therefore exhaust exporter process memory. The
+exporter never truncates accepted records.
+
+Revisit this boundary before adding live/follow capture, user-selected output
+files, redaction modes, range selection, provider HTTP-body or streaming-delta
+capture, new timing authority, or any persisted trace state.

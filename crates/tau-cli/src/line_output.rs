@@ -30,6 +30,25 @@ pub(crate) fn write_stdout(output: &str) -> Result<(), CliError> {
     write_output(&mut stdout.lock(), output)
 }
 
+/// Streams prepared output while treating a closed pipeline as success.
+pub(crate) fn stream_stdout(
+    write: impl FnOnce(&mut dyn io::Write) -> io::Result<()>,
+) -> Result<(), CliError> {
+    let stdout = io::stdout();
+    stream_output(&mut stdout.lock(), write)
+}
+
+fn stream_output(
+    output: &mut dyn io::Write,
+    write: impl FnOnce(&mut dyn io::Write) -> io::Result<()>,
+) -> Result<(), CliError> {
+    match write(output) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(CliError::Io(error)),
+    }
+}
+
 fn write_output(writer: &mut impl io::Write, output: &str) -> Result<(), CliError> {
     match writer.write_all(output.as_bytes()) {
         Ok(()) => Ok(()),

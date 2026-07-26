@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand};
-use tau_session_inspect::{default_session_id, default_sessions_dir, default_state_dir};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use tau_session_inspect::{
+    default_agents_dir, default_session_id, default_sessions_dir, default_state_dir,
+};
 
 #[derive(Parser)]
 #[command(
@@ -142,7 +144,7 @@ pub enum Command {
         command: SessionCommand,
     },
 
-    /// Inspect agents in a running session.
+    /// Inspect agents.
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
@@ -248,6 +250,37 @@ fn parse_canonical_directory(value: &str) -> Result<PathBuf, String> {
 pub enum AgentCommand {
     /// List agents known to a running session.
     List(AgentListArgs),
+    /// Export one complete durable agent journal trace.
+    Trace(AgentTraceArgs),
+}
+
+/// Options for `tau agent trace`.
+#[derive(Args, Clone)]
+pub struct AgentTraceArgs {
+    /// Durable agent journal to export.
+    pub agent_id: tau_proto::AgentId,
+
+    /// Recursively include agents created by the requested workflow.
+    #[arg(long)]
+    pub include_descendants: bool,
+
+    /// Machine-readable export format.
+    #[arg(long, value_enum, default_value_t)]
+    pub format: AgentTraceFormat,
+
+    /// Durable agent journal root.
+    #[arg(long, default_value_os_t = default_agents_dir())]
+    pub agents_dir: PathBuf,
+}
+
+/// Machine-readable agent trace export format.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum AgentTraceFormat {
+    /// Complete canonical Tau JSON Lines.
+    #[default]
+    TauJsonl,
+    /// Lossy OTLP/OpenInference JSON visualization adapter.
+    OtlpJson,
 }
 
 /// Filters for `tau agent list`.

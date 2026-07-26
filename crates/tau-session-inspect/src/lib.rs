@@ -6,16 +6,19 @@
 //! in the agent, extension supervisor, or event-loop graph just to
 //! render an events.jsonl.
 
+mod agent_trace;
+mod lossless_json;
+mod session_stats;
+
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
+pub use agent_trace::*;
+pub use session_stats::*;
 use tau_core::{AgentEntry, AgentStoreError, PolicyStore, SessionStore, SessionStoreError};
 use tau_proto::{
     CborValue, ContentPart, ContextItem, EventSelector, ToolCallItem, ToolResultStatus,
 };
-
-mod session_stats;
-pub use session_stats::*;
 
 /// Errors from the read-only inspection paths.
 #[derive(Debug)]
@@ -26,7 +29,31 @@ pub enum InspectError {
     SessionStore(SessionStoreError),
     /// An authoritative agent journal could not be opened or decoded.
     AgentStore(AgentStoreError),
+    /// Trace discovery or serialization could not produce a stable artifact.
+    Trace(AgentTraceError),
 }
+
+/// Typed failures specific to stable agent-trace preparation.
+#[derive(Debug)]
+pub enum AgentTraceError {
+    /// Creator-based workflow membership changed during lock acquisition.
+    DescendantsChanged,
+    /// A typed event could not be represented or an output format failed.
+    Projection(String),
+}
+
+impl fmt::Display for AgentTraceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DescendantsChanged => {
+                f.write_str("agent descendants changed while acquiring journal locks")
+            }
+            Self::Projection(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for AgentTraceError {}
 
 impl fmt::Display for InspectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -34,6 +61,7 @@ impl fmt::Display for InspectError {
             Self::Io(source) => write!(f, "I/O error: {source}"),
             Self::SessionStore(source) => write!(f, "session store error: {source}"),
             Self::AgentStore(source) => write!(f, "agent store error: {source}"),
+            Self::Trace(source) => write!(f, "agent trace error: {source}"),
         }
     }
 }
@@ -44,6 +72,7 @@ impl std::error::Error for InspectError {
             Self::Io(source) => Some(source),
             Self::SessionStore(source) => Some(source),
             Self::AgentStore(source) => Some(source),
+            Self::Trace(source) => Some(source),
         }
     }
 }
@@ -81,6 +110,12 @@ pub fn default_state_dir() -> PathBuf {
 #[must_use]
 pub fn default_sessions_dir() -> PathBuf {
     tau_config::settings::sessions_dir_of(&default_state_dir())
+}
+
+/// Returns the default durable-agent journal root below Tau's state directory.
+#[must_use]
+pub fn default_agents_dir() -> PathBuf {
+    default_state_dir().join("agents")
 }
 
 /// Returns the conventional session id used when no explicit session id is

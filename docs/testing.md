@@ -455,3 +455,23 @@ cycle prevention, collision winner selection, scoped prompt defaults, and built-
 self-knowledge skills. Prefer focused fixtures that exercise one contract at a
 time, including oversized bodies/frontmatter and UTF-8-safe truncation edge
 cases.
+
+
+## Agent trace export
+
+Agent-trace integration tests exercise durable journals through `AgentStore`.
+Core coverage checks non-creating missing paths, nonblocking active-agent
+failure, torn/corrupt/non-monotonic rejection, sorted snapshot identities, and
+retained-lock stability. Projection coverage checks lossless CBOR edge types,
+independently parseable native lines, creator-only recursive descendants,
+per-agent order, focused typed lifecycle correlation, decreasing-time handling,
+and protobuf-JSON decoding as one `ExportTraceServiceRequest`.
+
+CLI coverage verifies parser defaults and both formats, custom agent roots,
+descendant selection, and successful broken-pipe termination. Large-record and
+many-record regressions
+should assert that validation and raw projection stream records, payload-bearing
+OTLP correlation data goes to anonymous staging, and heap correlation state
+contains only compact offsets and identifiers. The accepted heap model is
+proportional to unique typed operation ID count and bytes rather than journal
+payload bytes; output is never truncated.

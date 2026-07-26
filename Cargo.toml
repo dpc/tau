@@ -168,6 +168,11 @@ nucleo-matcher = { version = "0.3.1", default-features = false, features = [
   "unicode-casefold",
   "unicode-normalization",
 ] }
+opentelemetry-proto = { version = "0.32", default-features = false, features = [
+  "gen-tonic-messages",
+  "trace",
+  "with-serde",
+] }
 parse_datetime = { version = "0.14", default-features = false }
 rand = { version = "0.8", default-features = false, features = [
   "std",
