@@ -112,7 +112,7 @@ pub fn read_session_stats(
         agents.push(agent);
     }
     Ok(Some(SessionStats {
-        schema_version: 1,
+        schema_version: 2,
         session_id: session_id.into(),
         complete: missing.is_empty(),
         missing_data: missing.into_iter().collect(),

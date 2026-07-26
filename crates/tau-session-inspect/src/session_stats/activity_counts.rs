@@ -1,5 +1,8 @@
 use serde::Serialize;
 
+const PICODOLLARS_PER_MICRODOLLAR: u64 = 1_000_000;
+const MICRODOLLARS_PER_DOLLAR: f64 = 1_000_000.0;
+
 /// Exact counts shared by session totals, agents, and model/effort buckets.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ActivityCounts {
@@ -25,9 +28,29 @@ pub struct ActivityCounts {
     pub cached_input_tokens: u64,
     /// Response-local output tokens.
     pub output_tokens: u64,
-    /// Sum of harness-captured response increments, in picodollars.
-    #[serde(rename = "estimated_api_cost_picodollars")]
+    /// Sum of harness-captured response increments, presented as USD rounded to
+    /// the nearest microdollar.
+    ///
+    /// The stored value retains the exact fixed-point picodollar accounting
+    /// representation.
+    #[serde(
+        rename = "estimated_api_cost_dollars",
+        serialize_with = "serialize_estimated_api_cost_dollars"
+    )]
     pub estimated_api_cost: tau_proto::EstimatedApiCost,
+}
+
+fn serialize_estimated_api_cost_dollars<S>(
+    cost: &tau_proto::EstimatedApiCost,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let rounded_microdollars = (u128::from(cost.as_picodollars())
+        + u128::from(PICODOLLARS_PER_MICRODOLLAR / 2))
+        / u128::from(PICODOLLARS_PER_MICRODOLLAR);
+    serializer.serialize_f64(rounded_microdollars as f64 / MICRODOLLARS_PER_DOLLAR)
 }
 
 impl ActivityCounts {

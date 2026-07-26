@@ -11,6 +11,47 @@ use tau_proto::{
 
 use super::{aggregate_agent, read_session_stats};
 
+/// Public reports must render estimated cost as a readable dollar value while
+/// retaining exact picodollars in the aggregation model.
+#[test]
+fn activity_counts_serialize_estimated_cost_as_rounded_dollars() {
+    for (picodollars, expected_dollars) in [
+        (18_728_643_000_000, serde_json::json!(18.728643)),
+        (18_728_643_499_999, serde_json::json!(18.728643)),
+        (18_728_643_500_000, serde_json::json!(18.728644)),
+        (u64::MAX, serde_json::json!(18_446_744.07371)),
+    ] {
+        let counts = super::ActivityCounts {
+            estimated_api_cost: EstimatedApiCost::from_picodollars(picodollars),
+            ..Default::default()
+        };
+        let serialized = serde_json::to_value(&counts).expect("serialize activity counts");
+
+        assert_eq!(
+            serialized["estimated_api_cost_dollars"], expected_dollars,
+            "unexpected rounded dollar value for {picodollars} picodollars"
+        );
+        assert!(serialized.get("estimated_api_cost_picodollars").is_none());
+        assert_eq!(counts.estimated_api_cost.as_picodollars(), picodollars);
+    }
+
+    let toon = serde_toon::to_string(&super::SessionStats {
+        schema_version: 2,
+        session_id: SessionId::from("s1"),
+        complete: true,
+        missing_data: Vec::new(),
+        totals: super::ActivityCounts {
+            estimated_api_cost: EstimatedApiCost::from_picodollars(18_728_643_500_000),
+            ..Default::default()
+        },
+        agents: Vec::new(),
+    })
+    .expect("serialize activity counts as TOON");
+    assert!(toon.contains("schema_version: 2"));
+    assert!(toon.contains("estimated_api_cost_dollars: 18.728644"));
+    assert!(!toon.contains("estimated_api_cost_picodollars"));
+}
+
 fn record(seq: u64, event: Event) -> PersistedAgentEvent {
     PersistedAgentEvent {
         seq: PersistedAgentEventSeq::new(seq),
@@ -270,6 +311,7 @@ fn persisted_traversal_reports_missing_member_journal() {
     let report = read_session_stats(&sessions_dir, "s1")
         .expect("stats")
         .expect("session");
+    assert_eq!(report.schema_version, 2);
     assert!(!report.complete);
     assert_eq!(
         report.missing_data[0].fact,

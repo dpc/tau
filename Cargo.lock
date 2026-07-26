@@ -4200,6 +4200,7 @@ dependencies = [
  "opentelemetry-proto",
  "serde",
  "serde_json",
+ "serde_toon_format",
  "tau-config",
  "tau-core",
  "tau-proto",

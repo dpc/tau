@@ -3,8 +3,11 @@
 `tau session stats --session <id>` reads the session membership journal and only
 the journals of agents that ever belonged to that session. It emits versioned TOON
 by default with exact turn, tool, token, model/effort, and captured estimated-cost
-counts. `complete: false` plus `missing_data` identifies pre-contract or missing
-facts; corrupt journals fail the command instead of producing partial totals.
+counts. Estimated API costs appear as `estimated_api_cost_dollars`, rounded to the
+nearest microdollar for readable output; internal aggregation retains exact
+picodollars. `complete: false` plus `missing_data` identifies pre-contract or
+missing facts; corrupt journals fail the command instead of producing partial
+totals.
 
 `tau-cli` is Tau's terminal application layer. It connects to the harness daemon, owns the interactive chat loop, interprets application commands, and renders protocol events through `tau-cli-term`.
 

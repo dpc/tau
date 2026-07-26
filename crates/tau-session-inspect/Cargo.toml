@@ -24,3 +24,6 @@ tau-config.workspace = true
 tau-core.workspace = true
 tau-proto.workspace = true
 tempfile.workspace = true
+
+[dev-dependencies]
+serde_toon_format.workspace = true
