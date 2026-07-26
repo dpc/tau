@@ -24112,7 +24112,9 @@ impl Harness {
         // `selected_model` later would lie if the user switched
         // models mid-turn.
         let turn_model = self.prompt_models.remove(&response.agent_prompt_id);
-        if let Some(ref model) = turn_model {
+        if let Some(ref model) = turn_model
+            && (input_tokens.is_some() || cached_tokens.is_some() || output_tokens.is_some())
+        {
             let sent_tokens = input_tokens.unwrap_or(0);
             let cached_tokens = cached_tokens.unwrap_or(0);
             let received_tokens = output_tokens.unwrap_or(0);
@@ -24141,8 +24143,12 @@ impl Harness {
         let captured_rates = self
             .prompt_estimated_cost_rates
             .remove(&response.agent_prompt_id);
-        let empty_usage = tau_proto::ProviderTokenUsage::default();
-        let usage = response.usage.as_ref().unwrap_or(&empty_usage);
+        let Some(usage) = response.usage.as_ref() else {
+            response.estimated_api_cost_rates = None;
+            response.estimated_api_cost_increment = None;
+            self.emit_agent_stats_updated_from(cid, source);
+            return;
+        };
         let rates = captured_rates.unwrap_or_else(|| {
             tracing::warn!(
                 target: "tau_harness",

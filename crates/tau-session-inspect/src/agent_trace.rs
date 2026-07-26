@@ -3,6 +3,7 @@
 mod agent_tools;
 mod native;
 mod otlp;
+mod performance;
 #[cfg(test)]
 mod tests;
 
@@ -33,6 +34,8 @@ pub enum AgentTraceFormat {
         /// Output detail encoded in each TOON call item.
         AgentTraceMode,
     ),
+    /// Content-free provider accounting and journal-wall timing JSON Lines.
+    AgentPerformanceJsonl,
 }
 
 /// Output detail retained by compact agent-tool trace formats.
@@ -122,6 +125,9 @@ fn prepare_agent_trace_with_after_capture(
         }
         AgentTraceFormat::AgentToolsToon(mode) => {
             agent_tools::write_toon(root_agent_id, &snapshot, mode, &mut file)?
+        }
+        AgentTraceFormat::AgentPerformanceJsonl => {
+            performance::write_jsonl(root_agent_id, &snapshot, &mut file)?
         }
     }
     file.rewind()?;

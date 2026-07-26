@@ -34,6 +34,94 @@ fn committed_events(harness: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, 
     events
 }
 
+fn publish_terminal_accounting_report(
+    usage: Option<tau_proto::ProviderTokenUsage>,
+) -> tau_proto::ProviderResponseFinished {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let cid = ensure_test_user_agent(&mut harness);
+    seed_agent_thinking(&mut harness, &cid, "accounting-prompt");
+    harness
+        .prompt_agents
+        .insert("accounting-prompt".into(), cid.clone());
+    harness
+        .pending_provider_prompts
+        .insert("accounting-prompt".into(), "provider".into());
+    harness
+        .prompt_models
+        .insert("accounting-prompt".into(), "provider/model".into());
+    harness.prompt_estimated_cost_rates.insert(
+        "accounting-prompt".into(),
+        tau_proto::ESTIMATED_API_COST_FALLBACK,
+    );
+    let mut report = super::dispatch::provider_text_response(
+        &"accounting-prompt".into(),
+        crate::parse_agent_id("spoofed"),
+        "done",
+    );
+    report.usage = usage;
+    harness
+        .handle_extension_event_inner("provider", Event::ProviderResponseFinishedReported(report))
+        .expect("accepted terminal report");
+
+    assert!(
+        committed_events(&harness)
+            .into_iter()
+            .any(|(source, event)| {
+                source.as_deref() == Some(HARNESS_CONNECTION_ID)
+                    && matches!(event, Event::ProviderResponseFinished(_))
+            })
+    );
+    let agent_id = durable_agent_id_for_conversation(&harness, &cid);
+    harness.shutdown().expect("shutdown");
+    let snapshot =
+        tau_core::AgentJournalSnapshot::capture(&temp.path().join("agents"), [agent_id.clone()])
+            .expect("durable snapshot");
+    snapshot
+        .records(&agent_id)
+        .expect("agent records")
+        .find_map(|record| match record.expect("valid durable record").event {
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id.as_str() == "accounting-prompt" =>
+            {
+                Some(response)
+            }
+            _ => None,
+        })
+        .expect("durable canonical terminal")
+}
+
+/// Accepted terminal reports preserve absent accounting and distinguish it
+/// from genuinely reported all-zero accounting through durable publication.
+#[test]
+fn finished_report_publication_distinguishes_absent_from_zero_accounting() {
+    let absent = publish_terminal_accounting_report(None);
+    assert_eq!(absent.usage, None);
+    assert_eq!(absent.estimated_api_cost_rates, None);
+    assert_eq!(absent.estimated_api_cost_increment, None);
+
+    let zero = publish_terminal_accounting_report(Some(tau_proto::ProviderTokenUsage::default()));
+    let usage = zero.usage.expect("present zero usage");
+    assert_eq!(usage.model, Some("provider/model".into()));
+    assert_eq!(usage.prompt_sent_tokens, 0);
+    assert_eq!(usage.prompt_cached_tokens, 0);
+    assert_eq!(usage.response_received_tokens, 0);
+    assert_eq!(
+        zero.estimated_api_cost_rates,
+        Some(tau_proto::ESTIMATED_API_COST_FALLBACK)
+    );
+    assert_eq!(
+        zero.estimated_api_cost_increment,
+        Some(tau_proto::EstimatedApiCost::from_picodollars(0))
+    );
+}
+
 /// A configured Provider report is observable before its separately authored
 /// canonical fact, and both records retain exact source authority.
 #[test]

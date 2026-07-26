@@ -290,6 +290,8 @@ pub enum AgentTraceFormat {
     /// Compact model-visible tool calls as TOON.
     #[default]
     AgentToolsToon,
+    /// Content-free provider accounting and journal-wall timing as JSON Lines.
+    AgentPerformanceJsonl,
 }
 
 /// Output detail for compact agent-tool trace formats.

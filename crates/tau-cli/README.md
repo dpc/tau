@@ -72,6 +72,9 @@ retaining every raw journal occurrence as a span event.
 `agent-tools-toon` and `agent-tools-jsonl` provide compact, trace-relative
 encodings over only model-visible tool calls. `--mode lite` is the default and
 reports output byte/line counts; `--mode full` includes rendered output.
+`agent-performance-jsonl` is always content-free and reports response-local
+token/cache/cost evidence plus qualified journal recorded-at wall intervals and
+per-agent summaries. `--mode full` is invalid for this format.
 See [`docs/agent-trace.md`](../../docs/agent-trace.md) for the output contracts,
 failure behavior, and sensitive-data warning.
 

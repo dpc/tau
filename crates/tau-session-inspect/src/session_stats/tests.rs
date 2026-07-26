@@ -286,6 +286,77 @@ fn aggregation_reports_legacy_accounting_gaps_without_inference() {
     assert_eq!(missing.len(), 3);
 }
 
+/// Complete present-zero accounting contributes exact zero without reporting
+/// an unavailable accounting gap.
+#[test]
+fn aggregation_treats_present_zero_accounting_as_complete() {
+    let agent_id = AgentId::parse("accounting_0").expect("agent id");
+    let model: tau_proto::ModelId = "openai/gpt-5".parse().expect("model");
+    let prompt = |id: &str| {
+        Event::AgentPromptStarted(AgentPromptStarted {
+            agent_prompt_id: id.into(),
+            agent_id: agent_id.clone(),
+            session_id: SessionId::from("s1"),
+            model: model.clone(),
+            model_params: Some(ModelParams::default()),
+            outer_turn_id: None,
+            operation: PromptOperation::Inference,
+            originator: Default::default(),
+            ctx_id: None,
+        })
+    };
+    let response = |id: &str,
+                    usage: Option<ProviderTokenUsage>,
+                    rates: Option<tau_proto::EstimatedApiCostRates>,
+                    cost: Option<EstimatedApiCost>| {
+        Event::ProviderResponseFinished(ProviderResponseFinished {
+            agent_prompt_id: id.into(),
+            agent_id: agent_id.clone(),
+            output_items: Vec::new(),
+            stop_reason: ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: Default::default(),
+            originator: Default::default(),
+            usage,
+            estimated_api_cost_rates: rates,
+            estimated_api_cost_increment: cost,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+    };
+    let zero_usage = ProviderTokenUsage::default();
+    let zero_rates = tau_proto::ESTIMATED_API_COST_FALLBACK;
+    let events = vec![
+        record(0, prompt("zero")),
+        record(
+            1,
+            response(
+                "zero",
+                Some(zero_usage),
+                Some(zero_rates),
+                Some(EstimatedApiCost::from_picodollars(0)),
+            ),
+        ),
+    ];
+    let mut missing = BTreeSet::new();
+    let stats = aggregate_agent("s1", &agent_id, &events, &mut missing);
+
+    assert_eq!(stats.totals.cached_input_tokens, 0);
+    assert_eq!(stats.totals.uncached_input_tokens, 0);
+    assert_eq!(stats.totals.output_tokens, 0);
+    assert_eq!(stats.totals.estimated_api_cost.as_picodollars(), 0);
+    assert!(
+        !missing
+            .iter()
+            .any(|gap| gap.fact == super::MissingAccountingFact::ResponseEstimatedCost)
+    );
+}
+
 /// A membership reference without its authoritative agent journal must produce
 /// an explicitly incomplete public report without creating an agents directory.
 #[test]

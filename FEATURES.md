@@ -229,7 +229,7 @@ configuration from `tau init`, and the component documentation linked above.
 Persisted activity accounting is available through
 `tau session stats --session <id>`. The versioned TOON report traverses immutable
 session membership and member agent journals without a cumulative sidecar, and
-marks unavailable legacy facts rather than inferring them.
+marks unavailable facts rather than inferring them.
 
 Complete offline durable-agent exports are available through
 `tau agent trace <agent-id>`. See [Durable agent trace export](docs/agent-trace.md)
@@ -237,3 +237,6 @@ for snapshot guarantees, the canonical native JSONL schema, and the lossy OTLP
 visualization adapter. `agent-tools-toon` and `agent-tools-jsonl` provide dense,
 trace-relative views containing only model-visible tool calls, with independently
 selected lite/full output detail. Agent trace defaults to TOON lite.
+`agent-performance-jsonl` instead emits content-free provider-prompt accounting,
+fixed-point cache ratios, missing-evidence coverage, and explicitly qualified
+journal recorded-at wall-clock intervals with one summary per included agent.

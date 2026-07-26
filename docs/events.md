@@ -328,7 +328,7 @@ their selected models.
   observation. The committed report enters prompt correlation and the existing
   response terminal pipeline; it never enters semantic replay.
 - **`provider.response_finished`** — Harness-sourced durable final assistant output in original
-  item order via `output_items`, plus optional usage, provider
+  item order via `output_items`, plus optional response-local usage, provider
   response id, backend metadata, and echoed originator. Terminal request
   rejection may carry a machine-readable `failure_kind`; notably,
   `context_window_exceeded` is independent of bounded display `error` prose.
@@ -348,7 +348,12 @@ their selected models.
   A transcript projection without nonzero `provider_input_tokens` is classified
   as `insufficient_evidence`; it cannot by itself claim rejection below or above
   the advertised provider limit.
-  Successful responses and retryable attempts omit it. Routed by the harness
+  Usage is absent when every provider counter is unavailable; an explicitly
+  reported all-zero usage record remains present zero. Harness-selected
+  estimated cost rates and increment are present only with usage, and a
+  calculated zero increment remains present zero. The nested cumulative usage
+  snapshot is presentation state, not durable accounting input.
+  Successful responses and retryable attempts omit context-limit telemetry. Routed by the harness
   based on the originator.
 - **`provider.tool_result`** / **`provider.tool_error`** — Provider-facing
   terminal tool-call completions. These satisfy provider protocol state and

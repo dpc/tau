@@ -2,8 +2,8 @@
 name: tau-self-knowledge-tracing
 description: >
   Use this skill when inspecting or filtering durable Tau agent traces, compact
-  virtual-tool timelines, trace-relative timing, TOON trace output, or JSONL
-  agent-tool output with jq.
+  virtual-tool timelines, content-free performance accounting, trace-relative
+  timing, TOON trace output, or JSONL output with jq.
 advertise: false
 ---
 
@@ -69,12 +69,30 @@ tau agent trace <agent-id> --format agent-tools-jsonl --mode full |
          [.at_us, .call_id, .output] | @tsv'
 ```
 
-Both compact formats include only provider-declared, model-visible tool calls;
+Use the content-free performance projection for provider-reported token/cache
+accounting, harness-calculated cost, and qualified prompt lifecycle intervals:
+
+```console
+tau agent trace <agent-id> --include-descendants \
+  --format agent-performance-jsonl
+```
+
+It emits one row per materialized ordinary-inference prompt and excludes
+standalone compaction and terminal-only facts. Each row includes the
+provider-qualified model ID, and each included agent gets one summary. Missing
+usage and cost remain absent and are counted separately. Cache
+ratios use integer parts per million. `recorded_at_wall_elapsed_us` measures
+only the wall-clock interval between journal append invocations; it is not
+provider wire latency, durable commit time, or exact execution time. The
+projection never includes prompt, tool, response, or error bodies. Treat model
+IDs as sensitive metadata.
+
+Both compact agent-tool formats include only provider-declared, model-visible tool calls;
 they omit assistant prose and lower-level lifecycle facts. `tau-jsonl` remains
 the complete canonical durable artifact, while `otlp-json` remains the telemetry
 adapter.
 
-Treat every trace as sensitive. Both compact formats expose unredacted tool
+Treat every trace as sensitive. Both compact agent-tool formats expose unredacted tool
 names, arguments, and commands; full mode also exposes complete outputs,
 including rendered error details.
 Projection uses anonymous payload staging, but heap still grows with call count

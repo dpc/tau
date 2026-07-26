@@ -60,8 +60,11 @@ harness discards provider claims to recovery disposition and context-limit telem
 estimated cost rates, and estimated cost increments, then derives agent identity,
 usage, telemetry, recovery, normalization, transcript, watch, tool,
 side-conversation, prompt-route, and turn effects from harness state. The canonical
-response captures the effective rates and its response-local cost increment; the
-nested cumulative usage snapshot is never durable accounting input.
+response preserves response-local usage only when at least one provider counter
+was available. Present all-zero counters remain present zero. Effective rates
+and response-local cost increment are present exactly when usage is present;
+otherwise all three accounting fields remain absent. The nested cumulative
+usage snapshot is never durable accounting input.
 
 Canceled, stale, unknown, and duplicate reports produce no canonical response.
 Standalone-compaction success derives `agent.compacted`; invalid standalone compaction

@@ -979,6 +979,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .expect("built-in tracing skill");
     assert!(!tracing.add_to_prompt);
     assert!(tracing.content.contains("--format agent-tools-toon"));
+    assert!(tracing.content.contains("--format agent-performance-jsonl"));
     assert!(tracing.content.contains("--format agent-tools-jsonl"));
     assert!(tracing.content.contains("jq -c"));
     assert!(tracing.content.contains("output_bytes"));

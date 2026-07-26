@@ -820,6 +820,9 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     cli::AgentTraceFormat::AgentToolsToon => {
                         tau_session_inspect::AgentTraceFormat::AgentToolsToon(mode)
                     }
+                    cli::AgentTraceFormat::AgentPerformanceJsonl => {
+                        tau_session_inspect::AgentTraceFormat::AgentPerformanceJsonl
+                    }
                 };
                 validate_agent_trace_mode(args.format, args.mode)?;
                 let mut output = tau_session_inspect::prepare_agent_trace(

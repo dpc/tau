@@ -1,5 +1,21 @@
 use super::*;
 
+/// Provider usage preserves an explicitly reported all-zero record while
+/// retaining complete field absence as unavailable.
+#[test]
+fn stream_usage_distinguishes_absent_from_zero() {
+    let mut state = StreamState::new();
+    assert_eq!(state.usage(), None);
+
+    state.input_tokens = Some(0);
+    state.cached_tokens = Some(0);
+    state.output_tokens = Some(0);
+    let usage = state.usage().expect("reported zero usage");
+    assert_eq!(usage.prompt_sent_tokens, 0);
+    assert_eq!(usage.prompt_cached_tokens, 0);
+    assert_eq!(usage.response_received_tokens, 0);
+}
+
 /// Ensures shared outbound categories retain their intended scheduler cadence
 /// at the Codex adapter boundary.
 #[test]

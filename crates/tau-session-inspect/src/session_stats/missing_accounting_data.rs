@@ -1,7 +1,7 @@
 use serde::Serialize;
 use tau_proto::AgentId;
 
-/// One explicit gap caused by a pre-accounting or incomplete journal.
+/// One explicit gap caused by unavailable or incomplete journal evidence.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct MissingAccountingData {
     /// Agent whose journal contains the gap.
@@ -22,7 +22,7 @@ pub enum MissingAccountingFact {
     /// Prompt predates captured model parameters.
     #[serde(rename = "agent.prompt_started.model_params")]
     PromptModelParams,
-    /// Response predates captured cost authority.
+    /// Response lacks captured cost authority.
     #[serde(rename = "provider.response_finished.estimated_api_cost")]
     ResponseEstimatedCost,
     /// Membership references an absent agent journal.

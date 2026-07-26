@@ -504,7 +504,9 @@ fn terminal_defaults(finished: &tau_proto::ProviderResponseFinished) -> bool {
         && finished.backend.is_none()
         && finished.provider_response_id.is_none()
         && finished.ws_pool_delta.is_none()
-        && finished.usage.is_some()
+        && finished.usage.is_none()
+        && finished.estimated_api_cost_rates.is_none()
+        && finished.estimated_api_cost_increment.is_none()
 }
 
 fn assert_durable_agent_start(

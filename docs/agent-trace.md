@@ -9,7 +9,7 @@ HTTP bodies, streaming deltas, or harness phase timing.
 ```console
 tau agent trace <agent-id> \
   [--include-descendants] \
-  [--format tau-jsonl|otlp-json|agent-tools-toon|agent-tools-jsonl] \
+  [--format tau-jsonl|otlp-json|agent-tools-toon|agent-tools-jsonl|agent-performance-jsonl] \
   [--mode lite|full] \
   [--agents-dir <path>]
 ```
@@ -17,6 +17,8 @@ tau agent trace <agent-id> \
 The defaults select only the requested agent, `agent-tools-toon`, `lite`, and
 `<state-dir>/agents`. Machine output goes to stdout; diagnostics go to stderr.
 A closed stdout pipe is a successful early consumer exit.
+`--mode full` is valid only with `agent-tools-toon` and
+`agent-tools-jsonl`; every other format is content-fixed.
 
 
 ## Snapshot and failure behavior
@@ -243,3 +245,72 @@ for a complete creator-owned workflow.
 > arguments, and commands. `--mode full` additionally exposes complete
 > unredacted output, including rendered error details. Treat either artifact as
 > sensitive.
+
+
+## Content-free performance JSON Lines
+
+`agent-performance-jsonl` projects only prompt correlations, response-local
+token/cache accounting, stored estimated cost, and qualified lifecycle timing.
+It never emits prompt or response content, errors, tool names, arguments,
+results, model parameters, or provider bodies. Agent, prompt, and
+provider-qualified model IDs, descendant membership, activity timing, token
+counts, cache reuse, and cost remain sensitive metadata.
+
+The first row uses schema `tau.agent_performance`, version `0`, and contains the
+root/included agent IDs, `time_unit: "microseconds"`,
+`timing_fidelity: "recorded_at_wall_clock_append_invocation_interval"`, and
+`content_included: false`. Each included agent then emits provider-prompt rows
+ordered lexically by prompt ID followed by one `agent_summary`; agents remain in
+lexical order. `--include-descendants` uses the same authenticated creator scope
+and snapshot as every other format.
+
+```text
+header: schema, schema_version, record_type, root_agent_id,
+        included_agent_ids, time_unit, timing_fidelity, content_included
+provider_prompt: record_type, agent_id, agent_prompt_id, model,
+                 optional at_us, optional terminal_at_us,
+                 optional recorded_at_wall_elapsed_us, terminal_present,
+                 optional prompt_sent_tokens,
+                 optional prompt_cached_tokens,
+                 optional response_received_tokens,
+                 optional estimated_api_cost_picodollars
+agent_summary: record_type, agent_id, provider_prompt_occurrences,
+               provider_prompt_complete, provider_prompt_incomplete,
+               provider_prompt_elapsed_reported,
+               provider_prompt_recorded_at_wall_elapsed_sum_us,
+               optional prompt_sent_tokens,
+               optional prompt_cached_tokens,
+               optional response_received_tokens,
+               optional cache_hit_ratio_ppm,
+               optional estimated_api_cost_picodollars,
+               usage_reported_occurrences, usage_missing_occurrences,
+               cost_reported_occurrences, cost_missing_occurrences
+```
+
+A provider-prompt row contains `agent_id`, `agent_prompt_id`, the stable
+provider-qualified `model`, terminal presence,
+optional response-local sent/cached/output tokens, and optional exact stored
+estimated-cost picodollars. Missing canonical journal values remain absent.
+Genuine present zero values remain numeric zero. Cached tokens are capped at
+sent tokens, matching Tau accounting. Summaries separately count terminal
+occurrences with and without usage/cost evidence, sum only present evidence,
+and emit `cache_hit_ratio_ppm = floor(1_000_000 * cached / sent)` only for a
+nonzero present input-token total. Checked aggregate overflow fails projection
+before stdout instead of emitting a saturated total. A stored per-response cost
+may itself be the saturated estimate produced by Tau's cost type.
+
+Ordinary-inference prompt materialization (`agent.prompt_started`) is the sole
+start and inclusion evidence. Standalone compaction is excluded because its
+canonical terminal is not `provider.response_finished`. The optional
+`recorded_at_wall_elapsed_us` and its summary sum compare the journal records'
+wall-clock append-invocation timestamps. They are not durable commit time,
+provider wire/model latency, or exact execution time, and intervals can overlap.
+Zero timestamps are unavailable; decreasing clocks omit the interval. Relative
+offsets are absent when no nonzero trace origin exists. Missing terminals stay
+explicitly incomplete. Duplicate lifecycle/terminal facts for one agent/prompt
+correlation fail projection rather than selecting one.
+
+Projection retains one small content-free correlation entry per distinct prompt
+until that agent's rows are emitted. It does not retain provider output,
+error text, model parameters, or cumulative token snapshots. As with other trace
+formats, pathological prompt-ID cardinality or length can exhaust memory.

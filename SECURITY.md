@@ -638,7 +638,7 @@ Provider-supplied accounting fields are discarded before canonical publication;
 captured response-local usage, effective rates, and increments are immutable
 authority. Outer-turn lifecycle and prompt joins are immutable must-pass facts.
 Stats traversal is read-only and performs no repair, migration, configuration
-lookup, or inferred backfill. Missing legacy authority makes `complete` false;
+lookup, or inferred backfill. Missing accounting authority makes `complete` false;
 malformed or corrupt journals fail closed. An unmatched crash-cut start remains
 reported as unterminated but does not block a later boot's fresh turn.
 
@@ -698,6 +698,16 @@ encodes safe readable calls, escapes multiline text, and Base64-frames only the
 exceptional call ID, arguments, command, or output field whenever tagged-CBOR, exact
 floats, or unsafe controls cannot round-trip directly. TOON must never print
 payload C0/C1 controls raw.
+
+The performance projection emits no prompt, tool, response, or error bodies, but
+its agent/prompt/model IDs, descendant membership, timing, token/cache counts,
+and estimated cost remain sensitive metadata. It retains only compact
+response-local accounting, provider-qualified model identity, and timestamps
+per prompt, not provider payloads, model parameters, or cumulative usage
+snapshots. Heap remains proportional to prompt correlation count and
+agent/prompt/model identifier bytes. Changes must recheck zero and decreasing wall timestamps, duplicate
+terminals, checked aggregate overflow, zero/fractional cache-ratio boundaries,
+and structural output-field privacy.
 
 For one exceptional near-limit argument, per-call materialization can
 simultaneously retain the decoded value, amplified `TaggedCbor`, compact JSON

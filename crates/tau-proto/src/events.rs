@@ -4623,12 +4623,13 @@ pub struct ProviderResponseFinished {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ProviderTokenUsage>,
     /// Harness-captured effective price rates for this accepted response.
-    /// Missing values identify legacy/report DTOs and are never provider
-    /// authority.
+    /// Missing when accepted provider usage is unavailable; providers never
+    /// author this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_api_cost_rates: Option<crate::EstimatedApiCostRates>,
     /// Harness-calculated cost from this response's local usage counters.
-    /// Missing values identify legacy/report DTOs and are never inferred.
+    /// Missing when accepted provider usage is unavailable. A calculated zero
+    /// remains present as zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_api_cost_increment: Option<crate::EstimatedApiCost>,
     /// Input-token count of the conversation before provider-side compaction,

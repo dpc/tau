@@ -429,13 +429,14 @@ fn agent_trace_command_parses_compact_formats_and_modes() {
     ));
 }
 
-/// Dispatch validation rejects full detail for both noncompact encodings with
+/// Dispatch validation rejects full detail for every noncompact encoding with
 /// the tailored diagnostic while accepting both compact encodings.
 #[test]
 fn agent_trace_mode_validation_matches_format_semantics() {
     for format in [
         super::cli::AgentTraceFormat::TauJsonl,
         super::cli::AgentTraceFormat::OtlpJson,
+        super::cli::AgentTraceFormat::AgentPerformanceJsonl,
     ] {
         let error = super::validate_agent_trace_mode(format, super::cli::AgentTraceMode::Full)
             .expect_err("full noncompact trace");
@@ -452,6 +453,28 @@ fn agent_trace_mode_validation_matches_format_semantics() {
         super::validate_agent_trace_mode(format, super::cli::AgentTraceMode::Full)
             .expect("full compact trace");
     }
+}
+
+/// Agent trace exposes the content-free performance JSONL projection without a
+/// payload-detail mode.
+#[test]
+fn agent_trace_command_parses_performance_format() {
+    let cli = super::cli::Cli::parse_from([
+        "tau",
+        "agent",
+        "trace",
+        "agent-root",
+        "--format",
+        "agent-performance-jsonl",
+    ]);
+
+    assert!(matches!(
+        cli.command,
+        Some(super::cli::Command::Agent {
+            command: super::cli::AgentCommand::Trace(args),
+        }) if args.format == super::cli::AgentTraceFormat::AgentPerformanceJsonl
+            && args.mode == super::cli::AgentTraceMode::Lite
+    ));
 }
 
 /// Session inspection operations share the same noun-first nested command shape

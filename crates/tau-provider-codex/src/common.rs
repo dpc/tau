@@ -1053,21 +1053,25 @@ impl StreamState {
         self.output_items_snapshot()
     }
 
+    /// Returns response-local usage when the provider supplied any usage field,
+    /// preserving an explicitly reported all-zero record.
     pub fn usage(&self) -> Option<ProviderTokenUsage> {
+        if self.input_tokens.is_none()
+            && self.cached_tokens.is_none()
+            && self.output_tokens.is_none()
+        {
+            return None;
+        }
         let input = self.input_tokens.unwrap_or(0);
         let cached = self.cached_tokens.unwrap_or(0);
         let output = self.output_tokens.unwrap_or(0);
-        if input == 0 && cached == 0 && output == 0 {
-            None
-        } else {
-            Some(ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input,
-                prompt_cached_tokens: cached,
-                response_received_tokens: output,
-                stats: Default::default(),
-            })
-        }
+        Some(ProviderTokenUsage {
+            model: None,
+            prompt_sent_tokens: input,
+            prompt_cached_tokens: cached,
+            response_received_tokens: output,
+            stats: Default::default(),
+        })
     }
 }
 

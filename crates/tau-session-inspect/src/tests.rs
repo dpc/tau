@@ -119,6 +119,99 @@ fn append_trace_prompt_lifecycle(
         .expect("prompt start");
 }
 
+/// Appends a valid standalone-compaction materialization prefix so the
+/// performance projection can prove that non-inference operations are excluded.
+fn append_trace_compaction_prompt(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    prompt_id: &str,
+    timestamp: u64,
+) {
+    let agent_id = AgentId::parse(agent_id).expect("agent id");
+    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: agent_id.clone(),
+                transaction_id: tau_proto::CompactionTransactionId::parse("compact-transaction")
+                    .expect("transaction id"),
+                compact_prompt_id: prompt_id.into(),
+                cut: tau_proto::AgentHead::Root,
+                resume_through: None,
+                model: "provider/model".into(),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator: tau_proto::PromptOriginator::User,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+            }),
+            tau_proto::UnixMicros::new(timestamp),
+        )
+        .expect("compaction start");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+                agent_prompt_id: prompt_id.into(),
+                agent_id: agent_id.clone(),
+                session_id: "trace-session".into(),
+                model: "provider/model".into(),
+                model_params: Some(Default::default()),
+                outer_turn_id: None,
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            }),
+            tau_proto::UnixMicros::new(timestamp + 1),
+        )
+        .expect("compaction prompt start");
+}
+
+/// Appends one timestamp-controlled content-free terminal accounting fact.
+fn append_trace_provider_terminal(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    prompt_id: &str,
+    timestamp: u64,
+    usage: Option<tau_proto::ProviderTokenUsage>,
+    cost_picodollars: Option<u64>,
+) {
+    let agent_id = AgentId::parse(agent_id).expect("agent id");
+    let mut store = tau_core::AgentStore::open_lazy(agents_dir).expect("agent store");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+                agent_prompt_id: prompt_id.into(),
+                agent_id: agent_id.clone(),
+                output_items: vec![assistant_message("private response")],
+                stop_reason: tau_proto::ProviderStopReason::EndTurn,
+                error: Some("private provider error".to_owned()),
+                failure_kind: None,
+                context_limit_telemetry: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                originator: tau_proto::PromptOriginator::User,
+                usage,
+                estimated_api_cost_increment: cost_picodollars
+                    .map(tau_proto::EstimatedApiCost::from_picodollars),
+                estimated_api_cost_rates: None,
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+            tau_proto::UnixMicros::new(timestamp),
+        )
+        .expect("provider terminal");
+}
+
 fn append_background_tool_lifecycle(agents_dir: &std::path::Path, agent_id: &str, call_id: &str) {
     append_background_tool_calls(
         agents_dir,
@@ -181,7 +274,9 @@ fn append_background_tool_calls(
                     call_id: (*call_id).into(),
                     tool_name: tool_name.clone(),
                     tool_type: ToolType::Function,
-                    result: tau_proto::CborValue::Null,
+                    result: tau_proto::CborValue::Text(format!(
+                        "private tool result sentinel for {call_id}"
+                    )),
                     provider_content: Vec::new(),
                     kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
                     display: None,
@@ -992,6 +1087,302 @@ fn agent_tools_lite_is_compact_relative_and_output_free() {
     assert_eq!(lines[2]["status"], "error");
     assert_eq!(lines[2]["output_bytes"], 28);
     assert_eq!(lines[2]["output_lines"], 3);
+}
+
+/// Performance export keeps exact accounting, qualifies journal-wall intervals,
+/// reports missing values, includes descendants, and excludes private bodies.
+#[test]
+fn agent_performance_is_content_free_exact_and_per_agent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    create_trace_agent(
+        temp.path(),
+        "agent-child",
+        tau_proto::AgentCreator::Agent {
+            agent_id: AgentId::parse("agent-root").expect("root id"),
+            session_id: "trace-session".into(),
+        },
+        Some("agent-root"),
+        2,
+    );
+    append_trace_prompt_lifecycle(temp.path(), "agent-root", "prompt-accounted", 10);
+    append_trace_prompt(
+        temp.path(),
+        "agent-root",
+        "private prompt body sentinel",
+        11,
+    );
+    append_trace_provider_terminal(
+        temp.path(),
+        "agent-root",
+        "prompt-accounted",
+        30,
+        Some(tau_proto::ProviderTokenUsage {
+            prompt_sent_tokens: 1_000,
+            prompt_cached_tokens: 1_100,
+            response_received_tokens: 25,
+            ..Default::default()
+        }),
+        Some(987_654_321),
+    );
+    append_trace_prompt_lifecycle(temp.path(), "agent-root", "prompt-missing", 35);
+    append_trace_provider_terminal(temp.path(), "agent-root", "prompt-missing", 40, None, None);
+    append_trace_prompt_lifecycle(temp.path(), "agent-root", "prompt-zero", 42);
+    append_trace_provider_terminal(
+        temp.path(),
+        "agent-root",
+        "prompt-zero",
+        43,
+        Some(tau_proto::ProviderTokenUsage::default()),
+        Some(0),
+    );
+    append_trace_provider_terminal(
+        temp.path(),
+        "agent-root",
+        "prompt-terminal-only",
+        44,
+        Some(tau_proto::ProviderTokenUsage::default()),
+        Some(0),
+    );
+    append_trace_compaction_prompt(temp.path(), "agent-root", "prompt-compaction", 50);
+    append_trace_prompt_lifecycle(temp.path(), "agent-child", "prompt-incomplete", 20);
+    append_background_tool_calls(
+        temp.path(),
+        "agent-child",
+        &[(
+            "private-tool-call-sentinel",
+            "private_tool_name_sentinel",
+            "private tool argument sentinel",
+        )],
+    );
+
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::Include,
+        AgentTraceFormat::AgentPerformanceJsonl,
+    )
+    .expect("performance trace");
+    assert!(!output.contains("private response"));
+    assert!(!output.contains("private provider error"));
+    assert!(!output.contains("private prompt body sentinel"));
+    assert!(!output.contains("private_tool_name_sentinel"));
+    assert!(!output.contains("private tool argument sentinel"));
+    assert!(!output.contains("private tool result sentinel"));
+    assert!(!output.contains("prompt-compaction"));
+    assert!(!output.contains("prompt-terminal-only"));
+    let rows = output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows[0]["schema"], "tau.agent_performance");
+    assert_eq!(
+        rows[0]["timing_fidelity"],
+        "recorded_at_wall_clock_append_invocation_interval"
+    );
+    assert_eq!(rows[0]["content_included"], false);
+    assert_eq!(
+        rows[0]
+            .as_object()
+            .expect("header object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            "schema",
+            "schema_version",
+            "record_type",
+            "root_agent_id",
+            "included_agent_ids",
+            "time_unit",
+            "timing_fidelity",
+            "content_included",
+        ])
+    );
+
+    let accounted = rows
+        .iter()
+        .find(|row| row["agent_prompt_id"] == "prompt-accounted")
+        .expect("accounted provider prompt");
+    assert_eq!(accounted["at_us"], 9);
+    assert_eq!(accounted["terminal_at_us"], 29);
+    assert_eq!(accounted["recorded_at_wall_elapsed_us"], 20);
+    assert_eq!(accounted["prompt_sent_tokens"], 1_000);
+    assert_eq!(accounted["prompt_cached_tokens"], 1_000);
+    assert_eq!(accounted["response_received_tokens"], 25);
+    assert_eq!(accounted["estimated_api_cost_picodollars"], 987_654_321);
+    let allowed = std::collections::BTreeSet::from([
+        "record_type",
+        "agent_id",
+        "agent_prompt_id",
+        "model",
+        "at_us",
+        "terminal_at_us",
+        "recorded_at_wall_elapsed_us",
+        "terminal_present",
+        "prompt_sent_tokens",
+        "prompt_cached_tokens",
+        "response_received_tokens",
+        "estimated_api_cost_picodollars",
+    ]);
+    assert_eq!(
+        accounted
+            .as_object()
+            .expect("provider-prompt object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        allowed
+    );
+
+    let missing = rows
+        .iter()
+        .find(|row| row["agent_prompt_id"] == "prompt-missing")
+        .expect("missing-accounting provider prompt");
+    assert!(missing.get("prompt_sent_tokens").is_none());
+    assert!(missing.get("estimated_api_cost_picodollars").is_none());
+    let zero = rows
+        .iter()
+        .find(|row| row["agent_prompt_id"] == "prompt-zero")
+        .expect("present-zero provider prompt");
+    assert_eq!(zero["prompt_sent_tokens"], 0);
+    assert_eq!(zero["prompt_cached_tokens"], 0);
+    assert_eq!(zero["response_received_tokens"], 0);
+    assert_eq!(zero["estimated_api_cost_picodollars"], 0);
+
+    let root_summary = rows
+        .iter()
+        .find(|row| {
+            row["record_type"] == "agent_summary" && row["agent_id"].as_str() == Some("agent-root")
+        })
+        .expect("root summary");
+    assert_eq!(root_summary["provider_prompt_occurrences"], 3);
+    assert_eq!(root_summary["provider_prompt_complete"], 3);
+    assert_eq!(root_summary["usage_reported_occurrences"], 2);
+    assert_eq!(root_summary["usage_missing_occurrences"], 1);
+    assert_eq!(root_summary["cost_reported_occurrences"], 2);
+    assert_eq!(root_summary["cost_missing_occurrences"], 1);
+    assert_eq!(root_summary["cache_hit_ratio_ppm"], 1_000_000);
+    let summary_allowed = std::collections::BTreeSet::from([
+        "record_type",
+        "agent_id",
+        "provider_prompt_occurrences",
+        "provider_prompt_complete",
+        "provider_prompt_incomplete",
+        "provider_prompt_elapsed_reported",
+        "provider_prompt_recorded_at_wall_elapsed_sum_us",
+        "prompt_sent_tokens",
+        "prompt_cached_tokens",
+        "response_received_tokens",
+        "cache_hit_ratio_ppm",
+        "estimated_api_cost_picodollars",
+        "usage_reported_occurrences",
+        "usage_missing_occurrences",
+        "cost_reported_occurrences",
+        "cost_missing_occurrences",
+    ]);
+    assert_eq!(
+        root_summary
+            .as_object()
+            .expect("summary object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        summary_allowed
+    );
+
+    let child_summary = rows
+        .iter()
+        .find(|row| {
+            row["record_type"] == "agent_summary" && row["agent_id"].as_str() == Some("agent-child")
+        })
+        .expect("child summary");
+    assert_eq!(child_summary["provider_prompt_incomplete"], 1);
+    assert!(child_summary.get("prompt_sent_tokens").is_none());
+}
+
+fn performance_prompt_row(start: u64, terminal: u64) -> serde_json::Value {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    append_trace_prompt_lifecycle(temp.path(), "agent-root", "prompt", start);
+    append_trace_provider_terminal(temp.path(), "agent-root", "prompt", terminal, None, None);
+    let output = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentPerformanceJsonl,
+    )
+    .expect("performance trace");
+    output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
+        .find(|row| row["record_type"] == "provider_prompt")
+        .expect("provider prompt")
+}
+
+/// An unavailable start timestamp omits both its relative offset and elapsed
+/// interval.
+#[test]
+fn agent_performance_omits_unavailable_timestamp_interval() {
+    let row = performance_prompt_row(0, 10);
+    assert!(row.get("at_us").is_none());
+    assert!(row.get("recorded_at_wall_elapsed_us").is_none());
+}
+
+/// Equal available timestamps preserve a genuine zero elapsed interval.
+#[test]
+fn agent_performance_reports_valid_zero_elapsed() {
+    let row = performance_prompt_row(10, 10);
+    assert_eq!(row["recorded_at_wall_elapsed_us"], 0);
+}
+
+/// A decreasing wall clock never produces a synthetic elapsed interval.
+#[test]
+fn agent_performance_omits_decreasing_clock_interval() {
+    let row = performance_prompt_row(30, 20);
+    assert!(row.get("recorded_at_wall_elapsed_us").is_none());
+}
+
+/// Duplicate canonical terminal facts reject ambiguous projection.
+#[test]
+fn agent_performance_rejects_duplicate_terminal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    append_trace_prompt_lifecycle(temp.path(), "agent-root", "prompt", 10);
+    append_trace_provider_terminal(temp.path(), "agent-root", "prompt", 20, None, None);
+    append_trace_provider_terminal(temp.path(), "agent-root", "prompt", 30, None, None);
+
+    let error = export_trace(
+        temp.path(),
+        &AgentId::parse("agent-root").expect("agent id"),
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentPerformanceJsonl,
+    )
+    .expect_err("duplicate terminal must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("multiple `provider.response_finished` facts")
+    );
 }
 
 /// The full agent-tools format retains the same flat call shape while replacing
