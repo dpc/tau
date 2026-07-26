@@ -83,10 +83,12 @@ when it is narrower than the baseline.
 
 **The initialization display names only model-listed skills and bootstrap
 AGENTS.md files.** It renders exactly the skill names in that agent's
-`<available_skills>` plus the AGENTS.md paths used for bootstrap. When canonical
-session skills remain, it summarizes all of them with exactly one count line, but
-must not list their names or imply that they were included in the agent prompt.
-Separately
+`<available_skills>` plus line and byte counts for the descriptions included
+there, and the AGENTS.md paths plus line and byte counts used for bootstrap.
+These compact size statistics use the same presentation as tool output
+statistics. When canonical session skills remain, it summarizes all of them with
+exactly one count line, but must not list their names or imply that they were
+included in the agent prompt. Separately
 user-invocable/manual skills remain available through canonical session skill
 state for `:skill` completion.
 

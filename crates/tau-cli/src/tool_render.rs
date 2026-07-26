@@ -1449,12 +1449,24 @@ pub(crate) fn agent_context_initialized_block(
     let mut text = ThemedText::new();
     let info = text.add_style(names::SYSTEM_INFO);
     let path_style = text.add_style(names::SYSTEM_PATH);
+    let stats_style = text.add_style(names::TOOL_STATUS_INFO);
     text.push(info, format!("initialized {}", initialized.agent_id));
     if !initialized.listed_skills.is_empty() || 0 < unadvertised_skill_count {
         text.push(info, "\nskills:");
         for skill in &initialized.listed_skills {
             text.push(info, "\n  ");
             text.push(path_style, skill.name.to_string());
+            text.push(
+                stats_style,
+                format!(
+                    " {}",
+                    format_stats(
+                        None,
+                        Some(skill.description.lines().count() as u64),
+                        Some(skill.description.len() as u64),
+                    )
+                ),
+            );
         }
         if 0 < unadvertised_skill_count {
             text.push(
@@ -1475,6 +1487,13 @@ pub(crate) fn agent_context_initialized_block(
         for file in &initialized.agents_files {
             text.push(info, "\n  ");
             text.push(path_style, file.file_path.display().to_string());
+            text.push(
+                stats_style,
+                format!(
+                    " {}",
+                    format_stats(None, Some(file.lines), Some(file.bytes))
+                ),
+            );
         }
     }
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))

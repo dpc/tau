@@ -34,6 +34,7 @@ fn cli_test_theme() -> tau_themes::Theme {
                 "watching.name": { fg: "dark_yellow" },
                 "tool.status.success": { fg: "green" },
                 "tool.status.error": { fg: "red" },
+                "tool.status.info": { fg: "dark_cyan" },
                 "system.info": { fg: "blue" },
                 "system.info.important": { fg: "red" },
                 "status.agents": { fg: "cyan" },
@@ -2962,7 +2963,8 @@ fn extension_context_ready_routes_to_agent_ui_state() {
 
 /// The initialization UI must use real line breaks, expose only advertised
 /// skill names, aggregate other skills, and put each bootstrap path on its own
-/// concise line without leaking skill descriptions or file statistics.
+/// concise line with prompt-context size statistics but without leaking skill
+/// descriptions.
 #[test]
 fn agent_context_initialization_summary_is_concise_and_literal() {
     let advertised = tau_proto::DiscoveryEffectiveSkill {
@@ -2995,20 +2997,74 @@ fn agent_context_initialization_summary_is_concise_and_literal() {
 
     let block =
         crate::tool_render::agent_context_initialized_block(&cli_test_theme(), &initialized, 2);
-    let text = block
-        .content
-        .spans()
+    let spans = block.content.spans();
+    let text = spans
         .iter()
         .map(|span| span.text.as_str())
         .collect::<String>();
     assert_eq!(
         text,
-        "initialized agent-1\nskills:\n  advertised\n  2 other session skills available\nAGENTS.md:\n  /home/dpc/.config/agents/AGENTS.md\n  /repo/AGENTS.md"
+        "initialized agent-1\nskills:\n  advertised 1L, 28B\n  2 other session skills available\nAGENTS.md:\n  /home/dpc/.config/agents/AGENTS.md 10L, 100B\n  /repo/AGENTS.md 20L, 200B"
     );
     assert!(!text.contains("\\n"));
     assert!(!text.contains("description must stay hidden"));
-    assert!(!text.contains("lines"));
-    assert!(!text.contains("bytes"));
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|span| span.style.fg == Some(Color::DarkCyan))
+            .map(|span| span.text.as_str())
+            .collect::<Vec<_>>(),
+        [" 1L, 28B", " 10L, 100B", " 20L, 200B"]
+    );
+}
+
+/// Skill statistics describe only the advertised description injected into the
+/// initial context, including UTF-8 bytes and multiple description lines.
+#[test]
+fn agent_context_initialization_skill_stats_measure_prompt_description() {
+    let initialized = tau_proto::HarnessAgentContextInitialized {
+        session_id: "session-1".into(),
+        agent_id: agent_id("agent-1"),
+        agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+        listed_skills: vec![
+            tau_proto::DiscoveryEffectiveSkill {
+                name: "focused".into(),
+                description: "one\né".to_owned(),
+                source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
+                add_to_prompt: true,
+                user_invocable: true,
+                disable_model_invocation: false,
+                argument_hint: None,
+            },
+            tau_proto::DiscoveryEffectiveSkill {
+                name: "empty".into(),
+                description: String::new(),
+                source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
+                add_to_prompt: true,
+                user_invocable: true,
+                disable_model_invocation: false,
+                argument_hint: None,
+            },
+        ],
+        agents_files: vec![tau_proto::DiscoveryAgentsFileSummary {
+            file_path: "/empty/AGENTS.md".into(),
+            lines: 0,
+            bytes: 0,
+        }],
+    };
+
+    let text =
+        crate::tool_render::agent_context_initialized_block(&cli_test_theme(), &initialized, 0)
+            .content
+            .spans()
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+
+    assert_eq!(
+        text,
+        "initialized agent-1\nskills:\n  focused 2L, 6B\n  empty 0L, 0B\nAGENTS.md:\n  /empty/AGENTS.md 0L, 0B"
+    );
 }
 
 /// Empty sections stay omitted, while a singular aggregate remains grammatical.
@@ -3081,6 +3137,8 @@ fn agent_context_initialization_event_aggregates_session_skills() {
     assert!(vt.screen_contains(80, "advertised"));
     assert!(vt.screen_contains(80, "1 other session skill available"));
     assert!(vt.screen_contains(80, "/repo/AGENTS.md"));
+    assert!(vt.screen_contains(80, "advertised 1L, 22B"));
+    assert!(vt.screen_contains(80, "/repo/AGENTS.md 20L, 200B"));
     assert!(!vt.screen_contains(80, "other description"));
 }
 
