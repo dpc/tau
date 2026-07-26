@@ -3118,6 +3118,7 @@ fn agent_context_initialization_event_aggregates_session_skills() {
             skills: vec![skill("advertised"), skill("other")],
         },
     ));
+    renderer.switch_agent("agent-1".to_owned());
     renderer.handle(&Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
             session_id: "session-1".into(),
@@ -3140,6 +3141,146 @@ fn agent_context_initialization_event_aggregates_session_skills() {
     assert!(vt.screen_contains(80, "advertised 1L, 22B"));
     assert!(vt.screen_contains(80, "/repo/AGENTS.md 20L, 200B"));
     assert!(!vt.screen_contains(80, "other description"));
+}
+
+/// Agent-specific discovery must remain in its owning transcript across
+/// background delivery and repeated selection switches.
+#[test]
+fn agent_context_initialization_is_visible_only_in_selected_agent_transcript() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let initialized = |agent: &str, skill: &str, path: &str| {
+        Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
+            session_id: "session-1".into(),
+            agent_id: agent_id(agent),
+            agent_initialization_id: tau_proto::AgentInitializationId::new(format!("{agent}-init")),
+            listed_skills: vec![tau_proto::DiscoveryEffectiveSkill {
+                name: skill.into(),
+                description: format!("{skill} description"),
+                source: tau_proto::DiscoveryEffectiveSkillSource::BuiltIn,
+                add_to_prompt: true,
+                user_invocable: true,
+                disable_model_invocation: false,
+                argument_hint: None,
+            }],
+            agents_files: vec![tau_proto::DiscoveryAgentsFileSummary {
+                file_path: path.into(),
+                lines: 6,
+                bytes: 550,
+            }],
+        })
+    };
+
+    renderer.switch_agent("agent-1".to_owned());
+    renderer.handle(&initialized(
+        "agent-1",
+        "foreground-skill",
+        "/one/AGENTS.md",
+    ));
+    renderer.handle(&initialized(
+        "agent-2",
+        "background-skill",
+        "/two/AGENTS.md",
+    ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "foreground-skill 1L, 28B"));
+    assert!(vt.screen_contains(80, "/one/AGENTS.md 6L, 550B"));
+    assert!(!vt.screen_contains(80, "background-skill"));
+    assert!(!vt.screen_contains(80, "/two/AGENTS.md"));
+
+    renderer.switch_agent("agent-2".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "background-skill 1L, 28B"));
+    assert!(vt.screen_contains(80, "/two/AGENTS.md 6L, 550B"));
+    assert!(!vt.screen_contains(80, "foreground-skill"));
+    assert!(!vt.screen_contains(80, "/one/AGENTS.md"));
+
+    renderer.switch_agent("agent-1".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "foreground-skill 1L, 28B"));
+    assert!(!vt.screen_contains(80, "background-skill"));
+}
+
+/// Current-state discovery catch-up received before any selection must remain
+/// hidden until the user selects its owning agent, as on restore or reattach.
+#[test]
+fn catch_up_agent_context_initialization_waits_for_agent_selection() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.apply_setting("notice-level", "debug");
+    renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice {
+        kind: "startup".into(),
+        message: "startup output adopted by first agent".into(),
+        level: tau_proto::NoticeLevel::Info,
+        always_show: true,
+    }));
+    renderer.handle(&Event::HarnessAgentContextInitialized(
+        tau_proto::HarnessAgentContextInitialized {
+            session_id: "session-1".into(),
+            agent_id: agent_id("restored"),
+            agent_initialization_id: tau_proto::AgentInitializationId::new("restored-init"),
+            listed_skills: Vec::new(),
+            agents_files: vec![tau_proto::DiscoveryAgentsFileSummary {
+                file_path: "/restored/AGENTS.md".into(),
+                lines: 6,
+                bytes: 550,
+            }],
+        },
+    ));
+    renderer.handle(&Event::ExtensionContextReady(
+        tau_proto::ExtensionContextReady {
+            agent_initialization_id: tau_proto::AgentInitializationId::new("restored-init"),
+            session_id: "session-1".into(),
+            agent_id: agent_id("restored"),
+        },
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "startup output adopted by first agent"));
+    assert!(!vt.screen_contains(80, "/restored/AGENTS.md"));
+    assert!(!vt.screen_contains(80, "context ready"));
+
+    renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
+        agent_id: agent_id("restored"),
+        ..agent_prompt_created("restored-prompt", "session-1")
+    }));
+    sync(&handle);
+    assert_eq!(
+        renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent")
+            .as_deref(),
+        Some("restored")
+    );
+    assert!(vt.screen_contains(80, "startup output adopted by first agent"));
+    assert!(vt.screen_contains(80, "/restored/AGENTS.md 6L, 550B"));
+    assert!(vt.screen_contains(80, "context ready"));
+    let restored = vt.screen_text(80).join("\n");
+    assert!(
+        restored.find("/restored/AGENTS.md").expect("discovery row")
+            < restored
+                .find("context ready")
+                .expect("later context-ready row")
+    );
+
+    renderer.switch_agent("background".to_owned());
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "startup output adopted by first agent"));
+    assert!(!vt.screen_contains(80, "/restored/AGENTS.md"));
+
+    renderer.switch_agent("restored".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "startup output adopted by first agent"));
+    assert!(vt.screen_contains(80, "/restored/AGENTS.md 6L, 550B"));
 }
 
 /// Extension lifecycle completion must update the same snapshot that received

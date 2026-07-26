@@ -88,6 +88,9 @@ pub(crate) struct EventRenderer {
     skill_state: SkillCommandState,
     /// Agent initialization projections already rendered by this UI instance.
     initialized_discovery_epochs: HashSet<(tau_proto::AgentId, tau_proto::AgentInitializationId)>,
+    /// Initialization projections waiting for first-agent startup output
+    /// adoption.
+    pending_initial_discovery: HashMap<String, Vec<(Event, UnixMicros)>>,
     theme: tau_themes::Theme,
     /// Agent that prompt input targets. `None` means the UI is in the
     /// start-new-agent state; the next user prompt will start/select an agent.
@@ -1378,6 +1381,7 @@ impl EventRenderer {
             action_state: ActionCommandState::new(std::iter::empty::<&str>()),
             skill_state: SkillCommandState::new(),
             initialized_discovery_epochs: HashSet::new(),
+            pending_initial_discovery: HashMap::new(),
             theme,
             current_agent_id: None,
             displayed_agent_id: None,
@@ -1673,6 +1677,26 @@ impl EventRenderer {
             self.adopt_visible_no_agent_owners(agent_id.as_str());
         }
         self.displayed_agent_id = Some(agent_id);
+        self.flush_pending_initial_discovery();
+    }
+
+    /// Render initialization summaries deferred while no first agent was
+    /// selected.
+    fn flush_pending_initial_discovery(&mut self) {
+        let Some(agent_id) = self.displayed_agent_id.as_deref() else {
+            return;
+        };
+        let Some(events) = self.pending_initial_discovery.remove(agent_id) else {
+            return;
+        };
+        for (event, recorded_at) in events {
+            if let Event::HarnessAgentContextInitialized(initialized) = &event {
+                self.print_agent_context_initialized(initialized);
+            } else {
+                self.handle_recorded_at_for_visible_agent(&event, recorded_at);
+            }
+        }
+        self.update_agent_in_progress();
     }
 
     fn adopt_visible_no_agent_owners(&mut self, agent_id: &str) {
@@ -3627,6 +3651,23 @@ impl EventRenderer {
 
     pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
         self.learn_agent_metadata(event);
+        if let Event::HarnessAgentContextInitialized(initialized) = event
+            && self.current_agent_id.is_none()
+            && self.displayed_agent_id.is_none()
+            && !self.awaiting_new_agent_selection
+        {
+            let key = (
+                initialized.agent_id.clone(),
+                initialized.agent_initialization_id.clone(),
+            );
+            if self.initialized_discovery_epochs.insert(key) {
+                self.pending_initial_discovery
+                    .entry(initialized.agent_id.to_string())
+                    .or_default()
+                    .push((event.clone(), recorded_at));
+            }
+            return;
+        }
         let inter_agent_message = Self::is_inter_agent_message(event);
         self.project_agent_message_to_overview(event);
         if let Some(owner) = self.extension_lifecycle_owner(event) {
@@ -3650,6 +3691,15 @@ impl EventRenderer {
             self.update_agent_in_progress();
             return;
         };
+        if self.current_agent_id.is_none()
+            && self.displayed_agent_id.is_none()
+            && !self.awaiting_new_agent_selection
+            && !self.event_selects_agent_from_empty(event, &target_agent_id)
+            && let Some(events) = self.pending_initial_discovery.get_mut(&target_agent_id)
+        {
+            events.push((event.clone(), recorded_at));
+            return;
+        }
         if self.current_agent_id.is_none() {
             if self.event_selects_agent_from_empty(event, &target_agent_id) {
                 if self.displayed_agent_id.as_deref() != Some(target_agent_id.as_str()) {
@@ -3676,6 +3726,7 @@ impl EventRenderer {
             if !inter_agent_message
                 && !Self::event_originator_is_extension(event)
                 && !Self::event_has_explicit_ui_target(event)
+                && !matches!(event, Event::HarnessAgentContextInitialized(_))
                 && !self.agents_ui_state.contains_key(&target_agent_id)
             {
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);
@@ -4417,6 +4468,9 @@ impl EventRenderer {
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
                 EventAgentIdResolution::Agent(changed.agent_id.to_string())
+            }
+            Event::HarnessAgentContextInitialized(initialized) => {
+                EventAgentIdResolution::Agent(initialized.agent_id.to_string())
             }
             Event::ExtensionContextReady(ready) => {
                 EventAgentIdResolution::Agent(ready.agent_id.to_string())
@@ -6841,15 +6895,7 @@ impl EventRenderer {
                     initialized.agent_initialization_id.clone(),
                 );
                 if self.initialized_discovery_epochs.insert(key) {
-                    self.handle.print_output(
-                        "agent-context-initialized",
-                        agent_context_initialized_block(
-                            &self.theme,
-                            initialized,
-                            self.skill_state
-                                .unadvertised_count(&initialized.listed_skills),
-                        ),
-                    );
+                    self.print_agent_context_initialized(initialized);
                 }
                 true
             }
@@ -6884,6 +6930,22 @@ impl EventRenderer {
             }
             _ => false,
         }
+    }
+
+    /// Print one initialization discovery summary into the active transcript.
+    fn print_agent_context_initialized(
+        &self,
+        initialized: &tau_proto::HarnessAgentContextInitialized,
+    ) {
+        self.handle.print_output(
+            "agent-context-initialized",
+            agent_context_initialized_block(
+                &self.theme,
+                initialized,
+                self.skill_state
+                    .unadvertised_count(&initialized.listed_skills),
+            ),
+        );
     }
 
     fn handle_harness_session_dir(&mut self, session_dir: &tau_proto::HarnessSessionDir) {
