@@ -1,5 +1,11 @@
 # ARCH-tau-proto: tau-proto architecture
 
+`SessionId` and `AgentPromptId` are controlled wire and journal identifiers.
+Both accept 1 through 128 bytes containing only ASCII letters, digits, `_`, and
+`-`. Construction and deserialization validate that grammar; invalid protocol
+or historical journal values fail closed rather than receiving a compatibility
+or sanitization path.
+
 The protocol now separates transient `message.*_reported` inputs from
 harness-authored canonical `message.*` facts, carries declared
 `PeerCapability::MessageBridge` authority in `Hello`, and separates transient

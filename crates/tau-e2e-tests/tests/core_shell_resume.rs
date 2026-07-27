@@ -96,7 +96,7 @@ fn core_shell_workdir_and_relative_edit_survive_cold_resume()
     );
     assert!(!wrong_path.exists());
     assert_eq!(std::fs::read(fixture.outside_canary())?, canary);
-    let session_id = SessionId::new(SESSION);
+    let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
     let prefix = DurableSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     assert_eq!(
         prefix.metadata_value("ext_core-shell_cwd")?,
@@ -207,7 +207,9 @@ fn create_agent_without_prompt(
     peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
         UiCreateAgent {
             literal: false,
-            session_id: SESSION.into(),
+            session_id: SESSION
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             role: "deterministic-e2e".to_owned(),
             model_override: None,
             metadata: Vec::new(),

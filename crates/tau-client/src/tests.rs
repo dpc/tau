@@ -471,22 +471,27 @@ impl TauExtension for ContextReadyEmitExtension {
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder.tool(tool_spec("context_ready_tool"), |cx| {
             cx.handle().emit_context_ready(
-                tau_proto::SessionId::new("session-1"),
+                tau_proto::SessionId::parse("session-1")
+                    .expect("known-safe SessionId must be valid"),
                 tau_proto::AgentId::parse("agent-1").expect("agent id"),
                 tau_proto::AgentInitializationId::new("init-1"),
             )?;
-            cx.handle()
-                .emit_session_context_ready(tau_proto::SessionId::new("session-1"))?;
+            cx.handle().emit_session_context_ready(
+                tau_proto::SessionId::parse("session-1")
+                    .expect("known-safe SessionId must be valid"),
+            )?;
             cx.handle().declare_session_discovery_snapshot(
                 tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
-                    session_id: tau_proto::SessionId::new("session-1"),
+                    session_id: tau_proto::SessionId::parse("session-1")
+                        .expect("known-safe SessionId must be valid"),
                     skills: Vec::new(),
                     agents_files: Vec::new(),
                 },
             )?;
             cx.handle().declare_agent_discovery_snapshot(
                 tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
-                    session_id: tau_proto::SessionId::new("session-1"),
+                    session_id: tau_proto::SessionId::parse("session-1")
+                        .expect("known-safe SessionId must be valid"),
                     agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
                     agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
                     skills: Vec::new(),
@@ -1100,7 +1105,9 @@ fn latest_extension_data_request(writer: &SharedWriter) -> tau_proto::ExtensionD
 fn action_invoke(extension_name: &str, action_id: &str) -> Event {
     Event::ActionInvoke(tau_proto::ActionInvoke {
         invocation_id: format!("invoke-{extension_name}-{action_id}").into(),
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         extension_name: extension_name.into(),
         instance_id: 0.into(),
         action_id: action_id.to_owned(),
@@ -1148,7 +1155,9 @@ fn session_agent_loaded() -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: agent_id(),
         ephemeral: false,
     })
@@ -1156,7 +1165,9 @@ fn session_agent_loaded() -> Event {
 
 fn session_agent_unloaded() -> Event {
     Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: agent_id(),
     })
 }
@@ -1184,7 +1195,9 @@ fn start_agent_result() -> Event {
 
 fn ui_shell_command() -> Event {
     Event::UiShellCommand(tau_proto::UiShellCommand {
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         command_id: "cmd-1".into(),
         command: "pwd".to_owned(),
         include_in_context: true,
@@ -1666,7 +1679,9 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let session = Event::ExtensionSessionDiscoverySnapshotDeclared(
         tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             skills: Vec::new(),
             agents_files: Vec::new(),
         },
@@ -1678,7 +1693,9 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let agent = Event::ExtensionAgentDiscoverySnapshotDeclared(
         tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
             skills: Vec::new(),
@@ -1692,7 +1709,9 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let replacement =
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
             agents_message: None,
@@ -1706,7 +1725,9 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let agent_projection =
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
             listed_skills: Vec::new(),
@@ -1719,7 +1740,9 @@ fn discovery_payloads_support_typed_subscriptions() {
 
     let session_projection =
         Event::HarnessSessionSkillsAvailable(tau_proto::HarnessSessionSkillsAvailable {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             skills: Vec::new(),
         });
     assert_payload::<tau_proto::HarnessSessionSkillsAvailable>(

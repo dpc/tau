@@ -12,7 +12,8 @@ fn retrying_transport() -> AgentWatchProviderDeliveryKind {
 #[test]
 fn provider_status_delivery_generations_are_monotonic_and_reset_forward() {
     let mut deliveries = AgentWatchProviderDeliveries::default();
-    let first_prompt = tau_proto::AgentPromptId::from("sp-generation-first");
+    let first_prompt = tau_proto::AgentPromptId::parse("sp-generation-first")
+        .expect("known-safe AgentPromptId must be valid");
     assert!(
         deliveries
             .record(7, &first_prompt, retrying_transport())
@@ -21,7 +22,8 @@ fn provider_status_delivery_generations_are_monotonic_and_reset_forward() {
 
     let stale = deliveries.record(
         6,
-        &tau_proto::AgentPromptId::from("sp-generation-stale"),
+        &tau_proto::AgentPromptId::parse("sp-generation-stale")
+            .expect("known-safe AgentPromptId must be valid"),
         retrying_transport(),
     );
     assert!(!stale.should_deliver);
@@ -29,7 +31,8 @@ fn provider_status_delivery_generations_are_monotonic_and_reset_forward() {
     assert_eq!(deliveries.prompt_count(), 1);
     assert_eq!(deliveries.delivery_key_count(), 1);
 
-    let newer_prompt = tau_proto::AgentPromptId::from("sp-generation-newer");
+    let newer_prompt = tau_proto::AgentPromptId::parse("sp-generation-newer")
+        .expect("known-safe AgentPromptId must be valid");
     let newer = deliveries.record(8, &newer_prompt, retrying_transport());
     assert!(newer.should_deliver);
     assert!(!newer.stale_generation);
@@ -54,7 +57,8 @@ fn provider_status_delivery_capacity_is_fifo_and_terminals_do_not_consume_it() {
             deliveries
                 .record(
                     3,
-                    &tau_proto::AgentPromptId::from(format!("sp-capacity-{index}")),
+                    &tau_proto::AgentPromptId::parse(format!("sp-capacity-{index}"))
+                        .expect("known-safe AgentPromptId must be valid"),
                     retrying_transport(),
                 )
                 .should_deliver
@@ -63,7 +67,8 @@ fn provider_status_delivery_capacity_is_fifo_and_terminals_do_not_consume_it() {
 
     let terminal = deliveries.record(
         3,
-        &tau_proto::AgentPromptId::from("sp-untracked-terminal"),
+        &tau_proto::AgentPromptId::parse("sp-untracked-terminal")
+            .expect("known-safe AgentPromptId must be valid"),
         AgentWatchProviderDeliveryKind::TerminalError(
             tau_proto::ProviderFailureKind::RequestRejected,
         ),
@@ -79,7 +84,8 @@ fn provider_status_delivery_capacity_is_fifo_and_terminals_do_not_consume_it() {
         !deliveries
             .record(
                 3,
-                &tau_proto::AgentPromptId::from("sp-capacity-0"),
+                &tau_proto::AgentPromptId::parse("sp-capacity-0")
+                    .expect("known-safe AgentPromptId must be valid"),
                 retrying_transport(),
             )
             .should_deliver,
@@ -88,7 +94,8 @@ fn provider_status_delivery_capacity_is_fifo_and_terminals_do_not_consume_it() {
 
     let overflow = deliveries.record(
         3,
-        &tau_proto::AgentPromptId::from("sp-capacity-overflow"),
+        &tau_proto::AgentPromptId::parse("sp-capacity-overflow")
+            .expect("known-safe AgentPromptId must be valid"),
         retrying_transport(),
     );
     assert!(overflow.should_deliver);
@@ -97,7 +104,8 @@ fn provider_status_delivery_capacity_is_fifo_and_terminals_do_not_consume_it() {
         !deliveries
             .record(
                 3,
-                &tau_proto::AgentPromptId::from("sp-capacity-1"),
+                &tau_proto::AgentPromptId::parse("sp-capacity-1")
+                    .expect("known-safe AgentPromptId must be valid"),
                 retrying_transport(),
             )
             .should_deliver,
@@ -107,7 +115,8 @@ fn provider_status_delivery_capacity_is_fifo_and_terminals_do_not_consume_it() {
         deliveries
             .record(
                 3,
-                &tau_proto::AgentPromptId::from("sp-capacity-0"),
+                &tau_proto::AgentPromptId::parse("sp-capacity-0")
+                    .expect("known-safe AgentPromptId must be valid"),
                 retrying_transport(),
             )
             .should_deliver,
@@ -128,7 +137,8 @@ fn provider_status_delivery_stays_bounded_across_a_long_high_cardinality_turn() 
 
     let mut deliveries = AgentWatchProviderDeliveries::default();
     for index in 0..HIGH_CARDINALITY_PROMPTS {
-        let prompt = tau_proto::AgentPromptId::from(format!("sp-terminal-stream-{index}"));
+        let prompt = tau_proto::AgentPromptId::parse(format!("sp-terminal-stream-{index}"))
+            .expect("known-safe AgentPromptId must be valid");
         assert!(
             deliveries
                 .record(11, &prompt, retrying_transport())
@@ -168,7 +178,8 @@ fn provider_status_delivery_stays_bounded_across_a_long_high_cardinality_turn() 
             deliveries
                 .record(
                     11,
-                    &tau_proto::AgentPromptId::from(format!("sp-nonterminal-stream-{index}")),
+                    &tau_proto::AgentPromptId::parse(format!("sp-nonterminal-stream-{index}"))
+                        .expect("known-safe AgentPromptId must be valid"),
                     retrying_transport(),
                 )
                 .should_deliver

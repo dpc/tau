@@ -658,7 +658,9 @@ fn pre_ready_shell_report_cannot_bind_after_session_rollover() {
         .expect("defer old-session report");
     harness
         .switch_session(
-            "replacement-session".into(),
+            "replacement-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             tau_proto::SessionStartReason::New,
         )
         .expect("switch session");
@@ -740,7 +742,9 @@ fn unknown_shell_report_route_is_not_classified_ephemeral_across_rollover() {
     assert!(!harness.event_targets_ephemeral_agent(&report, None));
     harness
         .switch_session(
-            "replacement-session".into(),
+            "replacement-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             tau_proto::SessionStartReason::New,
         )
         .expect("switch session");
@@ -760,7 +764,9 @@ fn ephemeral_shell_route_tombstone_survives_session_rollover() {
     let report = progress_report(&route_id, None, "old private output");
     harness
         .switch_session(
-            "replacement-session".into(),
+            "replacement-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             tau_proto::SessionStartReason::New,
         )
         .expect("switch session");
@@ -929,7 +935,9 @@ fn parked_progress_and_rollover_terminal_keep_ephemeral_debug_suppression() {
         .expect("park canonical progress");
     harness
         .switch_session(
-            "replacement-session".into(),
+            "replacement-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             tau_proto::SessionStartReason::New,
         )
         .expect("queue rollover terminal");

@@ -404,10 +404,18 @@ fn stale_session_request_is_observation_only() {
     )
     .expect("defer request behind parked observation");
 
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
-    h.switch_session("s1".into(), tau_proto::SessionStartReason::Resume)
-        .expect("return to original session id");
+    h.switch_session(
+        "s2".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
+    h.switch_session(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::Resume,
+    )
+    .expect("return to original session id");
     h.handle_extension_event(
         "start-agent-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -459,8 +467,12 @@ fn pre_ready_request_keeps_original_admission_session() {
         )
     }));
 
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "s2".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
     h.handle_extension_message("requester", TestMessage::Ready(Default::default()))
         .expect("activate requester");
 

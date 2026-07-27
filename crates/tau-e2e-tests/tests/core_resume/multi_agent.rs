@@ -52,7 +52,7 @@ const RESTORE_NOTICE: &str = concat!(
 fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn std::error::Error>> {
     let scenario = scenario();
     let fixture = GateFixture::new_multi_agent(&scenario, Path::new(FAKE_PROVIDER))?;
-    let session_id = SessionId::from(SESSION);
+    let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
 
     let socket_a = fixture.headless_socket();
     let daemon_a = HeadlessProcess::spawn(

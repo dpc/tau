@@ -24,27 +24,27 @@ pub enum AgentTraceFormat {
     TauJsonl,
     /// Lossy OTLP/OpenInference visualization adapter.
     OtlpJson,
-    /// Compact model-visible tool-call JSON Lines.
+    /// Compact semantic/correlation timeline as JSON Lines.
     AgentToolsJsonl(
-        /// Output detail encoded in each JSONL call record.
+        /// Semantic text and tool-output detail encoded in each JSONL item.
         AgentTraceMode,
     ),
-    /// Compact model-visible tool-call TOON.
+    /// Compact semantic/correlation timeline as TOON.
     AgentToolsToon(
-        /// Output detail encoded in each TOON call item.
+        /// Semantic text and tool-output detail encoded in each TOON item.
         AgentTraceMode,
     ),
     /// Content-free provider accounting and journal-wall timing JSON Lines.
     AgentPerformanceJsonl,
 }
 
-/// Output detail retained by compact agent-tool trace formats.
+/// Content detail retained by compact semantic trace formats.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AgentTraceMode {
-    /// Emit complete-output metrics and at most 4 KiB of output context.
+    /// Emit complete metrics and at most 4 KiB of each text/output item.
     #[default]
     Lite,
-    /// Emit complete-output metrics and complete normalized output.
+    /// Emit complete metrics and complete semantic text/normalized output.
     Full,
 }
 

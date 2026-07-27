@@ -798,7 +798,8 @@ impl PromptFixture {
     fn new() -> Self {
         Self {
             context: tau_proto::PromptContext::default(),
-            session_id: tau_proto::SessionId::new("session-test"),
+            session_id: tau_proto::SessionId::parse("session-test")
+                .expect("known-safe SessionId must be valid"),
             agent_id: tau_proto::AgentId::parse("agent-test").expect("agent id"),
             originator: tau_proto::PromptOriginator::User,
         }

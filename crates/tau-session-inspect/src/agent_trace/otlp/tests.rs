@@ -70,9 +70,13 @@ fn background_result(id: &str) -> Event {
 
 fn prompt_started(id: &str) -> Event {
     Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
-        agent_prompt_id: id.into(),
+        agent_prompt_id: id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: AgentId::parse("agent-test").expect("agent id"),
-        session_id: "session-test".into(),
+        session_id: "session-test"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         model: "provider/model".into(),
         model_params: Some(ModelParams::default()),
         outer_turn_id: None,
@@ -85,7 +89,9 @@ fn prompt_started(id: &str) -> Event {
 fn prompt_terminated(id: &str) -> Event {
     Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
         agent_id: AgentId::parse("agent-test").expect("agent id"),
-        agent_prompt_id: id.into(),
+        agent_prompt_id: id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         reason: tau_proto::AgentPromptTerminationReason::Canceled,
         originator: PromptOriginator::User,
     })

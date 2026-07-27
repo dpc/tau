@@ -10,7 +10,7 @@ fn navigation_requests_preserve_all_absolute_actions() {
         tau_proto::UiAgentNavigationModeAction::SetSuspended,
     ] {
         let event = set_agent_navigation_mode(
-            "session-1",
+            &tau_proto::SessionId::parse("session-1").expect("test session id"),
             tau_proto::AgentId::parse("agent-1").expect("agent id"),
             action,
         );

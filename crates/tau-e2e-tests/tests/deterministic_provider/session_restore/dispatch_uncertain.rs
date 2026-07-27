@@ -65,7 +65,7 @@ struct ChildAgentCheckpoint {
 #[test]
 fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dyn std::error::Error>>
 {
-    let session_id = SessionId::from(SESSION);
+    let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
     let scenario = dispatch_uncertain_scenario();
     assert_scenario_budget(&scenario)?;
     let fixture = DeterministicFixture::new_session_restore_watch(

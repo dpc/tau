@@ -487,10 +487,12 @@ OTLP correlation data goes to anonymous staging, and heap correlation state
 contains only compact offsets and identifiers. The accepted heap model is
 proportional to unique typed operation ID count and bytes rather than journal
 payload bytes; output is never truncated.
-Compact agent-tool coverage additionally checks explicit observation identities,
-selected-cut unresolved references, same-journal qualified timing, crash-tail
-incompleteness, source-owned output, bounded lite output, complete full output,
-and faithful tagged-CBOR fallback. Runtime tests separately cover call-ID reuse and
-background completion correlation. TOON
-coverage strictly decodes the counted record document, protects multiline/control
-escaping, and compares its semantics with independently parsed JSONL records.
+Compact semantic coverage additionally checks explicit observation identities,
+selected-cut unresolved references, globally sorted absolute/relative journal
+timing, provider item order, semantic prose/reasoning selection, both explicit
+message directions, crash-tail incompleteness, source-owned output, bounded lite
+content, complete full content, and faithful tagged-CBOR fallback. Runtime tests
+separately cover call-ID reuse and background completion correlation. TOON
+coverage strictly decodes the counted item document, protects multiline/control
+escaping and field-level Base64 framing, and compares its semantics with
+independently parsed JSONL items.

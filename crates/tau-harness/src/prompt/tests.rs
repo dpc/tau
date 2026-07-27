@@ -100,10 +100,14 @@ fn watch_provider_status_text_is_concise_readable_and_safe() {
     }
 
     let status = tau_proto::AgentWatchProviderStatusNotification {
-        session_id: "session".into(),
+        session_id: "session"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         subscription_id: "watch".to_owned(),
         turn_generation: 1,
-        agent_prompt_id: "prompt".into(),
+        agent_prompt_id: "prompt"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         state: tau_proto::AgentWatchProviderState::Retrying {
             category: tau_proto::AgentWatchProviderCategory::UsageWindow,
             attempt: 1,
@@ -1554,7 +1558,9 @@ fn assemble_conversation_includes_tool_error_details() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "sp-tools".into(),
+            agent_prompt_id: "sp-tools"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
                 call_id: "call-1".into(),
@@ -1649,7 +1655,9 @@ fn assemble_conversation_preserves_agent_phase() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: "sp-1"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
@@ -1744,7 +1752,11 @@ fn assemble_conversation_escapes_authenticated_peer_message_envelope() {
         tau_proto::AgentMessageReceived {
             message_id: "peer-message".into(),
             sender_id: tau_proto::AgentId::parse("peer_agent").expect("agent id"),
-            sender_session_id: Some("peer-session".into()),
+            sender_session_id: Some(
+                "peer-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
+            ),
             recipient_id: tau_proto::AgentId::parse("main").expect("agent id"),
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
@@ -1833,7 +1845,9 @@ fn assemble_conversation_replays_watch_turn_state_as_notification_only() {
             recipient_id: watcher,
             kind: tau_proto::AgentMessageKind::WatchTurnState,
             watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-                session_id: "session-1".into(),
+                session_id: "session-1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 subscription_id: "watch-subscription-1".to_owned(),
                 state: tau_proto::AgentRuntimeState::Running,
                 initial: false,
@@ -1869,7 +1883,9 @@ fn assemble_conversation_omits_initial_watch_turn_state() {
             recipient_id: watcher,
             kind: tau_proto::AgentMessageKind::WatchTurnState,
             watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-                session_id: "session-1".into(),
+                session_id: "session-1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 subscription_id: "watch-subscription-1".to_owned(),
                 state: tau_proto::AgentRuntimeState::Idle,
                 initial: true,
@@ -1908,7 +1924,9 @@ fn assemble_conversation_replays_reasoning_items_before_text() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: "sp-1"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![
                 ContextItem::Reasoning(tau_proto::OpaqueProviderItem::new(
@@ -1962,7 +1980,9 @@ fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: "sp-1"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![ContextItem::Reasoning(tau_proto::OpaqueProviderItem::new(
                 serde_json::from_str(&blob).expect("opaque reasoning item"),

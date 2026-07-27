@@ -252,7 +252,7 @@ fn callback_hello() -> tau_proto::Hello {
 #[test]
 fn no_callback_is_bounded_and_cleans_metadata() -> Result<(), Box<dyn std::error::Error>> {
     let root = tempfile::tempdir()?;
-    let session = SessionId::from("no-callback");
+    let session = SessionId::parse("no-callback").expect("known-safe SessionId must be valid");
     let mut sender = FakeExternalSender::start(root.path(), &session, fixture_request(&session))?;
     let metadata = sender.metadata.clone().ok_or("missing sender metadata")?;
     let result = sender.authorize(Instant::now() + Duration::from_millis(20));
@@ -266,7 +266,7 @@ fn no_callback_is_bounded_and_cleans_metadata() -> Result<(), Box<dyn std::error
 #[test]
 fn post_hello_stall_is_bounded_and_cleans_metadata() -> Result<(), Box<dyn std::error::Error>> {
     let root = tempfile::tempdir()?;
-    let session = SessionId::from("stalled-callback");
+    let session = SessionId::parse("stalled-callback").expect("known-safe SessionId must be valid");
     let mut sender = FakeExternalSender::start(root.path(), &session, fixture_request(&session))?;
     let metadata = sender.metadata.clone().ok_or("missing sender metadata")?;
     let mut stalled = tau_socket::SocketPeer::connect(sender.listener.path())?;
@@ -286,7 +286,9 @@ fn fixture_request(sender_session: &SessionId) -> tau_proto::ExternalAgentMessag
         capability: "fixture-capability".to_owned(),
         sender_session_id: sender_session.clone(),
         sender_id: tau_proto::AgentId::parse("fixture-sender").expect("static agent id"),
-        recipient_session_id: "fixture-recipient".into(),
+        recipient_session_id: "fixture-recipient"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
         message: "fixture-message".to_owned(),

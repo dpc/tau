@@ -36,7 +36,9 @@ fn publish_action_schema(h: &mut Harness, source_id: &str, action_id: &str) {
 fn action_invoke(invocation_id: &str, extension_name: &str) -> tau_proto::ActionInvoke {
     tau_proto::ActionInvoke {
         invocation_id: invocation_id.into(),
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         extension_name: extension_name.into(),
         instance_id: 0.into(),
         action_id: "email.list".to_owned(),
@@ -272,7 +274,9 @@ fn action_invoke_rejects_non_ui_source_wrong_session_and_invalid_arguments() {
     assert!(extension.lock().expect("extension sink").is_empty());
 
     let mut wrong_session = action_invoke("wrong-session", "email-ext");
-    wrong_session.session_id = "other-session".into();
+    wrong_session.session_id = "other-session"
+        .parse::<tau_proto::SessionId>()
+        .expect("known-safe SessionId must be valid");
     h.handle_client_event_inner("ui", Event::ActionInvoke(wrong_session))
         .expect("wrong-session invoke should be handled as rejection");
     assert!(ui.lock().expect("ui sink").iter().any(|routed| matches!(

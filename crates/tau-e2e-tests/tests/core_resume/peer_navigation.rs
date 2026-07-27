@@ -28,7 +28,8 @@ const CALLBACK_CLIENT_NAME: &str = "tau-external-agent-message";
 #[test]
 fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn std::error::Error>>
 {
-    let sender_session = SessionId::from(format!("peer-sender-{}", std::process::id()));
+    let sender_session = SessionId::parse(format!("peer-sender-{}", std::process::id()))
+        .expect("known-safe SessionId must be valid");
     let sender_id = AgentId::parse("peer-sender")?;
     let message = "peer navigation activation".to_owned();
     let model_input = format!(

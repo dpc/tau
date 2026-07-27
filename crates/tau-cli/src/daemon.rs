@@ -13,7 +13,7 @@ use crate::{CliError, mint_short_id};
 
 const RESUME_PICKER_LIMIT: usize = 10;
 const SESSION_ID_SUFFIX_BYTES: usize = 7;
-const SESSION_ID_MAX_BYTES: usize = 128;
+const SESSION_ID_MAX_BYTES: usize = tau_proto::SESSION_SCOPED_ID_MAX_LEN;
 const OWNED_DAEMON_GRACEFUL_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const OWNED_DAEMON_EXIT_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -133,7 +133,7 @@ fn stop_owned_daemon(
 /// - `Some(id)` → resume that explicit id; error if it does not exist.
 pub(crate) fn resolve_run_session_id(
     resume: Option<&str>,
-) -> Result<(String, SessionLaunchStatus), CliError> {
+) -> Result<(tau_proto::SessionId, SessionLaunchStatus), CliError> {
     let cwd = std::env::current_dir()?;
     match resume {
         None => Ok((mint_session_id(&cwd), SessionLaunchStatus::New)),
@@ -142,37 +142,41 @@ pub(crate) fn resolve_run_session_id(
             None => Ok((mint_session_id(&cwd), SessionLaunchStatus::New)),
         },
         Some(id) => {
-            if session_exists(id)? {
-                Ok((id.to_owned(), SessionLaunchStatus::Resumed))
+            let id = tau_proto::SessionId::parse(id).map_err(|error| {
+                CliError::Participant(format!("invalid session id `{id}`: {error}"))
+            })?;
+            if session_exists(&id)? {
+                Ok((id, SessionLaunchStatus::Resumed))
             } else {
-                Err(CliError::SessionNotFound(id.to_owned()))
+                Err(CliError::SessionNotFound(id.to_string()))
             }
         }
     }
 }
 
-fn session_exists(id: &str) -> Result<bool, CliError> {
+fn session_exists(id: &tau_proto::SessionId) -> Result<bool, CliError> {
     let sessions_dir = tau_session_inspect::default_sessions_dir();
     let metas = tau_harness::list_session_metas(&sessions_dir)?;
     Ok(metas
         .into_iter()
-        .any(|(session_id, _)| session_id.as_str() == id))
+        .any(|(session_id, _)| session_id.as_str() == id.as_str()))
 }
 
-pub(crate) fn mint_session_id(cwd: &Path) -> String {
+pub(crate) fn mint_session_id(cwd: &Path) -> tau_proto::SessionId {
     let basename = cwd
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("session");
-    mint_short_id(&sanitize_session_id_prefix(basename))
+    tau_proto::SessionId::parse(mint_short_id(&sanitize_session_id_prefix(basename)))
+        .expect("sanitized session id minting must satisfy the protocol grammar")
 }
 
 fn sanitize_session_id_prefix(prefix: &str) -> String {
     let mut prefix = prefix
-        .chars()
-        .map(|ch| match ch {
-            '/' | '\\' | '\0' => '_',
-            ch => ch,
+        .bytes()
+        .map(|byte| match byte {
+            byte if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') => char::from(byte),
+            _ => '_',
         })
         .collect::<String>();
     let max_prefix_bytes = SESSION_ID_MAX_BYTES - SESSION_ID_SUFFIX_BYTES;
@@ -186,7 +190,7 @@ fn sanitize_session_id_prefix(prefix: &str) -> String {
     }
 }
 
-fn pick_resume_session(_cwd: &Path) -> Result<Option<String>, CliError> {
+fn pick_resume_session(_cwd: &Path) -> Result<Option<tau_proto::SessionId>, CliError> {
     let sessions_dir = tau_session_inspect::default_sessions_dir();
     let mut metas = tau_harness::list_session_metas(&sessions_dir)?;
     metas.sort_by_key(|(_, meta)| std::cmp::Reverse(meta.last_touched));
@@ -195,7 +199,7 @@ fn pick_resume_session(_cwd: &Path) -> Result<Option<String>, CliError> {
         return Ok(None);
     }
     if metas.len() == 1 || !io::IsTerminal::is_terminal(&io::stdin()) {
-        return Ok(metas.first().map(|(sid, _)| sid.as_str().to_owned()));
+        return Ok(metas.first().map(|(sid, _)| sid.clone()));
     }
 
     let rows = metas
@@ -211,8 +215,8 @@ fn pick_resume_session(_cwd: &Path) -> Result<Option<String>, CliError> {
                     );
                     false
                 });
-            let id = sid.as_str().to_owned();
             let item = sid.as_str().to_owned();
+            let id = sid;
             (id, item, locked)
         })
         .collect::<Vec<_>>();

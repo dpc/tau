@@ -579,6 +579,9 @@ fn probe_peer_entrypoint(
     deadline: Instant,
     cancelled: &AtomicBool,
 ) -> bool {
+    let Ok(session_id) = tau_proto::SessionId::parse(session_id) else {
+        return false;
+    };
     let ProbeConnect::Connected(mut peer, probe_deadline) = connect_probe_peer(
         harness_path,
         deadline,
@@ -593,7 +596,7 @@ fn probe_peer_entrypoint(
         .send(&tau_proto::HarnessInputMessage::PeerSessionProbe(
             tau_proto::PeerSessionProbe {
                 request_id: request_id.clone(),
-                session_id: session_id.into(),
+                session_id,
             },
         ))
         .is_err()
@@ -730,17 +733,33 @@ impl Drop for DiscoveryWorkerGuard {
     }
 }
 
-/// Reads the session id a running daemon at `harness_path` is bound to.
-#[must_use]
-pub fn read_session_id(harness_path: &Path) -> Option<String> {
-    read_metadata(harness_path).map(|metadata| metadata.session_id)
+/// Reads the validated session id a running daemon at `harness_path` is bound
+/// to.
+///
+/// Reports missing metadata, malformed JSON, and invalid controlled identifiers
+/// as distinct I/O errors.
+pub fn read_session_id(harness_path: &Path) -> Result<tau_proto::SessionId, std::io::Error> {
+    let encoded = std::fs::read_to_string(metadata_path(harness_path))?;
+    let metadata: DaemonMetadata = serde_json::from_str(&encoded).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("malformed daemon metadata: {error}"),
+        )
+    })?;
+    tau_proto::SessionId::parse(metadata.session_id).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid daemon session id: {error}"),
+        )
+    })
 }
 
 /// Updates the active/current session id in an existing daemon metadata file.
 pub fn update_session_id(harness_path: &Path, session_id: &str) -> Result<(), std::io::Error> {
+    let session_id = validate_session_id_for_metadata(session_id)?;
     let mut metadata = read_metadata(harness_path)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "metadata missing"))?;
-    metadata.session_id = session_id.to_owned();
+    metadata.session_id = session_id.to_string();
     let json = serde_json::to_vec_pretty(&metadata).map_err(std::io::Error::other)?;
     std::fs::write(metadata_path(harness_path), json)
 }
@@ -750,6 +769,7 @@ pub fn prepare_harness_paths(
     project_root: &Path,
     session_id: &str,
 ) -> Result<HarnessPaths, std::io::Error> {
+    validate_session_id_for_metadata(session_id)?;
     prepare_harness_paths_for_instance(project_root, session_id, &HarnessInstanceId::mint())
 }
 
@@ -759,6 +779,7 @@ pub(crate) fn prepare_harness_paths_for_instance(
     session_id: &str,
     instance_id: &HarnessInstanceId,
 ) -> Result<HarnessPaths, std::io::Error> {
+    validate_session_id_for_metadata(session_id)?;
     let pid = std::process::id();
     let root_dir = root_runtime_dir();
     ensure_private_runtime_dir(&root_dir)?;
@@ -774,6 +795,17 @@ pub(crate) fn prepare_harness_paths_for_instance(
             session_id: session_id.to_owned(),
             peer_entrypoint: false,
         },
+    })
+}
+
+fn validate_session_id_for_metadata(
+    session_id: &str,
+) -> Result<tau_proto::SessionId, std::io::Error> {
+    tau_proto::SessionId::parse(session_id).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid session id `{session_id}`: {error}"),
+        )
     })
 }
 
@@ -1378,6 +1410,35 @@ mod tests {
         .expect("write metadata");
     }
 
+    /// Attach metadata is untrusted discovery input; an invalid controlled
+    /// session identifier must fail closed before the CLI stores it.
+    #[test]
+    fn read_session_id_rejects_invalid_runtime_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let harness_path = temp.path().join("harness");
+        write_peer_metadata(&harness_path, "bad.id", temp.path(), false);
+
+        let error = read_session_id(&harness_path).expect_err("invalid id must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("invalid daemon session id"));
+    }
+
+    /// Metadata readers preserve missing and malformed diagnostics instead of
+    /// collapsing both into an absent session id.
+    #[test]
+    fn read_session_id_distinguishes_missing_and_malformed_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let harness_path = temp.path().join("harness");
+
+        let missing = read_session_id(&harness_path).expect_err("missing metadata");
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+
+        std::fs::write(metadata_path(&harness_path), b"{").expect("malformed metadata");
+        let malformed = read_session_id(&harness_path).expect_err("malformed metadata");
+        assert_eq!(malformed.kind(), std::io::ErrorKind::InvalidData);
+        assert!(malformed.to_string().contains("malformed daemon metadata"));
+    }
+
     fn spawn_probe_daemon(
         path: &Path,
         expected_session: &str,
@@ -1418,7 +1479,8 @@ mod tests {
     fn spawn_current_session_daemon(path: &Path, session_id: &str) -> std::thread::JoinHandle<()> {
         let listener =
             tau_socket::SocketListener::bind(socket_path(path)).expect("current-session listener");
-        let session_id = tau_proto::SessionId::from(session_id);
+        let session_id =
+            tau_proto::SessionId::parse(session_id).expect("known-safe SessionId must be valid");
         let project_root = path
             .parent()
             .expect("runtime path parent")
@@ -1442,7 +1504,9 @@ mod tests {
                 .send(&tau_proto::HarnessOutputMessage::CurrentSessionResult(
                     tau_proto::CurrentSessionResult {
                         request_id: "unrelated-request".to_owned(),
-                        session_id: "wrong-session".into(),
+                        session_id: "wrong-session"
+                            .parse::<tau_proto::SessionId>()
+                            .expect("known-safe SessionId must be valid"),
                         project_root: PathBuf::from("/wrong/project"),
                     },
                 ))
@@ -1782,6 +1846,33 @@ mod tests {
         );
     }
 
+    /// Runtime metadata writers reject identifiers their reader cannot accept.
+    #[test]
+    fn runtime_metadata_writers_reject_invalid_session_ids() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+
+        let prepare_error = match prepare_harness_paths(&project_root, "bad.id") {
+            Ok(_) => panic!("invalid initial id must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(prepare_error.kind(), std::io::ErrorKind::InvalidInput);
+
+        let paths = prepare_harness_paths(&project_root, "valid").expect("paths");
+        paths.write_metadata().expect("write metadata");
+        let update_error =
+            update_session_id(paths.path(), "bad.id").expect_err("invalid updated id");
+        assert_eq!(update_error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            read_session_id(paths.path())
+                .expect("unchanged valid id")
+                .as_str(),
+            "valid"
+        );
+    }
+
     /// Models two daemons that report the same PID from separate PID namespaces
     /// and ensures their shared runtime directory still receives distinct
     /// sockets.
@@ -1831,7 +1922,9 @@ mod tests {
         assert_eq!(
             list_running_sessions().expect("running sessions"),
             vec![RunningSession {
-                session_id: "running-session".into(),
+                session_id: "running-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 project_root: harnesses_dir().canonicalize().expect("canonical root"),
             }]
         );
@@ -1867,7 +1960,9 @@ mod tests {
         assert_eq!(
             list_running_sessions().expect("running sessions"),
             vec![RunningSession {
-                session_id: "authoritative-session".into(),
+                session_id: "authoritative-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 project_root: harnesses_dir().canonicalize().expect("canonical root"),
             }]
         );
@@ -1890,15 +1985,21 @@ mod tests {
             list_running_sessions().expect("running sessions"),
             vec![
                 RunningSession {
-                    session_id: "a-session".into(),
+                    session_id: "a-session"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     project_root: harnesses_dir().canonicalize().expect("canonical root"),
                 },
                 RunningSession {
-                    session_id: "a-session".into(),
+                    session_id: "a-session"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     project_root: harnesses_dir().canonicalize().expect("canonical root"),
                 },
                 RunningSession {
-                    session_id: "z-session".into(),
+                    session_id: "z-session"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     project_root: harnesses_dir().canonicalize().expect("canonical root"),
                 },
             ]
@@ -1949,7 +2050,9 @@ mod tests {
         assert_eq!(
             list_running_sessions().expect("running sessions"),
             vec![RunningSession {
-                session_id: "responsive-session".into(),
+                session_id: "responsive-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 project_root: harnesses_dir().canonicalize().expect("canonical root"),
             }]
         );

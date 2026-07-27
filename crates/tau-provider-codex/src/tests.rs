@@ -244,7 +244,8 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
     let server = spawn_ws_context_error_server();
     let config = test_config(server.base_url());
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
-    let session_id = tau_proto::SessionId::new("session-ws-context");
+    let session_id = tau_proto::SessionId::parse("session-ws-context")
+        .expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("agent-ws-context").expect("agent id");
     let context = tau_proto::PromptContext::default();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
@@ -539,7 +540,8 @@ fn websocket_capability_error_does_not_fallback_to_http_sse() {
         inner: test_config(server.base_url()),
     };
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
-    let session_id = tau_proto::SessionId::new("session-ws-426");
+    let session_id =
+        tau_proto::SessionId::parse("session-ws-426").expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("agent-ws-426").expect("agent id");
     let context = tau_proto::PromptContext::default();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
@@ -581,7 +583,8 @@ fn retryable_websocket_exhaustion_does_not_fallback_to_http_sse() {
     let server = spawn_ws_disconnect_server();
     let config = test_config(server.base_url());
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
-    let session_id = tau_proto::SessionId::new("session-ws-retry");
+    let session_id = tau_proto::SessionId::parse("session-ws-retry")
+        .expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("agent-ws-retry").expect("agent id");
     let context = tau_proto::PromptContext::default();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
@@ -637,7 +640,8 @@ fn run_attempt_does_not_replay_after_semantic_progress() {
         inner: test_config(server.base_url()),
     };
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
-    let session_id = tau_proto::SessionId::new("session-semantic-close");
+    let session_id = tau_proto::SessionId::parse("session-semantic-close")
+        .expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("agent-semantic-close").expect("agent id");
     let context = tau_proto::PromptContext::default();
     let request = test_prompt_payload(&session_id, &agent_id, &context);

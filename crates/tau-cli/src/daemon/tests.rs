@@ -326,6 +326,8 @@ fn daemon_command_uses_initial_ui_stdio() {
     assert_eq!(args, ["component", "harness", "--initial-ui-stdio"]);
 }
 
+/// Session minting must normalize arbitrary filesystem basenames into the
+/// strict protocol grammar without exceeding its byte limit.
 #[test]
 fn mint_session_id_produces_store_safe_ids_from_hostile_basenames() {
     // Session ids are used as tau-core store directory names. Cwd basenames can
@@ -335,8 +337,8 @@ fn mint_session_id_produces_store_safe_ids_from_hostile_basenames() {
     assert!(id.starts_with("project_name-"));
     assert!(!id.contains('\\'));
 
-    let long = "é".repeat(100);
+    let long = format!("my project.{}", "é".repeat(100));
     let id = mint_session_id(Path::new(&long));
-    assert!(id.len() <= SESSION_ID_MAX_BYTES);
+    assert!(id.len() <= tau_proto::SESSION_SCOPED_ID_MAX_LEN);
     assert!(id.ends_with(|ch: char| ch.is_ascii_alphanumeric()));
 }

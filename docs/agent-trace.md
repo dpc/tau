@@ -2,7 +2,7 @@
 
 `tau agent trace <agent-id>` projects offline from a validated finite snapshot
 of existing durable agent journals. It defaults to a compact TOON-lite
-agent-tool overview; use explicit `--format tau-jsonl` for the complete journal
+semantic timeline; use explicit `--format tau-jsonl` for the complete journal
 artifact. It does not contact or attach to a harness and does not capture transient provider
 HTTP bodies, streaming deltas, or harness phase timing.
 
@@ -57,15 +57,15 @@ operation IDs in the largest included journal; IDs are not independently capped
 beyond the journal record framing limit, so a pathological journal can exhaust
 process memory. No accepted record is truncated.
 
-Compact agent-tool projection materializes the selected event payloads and its
-complete JSON-like record set in memory before encoding. Lite mode bounds each
-projected terminal output to 4 KiB but does not bound declaration arguments or the
-selected source events retained during correlation. Full mode additionally retains
-complete rendered terminal output. Heap use can therefore grow with both selected
-journal payload bytes and projected record bytes; a pathological frame-valid
-journal can exhaust memory or anonymous temporary storage. Projection still
-finishes before stdout delivery, and the final staged artifact remains
-delete-on-close.
+Compact semantic projection materializes the selected event payloads and its
+complete JSON-like item set in memory before encoding. Lite mode bounds each
+projected semantic text and terminal output to 4 KiB but does not bound
+declaration arguments or selected source events retained during correlation.
+Full mode additionally retains complete semantic text and rendered terminal
+output. Heap use can therefore grow with both selected journal payload bytes and
+projected item bytes; a pathological frame-valid journal can exhaust memory or
+anonymous temporary storage. Projection still finishes before stdout delivery,
+and the final staged artifact remains delete-on-close.
 
 
 ## Native JSON Lines
@@ -154,11 +154,43 @@ containing multiple tool calls, each TOOL span receives a compact projection of
 only its matching call item; response-wide payloads are not repeated per call.
 
 
-## Compact agent tool traces
+## Compact semantic traces
 
-`agent-tools-toon` and `agent-tools-jsonl` project only provider-declared calls and explicit observation facts. The in-place `tau.agent_tools` schema remains version `0`; no legacy reader or inference path exists. References outside the selected cut remain unresolved. Duplicate observation IDs and contradictory selected typed references are trace integrity errors.
+`agent-tools-toon` and `agent-tools-jsonl` project provider-declared calls,
+explicit observation relationships, assistant prose, displayable provider
+reasoning, and explicit sent/received agent messages. The
+`tau.agent_trace_compact` schema is version `0`; no legacy reader or inference
+path exists. References outside the selected cut remain unresolved. Duplicate
+observation IDs and contradictory selected typed references are trace integrity
+errors.
 
-The header fixes `timing_basis: producer_wall_clock_at_observation` and `causality: explicit_observation_refs_only`. Records use `call`, content-free `activation`, and content-free `relationship` discriminators. `ToolCallRef` (`declaration`, `item_index`) is the call identity; provider `call_id` remains display and routing metadata. Journal order and timestamps never create relationships.
+The header fixes
+`absolute_time: unix_epoch_microseconds_at_journal_append_invocation`,
+`timing_basis: producer_wall_clock_at_observation`, and
+`causality: explicit_observation_refs_only`. Items use `call`,
+`assistant_message`, `assistant_reasoning`, `message_sent`, `message_received`,
+content-free `activation`, and content-free `relationship` discriminators.
+`ToolCallRef` (`declaration`, `item_index`) is the call identity; provider
+`call_id` remains display and routing metadata.
+
+Every item carries trace-relative `at_us`, optional
+`recorded_at_unix_micros`, owning `agent_id`, and authoritative owning-journal
+`journal_seq`. Provider response items also carry their zero-based
+`item_index`. The relative origin is the minimum canonical `recorded_at` among
+all occurrences in the selected snapshot, including occurrences omitted from
+this compact projection. A zero timestamp omits absolute time and otherwise
+retains the existing zero-origin behavior.
+
+`journal_seq` is authoritative order within one agent journal. The combined
+view sorts journal append-invocation wall-clock samples for readability and
+uses deterministic ties. Across agents, wall-clock order, adjacency, and
+equal/shared timestamps do not establish causality or delivery order. Shared
+`message_id` correlates directional message facts but does not turn their
+timestamps into a latency or happens-before measurement.
+
+When every stronger sort component is equal, the approved family order is
+`call`, `assistant_message`, `assistant_reasoning`, `message_sent`,
+`message_received`, `activation`, then `relationship`.
 
 Only explicitly linked, nondecreasing endpoint pairs emit qualified intervals: `declaration_to_dispatch_us`, `dispatch_to_backgrounded_us`, `backgrounded_to_terminal_us`, `dispatch_to_terminal_us`, `active_wait_us`, `completion_to_delivery_us`, `activation_to_wait_terminal_us`, and `completion_to_activation_queue_us`. There is no unqualified `duration_us`.
 
@@ -166,15 +198,16 @@ Wait relationships report registration as `immediate`, `active`, or `unresolved`
 
 A canonical terminal owns normalized output exactly once. Lite mode emits its exact `output_bytes` and `output_lines` plus bounded output; full mode emits complete `output` (or TOON `output_base64` where required). A completion-delivering wait emits only `output_ref` and `envelope`, never copied payload or counts. JSONL and TOON preserve the same identities, lifecycle, wait outcomes, relationships, and ownership; only payload representation differs.
 
-JSONL writes one header followed by independently parseable records. TOON writes
-the same header fields, then a strict `records[N]:` counted array in the same
-record order. Optional fields below are absent unless their stated evidence
+JSONL writes one header followed by independently parseable items. TOON writes
+the same header fields, then a strict `items[N]:` counted array in the same
+item order. Optional fields below are absent unless their stated evidence
 survives:
 
 TOON preserves strings directly when its grammar can round-trip them. Otherwise
 it replaces the whole field with standard padded Base64: `call_id_base64`,
-`command_base64`, or `output_base64` decodes to the UTF-8 bytes of the
-corresponding JSONL string. `arguments_json_base64` decodes to the complete
+`message_id_base64`, `command_base64`, `text_base64`, or `output_base64`
+decodes to the UTF-8 bytes of the corresponding JSONL string.
+`arguments_json_base64` decodes to the complete
 compact JSON encoding of `arguments`; consumers must Base64-decode and then parse
 that whole JSON value. A record never emits both the direct and Base64 spelling
 of one field. Base64 is a framing adaptation only and does not change semantic
@@ -182,14 +215,18 @@ record parity with JSONL.
 
 ```text
 header:
-  schema="tau.agent_tools", schema_version=0, record_type="header",
-  root_agent_id, included_agent_ids[], output="lite"|"full",
+  schema="tau.agent_trace_compact", schema_version=0, record_type="header",
+  root_agent_id, included_agent_ids[], content="bounded"|"full",
   time_unit="microseconds",
+  absolute_time="unix_epoch_microseconds_at_journal_append_invocation",
   timing_basis="producer_wall_clock_at_observation",
   causality="explicit_observation_refs_only"
 
+common item:
+  at_us, [recorded_at_unix_micros], agent_id, journal_seq, [item_index]
+
 call:
-  record_type="call", agent_id, call={declaration,item_index},
+  record_type="call", call={declaration,item_index},
   call_id, tool, arguments, status
   [command] [terminal] [terminal_resolution] [cause]
   [output,output_complete] [output_bytes,output_lines]
@@ -221,6 +258,23 @@ relationship/wait_settlement:
 relationship/cancellation_requested:
   record_type="relationship", relationship="cancellation_requested",
   agent_id, observation_id, cancel_call, target_call
+
+assistant_message:
+  record_type="assistant_message", agent_prompt_id, [phase],
+  text_bytes, text_lines, text, text_complete
+
+assistant_reasoning:
+  record_type="assistant_reasoning", agent_prompt_id, reasoning_kind,
+  text_bytes, text_lines, text, text_complete
+
+message_sent:
+  record_type="message_sent", message_id, sender_id, recipient_kind,
+  [recipient_id], [recipient_session_id],
+  text_bytes, text_lines, text, text_complete
+
+message_received:
+  record_type="message_received", message_id, sender_id, [sender_session_id],
+  recipient_id, text_bytes, text_lines, text, text_complete
 ```
 
 Resolution fields use `resolved` when the selected endpoint belongs to the same
@@ -239,11 +293,47 @@ above.
 For example, a completion-delivering wait links rather than duplicates output:
 
 ```json
-{"record_type":"call","agent_id":"agent-a","call":{"declaration":"11111111111111111111111111111111","item_index":0},"call_id":"source","tool":"shell","arguments":{},"status":"ok","terminal":"22222222222222222222222222222222","terminal_resolution":"resolved","cause":{"kind":"completed"},"output":"done","output_complete":true}
-{"record_type":"relationship","relationship":"wait_settlement","agent_id":"agent-a","observation_id":"55555555555555555555555555555555","wait_observation":"77777777777777777777777777777777","wait_call":{"declaration":"33333333333333333333333333333333","item_index":0},"registration":"active","registration_ref":"44444444444444444444444444444444","wait_terminal":"66666666666666666666666666666666","wait_terminal_resolution":"resolved","outcome":"completion_delivered","source_call":{"declaration":"11111111111111111111111111111111","item_index":0},"source_phase":"background","output_ref":"22222222222222222222222222222222","envelope":"original_tool_call_id_header","source_resolution":"resolved"}
+{"at_us":0,"recorded_at_unix_micros":1700000000000000,"agent_id":"agent-a","journal_seq":1,"item_index":0,"record_type":"call","call":{"declaration":"11111111111111111111111111111111","item_index":0},"call_id":"source","tool":"shell","arguments":{},"status":"ok","terminal":"22222222222222222222222222222222","terminal_resolution":"resolved","cause":{"kind":"completed"},"output":"done","output_complete":true}
+{"at_us":20,"recorded_at_unix_micros":1700000000000020,"agent_id":"agent-a","journal_seq":5,"record_type":"relationship","relationship":"wait_settlement","observation_id":"55555555555555555555555555555555","wait_observation":"77777777777777777777777777777777","wait_call":{"declaration":"33333333333333333333333333333333","item_index":0},"registration":"active","registration_ref":"44444444444444444444444444444444","wait_terminal":"66666666666666666666666666666666","wait_terminal_resolution":"resolved","outcome":"completion_delivered","source_call":{"declaration":"11111111111111111111111111111111","item_index":0},"source_phase":"background","output_ref":"22222222222222222222222222222222","envelope":"original_tool_call_id_header","source_resolution":"resolved"}
 ```
 
-Use `--include-descendants` for the selected creator-owned workflow. Both formats expose unredacted tool names, arguments, commands, and owner output, so treat artifacts as sensitive.
+Only assistant-role `Message` items and displayable `ReasoningText` items from a
+canonical provider finish become semantic output. Ordered assistant text parts
+are concatenated without a separator. Opaque provider reasoning, raw provider
+JSON, unknown provider items, compaction items, and streaming updates never
+become compact semantic text.
+
+Only explicit `AgentMessageKind::Message` facts become message items; automatic
+watch/status traffic remains excluded. A provider-declared `message` tool
+`call` is the assistant's request or attempt, including failed attempts.
+`message_sent` is the canonical accepted sender-side fact. Durable storage has
+no call-to-message ID link, so the projector neither guesses one nor
+deduplicates by equal sender, recipient, text, or time. `message_id` is the sole
+explicit correlation between available sent and received directions.
+
+Lite mode emits at most the first 4 KiB of UTF-8 for each semantic text and tool
+output without splitting a code point. Exact `text_bytes`/`text_lines` and
+`output_bytes`/`output_lines` describe complete canonical content, while
+`*_complete` says whether the emitted spelling is complete. Full mode emits
+complete text and output.
+
+Compact trace identity and timestamps describe the captured journal facts, not
+the session currently containing or exporting those journals. Loading or
+importing a journal must not rebind historical agent, prompt, message,
+endpoint-session, sequence, or timestamp fields for trace projection.
+`root_agent_id` identifies the requested journal root and
+`included_agent_ids` identifies captured journals; descendant inclusion is
+selection, not item identity. Absolute samples come from the original host and
+are not commit, execution, delivery, wire, or synchronized distributed time.
+
+Use `--include-descendants` for the selected creator-owned workflow. Compact
+lite exposes complete tool arguments and up to 4 KiB each of unredacted
+assistant prose, displayable reasoning, explicit message text, and tool output.
+Full exposes complete text and output. Reasoning/messages can contain secrets,
+private communications, user data, or model-derived sensitive content; paired
+directions can duplicate the same body. Absolute timestamps, membership, and
+agent/session/message/prompt IDs expose sensitive activity metadata. Treat
+either artifact as sensitive.
 
 
 ## Content-free performance JSON Lines

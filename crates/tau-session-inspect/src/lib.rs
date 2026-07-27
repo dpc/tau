@@ -135,14 +135,14 @@ pub fn open_session_store(path: impl AsRef<Path>) -> Result<SessionStore, Inspec
 /// directories.
 pub fn session_lines(
     path: impl AsRef<Path>,
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
 ) -> Result<Vec<String>, InspectError> {
     let path = path.as_ref();
     if !path.try_exists()? {
         return Ok(vec![format!("session {session_id} not found")]);
     }
     let store = open_session_store(path)?;
-    let Some(tree) = store.session(session_id) else {
+    let Some(tree) = store.session(session_id.as_str()) else {
         return Ok(vec![format!("session {session_id} not found")]);
     };
     Ok(tree

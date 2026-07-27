@@ -447,9 +447,13 @@ fn stream_idle_progress_requires_data_event() {
 }
 fn prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
-        agent_prompt_id: "ap-test".into(),
+        agent_prompt_id: "ap-test"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("agent-test").expect("agent id"),
-        session_id: "session-test".into(),
+        session_id: "session-test"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         system_prompt: String::new(),
         context: tau_proto::PromptContext {
             blocks: vec![tau_proto::ContextBlock::UserInput(

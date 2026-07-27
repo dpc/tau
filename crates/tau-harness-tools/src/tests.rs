@@ -646,7 +646,9 @@ fn agent_watch_notification_extracts_assistant_response_text() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-watch".into(),
+        agent_prompt_id: "sp-watch"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
         output_items: vec![ContextItem::Message(tau_proto::MessageItem {
             role: ContextRole::Assistant,
@@ -684,7 +686,9 @@ fn agent_watch_ignores_mid_turn_tool_call_responses() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-watch".into(),
+        agent_prompt_id: "sp-watch"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
         output_items: vec![ContextItem::Message(tau_proto::MessageItem {
             role: ContextRole::Assistant,
@@ -720,7 +724,9 @@ fn agent_watch_ignores_internal_originated_responses() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-watch".into(),
+        agent_prompt_id: "sp-watch"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
         output_items: vec![ContextItem::Message(tau_proto::MessageItem {
             role: ContextRole::Assistant,
@@ -759,7 +765,9 @@ fn agent_watch_legacy_response_suppresses_untyped_provider_errors() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-watch-error".into(),
+        agent_prompt_id: "sp-watch-error"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
         output_items: Vec::new(),
         stop_reason: tau_proto::ProviderStopReason::Error,
@@ -801,7 +809,9 @@ fn agent_watch_forwards_terminal_agent_start_result() {
 /// are not forced through the external socket path.
 #[test]
 fn message_recipient_parser_recognizes_user_local_and_current_session() {
-    let current: tau_proto::SessionId = "session-a".into();
+    let current: tau_proto::SessionId = "session-a"
+        .parse::<tau_proto::SessionId>()
+        .expect("known-safe SessionId must be valid");
 
     assert!(matches!(
         parse_message_recipient("user", &current),
@@ -821,7 +831,9 @@ fn message_recipient_parser_recognizes_user_local_and_current_session() {
 /// right-hand agent id, preventing ambiguous `session/agent/extra` parsing.
 #[test]
 fn message_recipient_parser_validates_external_address_grammar() {
-    let current: tau_proto::SessionId = "session-a".into();
+    let current: tau_proto::SessionId = "session-a"
+        .parse::<tau_proto::SessionId>()
+        .expect("known-safe SessionId must be valid");
 
     match parse_message_recipient("session-b/agent_b", &current)
         .expect("valid other-session recipient")
@@ -1046,7 +1058,9 @@ fn session_runtime_state_cleanup_clears_in_flight_bookkeeping() {
     );
 
     state.record_runtime_bookkeeping_event(&Event::SessionShutdown(tau_proto::SessionShutdown {
-        session_id: "session-next".into(),
+        session_id: "session-next"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
     }));
 
     assert!(state.cancel_requested.is_empty());

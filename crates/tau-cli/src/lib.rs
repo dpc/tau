@@ -702,14 +702,9 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     let cwd = std::env::current_dir()?;
                     let harness_path =
                         runtime_dir::find_harness_for_dir(&cwd).ok_or(CliError::NoRunningDaemon)?;
-                    let daemon_session_id = runtime_dir::read_session_id(&harness_path)
-                        .ok_or_else(|| {
-                            CliError::Participant(
-                                "running daemon did not publish its session id".to_owned(),
-                            )
-                        })?;
+                    let daemon_session_id = read_attached_session_id(&harness_path)?;
                     if let Some(requested) = resume.as_deref().filter(|s| !s.is_empty())
-                        && requested != daemon_session_id
+                        && requested != daemon_session_id.as_str()
                     {
                         return Err(CliError::Participant(format!(
                             "--attach: daemon is bound to session `{daemon_session_id}`, \
@@ -964,6 +959,12 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             ExitCode::FAILURE
         }
     }
+}
+
+fn read_attached_session_id(path: &std::path::Path) -> Result<tau_proto::SessionId, CliError> {
+    runtime_dir::read_session_id(path).map_err(|error| {
+        CliError::Participant(format!("failed to read running daemon session id: {error}"))
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -1640,15 +1640,8 @@ fn parse_message_recipient(
 }
 
 fn parse_recipient_session_id(raw: &str) -> Result<tau_proto::SessionId, String> {
-    if raw.is_empty()
-        || raw.len() > 128
-        || !raw
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err("session id must contain 1-128 route-safe ASCII characters".to_owned());
-    }
-    Ok(raw.to_owned().into())
+    tau_proto::SessionId::parse(raw)
+        .map_err(|error| format!("invalid inter-session session id `{raw}`: {error}"))
 }
 
 fn parse_message_args(arguments: &CborValue) -> Result<MessageArgs, String> {

@@ -367,7 +367,8 @@ fn assert_durable_lifecycle(
     held_b: &tau_proto::AgentPromptCreated,
     fresh: &tau_proto::AgentPromptCreated,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let session_id = tau_proto::SessionId::new("deterministic-e2e-session");
+    let session_id = tau_proto::SessionId::parse("deterministic-e2e-session")
+        .expect("known-safe SessionId must be valid");
     let mut sessions = SessionStore::open(fixture.harness_state_dir().join("sessions"))?;
     let membership = sessions
         .load_session(session_id.as_str())?

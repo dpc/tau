@@ -7,7 +7,10 @@ fn custom(name: &str, payload: &str) -> Event {
     Event::ExtensionEvent(
         tau_proto::CustomEvent::try_new(
             name.parse().expect("custom event name"),
-            Some("s1".into()),
+            Some(
+                "s1".parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
+            ),
             CborValue::Text(payload.to_owned()),
         )
         .expect("extension-owned custom event"),

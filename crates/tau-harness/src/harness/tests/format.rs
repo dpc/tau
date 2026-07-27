@@ -58,7 +58,11 @@ fn session_lines_are_printable() {
     server.join().expect("join").expect("clean exit");
 
     let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-    let sl = session_lines(&sessions_dir, "s1").expect("lines");
+    let sl = session_lines(
+        &sessions_dir,
+        &tau_proto::SessionId::parse("s1").expect("session id"),
+    )
+    .expect("lines");
     assert!(sl.iter().any(|l| l.contains("loaded agent")));
     assert!(sl.iter().all(|l| !l.contains("user: hello")));
     let sll = session_list_lines(&sessions_dir).expect("list");
@@ -79,7 +83,11 @@ fn empty_session_views() {
         vec!["no sessions"]
     );
     assert_eq!(
-        session_lines(&sessions_dir, "x").expect("ok"),
+        session_lines(
+            &sessions_dir,
+            &tau_proto::SessionId::parse("x").expect("session id"),
+        )
+        .expect("ok"),
         vec!["session x not found"]
     );
 }

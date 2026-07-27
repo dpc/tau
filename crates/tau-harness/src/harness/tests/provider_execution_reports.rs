@@ -2,7 +2,9 @@ use super::*;
 
 fn submitted(prompt_id: &str) -> Event {
     Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
-        agent_prompt_id: prompt_id.into(),
+        agent_prompt_id: prompt_id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         originator: tau_proto::PromptOriginator::User,
     })
 }
@@ -47,21 +49,34 @@ fn publish_terminal_accounting_report(
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "accounting-prompt");
-    harness
-        .prompt_agents
-        .insert("accounting-prompt".into(), cid.clone());
-    harness
-        .pending_provider_prompts
-        .insert("accounting-prompt".into(), "provider".into());
-    harness
-        .prompt_models
-        .insert("accounting-prompt".into(), "provider/model".into());
+    harness.prompt_agents.insert(
+        "accounting-prompt"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        cid.clone(),
+    );
+    harness.pending_provider_prompts.insert(
+        "accounting-prompt"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
+    harness.prompt_models.insert(
+        "accounting-prompt"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider/model".into(),
+    );
     harness.prompt_estimated_cost_rates.insert(
-        "accounting-prompt".into(),
+        "accounting-prompt"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         tau_proto::ESTIMATED_API_COST_FALLBACK,
     );
     let mut report = super::dispatch::provider_text_response(
-        &"accounting-prompt".into(),
+        &"accounting-prompt"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         crate::parse_agent_id("spoofed"),
         "done",
     );
@@ -134,9 +149,12 @@ fn prompt_submitted_report_commits_before_harness_canonical_fact() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
 
     harness
         .handle_extension_event_inner_with_persist("provider", submitted("prompt-1"), Some(true))
@@ -183,9 +201,12 @@ fn pre_ready_provider_execution_report_retains_persistence_envelope() {
         .get_mut("provider")
         .expect("provider")
         .state = crate::extension::ExtensionState::Handshaking;
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
     let report = submitted("prompt-1");
     let expected_bytes = Harness::encoded_emit_size(&report, false);
 
@@ -243,9 +264,12 @@ fn provider_execution_authority_is_default_deny() {
         "configured-provider",
         tau_proto::ClientKind::Provider,
     );
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "configured-provider".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "configured-provider".into(),
+    );
 
     harness
         .handle_extension_event_inner_with_persist(
@@ -258,7 +282,9 @@ fn provider_execution_authority_is_default_deny() {
         .handle_extension_event_inner_with_persist(
             "configured-provider",
             Event::ProviderPromptSubmitted(tau_proto::ProviderPromptSubmitted {
-                agent_prompt_id: "prompt-1".into(),
+                agent_prompt_id: "prompt-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 originator: tau_proto::PromptOriginator::User,
             }),
             Some(false),
@@ -280,12 +306,21 @@ fn canceled_prompt_still_accepts_owned_cache_diagnostic() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
-    harness.canceled_prompts.insert("prompt-1".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
+    harness.canceled_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
     let diagnostic = tau_proto::ProviderCacheMissDiagnostic {
-        agent_prompt_id: "prompt-1".into(),
+        agent_prompt_id: "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         model: "provider/model".into(),
         originator: tau_proto::PromptOriginator::User,
         tool_choice: tau_proto::ToolChoice::default(),
@@ -318,7 +353,9 @@ fn canceled_prompt_still_accepts_owned_cache_diagnostic() {
         .handle_extension_event_inner(
             "provider",
             Event::ProviderCacheMissDiagnosticReported(tau_proto::ProviderCacheMissDiagnostic {
-                agent_prompt_id: "prompt-1".into(),
+                agent_prompt_id: "prompt-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 model: "provider/model".into(),
                 originator: tau_proto::PromptOriginator::User,
                 tool_choice: tau_proto::ToolChoice::default(),
@@ -353,10 +390,17 @@ fn canceled_submitted_and_updated_reports_are_observation_only() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
-    harness.canceled_prompts.insert("prompt-1".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
+    harness.canceled_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
 
     harness
         .handle_extension_event_inner("provider", submitted("prompt-1"))
@@ -365,7 +409,9 @@ fn canceled_submitted_and_updated_reports_are_observation_only() {
         .handle_extension_event_inner(
             "provider",
             Event::ProviderResponseUpdatedReported(tau_proto::ProviderResponseUpdated {
-                agent_prompt_id: "prompt-1".into(),
+                agent_prompt_id: "prompt-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 agent_id: crate::parse_agent_id("spoofed"),
                 deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
                     output_index: 0,
@@ -402,14 +448,19 @@ fn response_update_without_harness_agent_identity_is_observation_only() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
     harness
         .handle_extension_event_inner(
             "provider",
             Event::ProviderResponseUpdatedReported(tau_proto::ProviderResponseUpdated {
-                agent_prompt_id: "prompt-1".into(),
+                agent_prompt_id: "prompt-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 agent_id: crate::parse_agent_id("spoofed"),
                 deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
                     output_index: 0,
@@ -450,16 +501,32 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_agents.insert("prompt-1".into(), cid.clone());
+    harness.prompt_agents.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        cid.clone(),
+    );
     harness
         .agents
         .get_mut(&cid)
         .expect("agent")
-        .in_flight_prompt = Some("prompt-1".into());
-    harness.agents.get_mut(&cid).expect("agent").last_prompt_id = Some("prompt-1".into());
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
+        .in_flight_prompt = Some(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
+    harness.agents.get_mut(&cid).expect("agent").last_prompt_id = Some(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
     connect_test_tool(&mut harness, "interceptor");
     harness
         .handle_extension_event(
@@ -477,7 +544,9 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
         .handle_extension_event_inner(
             "provider",
             Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
-                &"prompt-1".into(),
+                &"prompt-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 crate::parse_agent_id("spoofed"),
                 "done",
             )),
@@ -540,21 +609,39 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_agents.insert("prompt-1".into(), cid.clone());
+    harness.prompt_agents.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        cid.clone(),
+    );
     harness
         .agents
         .get_mut(&cid)
         .expect("agent")
-        .in_flight_prompt = Some("prompt-1".into());
-    harness.agents.get_mut(&cid).expect("agent").last_prompt_id = Some("prompt-1".into());
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
+        .in_flight_prompt = Some(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
+    harness.agents.get_mut(&cid).expect("agent").last_prompt_id = Some(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
     let response = tau_proto::ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "prompt-1".into(),
+        agent_prompt_id: "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: crate::parse_agent_id("spoofed"),
         output_items: vec![tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
             call_id: "missing-call".into(),
@@ -666,15 +753,31 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
         .expect("subscribe observer");
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_agents.insert("prompt-1".into(), cid.clone());
+    harness.prompt_agents.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        cid.clone(),
+    );
     {
         let agent = harness.agents.get_mut(&cid).expect("agent");
-        agent.in_flight_prompt = Some("prompt-1".into());
-        agent.last_prompt_id = Some("prompt-1".into());
+        agent.in_flight_prompt = Some(
+            "prompt-1"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+        );
+        agent.last_prompt_id = Some(
+            "prompt-1"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+        );
     }
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
     let agent_id = durable_agent_id_for_conversation(&harness, &cid);
     let failure_store = state_dir.join("failure-agent-store");
     let mut agent_store = tau_core::AgentStore::open(&failure_store).expect("failure agent store");
@@ -703,7 +806,9 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
         .handle_extension_event_inner(
             "provider",
             Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
-                &"prompt-1".into(),
+                &"prompt-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 crate::parse_agent_id("spoofed"),
                 "done",
             )),
@@ -762,7 +867,9 @@ fn finished_report_live_delivery_clears_provider_image_bytes() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "unknown-prompt".into(),
+        agent_prompt_id: "unknown-prompt"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: crate::parse_agent_id("spoofed"),
         output_items: vec![tau_proto::ContextItem::ToolResult(
             tau_proto::ToolResultItem {
@@ -834,21 +941,39 @@ fn stale_finished_report_termination_uses_harness_source() {
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_agents.insert("prompt-1".into(), cid.clone());
+    harness.prompt_agents.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        cid.clone(),
+    );
     {
         let agent = harness.agents.get_mut(&cid).expect("agent");
-        agent.in_flight_prompt = Some("prompt-1".into());
-        agent.last_prompt_id = Some("newer-prompt".into());
+        agent.in_flight_prompt = Some(
+            "prompt-1"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+        );
+        agent.last_prompt_id = Some(
+            "newer-prompt"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+        );
     }
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
 
     harness
         .handle_extension_event_inner(
             "provider",
             Event::ProviderResponseFinishedReported(super::dispatch::provider_text_response(
-                &"prompt-1".into(),
+                &"prompt-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 crate::parse_agent_id("spoofed"),
                 "stale",
             )),
@@ -878,9 +1003,12 @@ fn provider_execution_report_replacement_and_drop_control_semantics() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness
-        .pending_provider_prompts
-        .insert("prompt-2".into(), "provider".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-2"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
     connect_test_tool(&mut harness, "interceptor");
     harness
         .handle_extension_event(
@@ -940,9 +1068,12 @@ fn parked_stale_provider_execution_report_commits_without_successor() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
     connect_test_tool(&mut harness, "interceptor");
     harness
         .handle_extension_event(
@@ -972,9 +1103,12 @@ fn parked_stale_provider_execution_report_commits_without_successor() {
         .get_mut("provider")
         .expect("replacement")
         .instance_id = 43.into();
-    harness
-        .pending_provider_prompts
-        .insert("prompt-1".into(), "provider".into());
+    harness.pending_provider_prompts.insert(
+        "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
     harness
         .handle_extension_event(
             "interceptor",

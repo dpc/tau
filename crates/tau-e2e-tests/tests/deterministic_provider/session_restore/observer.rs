@@ -70,7 +70,9 @@ impl SessionRestoreObserver {
             .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
                 tau_proto::UiCreateAgent {
                     literal: false,
-                    session_id: SESSION.into(),
+                    session_id: SESSION
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     role: "deterministic-main".to_owned(),
                     model_override: None,
                     metadata: Vec::new(),
@@ -96,7 +98,9 @@ impl SessionRestoreObserver {
             .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
                 tau_proto::UiCreateAgent {
                     literal: false,
-                    session_id: SESSION.into(),
+                    session_id: SESSION
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     role: "deterministic-worker".to_owned(),
                     model_override: None,
                     metadata: Vec::new(),
@@ -168,7 +172,9 @@ impl SessionRestoreObserver {
             .send(&HarnessInputMessage::emit(Event::UiPromptSubmitted(
                 tau_proto::UiPromptSubmitted {
                     literal: false,
-                    session_id: SESSION.into(),
+                    session_id: SESSION
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     text: text.to_owned(),
                     agent_id: agent_id.clone(),
                     message_class: tau_proto::PromptMessageClass::User,

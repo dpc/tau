@@ -16,6 +16,14 @@ use crate::harness::{
 };
 use crate::settings::ExtensionConfig;
 
+fn test_session_id(value: impl Into<String>) -> tau_proto::SessionId {
+    tau_proto::SessionId::parse(value).expect("test session id")
+}
+
+fn test_agent_prompt_id(value: impl Into<String>) -> tau_proto::AgentPromptId {
+    tau_proto::AgentPromptId::parse(value).expect("test agent prompt id")
+}
+
 /// The synchronous harness fault seam preserves rollback-poison lifecycle
 /// behavior; direct writer tests own production singleton-poison coverage.
 #[test]
@@ -340,7 +348,7 @@ pub(super) fn seed_restored_compaction_checkpoint(
     let agent_id = crate::parse_agent_id(h.agents[cid].agent_id.as_deref().expect("durable agent"));
     let transaction_id =
         tau_proto::CompactionTransactionId::parse(transaction).expect("transaction id");
-    let compact_prompt_id = tau_proto::AgentPromptId::from(format!("ap-{transaction}-compact"));
+    let compact_prompt_id = test_agent_prompt_id(format!("ap-{transaction}-compact"));
     let started = tau_proto::AgentStandaloneCompactionStarted {
         agent_id: agent_id.clone(),
         transaction_id: transaction_id.clone(),
@@ -513,7 +521,7 @@ fn detach_request() -> HarnessInputMessage {
 
 fn tree_request(session_id: &str, target_agent_id: Option<&str>) -> HarnessInputMessage {
     HarnessInputMessage::UiTreeRequest(tau_proto::UiTreeRequest {
-        session_id: session_id.into(),
+        session_id: test_session_id(session_id),
         target_agent_id: target_agent_id.map(crate::parse_agent_id),
     })
 }
@@ -3456,9 +3464,9 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-staged-tools");
     h.prompt_agents
-        .insert("sp-staged-tools".into(), cid.clone());
+        .insert(test_agent_prompt_id("sp-staged-tools"), cid.clone());
     assert!(
-        h.prompt_tool_specs[&AgentPromptId::from("sp-staged-tools")]
+        h.prompt_tool_specs[&test_agent_prompt_id("sp-staged-tools")]
             .iter()
             .any(|spec| spec.name == "staged_tool")
     );
@@ -3487,7 +3495,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "run two tools".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -3500,7 +3508,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-staged-tools".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-staged-tools"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
@@ -3602,9 +3610,9 @@ fn prompt_snapshot_does_not_expand_to_staged_registration() {
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-unadvertised-staged");
     h.prompt_agents
-        .insert("sp-unadvertised-staged".into(), cid.clone());
+        .insert(test_agent_prompt_id("sp-unadvertised-staged"), cid.clone());
     assert!(
-        !h.prompt_tool_specs[&AgentPromptId::from("sp-unadvertised-staged")]
+        !h.prompt_tool_specs[&test_agent_prompt_id("sp-unadvertised-staged")]
             .iter()
             .any(|spec| spec.name == "unadvertised_staged_tool")
     );
@@ -3613,7 +3621,7 @@ fn prompt_snapshot_does_not_expand_to_staged_registration() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-unadvertised-staged".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-unadvertised-staged"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "call-unadvertised".into(),
@@ -3692,7 +3700,7 @@ fn extension_that_never_sends_ready_never_exposes_staged_tool() {
     .expect("stage tool");
 
     let submission = h
-        .submit_user_prompt("s1".into(), "try never ready tool".to_owned())
+        .submit_user_prompt(test_session_id("s1"), "try never ready tool".to_owned())
         .expect("submit");
     assert!(matches!(submission, PromptSubmission::Queued));
     assert!(h.registry.providers_for("never_ready_tool").is_empty());
@@ -3731,7 +3739,7 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
     .expect("stage provider models");
 
     let submission = h
-        .submit_user_prompt("s1".into(), "wait for staged model".to_owned())
+        .submit_user_prompt(test_session_id("s1"), "wait for staged model".to_owned())
         .expect("submit");
     assert!(matches!(submission, PromptSubmission::Queued));
     assert!(!h.available_models.contains(&model_id));
@@ -4035,8 +4043,7 @@ fn session_init_catchup_replays_current_session_dir_to_early_subscribers() {
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
     let events = connect_test_client(&mut h, "early-session-dir", tau_proto::ClientKind::Provider);
-    h.initialized_sessions
-        .remove(&tau_proto::SessionId::new("s1"));
+    h.initialized_sessions.remove(&test_session_id("s1"));
 
     h.handle_extension_message(
         "early-session-dir",
@@ -4082,8 +4089,7 @@ fn session_init_catchup_does_not_duplicate_ui_startup_status_snapshots() {
         tau_proto::EventSelector::Exact(tau_proto::EventName::HARNESS_SESSION_DIR),
         tau_proto::EventSelector::Exact(tau_proto::EventName::EXTENSION_READY),
     ];
-    h.initialized_sessions
-        .remove(&tau_proto::SessionId::new("s1"));
+    h.initialized_sessions.remove(&test_session_id("s1"));
 
     h.handle_client_message(
         "startup-ui",
@@ -4181,7 +4187,7 @@ fn session_context_ready_is_published_live() {
         conn_id,
         TestProtocolItem::Event(Event::ExtensionSessionContextReady(
             tau_proto::ExtensionSessionContextReady {
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
             },
         )),
     )
@@ -4264,7 +4270,7 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
             event: Box::new(Event::ExtensionEvent(
                 tau_proto::CustomEvent::try_new(
                     custom_name.clone(),
-                    Some("s1".into()),
+                    Some(test_session_id("s1")),
                     CborValue::Text("STAGED CUSTOM EVENT".to_owned()),
                 )
                 .expect("valid custom event"),
@@ -4291,7 +4297,7 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
         TestProtocolItem::Event(Event::ExtensionEvent(
             tau_proto::CustomEvent::try_new(
                 trailing_name.clone(),
-                Some("s1".into()),
+                Some(test_session_id("s1")),
                 CborValue::Text("AFTER START REQUEST".to_owned()),
             )
             .expect("valid custom event"),
@@ -4498,7 +4504,7 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
             provider_id: "operational-owner".into(),
             command: tau_proto::UiShellCommand {
                 command_id: "startup-shell".into(),
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 command: "printf held".to_owned(),
                 include_in_context: false,
                 target_agent_id: None,
@@ -4512,7 +4518,7 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
         TestProtocolItem::Event(Event::ShellCommandFinishedReported(
             tau_proto::ShellCommandFinished {
                 command_id: "startup-shell".into(),
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 command: "printf held".to_owned(),
                 include_in_context: false,
                 target_agent_id: None,
@@ -4612,7 +4618,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     )
     .expect("prompt fragment");
 
-    h.dispatch_user_prompt("s1".into(), "first prompt".to_owned())
+    h.dispatch_user_prompt(test_session_id("s1"), "first prompt".to_owned())
         .expect("dispatch user prompt");
     assert!(
         !event_log_events(&h)
@@ -4638,7 +4644,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
         conn_id,
         TestProtocolItem::Event(Event::ExtAgentContextPublish(
             tau_proto::ExtAgentContextPublish {
-                session_id: tau_proto::SessionId::new("s1"),
+                session_id: test_session_id("s1"),
                 agent_initialization_id: initialization_id.clone(),
 
                 agent_id: crate::parse_agent_id(&agent_id),
@@ -4654,7 +4660,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
             tau_proto::ExtensionContextReady {
                 agent_initialization_id: initialization_id,
 
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 agent_id: crate::parse_agent_id(&agent_id),
             },
         )),
@@ -4701,7 +4707,7 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
     h.handle_extension_message(conn_id, TestMessage::Ready(Default::default()))
         .expect("ready");
 
-    h.dispatch_user_prompt("s1".into(), "resume after disconnect".to_owned())
+    h.dispatch_user_prompt(test_session_id("s1"), "resume after disconnect".to_owned())
         .expect("dispatch user prompt");
     assert!(
         !event_log_events(&h)
@@ -4722,7 +4728,7 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
         conn_id,
         TestProtocolItem::Event(Event::ExtAgentContextPublish(
             tau_proto::ExtAgentContextPublish {
-                session_id: tau_proto::SessionId::new("s1"),
+                session_id: test_session_id("s1"),
                 agent_initialization_id: initialization_id,
 
                 agent_id: agent_id.clone(),
@@ -5316,12 +5322,13 @@ fn unavailable_tool_is_reported_without_crashing() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-x"), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "shell printf hi".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -5334,7 +5341,7 @@ fn unavailable_tool_is_reported_without_crashing() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-x".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-x"),
         agent_id: target_agent_id.clone(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
@@ -5407,7 +5414,7 @@ fn disconnected_tool_completes_pending_call() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "sp-main".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-main"),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: call_id.clone(),
@@ -5545,12 +5552,13 @@ fn disconnected_tool_is_removed_cleanly() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-x"), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "shell printf hi".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -5562,7 +5570,7 @@ fn disconnected_tool_is_removed_cleanly() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-x".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-x"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
@@ -5759,12 +5767,13 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     h.selected_role = "engineer".to_owned();
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-x"), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "do it".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -5777,7 +5786,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-x".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-x"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
@@ -5893,7 +5902,7 @@ fn targetless_shell_output_injects_into_default_agent() {
 
     h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
         command_id: "shell-1".into(),
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         command: "printf hello".to_owned(),
         include_in_context: true,
         target_agent_id: None,
@@ -5929,7 +5938,7 @@ fn terminating_agent_rejects_late_shell_output() {
     for target_agent_id in [Some(agent_id.clone()), None] {
         h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
             command_id: "late-shell".into(),
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             command: "printf late".to_owned(),
             include_in_context: true,
             target_agent_id,
@@ -5960,7 +5969,7 @@ fn shell_output_for_wrong_session_is_ignored() {
 
     h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
         command_id: "shell-2".into(),
-        session_id: "other-session".into(),
+        session_id: test_session_id("other-session"),
         command: "printf wrong".to_owned(),
         include_in_context: true,
         target_agent_id: Some(agent_id),
@@ -6083,9 +6092,11 @@ fn resumed_session_init_does_not_reinject_agents_context() {
         file_path: PathBuf::from("/repo/AGENTS.md"),
         content: format!("# Root\n- {marker}\n"),
     });
-    h.pending_notices.restore_sessions.insert("s1".into(), None);
+    h.pending_notices
+        .restore_sessions
+        .insert(test_session_id("s1"), None);
     h.turn_state = TurnState::InitializingSession {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         reason: tau_proto::SessionStartReason::Resume,
         waiting_on: [tools_connection_id.clone().into()].into_iter().collect(),
     };
@@ -6093,7 +6104,7 @@ fn resumed_session_init_does_not_reinject_agents_context() {
         &tools_connection_id,
         TestProtocolItem::Event(Event::ExtensionSessionContextReady(
             tau_proto::ExtensionSessionContextReady {
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
             },
         )),
     )
@@ -6124,12 +6135,13 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-x"), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "do it".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -6142,7 +6154,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-x".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-x"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
@@ -6246,12 +6258,13 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
     );
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-x"), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "do it".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -6264,7 +6277,7 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-x".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-x"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
@@ -6343,13 +6356,14 @@ fn duplicate_tool_call_id_becomes_model_visible_tool_error() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-x"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-x".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-x"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
@@ -6423,14 +6437,15 @@ fn reused_prior_tool_call_id_becomes_model_visible_tool_error() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-y");
-    h.prompt_agents.insert("sp-y".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-y"), cid.clone());
     h.completed_tool_calls.insert("old-call".into());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-y".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-y"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "old-call".into(),
@@ -6494,12 +6509,13 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-x"), cid.clone());
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_client_event(
         "ui",
         TestProtocolItem::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(target_agent_id.clone()),
             agent_prompt_id: None,
         })),
@@ -6510,7 +6526,7 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-x".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-x"),
         agent_id: target_agent_id,
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
@@ -6578,13 +6594,14 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-x"), cid.clone());
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-x".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-x"),
         agent_id: target_agent_id.clone(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
@@ -6625,7 +6642,7 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
     h.handle_client_event(
         "ui",
         TestProtocolItem::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(target_agent_id),
             agent_prompt_id: None,
         })),
@@ -7186,7 +7203,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "sp-open".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-open"),
             agent_id: owner_agent_id.clone(),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: call_id.clone(),
@@ -7334,12 +7351,13 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
         let mut h = echo_harness(&sp).expect("start");
         let cid = ensure_test_user_agent(&mut h);
         seed_agent_thinking(&mut h, &cid, "sp-old");
-        h.prompt_agents.insert("sp-old".into(), cid.clone());
+        h.prompt_agents
+            .insert(test_agent_prompt_id("sp-old"), cid.clone());
         h.handle_provider_response_finished(ProviderResponseFinished {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "sp-old".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-old"),
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: "historical-call".into(),
@@ -7370,13 +7388,14 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
         .expect("resume");
     let cid = test_user_agent(&h);
     seed_agent_thinking(&mut h, &cid, "sp-new");
-    h.prompt_agents.insert("sp-new".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-new"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-new".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-new"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "historical-call".into(),
@@ -7546,13 +7565,14 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
         conv.parent_tool_call_id = None;
     }
     seed_agent_thinking(&mut h, &cid, "sp-query");
-    h.prompt_agents.insert("sp-query".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-query"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-query".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-query"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "query-call".into(),
@@ -7630,7 +7650,7 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
     }
     seed_agent_thinking(&mut h, &cid, "sp-query-pending");
     h.prompt_agents
-        .insert("sp-query-pending".into(), cid.clone());
+        .insert(test_agent_prompt_id("sp-query-pending"), cid.clone());
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
@@ -7649,7 +7669,7 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-query-pending".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-query-pending"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "query-pending-call".into(),
@@ -7698,13 +7718,14 @@ fn non_tool_stop_reason_tool_call_gets_terminal_error() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-length");
-    h.prompt_agents.insert("sp-length".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-length"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-length".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-length"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "length-call".into(),
@@ -7760,7 +7781,7 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
     h.apply_agent_context_publish(
         "ctx-ext",
         tau_proto::ExtAgentContextPublish {
-            session_id: tau_proto::SessionId::new("test-session"),
+            session_id: test_session_id("test-session"),
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
             agent_id: agent_id.clone(),
@@ -7807,7 +7828,7 @@ fn switch_session_clears_session_scoped_extension_context() {
     h.apply_agent_context_publish(
         "ctx-ext",
         tau_proto::ExtAgentContextPublish {
-            session_id: tau_proto::SessionId::new("test-session"),
+            session_id: test_session_id("test-session"),
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
             agent_id: agent_id.clone(),
@@ -7822,7 +7843,7 @@ fn switch_session_clears_session_scoped_extension_context() {
         HashSet::from([contributor.clone()]),
     );
 
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session");
 
     assert!(h.extension_prompt_fragments.contains_key(&contributor));

@@ -19,7 +19,7 @@ use crate::ui_prompt::{
 /// Read a single user prompt from stdin, submit it to a daemon, print the final
 /// reasoning snapshots and answer, then exit.
 pub(crate) fn run_prompt_stdin(
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     attach: bool,
     session_status: SessionLaunchStatus,
     startup_role: Option<&str>,
@@ -31,16 +31,16 @@ pub(crate) fn run_prompt_stdin(
     if prompt.is_empty() {
         return Ok(());
     }
-    print_prompt_stdin_headers(session_id, startup_role);
+    print_prompt_stdin_headers(session_id.as_str(), startup_role);
 
     let daemon_output = if attach {
         None
     } else {
-        Some(daemon_output_for_session(session_id, ephemeral)?)
+        Some(daemon_output_for_session(session_id.as_str(), ephemeral)?)
     };
     let mut daemon = resolve_daemon(
         attach,
-        session_id,
+        session_id.as_str(),
         session_status,
         daemon_output,
         startup_role,
@@ -98,7 +98,7 @@ fn subscribe_to_prompt_stdin_events(writer: &mut OneShotWriter) -> io::Result<()
 }
 fn submit_prompt(
     writer: &mut OneShotWriter,
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     role: &str,
     prompt: String,
 ) -> io::Result<()> {

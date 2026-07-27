@@ -28,8 +28,8 @@ fn compact_toon_frames_zero_calls() {
     let text = String::from_utf8(bytes).expect("UTF-8 TOON");
     let decoded: serde_json::Value = serde_toon::from_str(&text).expect("strict TOON");
 
-    assert!(text.contains("records[0]:"));
-    assert_eq!(decoded["records"], serde_json::json!([]));
+    assert!(text.contains("items[0]:"));
+    assert_eq!(decoded["items"], serde_json::json!([]));
 }
 
 fn prepare_fixture() -> (tempfile::TempDir, PreparedAgentTrace) {
@@ -101,13 +101,16 @@ fn public_compact_exports_project_persisted_explicit_observations() {
     let terminal = ObservationId::from_bytes([4; 16]);
     let cancellation = ObservationId::from_bytes([5; 16]);
     let activation = ObservationId::from_bytes([6; 16]);
+    let sent = ObservationId::from_bytes([7; 16]);
+    let received = ObservationId::from_bytes([8; 16]);
+    let semantic_text = format!("{}é-tail", "a".repeat(4_095));
     let call = ToolCallRef {
         declaration,
         item_index: 0,
     };
     let cancel_call = ToolCallRef {
         declaration,
-        item_index: 1,
+        item_index: 3,
     };
     let mut store = AgentStore::open_lazy(root.path()).expect("store");
     let append = |store: &mut AgentStore, id, event, at| -> Result<(), tau_core::AgentStoreError> {
@@ -126,7 +129,9 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         &mut store,
         declaration,
         Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
-            agent_prompt_id: "prompt-tools".into(),
+            agent_prompt_id: "prompt-tools"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: agent_id.clone(),
             output_items: vec![
                 ContextItem::ToolCall(tau_proto::ToolCallItem {
@@ -139,6 +144,18 @@ fn public_compact_exports_project_persisted_explicit_observations() {
                     )]),
                     raw_arguments_json: None,
                     responses_envelope: None,
+                }),
+                ContextItem::Message(tau_proto::MessageItem {
+                    role: tau_proto::ContextRole::Assistant,
+                    content: vec![tau_proto::ContentPart::Text {
+                        text: semantic_text.clone(),
+                    }],
+                    phase: Some(tau_proto::MessagePhase::FinalAnswer),
+                    responses_raw_json: None,
+                }),
+                ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                    kind: tau_proto::ReasoningTextKind::Summary,
+                    text: semantic_text.clone(),
                 }),
                 ContextItem::ToolCall(tau_proto::ToolCallItem {
                     call_id: "call-cancel".into(),
@@ -222,6 +239,35 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         22,
     )
     .expect("activation");
+    append(
+        &mut store,
+        sent,
+        Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            message_id: "message-semantic".into(),
+            sender_id: agent_id.clone(),
+            recipient: tau_proto::AgentMessageRecipient::User,
+            kind: tau_proto::AgentMessageKind::Message,
+            message: semantic_text.clone(),
+        }),
+        23,
+    )
+    .expect("sent message");
+    append(
+        &mut store,
+        received,
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "message-semantic".into(),
+            sender_id: AgentId::parse("agent-remote").expect("agent"),
+            sender_session_id: None,
+            recipient_id: agent_id.clone(),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: semantic_text.clone(),
+        }),
+        24,
+    )
+    .expect("received message");
     drop(store);
 
     let mut jsonl = prepare_agent_trace(
@@ -247,6 +293,34 @@ fn public_compact_exports_project_persisted_explicit_observations() {
     assert_eq!(call_record["dispatch_to_terminal_us"], 8);
     assert_eq!(call_record["terminal"], terminal.to_string());
     assert_eq!(call_record["output"], "done");
+    let items = &json_values[1..];
+    assert!(
+        items
+            .windows(2)
+            .all(|pair| pair[0]["recorded_at_unix_micros"].as_u64()
+                <= pair[1]["recorded_at_unix_micros"].as_u64())
+    );
+    for item in items {
+        assert!(item["at_us"].is_u64());
+        assert!(item["recorded_at_unix_micros"].is_u64());
+        assert!(item["journal_seq"].is_u64());
+        assert_eq!(item["agent_id"], "agent-stage");
+    }
+    for record_type in [
+        "assistant_message",
+        "assistant_reasoning",
+        "message_sent",
+        "message_received",
+    ] {
+        let item = items
+            .iter()
+            .find(|item| item["record_type"] == record_type)
+            .expect("semantic item");
+        assert_eq!(item["text"], "a".repeat(4_095));
+        assert_eq!(item["text_bytes"], semantic_text.len());
+        assert_eq!(item["text_lines"], 1);
+        assert_eq!(item["text_complete"], false);
+    }
 
     let mut toon = prepare_agent_trace(
         root.path(),
@@ -261,8 +335,37 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         serde_toon::from_str(std::str::from_utf8(&toon_bytes).expect("UTF-8"))
             .expect("strict TOON");
     let mut expected = json_values[0].clone();
-    expected["records"] = serde_json::Value::Array(json_values[1..].to_vec());
+    expected["items"] = serde_json::Value::Array(json_values[1..].to_vec());
     assert_eq!(decoded, expected);
+
+    let mut full = prepare_agent_trace(
+        root.path(),
+        &agent_id,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::AgentToolsJsonl(AgentTraceMode::Full),
+    )
+    .expect("full JSONL");
+    let mut full_bytes = Vec::new();
+    full.copy_to(&mut full_bytes).expect("copy full JSONL");
+    let full_items = std::str::from_utf8(&full_bytes)
+        .expect("UTF-8")
+        .lines()
+        .skip(1)
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON item"))
+        .collect::<Vec<_>>();
+    for record_type in [
+        "assistant_message",
+        "assistant_reasoning",
+        "message_sent",
+        "message_received",
+    ] {
+        let item = full_items
+            .iter()
+            .find(|item| item["record_type"] == record_type)
+            .expect("full semantic item");
+        assert_eq!(item["text"], semantic_text);
+        assert_eq!(item["text_complete"], true);
+    }
 }
 
 /// Sensitive staging uses a mode-0600 anonymous file whose procfs descriptor

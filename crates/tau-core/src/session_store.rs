@@ -256,7 +256,7 @@ pub struct PersistedSessionEvent {
 }
 
 /// Folded membership view for one session.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SessionMembership {
     session_id: SessionId,
     loaded_agents: HashSet<AgentId>,
@@ -1006,35 +1006,8 @@ impl SessionStore {
     }
 }
 
-const SESSION_ID_MAX_LEN: usize = 128;
-
 fn validate_session_id(session_id: &str) -> Result<SessionId, SessionStoreError> {
-    if session_id.is_empty() {
-        return Err(invalid_session_id(session_id, "must not be empty"));
-    }
-    if session_id == "." || session_id == ".." {
-        return Err(invalid_session_id(
-            session_id,
-            "must be a single path-safe directory name",
-        ));
-    }
-    if session_id.len() > SESSION_ID_MAX_LEN {
-        return Err(invalid_session_id(
-            session_id,
-            format!("must not exceed {SESSION_ID_MAX_LEN} bytes"),
-        ));
-    }
-    if let Some((index, byte)) = session_id
-        .bytes()
-        .enumerate()
-        .find(|(_, byte)| *byte == b'/' || *byte == b'\\' || *byte == 0)
-    {
-        return Err(invalid_session_id(
-            session_id,
-            format!("invalid byte 0x{byte:02x} at byte offset {index}"),
-        ));
-    }
-    Ok(SessionId::from(session_id))
+    SessionId::parse(session_id).map_err(|error| invalid_session_id(session_id, error.to_string()))
 }
 
 fn invalid_session_id(session_id: &str, message: impl Into<String>) -> SessionStoreError {

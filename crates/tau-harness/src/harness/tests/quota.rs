@@ -196,7 +196,12 @@ fn rollover_applies_deferred_provider_quota_for_current_generation() {
     assert!(harness.provider_quota.is_empty());
 
     harness
-        .switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .switch_session(
+            "replacement"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionStartReason::New,
+        )
         .expect("switch session");
 
     assert_eq!(

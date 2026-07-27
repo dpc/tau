@@ -16,6 +16,14 @@ fn message(text: &str) -> Option<HarnessInputMessage> {
     message_for_line(SESSION_ID, text)
 }
 
+/// The external headless-send boundary must reject an invalid controlled
+/// session identifier instead of reaching infallible UI event construction.
+#[test]
+fn headless_send_rejects_invalid_session_id_without_panicking() {
+    let error = run_send("bad.id", "hello").expect_err("invalid session id must fail");
+    assert!(error.to_string().contains("invalid session id `bad.id`"));
+}
+
 fn prompt_text(text: &str) -> String {
     match event(text).expect("prompt event") {
         Event::UiCreateAgent(req) => {

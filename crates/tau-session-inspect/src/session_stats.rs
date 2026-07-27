@@ -52,16 +52,16 @@ struct PromptAccounting {
 /// journals.
 pub fn read_session_stats(
     sessions_dir: &Path,
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
 ) -> Result<Option<SessionStats>, InspectError> {
     if !sessions_dir.try_exists()? {
         return Ok(None);
     }
     let session_store = SessionStore::open_lazy(sessions_dir)?;
-    let membership = session_store.session_events(session_id)?;
+    let membership = session_store.session_events(session_id.as_str())?;
     if membership.is_empty()
         && !sessions_dir
-            .join(session_id)
+            .join(session_id.as_str())
             .join("events.cbor")
             .try_exists()?
     {
@@ -70,10 +70,10 @@ pub fn read_session_stats(
     let member_ids = membership
         .iter()
         .filter_map(|record| match &record.event {
-            Event::SessionAgentLoaded(loaded) if loaded.session_id == session_id => {
+            Event::SessionAgentLoaded(loaded) if &loaded.session_id == session_id => {
                 Some(loaded.agent_id.clone())
             }
-            Event::SessionAgentUnloaded(unloaded) if unloaded.session_id == session_id => {
+            Event::SessionAgentUnloaded(unloaded) if &unloaded.session_id == session_id => {
                 Some(unloaded.agent_id.clone())
             }
             _ => None,
@@ -113,7 +113,9 @@ pub fn read_session_stats(
     }
     Ok(Some(SessionStats {
         schema_version: 2,
-        session_id: session_id.into(),
+        session_id: session_id
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         complete: missing.is_empty(),
         missing_data: missing.into_iter().collect(),
         totals,

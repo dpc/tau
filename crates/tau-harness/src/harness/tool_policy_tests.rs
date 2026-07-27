@@ -276,7 +276,9 @@ fn compaction_exact_and_tag_precedence_remains_independent() {
 #[test]
 fn compaction_prompt_snapshot_survives_later_role_changes() {
     let mut policy = policy_harness(&[], AgentRole::default());
-    let prompt_id: tau_proto::AgentPromptId = "prompt-compaction".into();
+    let prompt_id: tau_proto::AgentPromptId = "prompt-compaction"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     policy.harness.prompt_tool_specs.insert(
         prompt_id.clone(),
         vec![tagged_tool(
@@ -508,7 +510,9 @@ fn role_tool_tags_run_after_policy_before_groups_and_tools() {
 #[test]
 fn prompt_snapshot_lookup_is_strict_and_survives_role_changes() {
     let mut policy = policy_harness(&["shell:chatgpt"], AgentRole::default());
-    let prompt_id: tau_proto::AgentPromptId = "prompt-1".into();
+    let prompt_id: tau_proto::AgentPromptId = "prompt-1"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     policy.harness.prompt_tool_specs.insert(
         prompt_id.clone(),
         vec![tagged_tool("edit", true, &["shell:edit:line"])],
@@ -540,7 +544,9 @@ fn prompt_snapshot_lookup_is_strict_and_survives_role_changes() {
 #[test]
 fn prompt_snapshot_cleanup_removes_call_backreferences() {
     let mut policy = policy_harness(&[], AgentRole::default());
-    let prompt_id: tau_proto::AgentPromptId = "prompt-cleanup".into();
+    let prompt_id: tau_proto::AgentPromptId = "prompt-cleanup"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     policy.harness.prompt_tool_specs.insert(
         prompt_id.clone(),
         vec![tagged_tool("edit", true, &["shell:edit:line"])],
@@ -663,7 +669,9 @@ fn prompt_alias_resolution_does_not_prefer_an_internal_name() {
     aliased.model_visible_name = Some(ToolName::new("visible_b"));
     let mut other = tagged_tool("visible_b", true, &[]);
     other.model_visible_name = Some(ToolName::new("visible_c"));
-    let prompt_id: tau_proto::AgentPromptId = "alias-resolution".into();
+    let prompt_id: tau_proto::AgentPromptId = "alias-resolution"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     policy
         .harness
         .prompt_tool_specs

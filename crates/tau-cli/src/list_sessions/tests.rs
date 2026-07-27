@@ -4,26 +4,28 @@ use super::*;
 
 fn session(session_id: &str, project_root: impl Into<PathBuf>) -> RunningSession {
     RunningSession {
-        session_id: session_id.into(),
+        session_id: session_id
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         project_root: project_root.into(),
     }
 }
 
-/// Bare output remains sorted, deduplicated, headerless, and control-safe even
+/// Bare output remains sorted, deduplicated, and headerless even
 /// when multiple responsive harnesses report the same current session id.
 #[test]
 fn human_output_preserves_running_session_list_contract() {
     let output = render(
         &[
             session("z-session", "/work/z"),
-            session("a\nsession", "/work/a"),
-            session("a\nsession", "/work/duplicate"),
+            session("a_session", "/work/a"),
+            session("a_session", "/work/duplicate"),
         ],
         &crate::cli::SessionListArgs::default(),
     )
     .expect("human output");
 
-    assert_eq!(output, "a\\nsession\nz-session\n");
+    assert_eq!(output, "a_session\nz-session\n");
 }
 
 /// JSON always emits one array with the two required stable fields and retains

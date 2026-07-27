@@ -1,6 +1,26 @@
 //! Focused helpers for compact explicit-observation projection.
 
+use tau_proto::{AgentMessageKind, AgentMessageRecipient, ContentPart, ContextRole};
+
 use super::*;
+
+/// Wraps family records in deterministic common timing for serialization tests.
+fn timed_records(records: Vec<Record>) -> Vec<TimedRecord> {
+    records
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| TimedRecord {
+            common: RecordCommon {
+                at_us: index as u64,
+                recorded_at_unix_micros: Some(1_000 + index as u64),
+                agent_id: AgentId::parse("agent-a").expect("agent"),
+                journal_seq: index as u64,
+                item_index: None,
+            },
+            record,
+        })
+        .collect()
+}
 
 fn id(byte: u8) -> ObservationId {
     ObservationId::from_bytes([byte; 16])
@@ -14,6 +34,135 @@ fn fact(agent: &str, byte: u8, seq: u64, at: u64, event: Event) -> Fact {
         seq: PersistedAgentEventSeq::new(seq),
         event,
     }
+}
+
+/// Equal timestamp/owner/sequence/item prefixes must use the exact approved
+/// family order rather than declaration or insertion order.
+#[test]
+fn record_family_rank_uses_approved_equal_prefix_order() {
+    let mut ranks = [
+        RecordRank::Relationship,
+        RecordRank::MessageReceived,
+        RecordRank::Call,
+        RecordRank::Activation,
+        RecordRank::AssistantReasoning,
+        RecordRank::MessageSent,
+        RecordRank::AssistantMessage,
+    ];
+    ranks.sort_unstable();
+    assert_eq!(
+        ranks,
+        [
+            RecordRank::Call,
+            RecordRank::AssistantMessage,
+            RecordRank::AssistantReasoning,
+            RecordRank::MessageSent,
+            RecordRank::MessageReceived,
+            RecordRank::Activation,
+            RecordRank::Relationship,
+        ]
+    );
+}
+
+/// Semantic projection must preserve provider item order, directional message
+/// identity, complete-text metrics, and the origin established by omitted
+/// facts.
+#[test]
+fn semantic_items_share_global_journal_timing_and_order() {
+    let mut provider = declaration("agent-a", 2, 1, "unused");
+    provider.at = UnixMicros::new(10);
+    let Event::ProviderResponseFinished(response) = &mut provider.event else {
+        panic!("declaration helper must create a provider finish");
+    };
+    response.output_items = vec![
+        ContextItem::Message(tau_proto::MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![
+                ContentPart::Text {
+                    text: "hello ".into(),
+                },
+                ContentPart::Text {
+                    text: "world".into(),
+                },
+            ],
+            phase: Some(tau_proto::MessagePhase::Commentary),
+            responses_raw_json: Some("must-not-project".into()),
+        }),
+        ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: "because".into(),
+        }),
+        ContextItem::Reasoning(tau_proto::OpaqueProviderItem::new(CborValue::Text(
+            "opaque".into(),
+        ))),
+    ];
+    let sent = fact(
+        "agent-a",
+        3,
+        2,
+        20,
+        Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            message_id: "message-1".into(),
+            sender_id: AgentId::parse("agent-a").expect("agent"),
+            recipient: AgentMessageRecipient::Agent {
+                agent_id: AgentId::parse("agent-b").expect("agent"),
+            },
+            kind: AgentMessageKind::Message,
+            message: "outbound".into(),
+        }),
+    );
+    let received = fact(
+        "agent-b",
+        4,
+        0,
+        15,
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "message-1".into(),
+            sender_id: AgentId::parse("agent-a").expect("agent"),
+            sender_session_id: None,
+            recipient_id: AgentId::parse("agent-b").expect("agent"),
+            kind: AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: "outbound".into(),
+        }),
+    );
+    let omitted_origin = fact("agent-a", 1, 0, 1, Event::TermBell(tau_proto::TermBell {}));
+
+    let records = project_facts(
+        vec![sent, received, provider, omitted_origin],
+        super::super::AgentTraceMode::Lite,
+    )
+    .expect("semantic projection")
+    .into_iter()
+    .map(|record| serde_json::to_value(record).expect("record JSON"))
+    .collect::<Vec<_>>();
+
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record["record_type"].as_str().expect("record type"))
+            .collect::<Vec<_>>(),
+        [
+            "assistant_message",
+            "assistant_reasoning",
+            "message_received",
+            "message_sent",
+        ]
+    );
+    assert_eq!(records[0]["at_us"], 9);
+    assert_eq!(records[0]["recorded_at_unix_micros"], 10);
+    assert_eq!(records[0]["journal_seq"], 1);
+    assert_eq!(records[0]["item_index"], 0);
+    assert_eq!(records[0]["text"], "hello world");
+    assert_eq!(records[0]["text_bytes"], 11);
+    assert_eq!(records[0]["text_lines"], 1);
+    assert_eq!(records[0]["text_complete"], true);
+    assert!(records[0].get("responses_raw_json").is_none());
+    assert_eq!(records[1]["reasoning_kind"], "summary");
+    assert_eq!(records[2]["message_id"], "message-1");
+    assert_eq!(records[3]["recipient_kind"], "agent");
+    assert_eq!(records[3]["recipient_id"], "agent-b");
 }
 
 fn assert_projection_error(facts: Vec<Fact>, expected: &str) {
@@ -39,7 +188,9 @@ fn declaration(agent: &str, byte: u8, seq: u64, call_id: &str) -> Fact {
         seq,
         seq + 1,
         Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
-            agent_prompt_id: format!("prompt-{call_id}").into(),
+            agent_prompt_id: format!("prompt-{call_id}")
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: AgentId::parse(agent).expect("agent id"),
             output_items: vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
                 call_id: call_id.into(),
@@ -212,11 +363,12 @@ fn projected_payload_transformations_match_json_and_toon() {
             record_type: "header",
             root_agent_id: &agent_id,
             included_agent_ids: vec![&agent_id],
-            output: match mode {
+            content: match mode {
                 super::super::AgentTraceMode::Lite => "lite",
                 super::super::AgentTraceMode::Full => "full",
             },
             time_unit: "microseconds",
+            absolute_time: "unix_epoch_microseconds_at_journal_append_invocation",
             timing_basis: "producer_wall_clock_at_observation",
             causality: "explicit_observation_refs_only",
         };
@@ -224,7 +376,7 @@ fn projected_payload_transformations_match_json_and_toon() {
         toon::write(&header, records, &mut encoded).expect("TOON");
         let decoded: serde_json::Value =
             serde_toon::from_str(std::str::from_utf8(&encoded).expect("UTF-8")).expect("TOON");
-        let toon_call = &decoded["records"][0];
+        let toon_call = &decoded["items"][0];
         let toon_output = if let Some(output) = toon_call["output_base64"].as_str() {
             base64::engine::general_purpose::STANDARD
                 .decode(output)
@@ -1572,16 +1724,28 @@ fn toon_frames_control_bearing_payload_fields() {
         record_type: "header",
         root_agent_id: &root_agent_id,
         included_agent_ids: vec![],
-        output: "full",
+        content: "full",
         time_unit: "microseconds",
+        absolute_time: "unix_epoch_microseconds_at_journal_append_invocation",
         timing_basis: "producer_wall_clock_at_observation",
         causality: "explicit_observation_refs_only",
     };
     let arguments = serde_json::json!({"nested": "arg\u{1b}[31m"});
+    let semantic = semantic::project_message_event(
+        &Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            message_id: "message\u{1b}".into(),
+            sender_id: root_agent_id.clone(),
+            recipient: AgentMessageRecipient::User,
+            kind: AgentMessageKind::Message,
+            message: "secret\u{7}".into(),
+        }),
+        super::super::AgentTraceMode::Full,
+    )
+    .expect("semantic message")
+    .record;
     let records = vec![
         Record::Call(CallRecord {
             record_type: "call",
-            agent_id: root_agent_id.clone(),
             call: call(1),
             call_id: "call\u{1b}".into(),
             tool: tau_proto::ToolName::new("test"),
@@ -1604,7 +1768,6 @@ fn toon_frames_control_bearing_payload_fields() {
         }),
         Record::Call(CallRecord {
             record_type: "call",
-            agent_id: root_agent_id.clone(),
             call: call(3),
             call_id: "lite-control".into(),
             tool: tau_proto::ToolName::new("test"),
@@ -1629,7 +1792,6 @@ fn toon_frames_control_bearing_payload_fields() {
         }),
         Record::Call(CallRecord {
             record_type: "call",
-            agent_id: root_agent_id.clone(),
             call: call(5),
             call_id: "full-multiline".into(),
             tool: tau_proto::ToolName::new("test"),
@@ -1650,15 +1812,17 @@ fn toon_frames_control_bearing_payload_fields() {
                 },
             },
         }),
+        Record::Semantic(semantic),
     ];
 
+    let records = timed_records(records);
     let mut encoded = Vec::new();
     toon::write(&header, records, &mut encoded).expect("TOON");
     assert!(!encoded.contains(&0x1b));
     assert!(!encoded.contains(&0x07));
     let decoded: serde_json::Value =
         serde_toon::from_str(std::str::from_utf8(&encoded).expect("UTF-8")).expect("strict TOON");
-    let record = &decoded["records"][0];
+    let record = &decoded["items"][0];
     for (field, expected) in [
         ("call_id_base64", b"call\x1b".as_slice()),
         ("command_base64", b"printf \x07".as_slice()),
@@ -1684,7 +1848,7 @@ fn toon_frames_control_bearing_payload_fields() {
         .expect("JSON"),
         arguments
     );
-    let lite = &decoded["records"][1];
+    let lite = &decoded["items"][1];
     assert_eq!(lite["output_bytes"], 12);
     assert_eq!(lite["output_lines"], 2);
     assert_eq!(lite["output_complete"], false);
@@ -1694,7 +1858,22 @@ fn toon_frames_control_bearing_payload_fields() {
             .expect("Base64"),
         b"line1\nline2\x1b"
     );
-    assert_eq!(decoded["records"][2]["output"], "line1\nline2");
+    assert_eq!(decoded["items"][2]["output"], "line1\nline2");
+    let semantic = &decoded["items"][3];
+    assert!(semantic.get("message_id").is_none());
+    assert!(semantic.get("text").is_none());
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(semantic["message_id_base64"].as_str().expect("message id"))
+            .expect("Base64"),
+        b"message\x1b"
+    );
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(semantic["text_base64"].as_str().expect("text"))
+            .expect("Base64"),
+        b"secret\x07"
+    );
 }
 
 /// JSON and TOON preserve every relationship-family record without relying on
@@ -1708,8 +1887,9 @@ fn toon_preserves_all_relationship_families() {
         record_type: "header",
         root_agent_id: &agent_id,
         included_agent_ids: vec![&agent_id],
-        output: "lite",
+        content: "lite",
         time_unit: "microseconds",
+        absolute_time: "unix_epoch_microseconds_at_journal_append_invocation",
         timing_basis: "producer_wall_clock_at_observation",
         causality: "explicit_observation_refs_only",
     };
@@ -1717,7 +1897,6 @@ fn toon_preserves_all_relationship_families() {
         Record::Relationship(RelationshipRecord::WaitObservation(WaitObservationRecord {
             record_type: "relationship",
             relationship: "wait_observation",
-            agent_id: agent_id.clone(),
             observation_id: id(1),
             wait_call: call(1),
             mode: tau_proto::ToolWaitMode::NextBackground,
@@ -1726,7 +1905,6 @@ fn toon_preserves_all_relationship_families() {
             WaitRegistrationRecord {
                 record_type: "relationship",
                 relationship: "wait_registration",
-                agent_id: agent_id.clone(),
                 observation_id: id(2),
                 wait_observation: id(1),
                 wait_call: call(1),
@@ -1738,7 +1916,6 @@ fn toon_preserves_all_relationship_families() {
         Record::Relationship(RelationshipRecord::WaitSettlement(WaitSettlementRecord {
             record_type: "relationship",
             relationship: "wait_settlement",
-            agent_id: agent_id.clone(),
             observation_id: id(3),
             wait_observation: id(1),
             wait_call: call(1),
@@ -1753,15 +1930,15 @@ fn toon_preserves_all_relationship_families() {
             CancellationRequestedRecord {
                 record_type: "relationship",
                 relationship: "cancellation_requested",
-                agent_id: agent_id.clone(),
                 observation_id: id(5),
                 cancel_call: call(5),
                 target_call: call(1),
             },
         )),
     ];
+    let records = timed_records(records);
     let mut expected = serde_json::to_value(&header).expect("header JSON");
-    expected["records"] = serde_json::to_value(&records).expect("record JSON");
+    expected["items"] = serde_json::to_value(&records).expect("record JSON");
     let mut encoded = Vec::new();
     toon::write(&header, records, &mut encoded).expect("TOON");
     let actual: serde_json::Value =

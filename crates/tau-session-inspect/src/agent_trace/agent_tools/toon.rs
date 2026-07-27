@@ -1,18 +1,20 @@
-//! TOON serialization for the compact explicit-observation projection.
+//! TOON serialization for the compact semantic/correlation projection.
 
 use base64::Engine as _;
 use serde::Serialize;
 
+use super::semantic::ToonSemanticRecord;
 use super::{
     ActivationRecord, CallLifecycleRecord, CallOutputRecord, CallRecord, CallStatus, Header,
-    IncompleteCallStatus, LocalResolution, Record, RelationshipRecord, UnavailableResolution,
+    IncompleteCallStatus, LocalResolution, Record, RecordCommon, RelationshipRecord, TimedRecord,
+    UnavailableResolution,
 };
 use crate::InspectError;
 
 /// Writes one TOON document containing the same semantic records as JSONL.
 pub(super) fn write(
     header: &Header<'_>,
-    records: Vec<Record>,
+    records: Vec<TimedRecord>,
     output: &mut impl std::io::Write,
 ) -> Result<(), InspectError> {
     writeln!(
@@ -20,9 +22,9 @@ pub(super) fn write(
         "{}",
         serde_toon::to_string(header).map_err(toon_error)?
     )?;
-    writeln!(output, "records[{}]:", records.len())?;
+    writeln!(output, "items[{}]:", records.len())?;
     for record in records {
-        let encoded = serde_toon::to_string(&ToonRecord::from(record)).map_err(toon_error)?;
+        let encoded = serde_toon::to_string(&ToonTimedRecord::from(record)).map_err(toon_error)?;
         for (index, line) in encoded.lines().enumerate() {
             writeln!(
                 output,
@@ -35,6 +37,26 @@ pub(super) fn write(
     Ok(())
 }
 
+/// Common occurrence envelope around one TOON-safe family payload.
+#[derive(Serialize)]
+struct ToonTimedRecord {
+    /// Trace-relative and absolute journal timing.
+    #[serde(flatten)]
+    common: RecordCommon,
+    /// Family-specific record with payload safety framing applied.
+    #[serde(flatten)]
+    record: ToonRecord,
+}
+
+impl From<TimedRecord> for ToonTimedRecord {
+    fn from(record: TimedRecord) -> Self {
+        Self {
+            common: record.common,
+            record: record.record.into(),
+        }
+    }
+}
+
 /// Typed TOON record set with explicit direct/Base64 payload variants.
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -45,6 +67,8 @@ enum ToonRecord {
     Activation(ActivationRecord),
     /// A content-free relationship record shared with JSONL.
     Relationship(RelationshipRecord),
+    /// A semantic item with TOON-unsafe payload fields framed as Base64.
+    Semantic(ToonSemanticRecord),
 }
 
 impl From<Record> for ToonRecord {
@@ -53,6 +77,7 @@ impl From<Record> for ToonRecord {
             Record::Call(call) => Self::Call(call.into()),
             Record::Activation(activation) => Self::Activation(activation),
             Record::Relationship(relationship) => Self::Relationship(relationship),
+            Record::Semantic(semantic) => Self::Semantic(semantic.into()),
         }
     }
 }
@@ -62,8 +87,6 @@ impl From<Record> for ToonRecord {
 struct ToonCallRecord {
     /// Fixed `call` discriminator.
     record_type: &'static str,
-    /// Journal-local agent owner.
-    agent_id: tau_proto::AgentId,
     /// Exact provider declaration occurrence.
     call: tau_proto::ToolCallRef,
     /// Direct or Base64 display call ID.
@@ -92,7 +115,6 @@ impl From<CallRecord> for ToonCallRecord {
     fn from(call: CallRecord) -> Self {
         let CallRecord {
             record_type,
-            agent_id,
             call,
             call_id,
             tool,
@@ -104,7 +126,6 @@ impl From<CallRecord> for ToonCallRecord {
         } = call;
         Self {
             record_type,
-            agent_id,
             call,
             call_id: ToonCallId::new(call_id),
             tool,
@@ -397,6 +418,6 @@ fn is_unsafe_toon_char(character: char) -> bool {
 
 fn toon_error(error: serde_toon::Error) -> InspectError {
     InspectError::Trace(crate::AgentTraceError::Projection(format!(
-        "failed to serialize compact agent tool TOON: {error}"
+        "failed to serialize compact semantic trace TOON: {error}"
     )))
 }

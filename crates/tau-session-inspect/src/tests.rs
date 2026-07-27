@@ -88,7 +88,9 @@ fn append_trace_prompt_lifecycle(
             Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
                 agent_id: agent_id.clone(),
                 transaction_id: None,
-                agent_prompt_id: prompt_id.into(),
+                agent_prompt_id: prompt_id
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 through: tau_proto::AgentHead::Root,
                 model: Some("provider/model".into()),
                 operation: Some(tau_proto::PromptOperation::Inference),
@@ -103,9 +105,13 @@ fn append_trace_prompt_lifecycle(
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
-                agent_prompt_id: prompt_id.into(),
+                agent_prompt_id: prompt_id
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 agent_id: agent_id.clone(),
-                session_id: "trace-session".into(),
+                session_id: "trace-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 model: "provider/model".into(),
                 model_params: Some(Default::default()),
                 outer_turn_id: None,
@@ -137,7 +143,9 @@ fn append_trace_compaction_prompt(
                 agent_id: agent_id.clone(),
                 transaction_id: tau_proto::CompactionTransactionId::parse("compact-transaction")
                     .expect("transaction id"),
-                compact_prompt_id: prompt_id.into(),
+                compact_prompt_id: prompt_id
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 cut: tau_proto::AgentHead::Root,
                 resume_through: None,
                 model: "provider/model".into(),
@@ -155,9 +163,13 @@ fn append_trace_compaction_prompt(
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
-                agent_prompt_id: prompt_id.into(),
+                agent_prompt_id: prompt_id
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 agent_id: agent_id.clone(),
-                session_id: "trace-session".into(),
+                session_id: "trace-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 model: "provider/model".into(),
                 model_params: Some(Default::default()),
                 outer_turn_id: None,
@@ -187,7 +199,9 @@ fn append_trace_provider_terminal(
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
-                agent_prompt_id: prompt_id.into(),
+                agent_prompt_id: prompt_id
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 agent_id: agent_id.clone(),
                 output_items: vec![assistant_message("private response")],
                 stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -231,7 +245,9 @@ fn append_background_tool_calls(
             agent_id.as_str(),
             None,
             Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
-                agent_prompt_id: "prompt-background".into(),
+                agent_prompt_id: "prompt-background"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 agent_id: agent_id.clone(),
                 output_items: calls
                     .iter()
@@ -391,7 +407,11 @@ fn missing_inspection_roots_are_reported_without_creating_them() {
         vec!["no sessions"]
     );
     assert_eq!(
-        session_lines(&sessions_dir, "default").expect("session lines"),
+        session_lines(
+            &sessions_dir,
+            &tau_proto::SessionId::parse("default").expect("session id"),
+        )
+        .expect("session lines"),
         vec!["session default not found"]
     );
     assert!(
@@ -411,7 +431,13 @@ fn invalid_inspection_roots_return_errors() {
     let sessions_dir = file_parent.join("sessions");
 
     assert!(session_list_lines(&sessions_dir).is_err());
-    assert!(session_lines(&sessions_dir, "default").is_err());
+    assert!(
+        session_lines(
+            &sessions_dir,
+            &tau_proto::SessionId::parse("default").expect("session id")
+        )
+        .is_err()
+    );
 }
 
 /// Native trace output keeps complete prompt content, emits independently
@@ -478,7 +504,9 @@ fn agent_trace_descendants_use_creator_not_parent_agent() {
         temp.path(),
         "agent-child",
         tau_proto::AgentCreator::Agent {
-            session_id: "session-child".into(),
+            session_id: "session-child"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: AgentId::parse("agent-root").expect("agent id"),
         },
         None,
@@ -488,7 +516,9 @@ fn agent_trace_descendants_use_creator_not_parent_agent() {
         temp.path(),
         "agent-grandchild",
         tau_proto::AgentCreator::Agent {
-            session_id: "session-grandchild".into(),
+            session_id: "session-grandchild"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: AgentId::parse("agent-child").expect("agent id"),
         },
         None,
@@ -541,7 +571,9 @@ fn agent_trace_descendants_ignore_unrelated_legacy_creation_record() {
         temp.path(),
         "agent-child",
         tau_proto::AgentCreator::Agent {
-            session_id: "session-child".into(),
+            session_id: "session-child"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: AgentId::parse("agent-root").expect("agent id"),
         },
         None,
@@ -587,7 +619,9 @@ fn agent_trace_descendants_reject_reachable_corrupt_journal() {
         temp.path(),
         "agent-child",
         tau_proto::AgentCreator::Agent {
-            session_id: "session-child".into(),
+            session_id: "session-child"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: AgentId::parse("agent-root").expect("agent id"),
         },
         None,
@@ -639,7 +673,9 @@ fn agent_trace_descendants_reject_membership_change_during_snapshot() {
                 temp.path(),
                 "agent-late-child",
                 tau_proto::AgentCreator::Agent {
-                    session_id: "session-child".into(),
+                    session_id: "session-child"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     agent_id: root_id.clone(),
                 },
                 None,
@@ -893,7 +929,9 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
         "agent-child",
         tau_proto::AgentCreator::Agent {
             agent_id: AgentId::parse("agent-root").expect("root id"),
-            session_id: "trace-session".into(),
+            session_id: "trace-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
         },
         Some("agent-root"),
         2,
@@ -1267,7 +1305,8 @@ fn session_list_isolates_invalid_session_journals() {
                 Event::SessionAgentLoaded(SessionAgentLoaded {
                     agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                    session_id: SessionId::from(session_id),
+                    session_id: SessionId::parse(session_id)
+                        .expect("known-safe SessionId must be valid"),
                     agent_id: AgentId::parse(agent_id).expect("agent id"),
                     ephemeral: false,
                 }),

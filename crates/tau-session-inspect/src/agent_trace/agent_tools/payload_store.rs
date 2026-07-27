@@ -1,4 +1,4 @@
-//! Anonymous payload staging for compact agent-tool projection.
+//! Anonymous payload staging support for compact semantic projection.
 
 use std::io::{Read as _, Seek as _, Write as _};
 
@@ -56,6 +56,6 @@ impl PayloadStore {
 /// Wraps anonymous staging failures as trace projection errors.
 fn projection_error(error: impl std::fmt::Display) -> InspectError {
     InspectError::Trace(crate::AgentTraceError::Projection(format!(
-        "failed to stage compact agent tool trace: {error}"
+        "failed to stage compact semantic trace: {error}"
     )))
 }

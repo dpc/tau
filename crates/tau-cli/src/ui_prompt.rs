@@ -34,14 +34,14 @@ pub(crate) struct CreateUserAgentPromptOptions {
 /// Build the standard user-originated create-agent event used by interactive
 /// chat and one-shot/headless prompt submission paths.
 pub(crate) fn create_user_agent_prompt(
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     role: impl Into<String>,
     prompt: impl Into<String>,
     options: CreateUserAgentPromptOptions,
 ) -> Event {
     Event::UiCreateAgent(UiCreateAgent {
         parent_agent: None,
-        session_id: session_id.into(),
+        session_id: session_id.clone(),
         role: role.into(),
         model_override: options.model_override,
         metadata: Vec::new(),
@@ -70,7 +70,7 @@ mod tests {
     fn create_user_agent_prompt_preserves_model_override() {
         let model: tau_proto::ModelId = "test/override".parse().expect("model id");
         let Event::UiCreateAgent(req) = create_user_agent_prompt(
-            "s1",
+            &tau_proto::SessionId::parse("s1").expect("test session id"),
             "engineer",
             "hello",
             CreateUserAgentPromptOptions {
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn create_user_agent_prompt_preserves_ephemeral_flag() {
         let Event::UiCreateAgent(req) = create_user_agent_prompt(
-            "s1",
+            &tau_proto::SessionId::parse("s1").expect("test session id"),
             "engineer",
             "hello",
             CreateUserAgentPromptOptions {

@@ -887,17 +887,24 @@ fn send_daemon_message_prompt(
     message: &str,
     ctx_id: &str,
 ) -> Result<(), HarnessError> {
+    let session_id = tau_proto::SessionId::parse(session_id).map_err(|error| {
+        HarnessError::Participant(format!("invalid daemon-message session id: {error}"))
+    })?;
     peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
         daemon_message_create_agent(session_id, message, ctx_id),
     )))?;
     Ok(())
 }
 
-fn daemon_message_create_agent(session_id: &str, message: &str, ctx_id: &str) -> UiCreateAgent {
+fn daemon_message_create_agent(
+    session_id: tau_proto::SessionId,
+    message: &str,
+    ctx_id: &str,
+) -> UiCreateAgent {
     UiCreateAgent {
         literal: false,
         parent_agent: None,
-        session_id: session_id.into(),
+        session_id,
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),

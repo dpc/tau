@@ -1,5 +1,6 @@
-//! Compact, explicit-observation tool trace projection.
+//! Compact semantic timeline with explicit observation correlation.
 
+mod semantic;
 mod toon;
 
 // Keep test-only modules after every production module.
@@ -12,9 +13,10 @@ use serde::Serialize;
 use tau_core::{AgentJournalSnapshot, PersistedAgentEventSeq};
 use tau_proto::{AgentId, CborValue, ContextItem, Event, ObservationId, ToolCallRef, UnixMicros};
 
+use self::semantic::SemanticRecord;
 use crate::InspectError;
 
-const SCHEMA: &str = "tau.agent_tools";
+const SCHEMA: &str = "tau.agent_trace_compact";
 const LITE_OUTPUT_BYTES: usize = 4 * 1024;
 
 /// First-line metadata shared by both compact encodings.
@@ -31,9 +33,11 @@ pub(super) struct Header<'a> {
     /// Deterministically selected journal identities.
     included_agent_ids: Vec<&'a AgentId>,
     /// Selected payload detail.
-    output: &'static str,
+    content: &'static str,
     /// Unit used by qualified intervals.
     time_unit: &'static str,
+    /// Source and meaning of absolute item timestamps.
+    absolute_time: &'static str,
     /// Origin of timestamps used for intervals.
     timing_basis: &'static str,
     /// Only permitted source of causal edges.
@@ -53,8 +57,9 @@ impl<'a> Header<'a> {
             record_type: "header",
             root_agent_id: root,
             included_agent_ids: snapshot.agent_ids().collect(),
-            output: mode.label(),
+            content: mode.label(),
             time_unit: "microseconds",
+            absolute_time: "unix_epoch_microseconds_at_journal_append_invocation",
             timing_basis: "producer_wall_clock_at_observation",
             causality: "explicit_observation_refs_only",
         }
@@ -76,17 +81,82 @@ struct Fact {
     event: Event,
 }
 
-/// A completely materialized semantic record used identically by JSONL and
-/// TOON.
+/// Canonical materialized semantic record serialized directly by JSONL and
+/// converted exhaustively into TOON-safe typed variants.
 #[derive(Clone, Serialize)]
 #[serde(untagged)]
-pub(super) enum Record {
+enum Record {
     /// One provider-declared tool call.
     Call(CallRecord),
     /// One accepted inference activation.
     Activation(ActivationRecord),
     /// One explicit correlation edge.
     Relationship(RelationshipRecord),
+    /// One assistant/reasoning/inter-agent semantic occurrence.
+    Semantic(SemanticRecord),
+}
+
+/// Common journal identity and timing attached to every emitted occurrence.
+#[derive(Clone, Serialize)]
+struct RecordCommon {
+    /// Nonnegative offset from the minimum selected journal timestamp.
+    at_us: u64,
+    /// Original Unix-epoch sample at journal append invocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_at_unix_micros: Option<u64>,
+    /// Journal that owns the occurrence.
+    agent_id: AgentId,
+    /// Authoritative order within the owning journal.
+    journal_seq: u64,
+    /// Provider output position, when the occurrence came from a response item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_index: Option<u64>,
+}
+
+/// One fully projected record with the common occurrence envelope.
+#[derive(Clone, Serialize)]
+struct TimedRecord {
+    /// Common occurrence identity and timing.
+    #[serde(flatten)]
+    common: RecordCommon,
+    /// Family-specific semantic payload.
+    #[serde(flatten)]
+    record: Record,
+}
+
+/// Internal projected record retaining its deterministic presentation key.
+struct KeyedRecord {
+    /// Original append-invocation wall-clock sample.
+    recorded_at: UnixMicros,
+    /// Owning journal identity.
+    agent_id: AgentId,
+    /// Owning journal sequence.
+    journal_seq: PersistedAgentEventSeq,
+    /// Provider output position, absent for event-level occurrences.
+    item_index: Option<u64>,
+    /// Stable family rank for the remaining same-occurrence tie.
+    tie_rank: RecordRank,
+    /// Family-specific projected record.
+    record: Record,
+}
+
+/// Stable record-family rank used only after every stronger sort-key component.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum RecordRank {
+    /// Provider-declared call.
+    Call,
+    /// Assistant prose.
+    AssistantMessage,
+    /// Displayable reasoning.
+    AssistantReasoning,
+    /// Accepted sender-side message.
+    MessageSent,
+    /// Accepted recipient-side message.
+    MessageReceived,
+    /// Accepted activation.
+    Activation,
+    /// Explicit observation relationship.
+    Relationship,
 }
 
 /// Typed resolution of one selected observation reference.
@@ -141,8 +211,6 @@ enum RegistrationOutcome {
 pub(super) struct CallRecord {
     /// Record discriminator.
     record_type: &'static str,
-    /// Journal that owns the provider declaration.
-    agent_id: AgentId,
     /// Stable declaration occurrence and output-item index.
     call: ToolCallRef,
     /// Provider display/routing identifier.
@@ -274,8 +342,6 @@ impl Serialize for CompleteOutput {
 struct CallProjection {
     /// Fixed record discriminator.
     record_type: &'static str,
-    /// Selected declaration journal.
-    agent_id: AgentId,
     /// Exact provider declaration occurrence.
     call: ToolCallRef,
     /// Provider display/routing ID.
@@ -365,7 +431,6 @@ impl CallProjection {
         };
         CallRecord {
             record_type: self.record_type,
-            agent_id: self.agent_id,
             call: self.call,
             call_id: self.call_id,
             tool: self.tool,
@@ -383,8 +448,6 @@ impl CallProjection {
 pub(super) struct ActivationRecord {
     /// Record discriminator.
     record_type: &'static str,
-    /// Journal that owns the activation.
-    agent_id: AgentId,
     /// Activation observation identity.
     observation_id: ObservationId,
     /// Typed activation class.
@@ -451,8 +514,6 @@ pub(super) struct WaitObservationRecord {
     record_type: &'static str,
     /// Relationship discriminator.
     relationship: &'static str,
-    /// Journal owner that defines relationship locality.
-    agent_id: AgentId,
     /// Observation identity.
     observation_id: ObservationId,
     /// Declared wait call.
@@ -467,8 +528,6 @@ pub(super) struct WaitRegistrationRecord {
     record_type: &'static str,
     /// Relationship discriminator.
     relationship: &'static str,
-    /// Journal owner that defines relationship locality.
-    agent_id: AgentId,
     /// Registration observation identity.
     observation_id: ObservationId,
     /// Pre-resolution wait observation.
@@ -489,8 +548,6 @@ pub(super) struct WaitSettlementRecord {
     record_type: &'static str,
     /// Relationship discriminator.
     relationship: &'static str,
-    /// Journal owner that defines relationship locality.
-    agent_id: AgentId,
     /// Settlement observation identity.
     observation_id: ObservationId,
     /// Pre-resolution wait observation.
@@ -573,8 +630,6 @@ pub(super) struct CancellationRequestedRecord {
     record_type: &'static str,
     /// Relationship discriminator.
     relationship: &'static str,
-    /// Journal owner that defines relationship locality.
-    agent_id: AgentId,
     /// Cancellation observation identity.
     observation_id: ObservationId,
     /// Declared cancel call.
@@ -616,7 +671,7 @@ pub(super) fn write_toon(
 fn collect(
     snapshot: &AgentJournalSnapshot,
     mode: super::AgentTraceMode,
-) -> Result<Vec<Record>, InspectError> {
+) -> Result<Vec<TimedRecord>, InspectError> {
     let mut facts = Vec::new();
     let mut ids = HashSet::new();
     for agent_id in snapshot.agent_ids() {
@@ -644,7 +699,49 @@ fn collect(
 fn project_facts(
     facts: Vec<Fact>,
     mode: super::AgentTraceMode,
-) -> Result<Vec<Record>, InspectError> {
+) -> Result<Vec<TimedRecord>, InspectError> {
+    let origin = facts
+        .iter()
+        .map(|fact| fact.at)
+        .min()
+        .unwrap_or_else(|| UnixMicros::new(0));
+    let mut records = project_keyed_facts(facts, mode)?;
+    records.sort_unstable_by(|a, b| {
+        (
+            a.recorded_at,
+            &a.agent_id,
+            a.journal_seq.get(),
+            a.item_index.unwrap_or(0),
+            a.tie_rank,
+        )
+            .cmp(&(
+                b.recorded_at,
+                &b.agent_id,
+                b.journal_seq.get(),
+                b.item_index.unwrap_or(0),
+                b.tie_rank,
+            ))
+    });
+    Ok(records
+        .into_iter()
+        .map(|record| TimedRecord {
+            common: RecordCommon {
+                at_us: record.recorded_at.get().saturating_sub(origin.get()),
+                recorded_at_unix_micros: (record.recorded_at.get() != 0)
+                    .then_some(record.recorded_at.get()),
+                agent_id: record.agent_id,
+                journal_seq: record.journal_seq.get(),
+                item_index: record.item_index,
+            },
+            record: record.record,
+        })
+        .collect())
+}
+
+fn project_keyed_facts(
+    facts: Vec<Fact>,
+    mode: super::AgentTraceMode,
+) -> Result<Vec<KeyedRecord>, InspectError> {
     let by_id: HashMap<_, _> = facts.iter().map(|f| (f.id, f)).collect();
     let mut calls = HashMap::<ToolCallRef, (&Fact, usize, &tau_proto::ToolCallItem)>::new();
     let mut call_order = Vec::new();
@@ -781,7 +878,6 @@ fn project_facts(
         };
         let mut value = CallProjection {
             record_type: "call",
-            agent_id: declaration.agent_id.clone(),
             call: call_ref,
             call_id: call.call_id.to_string(),
             tool: call.name.clone(),
@@ -853,7 +949,14 @@ fn project_facts(
                 None => value.terminal_resolution = Some(Resolution::SourceNotSelected),
             }
         }
-        records.push(Record::Call(value.into_record()));
+        records.push(KeyedRecord {
+            recorded_at: declaration.at,
+            agent_id: declaration.agent_id.clone(),
+            journal_seq: declaration.seq,
+            item_index: Some(u64::from(call_ref.item_index)),
+            tie_rank: RecordRank::Call,
+            record: Record::Call(value.into_record()),
+        });
     }
     let settled_registrations = facts
         .iter()
@@ -869,6 +972,30 @@ fn project_facts(
         })
         .collect::<HashSet<_>>();
     for fact in &facts {
+        if let Event::ProviderResponseFinished(response) = &fact.event {
+            for (item_index, item) in response.output_items.iter().enumerate() {
+                if let Some(projection) =
+                    semantic::project_provider_item(item, &response.agent_prompt_id, mode)
+                {
+                    records.push(KeyedRecord {
+                        recorded_at: fact.at,
+                        agent_id: fact.agent_id.clone(),
+                        journal_seq: fact.seq,
+                        item_index: Some(item_index as u64),
+                        tie_rank: projection.rank,
+                        record: Record::Semantic(projection.record),
+                    });
+                }
+            }
+        }
+        if let Some(projection) = semantic::project_message_event(&fact.event, mode) {
+            push_event_record(
+                &mut records,
+                fact,
+                projection.rank,
+                Record::Semantic(projection.record),
+            );
+        }
         match &fact.event {
             Event::AgentActivationQueued(e) => {
                 let source_is_fully_local = e.source_observation.is_some_and(|id| {
@@ -907,24 +1034,32 @@ fn project_facts(
                 };
                 let record = ActivationRecord {
                     record_type: "activation",
-                    agent_id: fact.agent_id.clone(),
                     observation_id: fact.id,
                     kind: e.kind,
                     source,
                 };
-                records.push(Record::Activation(record));
+                push_event_record(
+                    &mut records,
+                    fact,
+                    RecordRank::Activation,
+                    Record::Activation(record),
+                );
             }
             Event::AgentToolWaitObserved(e) => {
-                records.push(Record::Relationship(RelationshipRecord::WaitObservation(
-                    WaitObservationRecord {
-                        record_type: "relationship",
-                        relationship: "wait_observation",
-                        agent_id: fact.agent_id.clone(),
-                        observation_id: fact.id,
-                        wait_call: e.wait_call,
-                        mode: projected_wait_mode(fact, e.wait_call, &e.mode, &calls),
-                    },
-                )));
+                push_event_record(
+                    &mut records,
+                    fact,
+                    RecordRank::Relationship,
+                    Record::Relationship(RelationshipRecord::WaitObservation(
+                        WaitObservationRecord {
+                            record_type: "relationship",
+                            relationship: "wait_observation",
+                            observation_id: fact.id,
+                            wait_call: e.wait_call,
+                            mode: projected_wait_mode(fact, e.wait_call, &e.mode, &calls),
+                        },
+                    )),
+                );
             }
             Event::AgentToolWaitRegistered(e) => {
                 let is_fully_local =
@@ -936,19 +1071,23 @@ fn project_facts(
                 } else {
                     RegistrationOutcome::Incomplete
                 };
-                records.push(Record::Relationship(RelationshipRecord::WaitRegistration(
-                    WaitRegistrationRecord {
-                        record_type: "relationship",
-                        relationship: "wait_registration",
-                        agent_id: fact.agent_id.clone(),
-                        observation_id: fact.id,
-                        wait_observation: e.wait_observation,
-                        wait_call: e.wait_call,
-                        mode: projected_wait_mode(fact, e.wait_call, &e.mode, &calls),
-                        registration: RegistrationState::Active,
-                        outcome,
-                    },
-                )));
+                push_event_record(
+                    &mut records,
+                    fact,
+                    RecordRank::Relationship,
+                    Record::Relationship(RelationshipRecord::WaitRegistration(
+                        WaitRegistrationRecord {
+                            record_type: "relationship",
+                            relationship: "wait_registration",
+                            observation_id: fact.id,
+                            wait_observation: e.wait_observation,
+                            wait_call: e.wait_call,
+                            mode: projected_wait_mode(fact, e.wait_call, &e.mode, &calls),
+                            registration: RegistrationState::Active,
+                            outcome,
+                        },
+                    )),
+                );
             }
             Event::AgentToolWaitSettled(e) => {
                 let is_fully_local = settlement_is_fully_local(fact, e, &by_id, &calls);
@@ -973,39 +1112,64 @@ fn project_facts(
                     (true, Some(_) | None) => Resolution::SourceNotSelected,
                 };
                 let (outcome, active_wait_us) = wait_relationship(e, &by_id, fact, !is_fully_local);
-                records.push(Record::Relationship(RelationshipRecord::WaitSettlement(
-                    WaitSettlementRecord {
-                        record_type: "relationship",
-                        relationship: "wait_settlement",
-                        agent_id: fact.agent_id.clone(),
-                        observation_id: fact.id,
-                        wait_observation: e.wait_observation,
-                        wait_call: e.wait_call,
-                        registration,
-                        registration_ref: e.registration,
-                        wait_terminal: e.wait_terminal,
-                        wait_terminal_resolution: terminal_resolution,
-                        outcome,
-                        active_wait_us,
-                    },
-                )));
+                push_event_record(
+                    &mut records,
+                    fact,
+                    RecordRank::Relationship,
+                    Record::Relationship(RelationshipRecord::WaitSettlement(
+                        WaitSettlementRecord {
+                            record_type: "relationship",
+                            relationship: "wait_settlement",
+                            observation_id: fact.id,
+                            wait_observation: e.wait_observation,
+                            wait_call: e.wait_call,
+                            registration,
+                            registration_ref: e.registration,
+                            wait_terminal: e.wait_terminal,
+                            wait_terminal_resolution: terminal_resolution,
+                            outcome,
+                            active_wait_us,
+                        },
+                    )),
+                );
             }
             Event::AgentToolCancellationRequested(e) => {
-                records.push(Record::Relationship(
-                    RelationshipRecord::CancellationRequested(CancellationRequestedRecord {
-                        record_type: "relationship",
-                        relationship: "cancellation_requested",
-                        agent_id: fact.agent_id.clone(),
-                        observation_id: fact.id,
-                        cancel_call: e.cancel_call,
-                        target_call: e.target_call,
-                    }),
-                ));
+                push_event_record(
+                    &mut records,
+                    fact,
+                    RecordRank::Relationship,
+                    Record::Relationship(RelationshipRecord::CancellationRequested(
+                        CancellationRequestedRecord {
+                            record_type: "relationship",
+                            relationship: "cancellation_requested",
+                            observation_id: fact.id,
+                            cancel_call: e.cancel_call,
+                            target_call: e.target_call,
+                        },
+                    )),
+                );
             }
             _ => {}
         }
     }
     Ok(records)
+}
+
+/// Appends one event-level record with its owning journal sort key.
+fn push_event_record(
+    records: &mut Vec<KeyedRecord>,
+    fact: &Fact,
+    tie_rank: RecordRank,
+    record: Record,
+) {
+    records.push(KeyedRecord {
+        recorded_at: fact.at,
+        agent_id: fact.agent_id.clone(),
+        journal_seq: fact.seq,
+        item_index: None,
+        tie_rank,
+        record,
+    });
 }
 
 /// Reject ambiguous or contradictory explicit observations before projection.
@@ -1862,6 +2026,6 @@ fn projection_error<T>(message: String) -> Result<T, InspectError> {
 }
 fn json_error(error: serde_json::Error) -> InspectError {
     InspectError::Trace(crate::AgentTraceError::Projection(format!(
-        "failed to serialize compact agent tool trace: {error}"
+        "failed to serialize compact semantic trace: {error}"
     )))
 }

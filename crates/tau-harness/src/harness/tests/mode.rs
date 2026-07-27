@@ -207,7 +207,9 @@ fn ephemeral_agent_uses_memory_only_agent_and_membership_stores() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
@@ -271,7 +273,9 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     let mut h = quiet_provider_harness(&sp).expect("harness");
     let request = tau_proto::UiCreateAgent {
         literal: false,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
@@ -291,7 +295,9 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     });
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
@@ -329,9 +335,13 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
             model_params: Some(tau_proto::ModelParams::default()),
             outer_turn_id: None,
 
-            agent_prompt_id: "ephemeral-debug-prompt".into(),
+            agent_prompt_id: "ephemeral-debug-prompt"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: agent_id.clone(),
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             model: "test/model".parse().expect("model id"),
             operation: tau_proto::PromptOperation::Inference,
             originator: tau_proto::PromptOriginator::User,
@@ -404,7 +414,9 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
 
     let provider = "ephemeral-provider";
     connect_ready_configured_extension(&mut h, provider, provider, tau_proto::ClientKind::Provider);
-    let provider_prompt_id: AgentPromptId = "ephemeral-provider-prompt".into();
+    let provider_prompt_id: AgentPromptId = "ephemeral-provider-prompt"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     seed_agent_thinking(&mut h, &cid, provider_prompt_id.as_str());
     h.prompt_agents
         .insert(provider_prompt_id.clone(), cid.clone());
@@ -424,7 +436,9 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
             request_id: tau_proto::RetryPromptRequestId::parse("ephemeral-ui-retry")
                 .expect("retry id"),
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: Some(agent_id.clone()),
             agent_prompt_id: None,
         }),
@@ -618,7 +632,9 @@ fn tool_backed_start_agent_request_targets_ephemeral_agent() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
@@ -672,7 +688,9 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
     let mut h = quiet_provider_harness(&sp).expect("harness");
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
@@ -746,7 +764,9 @@ fn ephemeral_parent_start_agent_request_creates_ephemeral_child() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
@@ -805,7 +825,9 @@ fn ui_create_agent_inherits_ephemeral_parent_persistence() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
@@ -827,7 +849,9 @@ fn ui_create_agent_inherits_ephemeral_parent_persistence() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),

@@ -459,7 +459,7 @@ struct DraftRetargeter {
     /// Debounce mailbox owned by the CLI input/draft subsystem.
     handle: Arc<(Mutex<DraftSlot>, Condvar)>,
     /// Authoritative current session id shared with input routing.
-    session_id: Arc<Mutex<String>>,
+    session_id: Arc<Mutex<tau_proto::SessionId>>,
 }
 
 #[derive(Default)]
@@ -1564,7 +1564,7 @@ impl EventRenderer {
     pub(crate) fn set_draft_retargeter(
         &mut self,
         handle: Arc<(Mutex<DraftSlot>, Condvar)>,
-        session_id: Arc<Mutex<String>>,
+        session_id: Arc<Mutex<tau_proto::SessionId>>,
     ) {
         self.draft_retargeter = Some(DraftRetargeter { handle, session_id });
     }
@@ -2125,17 +2125,15 @@ impl EventRenderer {
         let Some(retargeter) = &self.draft_retargeter else {
             return;
         };
-        let session_id = retargeter
-            .session_id
-            .lock()
-            .map(|session_id| session_id.clone())
-            .unwrap_or_default();
+        let Ok(session_id) = retargeter.session_id.lock().map(|id| id.clone()) else {
+            return;
+        };
         let target_agent_id = self.current_agent_id.as_deref().map(|agent_id| {
             tau_proto::AgentId::parse(agent_id).expect("renderer stores valid agent ids")
         });
         retarget_prompt_draft_snapshot(
             retargeter.handle.as_ref(),
-            session_id.into(),
+            session_id,
             target_agent_id,
             self.handle.get_buffer(),
         );
@@ -2530,7 +2528,7 @@ impl EventRenderer {
                     .session_id
                     .lock()
                     .ok()
-                    .map(|session_id| tau_proto::SessionId::from(session_id.clone()))
+                    .map(|session_id| session_id.clone())
             })
             .or_else(|| self.current_session_id.clone());
         if let Some(session_id) = effective_session_id {
@@ -5054,7 +5052,7 @@ impl EventRenderer {
         if let Some(retargeter) = &self.draft_retargeter
             && let Ok(mut active_session) = retargeter.session_id.lock()
         {
-            *active_session = session_id.to_string();
+            active_session.clone_from(session_id);
             invalidate_pending_draft(retargeter.handle.as_ref());
         }
         self.render_right_prompt_context(session_id);

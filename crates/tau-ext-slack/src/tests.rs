@@ -3569,7 +3569,9 @@ fn run_replayed_lifecycle_event_does_not_clear_registration() {
             HarnessOutputMessage::deliver_replay(
                 tau_proto::UnixMicros::new(1_700_000_000_000_000),
                 Event::SessionShutdown(tau_proto::SessionShutdown {
-                    session_id: "s1".into(),
+                    session_id: "s1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                 }),
             ),
             HarnessOutputMessage::deliver(Event::ToolStarted(tool(

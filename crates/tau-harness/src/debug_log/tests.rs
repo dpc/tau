@@ -257,7 +257,8 @@ fn harness_and_published_logging_observe_append_failures_consistently() {
         ..AppendFault::default()
     });
     let event = Event::ProviderResponseUpdated(ProviderResponseUpdated {
-        agent_prompt_id: AgentPromptId::from("sp-0"),
+        agent_prompt_id: AgentPromptId::parse("sp-0")
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         deltas: Vec::new(),
         compaction: None,
@@ -280,7 +281,8 @@ fn published_line_preserves_enriched_token_usage() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: AgentPromptId::from("sp-0"),
+        agent_prompt_id: AgentPromptId::parse("sp-0")
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: Vec::new(),
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -346,7 +348,8 @@ fn published_line_compacts_long_strings() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let event = Event::ProviderResponseUpdated(ProviderResponseUpdated {
-        agent_prompt_id: AgentPromptId::from("sp-0"),
+        agent_prompt_id: AgentPromptId::parse("sp-0")
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         deltas: vec![
             ProviderResponseTextDelta::Message {
@@ -388,7 +391,7 @@ fn published_action_invoke_redacts_gmail_oauth_redirect_url() {
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let event = Event::ActionInvoke(tau_proto::ActionInvoke {
         invocation_id: ActionInvocationId::from("action-1"),
-        session_id: SessionId::from("s1"),
+        session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
         extension_name: ExtensionName::from("tau-ext-pim"),
         instance_id: ExtensionInstanceId::from(0),
         action_id: "email.auth.google.finish".to_owned(),
@@ -448,9 +451,11 @@ fn full_prompt_debug_projection_is_fixed_shape_and_content_free() {
         )],
     };
     let event = Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
-        agent_prompt_id: "ap-main-1".into(),
+        agent_prompt_id: "ap-main-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        session_id: SessionId::from("s1"),
+        session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
         system_prompt: "unique-system-secret".repeat(1_000),
         context: tau_proto::PromptContext {
             blocks: vec![
@@ -654,7 +659,8 @@ fn transient_from_connection_events_are_not_logged_twice() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let event = Event::ProviderResponseUpdated(ProviderResponseUpdated {
-        agent_prompt_id: AgentPromptId::from("sp-0"),
+        agent_prompt_id: AgentPromptId::parse("sp-0")
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         deltas: vec![ProviderResponseTextDelta::Message {
             output_index: 0,
@@ -708,7 +714,8 @@ fn provider_finished_report_clears_image_bytes_before_debug_serialization() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: AgentPromptId::from("sp-image"),
+        agent_prompt_id: AgentPromptId::parse("sp-image")
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![tau_proto::ContextItem::ToolResult(
             tau_proto::ToolResultItem {

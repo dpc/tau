@@ -192,7 +192,7 @@ fn production_worker_scenario(name: &str, prefix: &str) -> ScenarioV2 {
 /// durable, independently addressable conversation without restoring its watch.
 #[test]
 fn cold_resume_restores_completed_production_worker() -> Result<(), Box<dyn std::error::Error>> {
-    let session_id = SessionId::from(SESSION);
+    let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
     let fixture = DeterministicFixture::new_session_restore(
         "cold_resume_restores_completed_production_worker",
         &production_worker_scenario("s1-quiescent-main-completed-worker", "s1"),
@@ -283,7 +283,7 @@ fn cold_resume_restores_completed_production_worker() -> Result<(), Box<dyn std:
 /// without turning its initial snapshot or replay into provider work.
 #[test]
 fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::error::Error>> {
-    let session_id = SessionId::from(SESSION);
+    let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
     let fixture = DeterministicFixture::new_session_restore_watch(
         "cold_resume_recreates_explicit_worker_watch",
         &ScenarioV2::new(

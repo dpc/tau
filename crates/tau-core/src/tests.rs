@@ -304,7 +304,7 @@ fn session_loaded(session_id: &str, agent_id: &str, ephemeral: bool) -> Event {
     Event::SessionAgentLoaded(SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-        session_id: SessionId::from(session_id),
+        session_id: SessionId::parse(session_id).expect("known-safe SessionId must be valid"),
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         ephemeral,
     })
@@ -315,7 +315,8 @@ fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: AgentPromptId::from("prompt-1"),
+        agent_prompt_id: AgentPromptId::parse("prompt-1")
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: ToolCallId::from(call_id),
@@ -381,7 +382,9 @@ fn manual_compaction_request(agent_id: &str, request_id: &str) -> Event {
         request_id: tau_proto::CompactionRequestId::parse(request_id).expect("request id"),
         caller_agent_id: tau_proto::AgentId::parse("caller").expect("caller id"),
         target_agent_id: tau_proto::AgentId::parse(agent_id).expect("target id"),
-        initiating_agent_prompt_id: "ap-origin".into(),
+        initiating_agent_prompt_id: "ap-origin"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         initiating_tool_call_id: "call-origin".into(),
         initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
         visible_tool_name: ToolName::new("agent_compact"),
@@ -401,7 +404,9 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
         Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
             agent_id: AgentId::parse("target").expect("agent id"),
             transaction_id: None,
-            agent_prompt_id: id.into(),
+            agent_prompt_id: id
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             through: tau_proto::AgentHead::Root,
             model: Some("provider/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
@@ -413,9 +418,13 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
             model_params: Some(tau_proto::ModelParams::default()),
             outer_turn_id: None,
 
-            agent_prompt_id: id.into(),
+            agent_prompt_id: id
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: AgentId::parse("target").expect("agent id"),
-            session_id: "session".into(),
+            session_id: "session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             model: "provider/model".into(),
             operation,
             originator: PromptOriginator::User,
@@ -436,7 +445,9 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
         Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
             agent_id: AgentId::parse("target").expect("agent id"),
             transaction_id: compaction_transaction_id.clone(),
-            compact_prompt_id: "ap-compact".into(),
+            compact_prompt_id: "ap-compact"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             cut: tau_proto::AgentHead::Root,
             resume_through: None,
             model: "provider/model".into(),
@@ -1430,7 +1441,7 @@ fn session_store_persists_membership_facts() {
     let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-        session_id: SessionId::from("session-1"),
+        session_id: SessionId::parse("session-1").expect("known-safe SessionId must be valid"),
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         ephemeral: false,
     });
@@ -1453,7 +1464,8 @@ fn session_store_persists_membership_facts() {
             "session-1",
             None,
             Event::SessionAgentUnloaded(SessionAgentUnloaded {
-                session_id: SessionId::from("session-1"),
+                session_id: SessionId::parse("session-1")
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: AgentId::parse("agent-1").expect("agent id"),
             }),
         )
@@ -1609,7 +1621,8 @@ fn session_store_persists_fallback_message_facts_without_membership_fold() {
             Event::SessionAgentLoaded(SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: SessionId::from("session-1"),
+                session_id: SessionId::parse("session-1")
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: agent_id.clone(),
                 ephemeral: false,
             }),
@@ -1682,7 +1695,8 @@ fn ephemeral_session_retains_fallback_message_facts_in_memory() {
             Event::SessionAgentLoaded(SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: SessionId::from("session-1"),
+                session_id: SessionId::parse("session-1")
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: AgentId::parse("agent-1").expect("agent id"),
                 ephemeral: true,
             }),
@@ -1862,7 +1876,7 @@ fn session_restore_append_recovers_wrong_existing_event_kind() {
         event: Event::SessionAgentLoaded(SessionAgentLoaded {
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-            session_id: SessionId::from("session-1"),
+            session_id: SessionId::parse("session-1").expect("known-safe SessionId must be valid"),
             agent_id: AgentId::parse("agent-1").expect("agent id"),
             ephemeral: false,
         }),
@@ -1900,7 +1914,7 @@ fn session_store_can_fold_one_membership_fact_without_persisting_it() {
     let event = Event::SessionAgentLoaded(SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-        session_id: SessionId::from("session-1"),
+        session_id: SessionId::parse("session-1").expect("known-safe SessionId must be valid"),
         agent_id: AgentId::parse("agent-ephemeral").expect("agent id"),
         ephemeral: true,
     });
@@ -2042,7 +2056,8 @@ fn session_store_ephemeral_membership_overlay_is_strict_and_independently_sequen
             "session-1",
             None,
             Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-                session_id: SessionId::from("session-1"),
+                session_id: SessionId::parse("session-1")
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: AgentId::parse("agent-ephemeral").expect("agent id"),
             }),
             tau_proto::UnixMicros::now(),
@@ -2080,7 +2095,8 @@ fn session_store_ephemeral_membership_overlay_is_strict_and_independently_sequen
             "session-1",
             None,
             Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-                session_id: SessionId::from("session-1"),
+                session_id: SessionId::parse("session-1")
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: AgentId::parse("agent-ephemeral").expect("agent id"),
             }),
             tau_proto::UnixMicros::now(),
@@ -2120,7 +2136,10 @@ fn session_store_ephemeral_membership_overlay_is_strict_and_independently_sequen
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
-    let mut membership = SessionMembership::from_events(SessionId::from("session-1"), &durable);
+    let mut membership = SessionMembership::from_events(
+        SessionId::parse("session-1").expect("known-safe SessionId must be valid"),
+        &durable,
+    );
     membership
         .apply_ephemeral_membership_overlay(&overlay)
         .expect("compose overlay");
@@ -2147,7 +2166,8 @@ fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
             event: Event::SessionAgentLoaded(SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: SessionId::from("session-1"),
+                session_id: SessionId::parse("session-1")
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: AgentId::parse("agent-1").expect("agent id"),
                 ephemeral: false,
             }),
@@ -2287,6 +2307,8 @@ fn session_store_validates_persisted_membership_events_on_load() {
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
+/// Session-store entry points must reject identifiers that could escape their
+/// single-directory storage boundary.
 #[test]
 fn session_store_rejects_path_escaping_session_ids() {
     // Session ids are used as directory names. They must be a single safe path
@@ -2298,7 +2320,7 @@ fn session_store_rejects_path_escaping_session_ids() {
         .append_session_event(
             "../escaped",
             None,
-            session_loaded("../escaped", "agent-1", false),
+            session_loaded("safe-session", "agent-1", false),
         )
         .expect_err("path escaping id must fail");
     assert!(matches!(error, SessionStoreError::InvalidSessionId { .. }));
@@ -2312,24 +2334,25 @@ fn session_store_rejects_path_escaping_session_ids() {
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
+/// Session storage and protocol decoding must enforce one identifier grammar
+/// instead of admitting a broader path-safe subset.
 #[test]
-fn session_store_accepts_cli_minted_path_safe_prefixes() {
-    // CLI session ids are minted from raw cwd basenames plus a suffix, so the
-    // store grammar must allow path-safe spaces, dots, and Unicode characters.
+fn session_store_rejects_identifiers_outside_the_shared_grammar() {
+    // The store must use the protocol type's grammar rather than accepting a
+    // broader path-safe subset that journals cannot subsequently decode.
     let sessions_dir = temp_dir("sessions-cli-shaped");
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
-    let session_id = "my project.café-abc123";
 
-    store
-        .append_session_event(
-            session_id,
-            None,
-            session_loaded(session_id, "agent-1", false),
-        )
-        .expect("append cli-shaped session id");
-
-    let reopened = SessionStore::open(&sessions_dir).expect("reopen session store");
-    assert!(reopened.session(session_id).is_some());
+    for session_id in ["my project-abc123", "my.project-abc123", "café-abc123"] {
+        let error = store
+            .append_session_event(
+                session_id,
+                None,
+                session_loaded("safe-session", "agent-1", false),
+            )
+            .expect_err("out-of-grammar session id must fail");
+        assert!(matches!(error, SessionStoreError::InvalidSessionId { .. }));
+    }
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
@@ -2442,7 +2465,7 @@ fn agent_store_rejects_non_agent_transcript_events() {
     let session_event = Event::SessionAgentLoaded(SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-        session_id: SessionId::from("session-1"),
+        session_id: SessionId::parse("session-1").expect("known-safe SessionId must be valid"),
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         ephemeral: false,
     });

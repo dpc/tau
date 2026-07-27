@@ -221,10 +221,14 @@ fn retry_prompt_result_renderer_displays_harness_message() {
 fn dynamic_action_prepare_records_matching_selected_agent_owner() {
     let action_state = action_state_with_email_list();
     let routing = routing_state_with_selected_agent(Some("agent-a"));
-    let invocation =
-        prepare_dynamic_action_invocation(&action_state, &routing, "s1", ":email list")
-            .expect("dynamic action prepares")
-            .expect("known dynamic action");
+    let invocation = prepare_dynamic_action_invocation(
+        &action_state,
+        &routing,
+        &tau_proto::SessionId::parse("s1").expect("test session id"),
+        ":email list",
+    )
+    .expect("dynamic action prepares")
+    .expect("known dynamic action");
 
     let Event::ActionInvoke(invoke) = &invocation.event else {
         panic!("expected action.invoke");
@@ -279,7 +283,11 @@ impl TestTreeCommandHandlers {
 
 impl RecordedLineHandlers for TestTreeCommandHandlers {
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        match tree_command_message("s1", None, text) {
+        match tree_command_message(
+            &tau_proto::SessionId::parse("s1").expect("test session id"),
+            None,
+            text,
+        ) {
             Ok(Some(message)) => {
                 self.outputs.push(format_tree_message(&message));
                 Ok(CommandOutcome::Continue)
@@ -362,7 +370,7 @@ impl RecordedLineHandlers for TestEphemeralCommandHandlers {
         let model_override = self.pending.take_model();
         let ephemeral = self.pending.take_ephemeral();
         let event = create_user_agent_prompt(
-            "s1",
+            &tau_proto::SessionId::parse("s1").expect("test session id"),
             "engineer",
             text,
             CreateUserAgentPromptOptions {
@@ -484,7 +492,7 @@ impl RecordedLineHandlers for TestNewRoleCommandHandlers {
         let model_override = self.pending.take_model();
         let ephemeral = self.pending.take_ephemeral();
         let event = create_user_agent_prompt(
-            "s1",
+            &tau_proto::SessionId::parse("s1").expect("test session id"),
             role,
             text,
             CreateUserAgentPromptOptions {
@@ -611,7 +619,7 @@ fn role_cycle_after_new_role_supersedes_pending_new_role() {
         pending.stage_role(role);
     }
     let event = create_user_agent_prompt(
-        "s1",
+        &tau_proto::SessionId::parse("s1").expect("test session id"),
         pending.take_role().unwrap_or_else(|| "engineer".to_owned()),
         "please implement",
         CreateUserAgentPromptOptions::default(),
@@ -787,7 +795,11 @@ fn model_selection_without_selected_agent_stages_one_shot_create_override() {
     let mut pending = PendingNewAgentOptions::default();
     let model: tau_proto::ModelId = "test/staged".parse().expect("model id");
 
-    let event = pending.apply_model_selection("s1", None, model.clone());
+    let event = pending.apply_model_selection(
+        &tau_proto::SessionId::parse("s1").expect("test session id"),
+        None,
+        model.clone(),
+    );
 
     assert_eq!(event, None);
     assert_eq!(pending.take_model(), Some(model));
@@ -803,7 +815,11 @@ fn model_selection_with_selected_agent_emits_targeted_update() {
     let agent_id = tau_proto::AgentId::parse("agent-1234567890abcdef").expect("agent id");
 
     let event = pending
-        .apply_model_selection("s1", Some(agent_id.clone()), model.clone())
+        .apply_model_selection(
+            &tau_proto::SessionId::parse("s1").expect("test session id"),
+            Some(agent_id.clone()),
+            model.clone(),
+        )
         .expect("selected agent event");
 
     match event {
@@ -827,7 +843,7 @@ fn name_alias_with_selected_agent_emits_display_name_update() {
     })
     .expect("selected agent request");
 
-    let event = request.event("session-1");
+    let event = request.event(&tau_proto::SessionId::parse("session-1").expect("test session id"));
 
     let Event::UiSetAgentDisplayName(update) = event else {
         panic!("expected display name event");
@@ -899,7 +915,14 @@ fn ephemeral_command_stages_one_shot_new_agent_option() {
 fn ephemeral_and_model_staging_compose_for_next_agent() {
     let model: tau_proto::ModelId = "test/composed".parse().expect("model id");
     let outputs = route_ephemeral_lines(&[":ephemeral on", "with model"], false, |pending| {
-        assert_eq!(pending.apply_model_selection("s1", None, model), None);
+        assert_eq!(
+            pending.apply_model_selection(
+                &tau_proto::SessionId::parse("s1").expect("test session id"),
+                None,
+                model
+            ),
+            None
+        );
     });
 
     assert!(

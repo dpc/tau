@@ -7,7 +7,7 @@ use super::*;
 #[test]
 fn cold_resume_composes_loaded_unloaded_and_ephemeral_membership()
 -> Result<(), Box<dyn std::error::Error>> {
-    let session_id = SessionId::from(SESSION);
+    let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
     let fixture = DeterministicFixture::new_session_restore(
         "cold_resume_composes_loaded_unloaded_and_ephemeral_membership",
         &production_worker_scenario("s3-loaded-unloaded-ephemeral-membership", "s3"),

@@ -359,7 +359,9 @@ impl<W: Write> Write for RetryInjectingWriter<W> {
                     Event::UiRetryPrompt(UiRetryPrompt {
                         request_id: tau_proto::RetryPromptRequestId::parse("quota-fixture-retry")
                             .expect("fixture retry id"),
-                        session_id: "s1".into(),
+                        session_id: "s1"
+                            .parse::<tau_proto::SessionId>()
+                            .expect("known-safe SessionId must be valid"),
                         target_agent_id: None,
                         agent_prompt_id: Some(agent_prompt_id),
                     }),

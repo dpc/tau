@@ -395,20 +395,26 @@ fn session_agent_loaded(session_id: &str, agent_id: &str) -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-        session_id: session_id.into(),
+        session_id: session_id
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         ephemeral: false,
     })
 }
 fn session_agent_unloaded(session_id: &str, agent_id: &str) -> Event {
     Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-        session_id: session_id.into(),
+        session_id: session_id
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
     })
 }
 fn session_shutdown(session_id: &str) -> Event {
     Event::SessionShutdown(tau_proto::SessionShutdown {
-        session_id: session_id.into(),
+        session_id: session_id
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
     })
 }
 fn agent_state(agent_id: &str, state: tau_proto::AgentRuntimeState) -> Event {
@@ -421,7 +427,9 @@ fn agent_state(agent_id: &str, state: tau_proto::AgentRuntimeState) -> Event {
 fn agent_prompt_terminated(agent_id: &str, agent_prompt_id: &str) -> Event {
     Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
-        agent_prompt_id: agent_prompt_id.into(),
+        agent_prompt_id: agent_prompt_id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         reason: tau_proto::AgentPromptTerminationReason::Canceled,
         originator: tau_proto::PromptOriginator::User,
     })
@@ -432,9 +440,13 @@ fn agent_prompt_started_for_agent(agent_id: &str, agent_prompt_id: &str) -> Even
         model_params: Some(tau_proto::ModelParams::default()),
         outer_turn_id: None,
 
-        agent_prompt_id: agent_prompt_id.into(),
+        agent_prompt_id: agent_prompt_id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         model: "test/model".parse().expect("model id"),
         operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::User,
@@ -452,7 +464,9 @@ fn assistant_finished_response_for_agent(
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: agent_prompt_id.into(),
+        agent_prompt_id: agent_prompt_id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
@@ -486,7 +500,9 @@ fn tool_call_finished_response(
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: agent_prompt_id.into(),
+        agent_prompt_id: agent_prompt_id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(tool_call)],
         stop_reason: ProviderStopReason::ToolCalls,
@@ -1466,7 +1482,9 @@ fn agent_idle_all_timer_survives_provider_prompt_in_other_session() {
     writer
         .write_event(&Event::ProviderPromptSubmitted(
             tau_proto::ProviderPromptSubmitted {
-                agent_prompt_id: "sp-other".into(),
+                agent_prompt_id: "sp-other"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 originator: tau_proto::PromptOriginator::User,
             },
         ))
@@ -2195,7 +2213,9 @@ fn prompt_draft_extends_idle_deadline() {
     for i in 0..5 {
         writer
             .write_event(&Event::UiPromptDraft(UiPromptDraft {
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 target_agent_id: None,
                 text: format!("partial draft {i}"),
             }))
@@ -2286,7 +2306,9 @@ fn prompt_draft_during_waiting_summary_does_not_cancel() {
     // The summary must still be allowed to land.
     writer
         .write_event(&Event::UiPromptDraft(UiPromptDraft {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
             text: "typing while summary is in flight".into(),
         }))
@@ -2855,7 +2877,9 @@ fn config_reload_clears_pending_idle_hooks() {
         .expect("write config");
     writer
         .write_event(&Event::UiPromptDraft(tau_proto::UiPromptDraft {
-            session_id: "session".into(),
+            session_id: "session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
             text: "still typing".to_owned(),
         }))
@@ -2968,7 +2992,9 @@ fn sub_agent_prompts_and_responses_are_ignored() {
     // touch `waiting_for_final_response`.
     writer
         .write_event(&Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
-            agent_prompt_id: "sp-side".into(),
+            agent_prompt_id: "sp-side"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             originator: tau_proto::PromptOriginator::Extension {
                 name: "core-subagents".into(),
                 query_id: "q1".into(),
@@ -3323,7 +3349,9 @@ fn unowned_provider_prompt_does_not_clear_other_agent_idle_timer() {
     writer
         .write_event(&Event::ProviderPromptSubmitted(
             tau_proto::ProviderPromptSubmitted {
-                agent_prompt_id: "sp-unowned-other".into(),
+                agent_prompt_id: "sp-unowned-other"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 originator: tau_proto::PromptOriginator::User,
             },
         ))

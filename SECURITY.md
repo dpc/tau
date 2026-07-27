@@ -711,11 +711,12 @@ A pathological journal can therefore exhaust exporter process memory. The
 exporter never truncates accepted records.
 
 Compact projections materialize selected source events and projected records in
-memory. Lite bounds each terminal output projection to 4 KiB, but declaration
-arguments and retained selected events remain bounded only by journal framing.
-Full mode retains complete rendered output. Heap can therefore grow with selected
-journal payload bytes and projected record bytes. TOON escapes multiline strings
-and must never print payload C0/C1 controls raw.
+memory. Lite bounds each semantic text and terminal output projection to 4 KiB,
+but declaration arguments and retained selected events remain bounded only by
+journal framing. Full mode retains complete semantic text and rendered output.
+Heap can therefore grow with selected journal payload bytes and projected record
+bytes. TOON escapes multiline strings and must never print payload C0/C1 controls
+raw.
 
 The performance projection emits no prompt, tool, response, or error bodies, but
 its agent/prompt/model IDs, descendant membership, timing, token/cache counts,
@@ -734,8 +735,17 @@ remains delete-on-close.
 Changes to compact projection must re-check zero/many-call framing, arbitrary
 strings and controls, strict TOON semantic round trips, exact tagged-CBOR and
 float-bit reconstruction, multiline full output, and parity with independently
-parseable JSONL call records.
+parsed JSONL items across all semantic families.
 
 Revisit this boundary before adding user-selected output files, redaction modes,
 provider HTTP-body or streaming-delta capture, new timing authority, or any
 persisted trace state.
+
+### Compact semantic trace disclosure
+
+Compact lite traces expose up to 4 KiB each of unredacted assistant prose, displayable reasoning, explicit sent/received message text, and tool output, in addition to complete tool arguments. Full mode exposes complete text and output. Reasoning and messages can contain secrets, private communications, user data, or model-derived sensitive content; paired directional records can duplicate the same sensitive body across included journals. Absolute timestamps, agent/session/message/prompt IDs, membership, and activity patterns are sensitive metadata. Cross-agent wall-clock order is not causality.
+
+Compact identity, sequence, and timestamp fields remain facts of the captured
+journals when those journals move between sessions; export never rebinds them to
+the containing session. Original-host wall-clock samples can regress or differ
+across hosts and do not establish delivery order, latency, or happens-before.

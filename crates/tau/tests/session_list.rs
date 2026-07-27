@@ -89,7 +89,9 @@ fn serve_current_session(
         .write_message(&tau_proto::HarnessOutputMessage::CurrentSessionResult(
             tau_proto::CurrentSessionResult {
                 request_id: request.request_id,
-                session_id: "live-session".into(),
+                session_id: "live-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 project_root,
             },
         ))

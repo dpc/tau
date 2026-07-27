@@ -134,7 +134,7 @@ impl S7Identities {
 #[test]
 fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn std::error::Error>>
 {
-    let session_id = SessionId::from(SESSION);
+    let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
     let diagnostic = interruption::interrupted_tool_diagnostic(&TOOL_CALL_ID.into());
     let scenario = mixed_state_scenario(&diagnostic);
     assert_scenario_budget(&scenario)?;
@@ -455,7 +455,9 @@ fn create_direct_repair_worker(
         .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
             tau_proto::UiCreateAgent {
                 literal: false,
-                session_id: SESSION.into(),
+                session_id: SESSION
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 role: REPAIR_ROLE.to_owned(),
                 model_override: None,
                 metadata: Vec::new(),

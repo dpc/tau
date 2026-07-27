@@ -271,7 +271,8 @@ fn provider_stream_idle_timeout_is_retryable() {
 
 fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> String {
     let context = tau_proto::PromptContext::default();
-    let session_id = tau_proto::SessionId::new("test-session");
+    let session_id =
+        tau_proto::SessionId::parse("test-session").expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
     let payload = PromptPayload {
         system_prompt: "sys",

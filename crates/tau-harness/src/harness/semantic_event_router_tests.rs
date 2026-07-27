@@ -81,14 +81,18 @@ fn discovery_snapshot_declarations_never_enter_semantic_history() {
     let events = [
         Event::ExtensionSessionDiscoverySnapshotDeclared(
             tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
-                session_id: "test-session".into(),
+                session_id: "test-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 skills: Vec::new(),
                 agents_files: Vec::new(),
             },
         ),
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
-                session_id: "test-session".into(),
+                session_id: "test-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: parse_agent_id("agent-1"),
                 agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
                 skills: Vec::new(),
@@ -111,7 +115,8 @@ fn per_agent_context_events_never_enter_semantic_history() {
     for event in [
         Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
         Event::ExtAgentContextPublish(tau_proto::ExtAgentContextPublish {
-            session_id: tau_proto::SessionId::new("test-session"),
+            session_id: tau_proto::SessionId::parse("test-session")
+                .expect("known-safe SessionId must be valid"),
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -121,7 +126,9 @@ fn per_agent_context_events_never_enter_semantic_history() {
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         }),
     ] {
@@ -169,7 +176,10 @@ fn custom_extension_events_never_enter_semantic_history() {
     let event = Event::ExtensionEvent(
         tau_proto::CustomEvent::try_new(
             "demo.observation".parse().expect("event name"),
-            Some("s1".into()),
+            Some(
+                "s1".parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
+            ),
             CborValue::Text("opaque".to_owned()),
         )
         .expect("custom event"),
@@ -184,12 +194,16 @@ fn custom_extension_events_never_enter_semantic_history() {
 fn ui_liveness_events_never_enter_semantic_history() {
     for event in [
         Event::UiPromptDraft(tau_proto::UiPromptDraft {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
             text: "typing".to_owned(),
         }),
         Event::UiFocusChanged(tau_proto::UiFocusChanged {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             focused: true,
         }),
     ] {
@@ -244,7 +258,8 @@ fn provider_quota_state_never_enters_semantic_history() {
 /// semantic facts, regardless of the peer-selected persistence value.
 #[test]
 fn provider_execution_reports_never_enter_semantic_history() {
-    let prompt_id = tau_proto::AgentPromptId::from("prompt-1");
+    let prompt_id = tau_proto::AgentPromptId::parse("prompt-1")
+        .expect("known-safe AgentPromptId must be valid");
     let agent_id = parse_agent_id("agent-1");
     for event in [
         Event::ProviderPromptSubmittedReported(ProviderPromptSubmitted {
@@ -379,7 +394,9 @@ fn shell_reports_never_enter_semantic_history() {
     };
     let finished = tau_proto::ShellCommandFinished {
         command_id: "shell-route".into(),
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         command: "pwd".to_owned(),
         include_in_context: true,
         target_agent_id: Some(parse_agent_id("agent-1")),
@@ -512,9 +529,13 @@ fn persist_false_preserves_every_persistence_exception() {
             model_params: Some(tau_proto::ModelParams::default()),
             outer_turn_id: None,
 
-            agent_prompt_id: "prompt-1".into(),
+            agent_prompt_id: "prompt-1"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: parse_agent_id("agent-1"),
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             model: "test/model".parse().expect("model id"),
             operation: tau_proto::PromptOperation::Inference,
             originator: PromptOriginator::User,
@@ -612,12 +633,16 @@ fn session_membership_events_route_to_session_log() {
     let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: parse_agent_id("agent-1"),
         ephemeral: false,
     });
     let unloaded = Event::SessionAgentUnloaded(SessionAgentUnloaded {
-        session_id: "session-2".into(),
+        session_id: "session-2"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: parse_agent_id("agent-1"),
     });
 

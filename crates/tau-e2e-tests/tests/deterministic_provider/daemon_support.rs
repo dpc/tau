@@ -334,7 +334,9 @@ pub(super) fn create_agent(
     peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
         tau_proto::UiCreateAgent {
             literal: false,
-            session_id: "deterministic-e2e-session".into(),
+            session_id: "deterministic-e2e-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             role: "deterministic-e2e".to_owned(),
             model_override: None,
             metadata: Vec::new(),
@@ -358,7 +360,9 @@ pub(super) fn submit_prompt(
     peer.send(&HarnessInputMessage::emit(Event::UiPromptSubmitted(
         tau_proto::UiPromptSubmitted {
             literal: false,
-            session_id: "deterministic-e2e-session".into(),
+            session_id: "deterministic-e2e-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             text: prompt.to_owned(),
             agent_id: agent_id.clone(),
             message_class: tau_proto::PromptMessageClass::User,
@@ -375,7 +379,9 @@ pub(super) fn cancel_prompt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     peer.send(&HarnessInputMessage::emit(Event::UiCancelPrompt(
         tau_proto::UiCancelPrompt {
-            session_id: "deterministic-e2e-session".into(),
+            session_id: "deterministic-e2e-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: Some(prompt.agent_id.clone()),
             agent_prompt_id: Some(prompt.agent_prompt_id.clone()),
         },

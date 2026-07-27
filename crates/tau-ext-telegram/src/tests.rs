@@ -593,7 +593,10 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
         .expect("apply gateway client config");
     {
         let mut state = ext.state.lock();
-        state.current_session_id = Some("s1".into());
+        state.current_session_id = Some(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+        );
     }
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
 
@@ -670,7 +673,10 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
         .expect("apply gateway client config");
     {
         let mut state = ext.state.lock();
-        state.current_session_id = Some("s1".into());
+        state.current_session_id = Some(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+        );
         state.registered_agents.insert(agent_id("agent-1"));
     }
 
@@ -729,7 +735,10 @@ fn gateway_client_send_failure_does_not_submit_sent_report() {
         .expect("apply gateway client config");
     {
         let mut state = ext.state.lock();
-        state.current_session_id = Some("s1".into());
+        state.current_session_id = Some(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+        );
         state.registered_agents.insert(agent_id("agent-1"));
     }
 
@@ -808,7 +817,10 @@ fn gateway_delivery_requires_live_local_registration() {
     let state = SharedState::new();
     {
         let mut state = state.lock();
-        state.current_session_id = Some("s1".into());
+        state.current_session_id = Some(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+        );
     }
     emit_gateway_deliveries(
         &state,
@@ -977,7 +989,10 @@ fn gateway_client_agent_unload_sends_unregister() {
         .expect("apply gateway client config");
     {
         let mut state = ext.state.lock();
-        state.current_session_id = Some("s1".into());
+        state.current_session_id = Some(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+        );
     }
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     expect_tool_finished(&rx);
@@ -985,7 +1000,9 @@ fn gateway_client_agent_unload_sends_unregister() {
     handle_live_event_value(
         &runtime,
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id("agent-1"),
         }),
     );

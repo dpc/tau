@@ -1,5 +1,20 @@
 use super::*;
 
+/// The direct roster request boundary must reject invalid controlled session
+/// identifiers before attempting socket I/O.
+#[test]
+fn roster_request_rejects_invalid_session_id_without_panicking() {
+    let error = run(&crate::cli::AgentListArgs {
+        session_id: "bad.id".to_owned(),
+        include_suspended: false,
+        include_unavailable: false,
+        include_unloaded: false,
+        all: false,
+    })
+    .expect_err("invalid session id must fail");
+    assert!(error.to_string().contains("invalid session id `bad.id`"));
+}
+
 fn entry(id: &str, parent: Option<&str>, started_at: Option<u64>) -> SessionAgentListEntry {
     SessionAgentListEntry {
         agent_id: tau_proto::AgentId::parse(id).expect("valid test id"),
@@ -400,9 +415,9 @@ fn roster_request_times_out_on_silent_peer() {
     });
 
     let started = std::time::Instant::now();
-    let result = request_at_socket_with_timeout(
+    let result = request_at_socket_with_timeout_typed(
         &socket_path,
-        "s1",
+        &tau_proto::SessionId::parse("s1").expect("session id"),
         SessionAgentListScope::Current,
         Duration::from_millis(20),
     );
@@ -440,9 +455,9 @@ fn roster_request_deadline_survives_unrelated_frames() {
     });
 
     let started = std::time::Instant::now();
-    let result = request_at_socket_with_timeout(
+    let result = request_at_socket_with_timeout_typed(
         &socket_path,
-        "s1",
+        &tau_proto::SessionId::parse("s1").expect("session id"),
         SessionAgentListScope::Current,
         Duration::from_millis(20),
     );
@@ -480,9 +495,9 @@ fn roster_request_deadline_stops_partial_frame_trickle() {
     });
 
     let started = std::time::Instant::now();
-    let result = request_at_socket_with_timeout(
+    let result = request_at_socket_with_timeout_typed(
         &socket_path,
-        "s1",
+        &tau_proto::SessionId::parse("s1").expect("session id"),
         SessionAgentListScope::Current,
         Duration::from_millis(20),
     );
@@ -521,9 +536,9 @@ fn roster_request_deadline_bounds_saturated_backlog_connect() {
     assert!(!backlog.is_empty());
 
     let started = std::time::Instant::now();
-    let result = request_at_socket_with_timeout(
+    let result = request_at_socket_with_timeout_typed(
         &socket_path,
-        "s1",
+        &tau_proto::SessionId::parse("s1").expect("session id"),
         SessionAgentListScope::Current,
         Duration::from_millis(20),
     );

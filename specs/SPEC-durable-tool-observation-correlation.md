@@ -70,10 +70,19 @@ sync remains asynchronous under
 
 ## Projection
 
-The `tau.agent_tools` schema version `0` emits `call`, `activation`, and
-`relationship` records. JSON Lines and strict TOON carry the same semantic record
-set. Lite mode bounds source-owned terminal output to 4 KiB while retaining exact
-complete byte and line counts. Full mode retains complete source output.
+The `tau.agent_trace_compact` schema version `0` emits `call`, `activation`, and
+`relationship` items alongside assistant/reasoning and explicit directional
+message items. JSON Lines and strict TOON carry the same semantic item set.
+Every item carries relative append time, optional absolute append time, owning
+journal identity and sequence, plus provider item position when applicable.
+Presentation sorting uses the exact lexicographic tuple `(recorded_at, agent_id,
+journal_seq, item_index-or-0, family rank)`, where an absent provider item index
+sorts as zero. It creates no causal authority and does not replace
+journal-sequence order. Lite mode bounds each semantic text and source-owned
+terminal output to 4 KiB while retaining exact complete byte and line counts.
+Full mode retains complete content. The family rank order is `call`,
+`assistant_message`, `assistant_reasoning`, `message_sent`, `message_received`,
+`activation`, then `relationship`.
 
 The native `tau.agent_trace` JSON Lines occurrence includes its observation ID,
 journal identity, sequence, timestamp, source, parent, and lossless typed event.

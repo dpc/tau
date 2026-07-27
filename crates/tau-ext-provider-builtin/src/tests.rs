@@ -143,7 +143,9 @@ fn synthetic_provider_error_is_not_output_item() {
     // Regression: runtime/provider setup errors are display strings, not
     // assistant messages that should be replayed as future context.
     let finished = simple_finished(
-        "sp-error".into(),
+        "sp-error"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         tau_proto::AgentId::parse("agent").expect("valid test agent id"),
         tau_proto::PromptOriginator::User,
         "no model specified",
@@ -1210,7 +1212,8 @@ fn shared_cooldown_jitter_is_positive_stable_and_prompt_local() {
 #[test]
 fn cancellation_state_reports_pending_target_without_consuming_it() {
     let cancellation = CancellationState::default();
-    let prompt_id = tau_proto::AgentPromptId::new("ap-late-retry");
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-late-retry")
+        .expect("known-safe AgentPromptId must be valid");
     cancellation.cancel(prompt_id.clone());
     assert!(cancellation.is_canceled(&prompt_id));
     assert!(cancellation.is_canceled(&prompt_id));
@@ -1224,8 +1227,10 @@ fn cancellation_waker_fires_for_matching_prompt_only() {
     // watchdog. The cancellation registry must therefore wake the matching turn
     // directly, without relying on periodic receive timeouts.
     let cancellation = Arc::new(CancellationState::default());
-    let target_apid = tau_proto::AgentPromptId::from("ap-target");
-    let other_apid = tau_proto::AgentPromptId::from("ap-other");
+    let target_apid = tau_proto::AgentPromptId::parse("ap-target")
+        .expect("known-safe AgentPromptId must be valid");
+    let other_apid = tau_proto::AgentPromptId::parse("ap-other")
+        .expect("known-safe AgentPromptId must be valid");
     let matching = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let other = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -1254,8 +1259,10 @@ fn cancellation_waker_fires_for_matching_prompt_only() {
 #[test]
 fn cancellation_global_cancel_wakes_all_registered_abort_wakers() {
     let cancellation = Arc::new(CancellationState::default());
-    let first_apid = tau_proto::AgentPromptId::from("ap-first");
-    let second_apid = tau_proto::AgentPromptId::from("ap-second");
+    let first_apid = tau_proto::AgentPromptId::parse("ap-first")
+        .expect("known-safe AgentPromptId must be valid");
+    let second_apid = tau_proto::AgentPromptId::parse("ap-second")
+        .expect("known-safe AgentPromptId must be valid");
     let first = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let second = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let initial_generation = cancellation.retry_generation();
@@ -1285,7 +1292,8 @@ fn cancellation_global_cancel_wakes_all_registered_abort_wakers() {
 #[test]
 fn cancellation_global_cancel_wakes_late_old_generation_registration() {
     let cancellation = Arc::new(CancellationState::default());
-    let prompt_id = tau_proto::AgentPromptId::from("ap-late-registration");
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-late-registration")
+        .expect("known-safe AgentPromptId must be valid");
     let stale_generation = cancellation.retry_generation();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -1306,8 +1314,10 @@ fn cancellation_shutdown_wakes_all_registered_abort_wakers() {
     // can return their normal canceled terminal path instead of waiting on idle
     // upstream sockets.
     let cancellation = Arc::new(CancellationState::default());
-    let first_apid = tau_proto::AgentPromptId::from("ap-first");
-    let second_apid = tau_proto::AgentPromptId::from("ap-second");
+    let first_apid = tau_proto::AgentPromptId::parse("ap-first")
+        .expect("known-safe AgentPromptId must be valid");
+    let second_apid = tau_proto::AgentPromptId::parse("ap-second")
+        .expect("known-safe AgentPromptId must be valid");
     let first = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let second = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -1337,7 +1347,8 @@ fn cancellation_waker_guard_unregisters_on_drop() {
     // same prompt id must not enqueue stale wake hints into a reused socket's
     // inbound event stream.
     let cancellation = Arc::new(CancellationState::default());
-    let apid = tau_proto::AgentPromptId::from("ap-drop");
+    let apid =
+        tau_proto::AgentPromptId::parse("ap-drop").expect("known-safe AgentPromptId must be valid");
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let guard = cancellation.register_abort_waker(&apid, cancellation.retry_generation(), {
@@ -1355,9 +1366,13 @@ fn cancellation_waker_guard_unregisters_on_drop() {
 
 fn minimal_prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
-        agent_prompt_id: "ap-test".into(),
+        agent_prompt_id: "ap-test"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("agent-test").expect("agent id"),
-        session_id: "session-test".into(),
+        session_id: "session-test"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         system_prompt: String::new(),
         context: tau_proto::PromptContext::default(),
         tools: Vec::new(),
@@ -1394,7 +1409,8 @@ fn chatgpt_stream_update_emits_response_stats_without_text_deltas() {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut delta_emitter = CodexStreamDeltaEmitter::default();
         emit_chatgpt_stream_update(
-            prompt.agent_prompt_id.as_str(),
+            &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
             &prompt.agent_id,
             &prompt.originator,
             &state,
@@ -1436,7 +1452,8 @@ fn chatgpt_connecting_update_is_sanitized() {
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         emit_chatgpt_connecting_update(
-            prompt.agent_prompt_id.as_str(),
+            &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
             &prompt.agent_id,
             &prompt.originator,
             &mut writer,
@@ -1476,7 +1493,8 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
         let target = ResponseUpdateTarget {
-            agent_prompt_id: prompt.agent_prompt_id.as_str(),
+            agent_prompt_id: &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
@@ -1567,7 +1585,8 @@ fn chatgpt_response_update_emitter_emits_due_stats_only_sample() {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
         let target = ResponseUpdateTarget {
-            agent_prompt_id: prompt.agent_prompt_id.as_str(),
+            agent_prompt_id: &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
@@ -1647,7 +1666,8 @@ fn chatgpt_response_update_emitter_emits_first_bytes_after_idle_sample_promptly(
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
         let target = ResponseUpdateTarget {
-            agent_prompt_id: prompt.agent_prompt_id.as_str(),
+            agent_prompt_id: &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
@@ -1746,7 +1766,8 @@ fn chatgpt_response_update_emitter_emits_first_stats_only_sample_promptly() {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
         let target = ResponseUpdateTarget {
-            agent_prompt_id: prompt.agent_prompt_id.as_str(),
+            agent_prompt_id: &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
@@ -1790,7 +1811,8 @@ fn chatgpt_response_update_emitter_terminal_flush_emits_batched_suffix() {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
         let target = ResponseUpdateTarget {
-            agent_prompt_id: prompt.agent_prompt_id.as_str(),
+            agent_prompt_id: &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
@@ -1866,7 +1888,7 @@ fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         emit_repetition_detected_update(
-            "ap-test",
+            &tau_proto::AgentPromptId::parse("ap-test").expect("test prompt id"),
             &prompt.agent_id,
             &prompt.originator,
             &repetition,
@@ -1899,7 +1921,7 @@ fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         finish_error(
-            "ap-test",
+            &tau_proto::AgentPromptId::parse("ap-test").expect("test prompt id"),
             &prompt,
             &backend,
             tau_provider_codex::CodexError::from_repetition(repetition),

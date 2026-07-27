@@ -136,8 +136,13 @@ fn rollover_applies_deferred_prompt_fragment_for_current_generation() {
         None
     );
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
 
     assert_eq!(
         projected_template(&h, "fragment-owner", "rollover.fragment"),
@@ -524,8 +529,13 @@ fn rollover_stages_deferred_prompt_fragment_for_later_ready() {
     assert_eq!(stage.retained_message_count, 1);
     assert!(stage.retained_message_bytes > 0);
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
 
     assert!(
         !h.extensions

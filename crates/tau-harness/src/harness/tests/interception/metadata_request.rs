@@ -115,8 +115,13 @@ fn rollover_metadata_request_is_observation_only() {
     )
     .expect("park metadata request");
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
 
     assert!(matches!(
         metadata_commits(&h).as_slice(),

@@ -668,8 +668,12 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     assert!(h.selected_model.is_none());
 
     assert_eq!(
-        h.submit_user_prompt("s1".into(), "hello".to_owned())
-            .expect("submit prompt"),
+        h.submit_user_prompt(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            "hello".to_owned()
+        )
+        .expect("submit prompt"),
         PromptSubmission::Queued,
     );
     assert_eq!(h.agents[&test_user_agent(&h)].pending_prompts.len(), 1,);
@@ -703,7 +707,11 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let role = h.selected_role.clone();
-    let cid = h.create_durable_user_agent("s1".into(), &role);
+    let cid = h.create_durable_user_agent(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        &role,
+    );
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent id");
 
     let default_model: ModelId = "test/default".parse().expect("model id");
@@ -722,7 +730,9 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     h.handle_client_event_inner(
         "ui-client",
         Event::UiAgentModelSelect(tau_proto::UiAgentModelSelect {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: Some(crate::parse_agent_id(&agent_id)),
             model: selected_model.clone(),
         }),
@@ -767,7 +777,9 @@ fn ui_create_agent_applies_initial_model_override() {
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
         parent_agent: None,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role,
         model_override: Some(selected_model.clone()),
         metadata: Vec::new(),
@@ -805,7 +817,9 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
         parent_agent: None,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role,
         model_override: Some(selected_model.clone()),
         metadata: Vec::new(),
@@ -883,7 +897,9 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
         parent_agent: None,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: h.selected_role.clone(),
         model_override: None,
         metadata: Vec::new(),
@@ -941,7 +957,11 @@ fn unavailable_agent_model_override_falls_back_to_role_model() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let role = h.selected_role.clone();
-    let cid = h.create_durable_user_agent("s1".into(), &role);
+    let cid = h.create_durable_user_agent(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        &role,
+    );
     let role_model: ModelId = "test/role-model".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
@@ -967,8 +987,16 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let role = h.selected_role.clone();
-    let first = h.create_durable_user_agent("s1".into(), &role);
-    let second = h.create_durable_user_agent("s1".into(), &role);
+    let first = h.create_durable_user_agent(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        &role,
+    );
+    let second = h.create_durable_user_agent(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        &role,
+    );
     let selected_model: ModelId = "test/selected".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
@@ -981,7 +1009,9 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
     h.handle_client_event_inner(
         "ui-client",
         Event::UiAgentModelSelect(tau_proto::UiAgentModelSelect {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
             model: selected_model,
         }),
@@ -1017,8 +1047,12 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     h.selected_role = "assistant".to_owned();
 
     assert_eq!(
-        h.submit_user_prompt("s1".into(), "hello".to_owned())
-            .expect("submit prompt"),
+        h.submit_user_prompt(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            "hello".to_owned()
+        )
+        .expect("submit prompt"),
         PromptSubmission::Queued,
     );
     assert_eq!(h.agents[&test_user_agent(&h)].pending_prompts.len(), 1);

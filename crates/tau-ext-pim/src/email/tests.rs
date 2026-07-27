@@ -565,7 +565,8 @@ fn split_tool_started(tool_name: &str, args: Vec<(&str, CborValue)>) -> ToolStar
 fn email_action_invoke(invocation_id: &str) -> ActionInvoke {
     ActionInvoke {
         invocation_id: tau_proto::ActionInvocationId::new(invocation_id),
-        session_id: tau_proto::SessionId::new("session-1"),
+        session_id: tau_proto::SessionId::parse("session-1")
+            .expect("known-safe SessionId must be valid"),
         extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
         instance_id: tau_proto::ExtensionInstanceId::from(1),
         action_id: "email.in.list".to_owned(),
@@ -3977,7 +3978,8 @@ fn runtime_action_invoke_returns_action_error_for_bad_id() {
     };
     let event = runtime.dispatch_action(ActionInvoke {
         invocation_id: tau_proto::ActionInvocationId::new("invoke-1"),
-        session_id: tau_proto::SessionId::new("session-1"),
+        session_id: tau_proto::SessionId::parse("session-1")
+            .expect("known-safe SessionId must be valid"),
         extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
         instance_id: tau_proto::ExtensionInstanceId::from(1),
         action_id: "email.in.list".to_owned(),

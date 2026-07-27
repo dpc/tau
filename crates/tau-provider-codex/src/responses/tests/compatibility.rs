@@ -53,7 +53,8 @@ fn compatibility_request_snapshot(mode: ResponsesMode) -> serde_json::Value {
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &tau_proto::PromptOriginator::User,
-        session_id: &tau_proto::SessionId::new("compat-session"),
+        session_id: &tau_proto::SessionId::parse("compat-session")
+            .expect("known-safe SessionId must be valid"),
         agent_id: &tau_proto::AgentId::parse("compat-agent").expect("agent id"),
         share_user_cache_key: false,
         debug_provider_requests: false,

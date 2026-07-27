@@ -19,14 +19,20 @@ enum SendLineDisposition {
 }
 
 pub(crate) fn run_send(session_id: &str, line: &str) -> Result<(), CliError> {
-    let disposition = classify_send_line(session_id, line)?;
+    let session_id = tau_proto::SessionId::parse(session_id).map_err(|error| {
+        CliError::Participant(format!("invalid session id `{session_id}`: {error}"))
+    })?;
+    let disposition = classify_send_line(&session_id, line)?;
     let SendLineDisposition::Message(message) = disposition else {
         return Ok(());
     };
-    send_message(session_id, *message)
+    send_message(&session_id, *message)
 }
 
-fn classify_send_line(session_id: &str, line: &str) -> Result<SendLineDisposition, CliError> {
+fn classify_send_line(
+    session_id: &tau_proto::SessionId,
+    line: &str,
+) -> Result<SendLineDisposition, CliError> {
     let canonical_line = tau_cli_term::canonical_literal_colon_prompt(line);
     let text = canonical_line.as_deref().unwrap_or(line).trim();
     if text.is_empty() {
@@ -65,8 +71,11 @@ fn classify_send_line(session_id: &str, line: &str) -> Result<SendLineDispositio
     )))
 }
 
-fn send_message(session_id: &str, message: HarnessInputMessage) -> Result<(), CliError> {
-    let harness_path = find_daemon_for_session(session_id).ok_or_else(|| {
+fn send_message(
+    session_id: &tau_proto::SessionId,
+    message: HarnessInputMessage,
+) -> Result<(), CliError> {
+    let harness_path = find_daemon_for_session(session_id.as_str()).ok_or_else(|| {
         CliError::Participant(format!("no running daemon for session `{session_id}`"))
     })?;
     let socket_path = tau_harness::runtime_dir::socket_path(&harness_path);
@@ -85,7 +94,8 @@ fn send_message(session_id: &str, message: HarnessInputMessage) -> Result<(), Cl
 
 #[cfg(test)]
 fn message_for_line(session_id: &str, line: &str) -> Option<HarnessInputMessage> {
-    match classify_send_line(session_id, line).ok()? {
+    let session_id = tau_proto::SessionId::parse(session_id).ok()?;
+    match classify_send_line(&session_id, line).ok()? {
         SendLineDisposition::Message(message) => Some(*message),
         SendLineDisposition::Noop => None,
     }
@@ -99,7 +109,7 @@ fn event_for_test_line(session_id: &str, line: &str) -> Option<Event> {
     Some(*emit.event)
 }
 
-fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
+fn event_for_line(session_id: &tau_proto::SessionId, text: &str) -> Option<Event> {
     if text == ":quit" || text == ":detach" {
         return None;
     }

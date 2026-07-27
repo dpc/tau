@@ -4,7 +4,9 @@ use crate::agent::Agent;
 fn retry_request(id: &str, session_id: &str, agent_id: Option<&str>) -> Event {
     Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
         request_id: tau_proto::RetryPromptRequestId::parse(id).expect("valid retry request id"),
-        session_id: session_id.into(),
+        session_id: session_id
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         target_agent_id: agent_id.map(crate::parse_agent_id),
         agent_prompt_id: None,
     })
@@ -17,7 +19,9 @@ fn retry_result(
 ) -> Event {
     Event::ProviderRetryPromptResultReported(tau_proto::ProviderRetryPromptResult {
         request_id: id,
-        agent_prompt_id: prompt_id.into(),
+        agent_prompt_id: prompt_id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         status,
     })
 }
@@ -42,13 +46,26 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
     );
     agent.agent_id = Some(agent_id.to_owned());
     agent.display_name = Some(format!("{agent_id} label"));
-    agent.in_flight_prompt = Some(prompt_id.into());
+    agent.in_flight_prompt = Some(
+        prompt_id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
     h.agents.insert(cid.clone(), agent);
     h.agent_routes.insert(agent_id.to_owned(), cid.clone());
-    h.prompt_agents.insert(prompt_id.into(), cid);
+    h.prompt_agents.insert(
+        prompt_id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        cid,
+    );
     if let Some(provider_id) = provider_id {
-        h.pending_provider_prompts
-            .insert(prompt_id.into(), provider_id.into());
+        h.pending_provider_prompts.insert(
+            prompt_id
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+            provider_id.into(),
+        );
     }
 }
 
@@ -267,13 +284,21 @@ fn retry_pending_requests_resolve_on_disconnect_and_session_rollover() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    h.pending_provider_prompts
-        .insert("prompt".into(), "provider".into());
+    h.pending_provider_prompts.insert(
+        "prompt"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        "provider".into(),
+    );
     h.handle_client_event_inner("requester", retry_request("rollover", "s1", Some("agent")))
         .expect("rollover request");
     let rollover_token = provider_request_id(&h, "rollover");
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
-        .expect("session rollover");
+    h.switch_session(
+        "s2".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("session rollover");
     h.handle_extension_event(
         "provider",
         TestProtocolItem::Event(retry_result(

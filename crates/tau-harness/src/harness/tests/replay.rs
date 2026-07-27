@@ -296,7 +296,9 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
     let mut h = quiet_provider_harness(&state_dir).expect("start");
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
@@ -431,7 +433,9 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
@@ -775,7 +779,9 @@ fn agent_message_fact_replay_projects_without_wake() {
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                     agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                    session_id: "s1".into(),
+                    session_id: "s1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     agent_id: agent_id.clone(),
                     ephemeral: false,
                 }),
@@ -859,7 +865,9 @@ fn received_agent_message_replay_restores_context_without_wake() {
         let cid = ensure_test_user_agent(&mut h);
         let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
         h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
-            agent_prompt_id: "live-message-before-crash".into(),
+            agent_prompt_id: "live-message-before-crash"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
         };
         h.publish_event(
             Some(HARNESS_CONNECTION_ID),
@@ -944,7 +952,9 @@ fn member_agent_message_fact_uses_agent_journal() {
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: agent_id.clone(),
                 ephemeral: false,
             }),
@@ -988,7 +998,9 @@ fn live_route_only_message_fact_uses_agent_journal() {
             "s1",
             None,
             Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: agent_id.clone(),
             }),
         )
@@ -1135,7 +1147,9 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: agent_id.clone(),
                 ephemeral: false,
             }),
@@ -1168,7 +1182,9 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
             event: Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: "wrong-session".into(),
+                session_id: "wrong-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
                 ephemeral: false,
             }),
@@ -1217,7 +1233,9 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
                 ephemeral: false,
             }),
@@ -1374,7 +1392,9 @@ fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-restored-tools".into(),
+        agent_prompt_id: "sp-restored-tools"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: call_ids
             .iter()
@@ -1427,7 +1447,9 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 ephemeral: false,
             }),
@@ -1502,7 +1524,9 @@ fn restore_rejects_membership_without_committed_agent_creation() {
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                     agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                    session_id: "s1".into(),
+                    session_id: "s1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     agent_id: crate::parse_agent_id("orphan"),
                     ephemeral: false,
                 }),
@@ -1591,7 +1615,9 @@ fn seed_restored_tool_round_for_agent(
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: session_id.into(),
+                session_id: session_id
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: crate::parse_agent_id(agent_id),
                 ephemeral: false,
             }),
@@ -1637,7 +1663,9 @@ fn seed_restored_tool_round_for_agent(
             agent_id,
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
-                agent_prompt_id: format!("sp-{agent_id}").into(),
+                agent_prompt_id: format!("sp-{agent_id}")
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 agent_id: crate::parse_agent_id(agent_id),
                 ..response_with_tool_calls(call_ids)
             }),
@@ -1787,7 +1815,9 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
                 ephemeral: false,
             }),
@@ -2216,7 +2246,9 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id.clone(),
             ephemeral: false,
         }),
@@ -2367,7 +2399,9 @@ fn replay_complete_boundaries_report_agent_log_errors() {
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: agent_id.clone(),
                 ephemeral: false,
             }),
@@ -2534,7 +2568,9 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let spid: AgentPromptId = "sp-replay".into();
+    let spid: AgentPromptId = "sp-replay"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
@@ -2739,7 +2775,9 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
 
-                agent_prompt_id: spid.into(),
+                agent_prompt_id: spid
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 agent_id: crate::parse_agent_id(&agent_id),
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
                     call_id: call_id.into(),
@@ -2943,8 +2981,12 @@ fn resumed_harness_replays_persisted_session_history() {
         let mut h = echo_harness_for("s1", &sp).expect("start");
         h.selected_model = Some("test/model".into());
 
-        h.submit_user_prompt("s1".into(), "remember potato".to_owned())
-            .expect("submit first prompt");
+        h.submit_user_prompt(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            "remember potato".to_owned(),
+        )
+        .expect("submit first prompt");
         let spid = h
             .prompt_agents
             .keys()
@@ -2995,7 +3037,11 @@ fn resumed_harness_replays_persisted_session_history() {
     resumed.selected_model = Some("test/model".into());
 
     resumed
-        .submit_user_prompt("s1".into(), "what was it?".to_owned())
+        .submit_user_prompt(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            "what was it?".to_owned(),
+        )
         .expect("submit resumed prompt");
     let spid = resumed
         .prompt_agents
@@ -3276,8 +3322,12 @@ fn resumed_session_init_catches_up_subscribers_that_joined_before_init() {
     .expect("extension subscribe");
     extension_events.lock().expect("sink").clear();
 
-    h.switch_session("s1".into(), tau_proto::SessionStartReason::Resume)
-        .expect("switch to resumed session");
+    h.switch_session(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::Resume,
+    )
+    .expect("switch to resumed session");
 
     let events = extension_events.lock().expect("sink");
     let started_count = events
@@ -3342,8 +3392,12 @@ fn resumed_session_repair_errors_are_not_duplicated_for_pre_init_subscribers() {
     .expect("extension subscribe");
     extension_events.lock().expect("sink").clear();
 
-    h.switch_session("s1".into(), tau_proto::SessionStartReason::Resume)
-        .expect("switch to resumed session");
+    h.switch_session(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::Resume,
+    )
+    .expect("switch to resumed session");
 
     let events = extension_events.lock().expect("sink");
     let deliveries: Vec<bool> = events
@@ -3381,7 +3435,9 @@ fn replay_emits_latest_agent_metadata_without_stale_values() {
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                     agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                    session_id: "s1".into(),
+                    session_id: "s1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     agent_id: crate::parse_agent_id("agent-replay-meta"),
                     ephemeral: false,
                 }),

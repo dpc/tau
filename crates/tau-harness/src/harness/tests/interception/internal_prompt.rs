@@ -381,8 +381,13 @@ fn pre_ready_request_after_rollover_is_observation_only() {
     )
     .expect("defer request before Ready");
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
     h.handle_extension_message("requester", TestMessage::Ready(Default::default()))
         .expect("activate requester");
 

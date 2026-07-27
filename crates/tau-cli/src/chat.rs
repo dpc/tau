@@ -283,7 +283,7 @@ fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
 /// Sends the production cancellation event through the direct uplink.
 fn send_cancel_prompt_frame(
     writer: &WriterHandle,
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     target_agent_id: Option<tau_proto::AgentId>,
 ) -> io::Result<()> {
     send_event(
@@ -792,7 +792,7 @@ mod ui_io_tests {
         let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
         send_cancel_prompt_frame(
             &writer,
-            "session",
+            &tau_proto::SessionId::parse("session").expect("test session id"),
             Some(tau_proto::AgentId::parse("worker").expect("agent id")),
         )
         .expect("direct cancel uplink");
@@ -976,7 +976,9 @@ mod ui_io_tests {
         ));
         meter.record_downlink_frame(&HarnessOutputMessage::deliver(
             Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
-                session_id: "session-1".into(),
+                session_id: "session-1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 error: None,
             }),
         ));
@@ -1148,7 +1150,7 @@ mod ui_io_tests {
         let mut errors = Vec::new();
 
         assert!(handle_tree_command_text(
-            "s1",
+            &tau_proto::SessionId::parse("s1").expect("test session id"),
             Some(tau_proto::AgentId::parse("agent-1").expect("agent id")),
             ":tree",
             &writer,
@@ -1160,7 +1162,9 @@ mod ui_io_tests {
             reader.read_message().expect("read request"),
             Some(HarnessInputMessage::UiTreeRequest(
                 tau_proto::UiTreeRequest {
-                    session_id: "s1".into(),
+                    session_id: "s1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     target_agent_id: Some(tau_proto::AgentId::parse("agent-1").expect("agent id")),
                 },
             ))
@@ -1577,7 +1581,7 @@ fn encode_binding_action(action: &CliBindingAction) -> String {
 }
 
 pub(crate) fn run_chat(
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     attach: bool,
     session_status: SessionLaunchStatus,
     startup_role: Option<&str>,
@@ -1597,7 +1601,7 @@ pub(crate) fn run_chat(
         ui_id = ui_logging.ui_id(),
         ui_dir = %ui_logging.dir().display(),
         log_path = %ui_logging.log_path().display(),
-        session_id,
+        session_id = %session_id,
         attach,
         "terminal UI starting"
     );
@@ -1606,11 +1610,11 @@ pub(crate) fn run_chat(
     let daemon_output = if attach {
         None
     } else {
-        Some(daemon_output_for_session(session_id, ephemeral)?)
+        Some(daemon_output_for_session(session_id.as_str(), ephemeral)?)
     };
     let mut daemon = resolve_daemon(
         attach,
-        session_id,
+        session_id.as_str(),
         session_status,
         daemon_output,
         startup_role,
@@ -1835,7 +1839,7 @@ pub(crate) fn run_chat(
     let cwd = std::env::current_dir()?;
     let home_dir = dirs::home_dir();
     let right_prompt =
-        crate::theme::right_prompt_context(&theme, &cwd, home_dir.as_deref(), session_id);
+        crate::theme::right_prompt_context(&theme, &cwd, home_dir.as_deref(), session_id.as_str());
     let cursor_shape = if settings.bar_cursor {
         tau_cli_term::CursorShape::Bar
     } else {
@@ -2301,7 +2305,7 @@ struct TerminalInputLoopCtx {
     agent_in_progress: Arc<std::sync::atomic::AtomicBool>,
     remote_disconnected: Arc<AtomicBool>,
     renderer_tx: LocalRendererSender,
-    active_session_state: Arc<Mutex<String>>,
+    active_session_state: Arc<Mutex<tau_proto::SessionId>>,
     editor_context: Arc<Mutex<tau_cli_term::EditorContext>>,
     action_state: ActionCommandState,
     draft_handle: DraftHandle,
@@ -2579,7 +2583,7 @@ trait RecordedLineHandlers {
 struct TerminalInputSession<'a> {
     term: &'a mut tau_cli_term::HighTerm,
     writer: &'a WriterHandle,
-    session_id: &'a mut String,
+    session_id: &'a mut tau_proto::SessionId,
     ctx: TerminalInputLoopCtx,
     output: LocalTerminalOutput,
     pending_new_agent_options: PendingNewAgentOptions,
@@ -2615,7 +2619,7 @@ impl PendingNewAgentOptions {
 
     fn apply_model_selection(
         &mut self,
-        session_id: &str,
+        session_id: &tau_proto::SessionId,
         selected_agent_id: Option<tau_proto::AgentId>,
         model: tau_proto::ModelId,
     ) -> Option<Event> {
@@ -2693,7 +2697,7 @@ fn take_new_agent_role(pending: &mut PendingNewAgentOptions, current_role: Strin
 }
 
 fn tree_command_message(
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     target_agent_id: Option<tau_proto::AgentId>,
     text: &str,
 ) -> Result<Option<HarnessInputMessage>, &'static str> {
@@ -2714,7 +2718,7 @@ fn tree_command_message(
 }
 
 fn handle_tree_command_text(
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     target_agent_id: Option<tau_proto::AgentId>,
     text: &str,
     writer: &WriterHandle,
@@ -2760,7 +2764,7 @@ impl AgentDisplayNameRequest {
         })
     }
 
-    fn event(&self, session_id: &str) -> Event {
+    fn event(&self, session_id: &tau_proto::SessionId) -> Event {
         crate::ui_events::set_agent_display_name(
             session_id,
             self.agent_id.clone(),
@@ -2923,7 +2927,7 @@ impl<'a> TerminalInputSession<'a> {
         let _ = send_event(
             self.writer,
             &Event::UiFocusChanged(UiFocusChanged {
-                session_id: self.session_id.as_str().into(),
+                session_id: self.session_id.clone(),
                 focused,
             }),
         );
@@ -2933,7 +2937,7 @@ impl<'a> TerminalInputSession<'a> {
         let _ = send_event(
             self.writer,
             &Event::UiRecallQueuedPrompt(tau_proto::UiRecallQueuedPrompt {
-                session_id: self.session_id.as_str().into(),
+                session_id: self.session_id.clone(),
                 target_agent_id: self.selected_side_agent_id(),
             }),
         );
@@ -3145,7 +3149,7 @@ impl<'a> TerminalInputSession<'a> {
         let _ = send_event(
             self.writer,
             &Event::UiSwitchSession(tau_proto::UiSwitchSession {
-                new_session_id: self.session_id.as_str().into(),
+                new_session_id: self.session_id.clone(),
                 reason: tau_proto::SessionStartReason::New,
             }),
         );
@@ -3636,7 +3640,7 @@ impl<'a> TerminalInputSession<'a> {
         }) {
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 literal: matches!(command_handling, PromptCommandHandling::LiteralEscape),
-                session_id: self.session_id.as_str().into(),
+                session_id: self.session_id.clone(),
                 text: text.to_owned(),
                 agent_id: target_agent_id,
                 message_class: tau_proto::PromptMessageClass::User,
@@ -3703,7 +3707,7 @@ impl<'a> TerminalInputSession<'a> {
         let target_agent_id = self.selected_side_agent_id();
         queue_prompt_draft_snapshot(
             self.ctx.draft_handle.as_ref(),
-            self.session_id.as_str().into(),
+            self.session_id.clone(),
             target_agent_id,
             text,
         );
@@ -3715,7 +3719,7 @@ impl<'a> TerminalInputSession<'a> {
         let target_agent_id = self.selected_side_agent_id();
         retarget_prompt_draft_snapshot(
             self.ctx.draft_handle.as_ref(),
-            self.session_id.as_str().into(),
+            self.session_id.clone(),
             target_agent_id,
             text,
         );
@@ -4123,7 +4127,7 @@ fn dispatch_agent_cycle(
 fn prepare_dynamic_action_invocation(
     action_state: &ActionCommandState,
     routing: &InputRoutingState,
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     text: &str,
 ) -> Result<Option<DynamicActionInvocation>, String> {
     let Some(dispatch) = action_state.parse_line(text) else {
@@ -4135,7 +4139,7 @@ fn prepare_dynamic_action_invocation(
     let owner_agent_id = routing.selected_agent_id();
     let event = Event::ActionInvoke(tau_proto::ActionInvoke {
         invocation_id: invocation_id.clone(),
-        session_id: session_id.into(),
+        session_id: session_id.clone(),
         extension_name: dispatch.extension_name,
         instance_id: dispatch.instance_id,
         action_id: parsed.action_id.clone(),
@@ -4156,7 +4160,7 @@ fn prepare_dynamic_action_invocation(
 fn terminal_input_loop(
     term: &mut tau_cli_term::HighTerm,
     writer: &WriterHandle,
-    session_id: &mut String,
+    session_id: &mut tau_proto::SessionId,
     ctx: TerminalInputLoopCtx,
 ) -> Result<InputLoopExit, CliError> {
     // Cloned `TermHandle` so we can `print_output` for client-side
@@ -4608,7 +4612,7 @@ fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {
 
 fn send_shell_command(
     writer: &WriterHandle,
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     command: &str,
     include_in_context: bool,
     target_agent_id: Option<tau_proto::AgentId>,

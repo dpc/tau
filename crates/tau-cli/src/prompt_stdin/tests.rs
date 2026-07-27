@@ -24,7 +24,9 @@ fn user_update(spid: &str, text: &str, thinking: Option<&str>) -> ProviderRespon
         });
     }
     ProviderResponseUpdated {
-        agent_prompt_id: spid.into(),
+        agent_prompt_id: spid
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         deltas,
         compaction: None,
@@ -36,7 +38,9 @@ fn user_update(spid: &str, text: &str, thinking: Option<&str>) -> ProviderRespon
 
 fn user_status_clear_update(spid: &str) -> ProviderResponseUpdated {
     ProviderResponseUpdated {
-        agent_prompt_id: spid.into(),
+        agent_prompt_id: spid
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         deltas: Vec::new(),
         compaction: None,
@@ -59,7 +63,9 @@ fn assistant_finished(
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: spid.into(),
+        agent_prompt_id: spid
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
@@ -93,26 +99,30 @@ fn one_shot_output_waits_through_tool_calls_and_keeps_final_snapshots() {
     output.capture_update(&user_update("sp-tool", "", Some("plan v1")));
     output.capture_update(&user_update("sp-tool", "", Some(" final")));
 
-    assert!(!output.capture_finished(&ProviderResponseFinished {
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
+    assert!(
+        !output.capture_finished(&ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-tool".into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        stop_reason: ProviderStopReason::ToolCalls,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        originator: PromptOriginator::User,
-        output_items: Vec::new(),
-        usage: None,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    }));
+            agent_prompt_id: "sp-tool"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            stop_reason: ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            originator: PromptOriginator::User,
+            output_items: Vec::new(),
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+    );
 
     output.capture_update(&user_update(
         "sp-final",
@@ -138,26 +148,30 @@ fn one_shot_output_falls_back_to_latest_streaming_text() {
     output.capture_update(&user_update("sp-final", "partial", None));
     output.capture_update(&user_update("sp-final", "complete", None));
 
-    assert!(output.capture_finished(&ProviderResponseFinished {
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
+    assert!(
+        output.capture_finished(&ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-final".into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        stop_reason: ProviderStopReason::EndTurn,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        originator: PromptOriginator::User,
-        output_items: Vec::new(),
-        usage: None,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    }));
+            agent_prompt_id: "sp-final"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            stop_reason: ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            originator: PromptOriginator::User,
+            output_items: Vec::new(),
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+    );
 
     assert_eq!(output.final_response.as_deref(), Some("partialcomplete"));
 }
@@ -171,26 +185,30 @@ fn one_shot_output_status_clear_resets_streaming_fallback() {
     output.capture_update(&user_status_clear_update("sp-final"));
     output.capture_update(&user_update("sp-final", "good", Some("good plan")));
 
-    assert!(output.capture_finished(&ProviderResponseFinished {
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
+    assert!(
+        output.capture_finished(&ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-final".into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        stop_reason: ProviderStopReason::EndTurn,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        originator: PromptOriginator::User,
-        output_items: Vec::new(),
-        usage: None,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    }));
+            agent_prompt_id: "sp-final"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            stop_reason: ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            originator: PromptOriginator::User,
+            output_items: Vec::new(),
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+    );
 
     assert_eq!(output.thinking_blocks, vec!["good plan"]);
     assert_eq!(output.final_response.as_deref(), Some("good"));

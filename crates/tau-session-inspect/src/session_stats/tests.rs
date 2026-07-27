@@ -37,7 +37,7 @@ fn activity_counts_serialize_estimated_cost_as_rounded_dollars() {
 
     let toon = serde_toon::to_string(&super::SessionStats {
         schema_version: 2,
-        session_id: SessionId::from("s1"),
+        session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
         complete: true,
         missing_data: Vec::new(),
         totals: super::ActivityCounts {
@@ -68,7 +68,8 @@ fn record(seq: u64, event: Event) -> PersistedAgentEvent {
 #[test]
 fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
     let agent_id = AgentId::parse("engineer_0").expect("agent id");
-    let prompt_id = AgentPromptId::from("ap-engineer_0-0");
+    let prompt_id =
+        AgentPromptId::parse("ap-engineer_0-0").expect("known-safe AgentPromptId must be valid");
     let model: tau_proto::ModelId = "openai/gpt-5".parse().expect("model id");
     let rates = EstimatedApiCostRates {
         uncached_input: EstimatedUsdPerMillion::checked_from_usd(1).expect("rate"),
@@ -92,9 +93,11 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
             1,
             Event::AgentOuterTurnStarted(AgentOuterTurnStarted {
                 agent_id: agent_id.clone(),
-                session_id: SessionId::from("s1"),
+                session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
                 outer_turn_id: "ot-ap-engineer_0-0".into(),
-                agent_prompt_id: "ap-engineer_0-0".into(),
+                agent_prompt_id: "ap-engineer_0-0"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 runtime_id: tau_proto::AccountingRuntimeId::new("runtime-1"),
                 activation: tau_proto::AgentOuterTurnActivation::Journal {
                     occurrence: AgentHead::Node(tau_core::NodeId::new(0)),
@@ -106,7 +109,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
             Event::AgentPromptStarted(AgentPromptStarted {
                 agent_prompt_id: prompt_id.clone(),
                 agent_id: agent_id.clone(),
-                session_id: SessionId::from("s1"),
+                session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
                 model: model.clone(),
                 model_params: Some(ModelParams {
                     effort: Effort::High,
@@ -163,7 +166,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
             4,
             Event::AgentOuterTurnFinished(AgentOuterTurnFinished {
                 agent_id,
-                session_id: SessionId::from("s1"),
+                session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
                 outer_turn_id: "ot-ap-engineer_0-0".into(),
                 disposition: tau_proto::AgentOuterTurnDisposition::Settled,
             }),
@@ -188,9 +191,11 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
     events.push(record(
         6,
         Event::AgentPromptStarted(AgentPromptStarted {
-            agent_prompt_id: "ap-engineer_0-foreign".into(),
+            agent_prompt_id: "ap-engineer_0-foreign"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: AgentId::parse("engineer_0").expect("agent id"),
-            session_id: SessionId::from("s2"),
+            session_id: SessionId::parse("s2").expect("known-safe SessionId must be valid"),
             model: "openai/gpt-5".parse().expect("model id"),
             model_params: Some(ModelParams::default()),
             outer_turn_id: None,
@@ -203,7 +208,9 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
         Event::ProviderResponseFinished(response) => response,
         _ => unreachable!("selected response fixture"),
     };
-    foreign.agent_prompt_id = "ap-engineer_0-foreign".into();
+    foreign.agent_prompt_id = "ap-engineer_0-foreign"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     foreign.estimated_api_cost_increment = Some(EstimatedApiCost::from_picodollars(999_999));
     events.push(record(7, Event::ProviderResponseFinished(foreign)));
     events.push(record(
@@ -261,9 +268,11 @@ fn aggregation_reports_legacy_accounting_gaps_without_inference() {
         record(
             1,
             Event::AgentPromptStarted(AgentPromptStarted {
-                agent_prompt_id: "ap-legacy_0-0".into(),
+                agent_prompt_id: "ap-legacy_0-0"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 agent_id,
-                session_id: SessionId::from("s1"),
+                session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
                 model: "openai/gpt-5".parse().expect("model id"),
                 model_params: None,
                 outer_turn_id: None,
@@ -295,9 +304,11 @@ fn aggregation_treats_present_zero_accounting_as_complete() {
     let model: tau_proto::ModelId = "openai/gpt-5".parse().expect("model");
     let prompt = |id: &str| {
         Event::AgentPromptStarted(AgentPromptStarted {
-            agent_prompt_id: id.into(),
+            agent_prompt_id: id
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: agent_id.clone(),
-            session_id: SessionId::from("s1"),
+            session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
             model: model.clone(),
             model_params: Some(ModelParams::default()),
             outer_turn_id: None,
@@ -311,7 +322,9 @@ fn aggregation_treats_present_zero_accounting_as_complete() {
                     rates: Option<tau_proto::EstimatedApiCostRates>,
                     cost: Option<EstimatedApiCost>| {
         Event::ProviderResponseFinished(ProviderResponseFinished {
-            agent_prompt_id: id.into(),
+            agent_prompt_id: id
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: agent_id.clone(),
             output_items: Vec::new(),
             stop_reason: ProviderStopReason::EndTurn,
@@ -372,7 +385,7 @@ fn persisted_traversal_reports_missing_member_journal() {
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: SessionId::from("s1"),
+                session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
                 agent_id: AgentId::parse("missing_0").expect("agent id"),
                 ephemeral: false,
             }),
@@ -380,9 +393,12 @@ fn persisted_traversal_reports_missing_member_journal() {
         .expect("membership");
     drop(sessions);
 
-    let report = read_session_stats(&sessions_dir, "s1")
-        .expect("stats")
-        .expect("session");
+    let report = read_session_stats(
+        &sessions_dir,
+        &tau_proto::SessionId::parse("s1").expect("session id"),
+    )
+    .expect("stats")
+    .expect("session");
     assert_eq!(report.schema_version, 2);
     assert!(!report.complete);
     assert_eq!(

@@ -5,7 +5,9 @@ use super::*;
 /// Build one contentful prompt-draft liveness observation.
 fn draft(text: &str) -> Event {
     Event::UiPromptDraft(tau_proto::UiPromptDraft {
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         target_agent_id: None,
         text: text.to_owned(),
     })
@@ -14,7 +16,9 @@ fn draft(text: &str) -> Event {
 /// Build one terminal-focus liveness observation.
 fn focus(focused: bool) -> Event {
     Event::UiFocusChanged(tau_proto::UiFocusChanged {
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         focused,
     })
 }

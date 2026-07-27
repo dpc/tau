@@ -430,8 +430,13 @@ fn rollover_applies_deferred_tool_declaration_for_current_generation() {
     .expect("defer declaration");
     assert!(h.registry.providers_for("rollover_tool").is_empty());
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
 
     assert_eq!(
         h.registry.providers_for("rollover_tool")[0]

@@ -815,7 +815,8 @@ fn assert_lifecycle_pairs(
         (prompt_ids, occurrence),
     ) in starts.iter().zip(&finishes).zip(expected)
     {
-        let first_prompt = AgentPromptId::from(prompt_ids[0]);
+        let first_prompt =
+            AgentPromptId::parse(prompt_ids[0]).expect("known-safe AgentPromptId must be valid");
         let expected_turn = tau_proto::AgentOuterTurnId::for_prompt(&first_prompt);
         if start_record.source.is_some()
             || finish_record.source.is_some()
@@ -840,7 +841,8 @@ fn assert_lifecycle_pairs(
             .into());
         }
         for prompt_id in *prompt_ids {
-            let prompt_id = AgentPromptId::from(*prompt_id);
+            let prompt_id =
+                AgentPromptId::parse(*prompt_id).expect("known-safe AgentPromptId must be valid");
             let dispatch_index = records
                 .iter()
                 .position(|record| {

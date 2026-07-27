@@ -12,14 +12,21 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id.clone(),
             ephemeral: false,
         }),
     );
 
     let current = harness
-        .build_session_agent_list(&"s1".into(), tau_proto::SessionAgentListScope::Current)
+        .build_session_agent_list(
+            &"s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionAgentListScope::Current,
+        )
         .expect("current roster");
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].agent_id, agent_id);
@@ -41,7 +48,12 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
         .expect("live agent runtime")
         .terminating = true;
     let stopping = harness
-        .build_session_agent_list(&"s1".into(), tau_proto::SessionAgentListScope::Current)
+        .build_session_agent_list(
+            &"s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionAgentListScope::Current,
+        )
         .expect("stopping roster");
     assert_eq!(
         stopping[0].lifecycle,
@@ -52,19 +64,31 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
     harness.publish_event(
         None,
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id.clone(),
         }),
     );
 
     assert!(
         harness
-            .build_session_agent_list(&"s1".into(), tau_proto::SessionAgentListScope::Current)
+            .build_session_agent_list(
+                &"s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
+                tau_proto::SessionAgentListScope::Current
+            )
             .expect("current roster")
             .is_empty()
     );
     let history = harness
-        .build_session_agent_list(&"s1".into(), tau_proto::SessionAgentListScope::History)
+        .build_session_agent_list(
+            &"s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionAgentListScope::History,
+        )
         .expect("history roster");
     assert_eq!(history.len(), 1);
     assert_eq!(
@@ -88,7 +112,12 @@ fn roster_keeps_committed_member_without_runtime_or_facts() {
         .insert(agent_id.clone());
 
     let rows = harness
-        .build_session_agent_list(&"s1".into(), tau_proto::SessionAgentListScope::Current)
+        .build_session_agent_list(
+            &"s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionAgentListScope::Current,
+        )
         .expect("roster");
 
     assert_eq!(rows.len(), 1);
@@ -107,7 +136,12 @@ fn roster_rejects_stale_session() {
     let harness = quiet_provider_harness(temp.path()).expect("harness");
 
     let error = harness
-        .build_session_agent_list(&"other".into(), tau_proto::SessionAgentListScope::Current)
+        .build_session_agent_list(
+            &"other"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionAgentListScope::Current,
+        )
         .expect_err("stale session must fail");
 
     assert_eq!(
@@ -128,7 +162,9 @@ fn roster_result_is_ui_only_and_requester_directed() {
     let tool = connect_test_client(&mut harness, "tool", tau_proto::ClientKind::Tool);
     let request = tau_proto::GetSessionAgentList {
         request_id: "request-1".to_owned(),
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         scope: tau_proto::SessionAgentListScope::Current,
     };
 
@@ -224,7 +260,12 @@ fn roster_bounds_cached_membership_before_projection() {
     }
 
     let error = harness
-        .build_session_agent_list(&"s1".into(), tau_proto::SessionAgentListScope::History)
+        .build_session_agent_list(
+            &"s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionAgentListScope::History,
+        )
         .expect_err("oversized membership cache");
     assert_eq!(
         error.kind,
@@ -236,7 +277,12 @@ fn roster_bounds_cached_membership_before_projection() {
         .session_roster_loaded_agents
         .insert(tau_proto::AgentId::parse("orphan").expect("agent id"));
     let error = harness
-        .build_session_agent_list(&"s1".into(), tau_proto::SessionAgentListScope::Current)
+        .build_session_agent_list(
+            &"s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionAgentListScope::Current,
+        )
         .expect_err("inconsistent membership cache");
     assert_eq!(
         error.kind,
@@ -245,7 +291,12 @@ fn roster_bounds_cached_membership_before_projection() {
     harness.session_roster_loaded_agents.clear();
     harness.session_roster_valid = false;
     let error = harness
-        .build_session_agent_list(&"s1".into(), tau_proto::SessionAgentListScope::Current)
+        .build_session_agent_list(
+            &"s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionAgentListScope::Current,
+        )
         .expect_err("invalid restored projection");
     assert_eq!(
         error.kind,
@@ -260,7 +311,9 @@ fn roster_response_size_check_rejects_oversized_content() {
     let message =
         HarnessOutputMessage::SessionAgentListResult(Box::new(tau_proto::SessionAgentListResult {
             request_id: "request".to_owned(),
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             result: tau_proto::SessionAgentListResultPayload::Error {
                 error: tau_proto::SessionAgentListError {
                     kind: tau_proto::SessionAgentListErrorKind::ResponseTooLarge,

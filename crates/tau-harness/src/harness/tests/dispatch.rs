@@ -10,6 +10,14 @@ use crate::harness::{
     restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
 };
 
+fn test_session_id(value: impl Into<String>) -> tau_proto::SessionId {
+    tau_proto::SessionId::parse(value).expect("test session id")
+}
+
+fn test_agent_prompt_id(value: impl Into<String>) -> tau_proto::AgentPromptId {
+    tau_proto::AgentPromptId::parse(value).expect("test agent prompt id")
+}
+
 /// Completed calls must release every process-local correlation before a
 /// provider reuses the same display call ID.
 #[test]
@@ -118,7 +126,7 @@ fn publish_test_tool_declaration(harness: &mut Harness, cid: &AgentId, call_id: 
         Event::ProviderResponseFinished(ProviderResponseFinished {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
-            agent_prompt_id: format!("prompt-{call_id}").into(),
+            agent_prompt_id: test_agent_prompt_id(format!("prompt-{call_id}")),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: call_id.into(),
@@ -264,7 +272,7 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
         .find(|conversation| conversation.originator.is_user())
         .and_then(|conversation| conversation.agent_id.clone());
 
-    h.submit_user_prompt("s1".into(), "hello".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "hello".to_owned())
         .expect("submit first user prompt");
 
     let agent_id = h
@@ -341,7 +349,7 @@ fn prompt_override_template_can_place_agent_id_without_default_duplication() {
         .or_default()
         .prompt_override = Some("custom-template".to_owned());
 
-    h.submit_user_prompt("s1".into(), "hello".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "hello".to_owned())
         .expect("submit first user prompt");
 
     let agent_id = h
@@ -466,7 +474,7 @@ fn first_effective_prompt_with_agent_start_lists_delegate_roles() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
 
-    h.submit_user_prompt("s1".into(), "hello".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "hello".to_owned())
         .expect("submit first user prompt");
 
     let prompt = read_nth_prompt_created(&h, 0);
@@ -658,7 +666,7 @@ fn late_prompt_surface_failure_terminalizes_running_compaction() {
         resume_through: None,
         model: "test/model".into(),
         branch_generation: 0,
-        compact_prompt_id: "ap-late-surface".into(),
+        compact_prompt_id: test_agent_prompt_id("ap-late-surface"),
     };
 
     for internal_name in ["first_internal", "second_internal"] {
@@ -708,7 +716,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
         parent_agent: None,
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         role: h.selected_role.clone(),
         model_override: None,
         metadata: Vec::new(),
@@ -807,7 +815,7 @@ fn existing_agent_human_ui_prompt_is_wrapped_only_in_provider_context() {
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         literal: false,
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         text: raw.to_owned(),
         agent_id: agent_id.clone(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -838,7 +846,7 @@ fn existing_agent_human_ui_prompt_is_wrapped_only_in_provider_context() {
             .iter()
             .any(|item| { text_part(item) == Some("<user>  hello <world> & 雪\nnext  </user>") })
     );
-    let tree = h.tree_request_result(&"s1".into(), Some(agent_id.as_str()));
+    let tree = h.tree_request_result(&test_session_id("s1"), Some(agent_id.as_str()));
     assert!(tree.contains("hello <world> & 雪"));
     assert!(
         !tree.contains("<user>"),
@@ -859,7 +867,7 @@ fn new_agent_initial_human_ui_prompt_is_wrapped_only_in_provider_context() {
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
         parent_agent: None,
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         role: h.selected_role.clone(),
         model_override: None,
         metadata: Vec::new(),
@@ -922,7 +930,7 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
         parent_agent: None,
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         role: h.selected_role.clone(),
         model_override: None,
         metadata: vec![tau_proto::AgentInitialMetadata {
@@ -1233,7 +1241,7 @@ fn duplicate_shell_workdir_fragments_are_coalesced_once() {
 fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
     fn command(agent_id: tau_proto::AgentId, id: &str) -> tau_proto::UiShellCommand {
         tau_proto::UiShellCommand {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             command_id: id.into(),
             command: "pwd".to_owned(),
             include_in_context: false,
@@ -1251,7 +1259,7 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
             .expect("durable agent id"),
     );
     let mut stale = command(agent_id.clone(), "stale");
-    stale.session_id = "old-session".into();
+    stale.session_id = test_session_id("old-session");
     h.handle_ui_shell_command("ui", stale);
     assert_eq!(
         event_log_events(&h)
@@ -1417,7 +1425,7 @@ fn ui_shell_route_is_point_to_point_with_resolved_target() {
     h.handle_ui_shell_command(
         "ui",
         tau_proto::UiShellCommand {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             command_id: "routed-shell".into(),
             command: "pwd".to_owned(),
             include_in_context: false,
@@ -1786,7 +1794,7 @@ fn ui_shell_pending_commands_fail_on_provider_disconnect_and_session_shutdown() 
 
     configure_test_ui_shell_provider(&mut h, "replacement-shell");
     let shutdown = routed_ui_shell_command(&mut h, "shutdown-shell", false);
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session");
     assert_eq!(
         event_log_events(&h)
@@ -1818,7 +1826,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                        session_id: "s1".into(),
+                        session_id: test_session_id("s1"),
                         agent_id: crate::parse_agent_id(agent_id),
                         ephemeral: false,
                     }),
@@ -1939,7 +1947,7 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                     agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                    session_id: "s1".into(),
+                    session_id: test_session_id("s1"),
                     agent_id: agent_id.clone(),
                     ephemeral: false,
                 }),
@@ -2077,7 +2085,7 @@ fn resume_rehydrates_default_agent_conversation_from_durable_routing() {
     let agent_id = {
         let mut h = echo_harness(&sp).expect("start");
         h.selected_model = Some("test/model".into());
-        h.submit_user_prompt("s1".into(), "hello".to_owned())
+        h.submit_user_prompt(test_session_id("s1"), "hello".to_owned())
             .expect("submit first prompt");
         let agent_id = h
             .agents
@@ -2277,7 +2285,7 @@ fn seed_agent_context_usage(state_dir: &Path, model: Option<&str>, input_tokens:
             ctx_id: None,
         }),
     );
-    let prompt_id = tau_proto::AgentPromptId::from("ap-main-usage");
+    let prompt_id = test_agent_prompt_id("ap-main-usage");
     let mut response = provider_text_response(
         &prompt_id,
         tau_proto::AgentId::parse("main").expect("agent id"),
@@ -2356,7 +2364,7 @@ fn seed_agent_loaded(state_dir: &Path, session_id: &str, agent_id: &str) {
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: session_id.into(),
+                session_id: test_session_id(session_id),
                 agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
                 ephemeral: false,
             }),
@@ -2501,7 +2509,7 @@ fn seed_background_placeholder_for_agent(
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
 
-                agent_prompt_id: format!("sp-{call_id}").into(),
+                agent_prompt_id: test_agent_prompt_id(format!("sp-{call_id}")),
                 agent_id: parsed_agent_id,
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
                     call_id: call_id.into(),
@@ -2745,7 +2753,7 @@ pub(super) fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (Te
         .register("conn-owner", shared_test_tool_spec(tool_name));
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = format!("sp-{call_id}").into();
+    let spid: AgentPromptId = test_agent_prompt_id(format!("sp-{call_id}"));
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
 
@@ -2832,7 +2840,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     h.registry.register("conn-strict-tool", spec);
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-invalid-tool-args".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-invalid-tool-args");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
@@ -2965,7 +2973,7 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
     h.registry.register("conn-repair-tool", spec);
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-repair-tool-args".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-repair-tool-args");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
@@ -3069,7 +3077,7 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
     h.registry.register("conn-repair-revalidate-tool", spec);
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-repair-revalidate-tool-args".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-repair-revalidate-tool-args");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
 
@@ -3232,7 +3240,7 @@ fn shown_tool_failure_examples_are_session_and_agent_scoped() {
     h.shown_tool_failure_examples
         .insert((cid, ToolName::new("example_tool"), "hint".to_owned()));
     h.switch_session(
-        tau_proto::SessionId::new("session-after-example-hint"),
+        test_session_id("session-after-example-hint"),
         tau_proto::SessionStartReason::New,
     )
     .expect("switch session");
@@ -3294,7 +3302,7 @@ fn loop_guard_repeated_assistant_text_flows_through_provider_responses() {
         "I will keep trying the same plan without taking any tool action or making progress.";
 
     for idx in 0..3 {
-        let spid: AgentPromptId = format!("sp-loop-text-{idx}").into();
+        let spid: AgentPromptId = test_agent_prompt_id(format!("sp-loop-text-{idx}"));
         seed_agent_thinking(&mut h, &cid, spid.as_str());
         h.prompt_agents.insert(spid.clone(), cid.clone());
         h.handle_provider_response_finished(provider_text_response(
@@ -3356,7 +3364,7 @@ fn loop_guard_provider_repetition_response_queues_pivot_then_blocks() {
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
 
-    let spid: AgentPromptId = "sp-provider-repetition-1".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-provider-repetition-1");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(provider_repetition_response(
@@ -3408,7 +3416,7 @@ fn repetition_response_with_output_items_is_cleared_before_persisting() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-provider-repetition-malformed".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-provider-repetition-malformed");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     let mut response =
@@ -3591,7 +3599,7 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let _frames = connect_test_client(&mut h, "conn-side-invalid", tau_proto::ClientKind::External);
-    h.submit_user_prompt("s1".into(), "parent prompt".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "parent prompt".to_owned())
         .expect("submit parent");
     let parent = h
         .agents
@@ -3668,7 +3676,7 @@ fn provider_completion_after_agent_unload_is_discarded_idempotently() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
-    let prompt_id: AgentPromptId = "sp-late-after-unload".into();
+    let prompt_id: AgentPromptId = test_agent_prompt_id("sp-late-after-unload");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
     h.prompt_agents.insert(prompt_id.clone(), cid.clone());
     let response = provider_text_response(
@@ -4017,7 +4025,7 @@ fn loop_guard_resets_when_user_prompt_is_queued() {
         .expect("agent id")
         .to_owned();
     h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "sp-loop-queued-reset".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-loop-queued-reset"),
     };
     h.record_assistant_loop_signature(
         &cid,
@@ -4053,7 +4061,7 @@ fn loop_guard_queued_user_prompt_removes_pending_breaker() {
     h.record_assistant_loop_signature(&cid, Some(text));
     h.record_assistant_loop_signature(&cid, Some(text));
     h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "sp-loop-queued-breaker-reset".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-loop-queued-breaker-reset"),
     };
 
     let submission = h
@@ -4289,7 +4297,7 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
         .register("conn-disabled", shared_test_tool_spec("disabled_tool"));
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-unavailable-tool-errors".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-unavailable-tool-errors");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
@@ -4420,7 +4428,7 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         .register("conn-current", shared_test_tool_spec("current_tool"));
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-snapshot-tool-suggestion".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-snapshot-tool-suggestion");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.prompt_tool_specs
@@ -4524,7 +4532,7 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
     h.registry.register("conn-strict-old-tool", spec);
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-strict-old-tool".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-strict-old-tool");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.registry.unregister_connection("conn-strict-old-tool");
@@ -4605,14 +4613,14 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         .register("conn-dead-tool", exclusive_test_tool_spec("dead_slow"));
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-dead-tool".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-dead-tool");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "run two slow tools".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -5106,7 +5114,7 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-bg-result-drain".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-bg-result-drain");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -5208,7 +5216,7 @@ fn background_error_clears_actual_running_call() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-bg-error-drain".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-bg-error-drain");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -5322,7 +5330,7 @@ fn background_cancel_clears_actual_running_call() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-bg-cancel-drain".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-bg-cancel-drain");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -5461,7 +5469,7 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-bg-disconnect-batch".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-bg-disconnect-batch");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -5574,7 +5582,7 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-bg-idle-disconnect".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-bg-idle-disconnect");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -5687,7 +5695,7 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-mixed-disconnect".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-mixed-disconnect");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -6096,7 +6104,7 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
 
-                agent_prompt_id: "spoofed-prompt".into(),
+                agent_prompt_id: test_agent_prompt_id("spoofed-prompt"),
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 output_items: Vec::new(),
                 stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -6176,7 +6184,7 @@ fn cancel_publishes_tool_cancel_request() {
         .register("conn-cancel-owner", shared_test_tool_spec("cancel_tool"));
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-cancel-tool".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-cancel-tool");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid);
@@ -6210,7 +6218,7 @@ fn cancel_publishes_tool_cancel_request() {
     .expect("tool call routed");
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: None,
     });
@@ -6321,7 +6329,7 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-cancel-bg-tool".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-cancel-bg-tool");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid.clone());
@@ -6438,7 +6446,7 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
         ));
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: None,
     });
@@ -6478,7 +6486,7 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
     assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
 
     let submission = h
-        .submit_user_prompt("s1".into(), "continue after cancel".to_owned())
+        .submit_user_prompt(test_session_id("s1"), "continue after cancel".to_owned())
         .expect("submit follow-up user prompt");
     assert_eq!(submission, PromptSubmission::Dispatched);
     assert!(event_log_contains_any_source(&h, |event| matches!(
@@ -6548,7 +6556,7 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
     seed_tools_running(&mut h, &cancel_cid, vec![call_id.clone()]);
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(crate::parse_agent_id(&cancel_agent_id)),
         agent_prompt_id: None,
     });
@@ -6599,7 +6607,7 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-live-mixed-cancel".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-live-mixed-cancel");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid.clone());
@@ -6652,7 +6660,7 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
     assert!(h.agents[&cid].pending_prompts.is_empty());
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: None,
     });
@@ -6772,7 +6780,7 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
     h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
 
     let parent_cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-builtin-agent-start-bg".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-builtin-agent-start-bg");
     seed_agent_thinking(&mut h, &parent_cid, spid.as_str());
     let parent_agent_id = h.agents[&parent_cid].agent_id.clone().expect("agent id");
     h.prompt_agents.insert(spid.clone(), parent_cid.clone());
@@ -6855,7 +6863,7 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
     h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
 
     let parent_cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-live-builtin-agent-start-bg".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-live-builtin-agent-start-bg");
     seed_agent_thinking(&mut h, &parent_cid, spid.as_str());
     let parent_agent_id = h.agents[&parent_cid].agent_id.clone().expect("agent id");
     h.prompt_agents.insert(spid.clone(), parent_cid.clone());
@@ -6892,7 +6900,7 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
 
     seed_tools_running(&mut h, &parent_cid, vec![call_id.clone()]);
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(crate::parse_agent_id(&parent_agent_id)),
         agent_prompt_id: None,
     });
@@ -7029,7 +7037,7 @@ fn cancel_clears_active_wait_state() {
     .expect("register cancellation interceptor");
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: None,
     });
@@ -7085,7 +7093,7 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
     let mut h = echo_harness(&sp).expect("start");
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-cancel-thinking".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-cancel-thinking");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.agents
         .get_mut(&cid)
@@ -7106,7 +7114,7 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: None,
     });
@@ -7187,7 +7195,7 @@ fn cancel_while_thinking_keeps_standalone_dispatch_ownership() {
     let mut h = echo_harness(&sp).expect("start");
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-cancel-standalone-thinking".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-cancel-standalone-thinking");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-cancel-standalone").expect("valid id");
@@ -7207,7 +7215,7 @@ fn cancel_while_thinking_keeps_standalone_dispatch_ownership() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: Some(spid.clone()),
     });
@@ -7239,8 +7247,8 @@ fn cancel_while_thinking_keeps_mismatched_inference_dispatch_ownership() {
     let mut h = echo_harness(&sp).expect("start");
 
     let cid = ensure_test_user_agent(&mut h);
-    let canceled_id: AgentPromptId = "sp-cancel-mismatched-thinking".into();
-    let owned_id: AgentPromptId = "sp-owned-by-other-dispatch".into();
+    let canceled_id: AgentPromptId = test_agent_prompt_id("sp-cancel-mismatched-thinking");
+    let owned_id: AgentPromptId = test_agent_prompt_id("sp-owned-by-other-dispatch");
     seed_agent_thinking(&mut h, &cid, canceled_id.as_str());
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     let agent = h.agents.get_mut(&cid).expect("conversation");
@@ -7256,7 +7264,7 @@ fn cancel_while_thinking_keeps_mismatched_inference_dispatch_ownership() {
     h.prompt_agents.insert(canceled_id.clone(), cid.clone());
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
         agent_prompt_id: Some(canceled_id),
     });
@@ -7284,7 +7292,7 @@ fn cross_session_submission_is_rejected() {
 
     h.selected_model = Some("test/model".into());
     let submission = h
-        .submit_user_prompt("chat-1".into(), "hello".to_owned())
+        .submit_user_prompt(test_session_id("chat-1"), "hello".to_owned())
         .expect("submit");
     match submission {
         PromptSubmission::Rejected { reason } => {
@@ -7579,7 +7587,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
     h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "watcher-busy".into(),
+        agent_prompt_id: test_agent_prompt_id("watcher-busy"),
     };
     h.set_agent_watch(
         &watcher_id,
@@ -7753,7 +7761,7 @@ fn provider_response_stats_are_public_provider_updates() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-provider-public-stats".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-provider-public-stats");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     let durable_id = durable_agent_id_for_conversation(&h, &cid);
     h.prompt_agents.insert(spid.clone(), cid.clone());
@@ -7830,7 +7838,7 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_agents.insert("sp-x".into(), cid);
+    h.prompt_agents.insert(test_agent_prompt_id("sp-x"), cid);
 
     // A `read` of a nonexistent path returns a ToolError; a valid mutating
     // tool call returns ToolResult. Harness dispatch no longer serializes them
@@ -7870,7 +7878,7 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-x".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-x"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
@@ -7967,7 +7975,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     append_user_message_via_event(&mut h, "s1", "go");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    let spid: AgentPromptId = format!("ap-{agent_id}-0").into();
+    let spid: AgentPromptId = test_agent_prompt_id(format!("ap-{agent_id}-0"));
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid);
 
@@ -8131,7 +8139,7 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
         h.handle_ui_navigate_tree(
             "ui",
             tau_proto::UiNavigateTree {
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 target_agent_id: Some(agent_id.clone()),
                 target: tau_proto::UiTreeNavigationTarget::Node(first_user_head),
             },
@@ -8162,7 +8170,7 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
         h.handle_ui_navigate_tree(
             "ui",
             tau_proto::UiNavigateTree {
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 target_agent_id: Some(agent_id.clone()),
                 target: tau_proto::UiTreeNavigationTarget::Node(first_user_head),
             },
@@ -8215,7 +8223,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(provider_text_response(
-            &"sp-tree-anchor".into(),
+            &test_agent_prompt_id("sp-tree-anchor"),
             agent_id.clone(),
             "assistant answer",
         )),
@@ -8226,7 +8234,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     h.handle_ui_navigate_tree(
         "ui",
         tau_proto::UiNavigateTree {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id.clone()),
             target: tau_proto::UiTreeNavigationTarget::PromptAnchor(1),
         },
@@ -8241,7 +8249,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     h.handle_ui_navigate_tree(
         "ui",
         tau_proto::UiNavigateTree {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id.clone()),
             target: tau_proto::UiTreeNavigationTarget::Node(assistant_node),
         },
@@ -8296,7 +8304,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(provider_text_response(
-            &"sp-tree-anchor-parent".into(),
+            &test_agent_prompt_id("sp-tree-anchor-parent"),
             agent_id.clone(),
             "assistant answer",
         )),
@@ -8307,7 +8315,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
     h.handle_ui_navigate_tree(
         "ui",
         tau_proto::UiNavigateTree {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id.clone()),
             target: tau_proto::UiTreeNavigationTarget::PromptAnchor(2),
         },
@@ -8341,7 +8349,7 @@ fn ui_tree_root_navigation_persists_across_resume() {
         h.handle_ui_navigate_tree(
             "ui",
             tau_proto::UiNavigateTree {
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 target_agent_id: Some(agent_id.clone()),
                 target: tau_proto::UiTreeNavigationTarget::Root,
             },
@@ -8398,7 +8406,7 @@ fn resume_keeps_prompt_appended_after_root_rewind_as_head() {
         h.handle_ui_navigate_tree(
             "ui",
             tau_proto::UiNavigateTree {
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 target_agent_id: Some(agent_id),
                 target: tau_proto::UiTreeNavigationTarget::Root,
             },
@@ -8446,7 +8454,7 @@ fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
         h.publish_for_agent(
             &cid,
             Event::ProviderResponseFinished(provider_text_response(
-                &"sp-tree-resume-anchor".into(),
+                &test_agent_prompt_id("sp-tree-resume-anchor"),
                 agent_id.clone(),
                 "assistant answer",
             )),
@@ -8456,7 +8464,7 @@ fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
         h.handle_ui_navigate_tree(
             "ui",
             tau_proto::UiNavigateTree {
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 target_agent_id: Some(agent_id),
                 target: tau_proto::UiTreeNavigationTarget::PromptAnchor(2),
             },
@@ -8501,7 +8509,7 @@ fn tree_request_result_formats_prompt_anchors_without_raw_nodes() {
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(provider_text_response(
-            &"sp-tree-view".into(),
+            &test_agent_prompt_id("sp-tree-view"),
             agent_id.clone(),
             "assistant answer should not be listed",
         )),
@@ -8510,14 +8518,14 @@ fn tree_request_result_formats_prompt_anchors_without_raw_nodes() {
     h.handle_ui_navigate_tree(
         "ui",
         tau_proto::UiNavigateTree {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id.clone()),
             target: tau_proto::UiTreeNavigationTarget::PromptAnchor(2),
         },
     )
     .expect("select second prompt anchor");
 
-    let result = h.tree_request_result(&"s1".into(), Some(agent_id.as_str()));
+    let result = h.tree_request_result(&test_session_id("s1"), Some(agent_id.as_str()));
     assert_eq!(
         result,
         concat!(
@@ -8544,7 +8552,8 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.prompt_agents
+        .insert(test_agent_prompt_id("sp-x"), cid.clone());
 
     let edit_args = CborValue::Map(vec![
         (
@@ -8577,7 +8586,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-x".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-x"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
@@ -8622,7 +8631,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         literal: false,
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         text: "redirect".to_owned(),
         agent_id,
         message_class: tau_proto::PromptMessageClass::User,
@@ -8742,7 +8751,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "hello".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "hello".to_owned())
         .expect("submit");
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
@@ -8780,7 +8789,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
     ));
     assert_eq!(h.tool_turn.pending_len(), 0);
 
-    h.submit_user_prompt("s1".into(), "again".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "again".to_owned())
         .expect("submit again");
     assert!(matches!(
         h.agents.get(&cid).expect("default").turn_state,
@@ -8947,7 +8956,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -8993,7 +9002,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
     })
     .expect("finish first");
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -9012,7 +9021,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -9057,7 +9066,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     })
     .expect("finish first");
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
     let spid2 = prompt2.agent_prompt_id.clone();
@@ -9126,7 +9135,7 @@ fn model_switch_invalidates_chain_anchor() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model-a".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -9174,7 +9183,7 @@ fn model_switch_invalidates_chain_anchor() {
     // The selected role resolves to a different model.
     h.selected_model = Some("test/model-b".into());
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -9204,7 +9213,7 @@ fn params_drift_invalidates_chain_anchor() {
         .expect("selected role")
         .effort = Some(tau_proto::Effort::Low);
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -9255,7 +9264,7 @@ fn params_drift_invalidates_chain_anchor() {
         .expect("selected role")
         .effort = Some(tau_proto::Effort::High);
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -9280,7 +9289,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -9346,7 +9355,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
         },
     );
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -9369,7 +9378,7 @@ fn tools_drift_invalidates_chain_anchor() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -9434,7 +9443,7 @@ fn tools_drift_invalidates_chain_anchor() {
         },
     );
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -9457,7 +9466,7 @@ fn stable_params_preserve_chain_anchor() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -9502,7 +9511,7 @@ fn stable_params_preserve_chain_anchor() {
     })
     .expect("finish first");
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -9523,7 +9532,7 @@ fn missing_response_id_leaves_chain_unset() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.submit_user_prompt("s1".into(), "first".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     let prompt1 = read_nth_prompt_created(&h, 0);
     let spid1 = prompt1.agent_prompt_id.clone();
@@ -9569,7 +9578,7 @@ fn missing_response_id_leaves_chain_unset() {
     })
     .expect("finish first");
 
-    h.submit_user_prompt("s1".into(), "second".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");
     let prompt2 = read_nth_prompt_created(&h, 1);
 
@@ -9589,7 +9598,7 @@ fn queued_prompt_extends_completed_first_prompt() {
     h.selected_model = Some("test/model".into());
 
     let first = h
-        .submit_user_prompt("s1".into(), "first".to_owned())
+        .submit_user_prompt(test_session_id("s1"), "first".to_owned())
         .expect("submit first");
     assert_eq!(first, PromptSubmission::Dispatched);
     let first_agent_id = h
@@ -9602,7 +9611,7 @@ fn queued_prompt_extends_completed_first_prompt() {
     let spid1 = prompt1.agent_prompt_id.clone();
 
     let second = h
-        .submit_user_prompt("s1".into(), "second".to_owned())
+        .submit_user_prompt(test_session_id("s1"), "second".to_owned())
         .expect("submit second");
     assert_eq!(second, PromptSubmission::Queued);
 
@@ -9863,7 +9872,7 @@ fn resumed_startup_folds_restore_notice_before_first_user_prompt() {
     )));
     assert_eq!(restore_notice_event_count(&h), 0);
 
-    h.submit_user_prompt("s1".into(), "after restore".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "after restore".to_owned())
         .expect("submit first resumed prompt");
     let prompt = read_nth_prompt_created(&h, 0);
     let notice_pos = prompt
@@ -10058,7 +10067,7 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
         .agent("main")
         .and_then(tau_core::AgentTree::head)
         .expect("second activation head");
-    let completed_prompt_id = tau_proto::AgentPromptId::from("ap-main-completed");
+    let completed_prompt_id = test_agent_prompt_id("ap-main-completed");
     append_seed_agent_event(
         &mut store,
         Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
@@ -10150,7 +10159,7 @@ fn restore_notice_is_not_duplicated_by_followups_or_later_resumes() {
             quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
                 .expect("first resume");
 
-        h.submit_user_prompt("s1".into(), "first after restore".to_owned())
+        h.submit_user_prompt(test_session_id("s1"), "first after restore".to_owned())
             .expect("submit first resumed prompt");
         let first_prompt = read_nth_prompt_created(&h, 0);
         let first_spid = first_prompt.agent_prompt_id.clone();
@@ -10165,7 +10174,7 @@ fn restore_notice_is_not_duplicated_by_followups_or_later_resumes() {
             "first answer",
         ))
         .expect("finish first prompt");
-        h.submit_user_prompt("s1".into(), "second after restore".to_owned())
+        h.submit_user_prompt(test_session_id("s1"), "second after restore".to_owned())
             .expect("submit second prompt");
         let second_prompt = read_nth_prompt_created(&h, 1);
         assert_eq!(context_text_count(&second_prompt, notice.as_str()), 1);
@@ -10188,7 +10197,7 @@ fn restore_notice_is_not_duplicated_by_followups_or_later_resumes() {
             quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
                 .expect("second resume");
 
-        h.submit_user_prompt("s1".into(), "third after restore".to_owned())
+        h.submit_user_prompt(test_session_id("s1"), "third after restore".to_owned())
             .expect("submit after second resume");
         let prompt = read_nth_prompt_created(&h, 0);
         assert_eq!(context_text_count(&prompt, notice.as_str()), 1);
@@ -10229,7 +10238,7 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
         Event::AgentPromptCreated(_)
     )));
 
-    h.submit_user_prompt("s1".into(), "after restore".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "after restore".to_owned())
         .expect("submit first resumed prompt");
     let first_prompt = read_nth_prompt_created(&h, 0);
     let first_spid = first_prompt.agent_prompt_id.clone();
@@ -10391,8 +10400,11 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
         h.wait_tool_terminal_observation(&ToolCallId::from("restored-any")),
         Some(source_terminal)
     );
-    h.submit_user_prompt("s1".into(), "collect restored background".to_owned())
-        .expect("submit first resumed prompt");
+    h.submit_user_prompt(
+        test_session_id("s1"),
+        "collect restored background".to_owned(),
+    )
+    .expect("submit first resumed prompt");
     let prompt = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
@@ -10458,8 +10470,11 @@ fn resumed_completed_background_result_preserves_exact_wait_correlation() {
         h.wait_tool_terminal_observation(&ToolCallId::from("restored-exact")),
         Some(source_terminal)
     );
-    h.submit_user_prompt("s1".into(), "collect exact restored background".to_owned())
-        .expect("submit resumed prompt");
+    h.submit_user_prompt(
+        test_session_id("s1"),
+        "collect exact restored background".to_owned(),
+    )
+    .expect("submit resumed prompt");
     let prompt = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
@@ -10643,7 +10658,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         })),
     )
     .expect("register rollover interceptor");
-    let checkpoint_prompt_id = tau_proto::AgentPromptId::from("ap-old-checkpoint");
+    let checkpoint_prompt_id = test_agent_prompt_id("ap-old-checkpoint");
     h.agents
         .get_mut(&cid)
         .expect("old agent")
@@ -10678,7 +10693,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         .expect("shell")
         .to_owned();
 
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch");
 
     let mut saw_session_dir = false;
@@ -10722,7 +10737,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     )
     .expect("replace suspended interceptor registration");
     let new_session_draft = Event::UiPromptDraft(tau_proto::UiPromptDraft {
-        session_id: "s2".into(),
+        session_id: test_session_id("s2"),
         target_agent_id: None,
         text: "new session event".to_owned(),
     });
@@ -10737,7 +10752,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     .expect("stale old-session reply is ignored");
     assert!(event_log_events(&h).contains(&new_session_draft));
     let post_stale_draft = Event::UiPromptDraft(tau_proto::UiPromptDraft {
-        session_id: "s2".into(),
+        session_id: test_session_id("s2"),
         target_agent_id: None,
         text: "interception resumes after stale reply".to_owned(),
     });
@@ -10769,7 +10784,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
             tau_proto::ExtensionContextReady {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: "s2".into(),
+                session_id: test_session_id("s2"),
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             },
         )),
@@ -10777,7 +10792,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     .expect("ready");
 
     let submission = h
-        .submit_user_prompt("s2".into(), "hello".to_owned())
+        .submit_user_prompt(test_session_id("s2"), "hello".to_owned())
         .expect("submit");
     assert_eq!(submission, PromptSubmission::Dispatched);
     let new_cid = test_user_agent(&h);
@@ -10806,7 +10821,7 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
         .expect("selected role")
         .compaction = Some(tau_config::settings::RoleCompaction::Threshold(1200));
 
-    h.handle_compact_request("s1".into(), Some(&target_agent_id));
+    h.handle_compact_request(test_session_id("s1"), Some(&target_agent_id));
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -11575,7 +11590,7 @@ fn manual_standalone_compact_installs_one_boundary() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
 
-    h.handle_compact_request("s1".into(), Some(&agent_id));
+    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
     let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(
         prompt.operation,
@@ -12139,7 +12154,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             agent_id: agent_id.clone(),
             ephemeral: false,
         }),
@@ -12178,7 +12193,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
             .and_then(tau_core::AgentTree::head)
             .expect("head"),
     );
-    let prompt_id = tau_proto::AgentPromptId::from("ap-main-overflow");
+    let prompt_id = test_agent_prompt_id("ap-main-overflow");
     append_seed_agent_event(
         &mut store,
         Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
@@ -12318,7 +12333,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
             .and_then(tau_core::AgentTree::head)
             .expect("head"),
     );
-    let prompt_id = tau_proto::AgentPromptId::from("ap-main-drift");
+    let prompt_id = test_agent_prompt_id("ap-main-drift");
     append_seed_agent_event(
         &mut store,
         Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
@@ -12379,7 +12394,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
-    h.handle_compact_request("s1".into(), Some("main"));
+    h.handle_compact_request(test_session_id("s1"), Some("main"));
     assert_eq!(
         read_nth_prompt_created(&h, 0).operation,
         tau_proto::PromptOperation::StandaloneCompaction
@@ -12410,7 +12425,7 @@ fn reactive_context_overflow_ui_cancel_is_terminal_once() {
             .expect("start recovery");
         compact = read_nth_prompt_created(&h, 1);
         h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(crate::parse_agent_id(&agent_id)),
             agent_prompt_id: Some(compact.agent_prompt_id.clone()),
         });
@@ -12572,7 +12587,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
             .and_then(tau_core::AgentTree::head)
             .expect("head"),
     );
-    let failed_prompt_id = tau_proto::AgentPromptId::from("ap-main-overflow-success-cut");
+    let failed_prompt_id = test_agent_prompt_id("ap-main-overflow-success-cut");
     append_seed_agent_event(
         &mut store,
         Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
@@ -12610,7 +12625,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
     );
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-reactive-success-cut").expect("id");
-    let compact_prompt_id = tau_proto::AgentPromptId::from("ap-main-compact-success-cut");
+    let compact_prompt_id = test_agent_prompt_id("ap-main-compact-success-cut");
     append_seed_agent_event(
         &mut store,
         Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
@@ -12668,7 +12683,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
             h.provider_model_info.contains_key(&"test/model".into()),
             "provider state is populated before warm resume"
         );
-        h.switch_session("s1".into(), tau_proto::SessionStartReason::Resume)
+        h.switch_session(test_session_id("s1"), tau_proto::SessionStartReason::Resume)
             .expect("warm resume success cut");
         assert_eq!(
             h.agent_store
@@ -12774,9 +12789,9 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
             0,
             "later discovery must not resend work that was durably terminalized as unavailable"
         );
-        h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+        h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
             .expect("switch away");
-        h.switch_session("s1".into(), tau_proto::SessionStartReason::Resume)
+        h.switch_session(test_session_id("s1"), tau_proto::SessionStartReason::Resume)
             .expect("warm resume with provider state already populated");
         assert_eq!(
             h.agent_store
@@ -12824,7 +12839,7 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
     h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "ap-busy-removal-watcher".into(),
+        agent_prompt_id: test_agent_prompt_id("ap-busy-removal-watcher"),
     };
     h.set_agent_watch(
         &watcher_id,
@@ -12836,8 +12851,10 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
     let provider = h.provider_model_routes[&model].to_string();
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-restored-removal").expect("transaction");
-    let compact_prompt_id: tau_proto::AgentPromptId = "ap-restored-removal-compact".into();
-    let checkpoint_prompt_id: tau_proto::AgentPromptId = "ap-restored-removal-inference".into();
+    let compact_prompt_id: tau_proto::AgentPromptId =
+        test_agent_prompt_id("ap-restored-removal-compact");
+    let checkpoint_prompt_id: tau_proto::AgentPromptId =
+        test_agent_prompt_id("ap-restored-removal-inference");
     let started = tau_proto::AgentStandaloneCompactionStarted {
         agent_id: agent_id.clone(),
         transaction_id: transaction_id.clone(),
@@ -13042,7 +13059,7 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
     );
     let prefix = h.agents[&cid].head.expect("prefix");
     h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "busy-before-wakes".into(),
+        agent_prompt_id: test_agent_prompt_id("busy-before-wakes"),
     };
     for (message_id, body) in [
         ("coalesced-message-one", "coalesced body one"),
@@ -13164,7 +13181,7 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
     );
     let prefix = h.agents[&cid].head.expect("prefix");
     h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "busy-before-proactive-wakes".into(),
+        agent_prompt_id: test_agent_prompt_id("busy-before-proactive-wakes"),
     };
     for (message_id, body) in [
         ("proactive-message-one", "proactive body one"),
@@ -13257,7 +13274,7 @@ fn reactive_context_overflow_extension_preemption_cancels_once() {
     h.handle_provider_response_finished(context_overflow_response(&inference))
         .expect("start recovery");
     let compact = read_nth_prompt_created(&h, 1);
-    h.submit_user_prompt("s1".into(), "preempt side work".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "preempt side work".to_owned())
         .expect("submit user prompt");
     h.handle_provider_response_finished(context_overflow_response(&compact))
         .expect("ignore late compact response");
@@ -13348,7 +13365,7 @@ fn reactive_context_overflow_session_switch_cancels_and_cleans_state() {
     let compact = read_nth_prompt_created(&h, 1);
     h.prompt_semantic_output
         .insert(compact.agent_prompt_id.clone());
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session");
     assert_eq!(
         event_log_events(&h)
@@ -13392,7 +13409,7 @@ fn standalone_compaction_rejects_response_after_head_navigation() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
 
-    h.handle_compact_request("s1".into(), Some(&agent_id));
+    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
     let compact = read_nth_prompt_created(&h, 0);
     h.publish_for_agent(
         &cid,
@@ -13455,7 +13472,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
 
-    h.handle_compact_request("s1".into(), Some(&agent_id));
+    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
     let compact = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
@@ -13499,7 +13516,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
     h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "blocked-watcher-busy".into(),
+        agent_prompt_id: test_agent_prompt_id("blocked-watcher-busy"),
     };
     h.set_agent_watch(
         &watcher_id,
@@ -13542,7 +13559,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         matches!(event, Event::AgentStandaloneCompactionFailed(failed)
             if serde_json::to_string(&failed).expect("serialize failure").contains("secret provider detail"))
     }));
-    h.handle_compact_request("s1".into(), Some(&agent_id));
+    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
     let starts: Vec<_> = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
@@ -13576,7 +13593,7 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
         info.supports_standalone_compaction = true;
         let cid = ensure_test_user_agent(&mut h);
         agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
-        h.handle_compact_request("s1".into(), Some(&agent_id));
+        h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
         let compact = read_nth_prompt_created(&h, 0);
         compact_prompt_id = compact.agent_prompt_id.clone();
         h.handle_provider_response_finished(ProviderResponseFinished {
@@ -13735,7 +13752,7 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
             ctx_id: None,
         }),
     );
-    h.handle_compact_request("s1".into(), Some(&agent_id));
+    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
     let retry_compact = read_nth_prompt_created(&h, 1);
     h.handle_provider_response_finished(provider_text_response(
         &retry_compact.agent_prompt_id,
@@ -14015,7 +14032,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "ap-mixed-round".into(),
+            agent_prompt_id: test_agent_prompt_id("ap-mixed-round"),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: calls
                 .iter()
@@ -14173,9 +14190,9 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
 fn strict_provider_vertical_slice_accepts_closed_post_tool_compaction() {
     let td = TempDir::new().expect("tempdir");
     let mut h = strict_compaction_provider_harness(td.path().join("state")).expect("start");
-    h.submit_user_prompt("s1".into(), "first tool round".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "first tool round".to_owned())
         .expect("submit first prompt");
-    h.submit_user_prompt("s1".into(), "later queued prompt".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "later queued prompt".to_owned())
         .expect("queue later prompt");
 
     let error = h
@@ -14249,7 +14266,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "ap-reactive-tool".into(),
+            agent_prompt_id: test_agent_prompt_id("ap-reactive-tool"),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: "call-reactive".into(),
@@ -14950,7 +14967,7 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
         .expect("blocked agent")
         .activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
         owner: crate::agent::InferenceCheckpointOwner::Inference,
-        agent_prompt_id: "ap-blocked-uncertain".into(),
+        agent_prompt_id: test_agent_prompt_id("ap-blocked-uncertain"),
         through: blocked_obligation
             .activation_through
             .expect("blocked activation watermark"),
@@ -15316,7 +15333,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
         }),
     );
     h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "branch-b-readiness-hold".into(),
+        agent_prompt_id: test_agent_prompt_id("branch-b-readiness-hold"),
     };
     h.publish_for_agent(
         &cid,
@@ -15579,7 +15596,7 @@ fn seed_historical_open_prefix_failure(
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "ap-historical-inference".into(),
+            agent_prompt_id: test_agent_prompt_id("ap-historical-inference"),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: "call-historical".into(),
@@ -15623,7 +15640,9 @@ fn seed_historical_open_prefix_failure(
     h.publish_for_agent(
         cid,
         Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
-            compact_prompt_id: format!("ap-{agent_id}-historical-open-prefix").into(),
+            compact_prompt_id: test_agent_prompt_id(format!(
+                "ap-{agent_id}-historical-open-prefix"
+            )),
             operation: tau_proto::PromptOperation::StandaloneCompaction,
             agent_id: crate::parse_agent_id(&agent_id),
             transaction_id: transaction_id.clone(),
@@ -15668,7 +15687,7 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(crate::parse_agent_id(&agent_id)),
         agent_prompt_id: None,
     });
@@ -15691,7 +15710,7 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
         1,
         "new input must not implicitly retry or clear the block"
     );
-    h.handle_compact_request("s1".into(), Some(&agent_id));
+    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
     let starts: Vec<_> = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
@@ -15777,7 +15796,7 @@ fn compact_repairs_cold_historical_open_prefix_failure() {
         .get_mut(&"test/model".into())
         .expect("model")
         .supports_standalone_compaction = true;
-    resumed.handle_compact_request("s1".into(), Some(&agent_id));
+    resumed.handle_compact_request(test_session_id("s1"), Some(&agent_id));
     let successor = event_log_events(&resumed)
         .into_iter()
         .filter_map(|event| match event {
@@ -15836,7 +15855,7 @@ fn compact_refuses_warm_blocked_recovery_off_owed_branch() {
         }),
     );
 
-    h.handle_compact_request("s1".into(), Some(&agent_id));
+    h.handle_compact_request(test_session_id("s1"), Some(&agent_id));
     assert_eq!(
         event_log_events(&h)
             .into_iter()
@@ -15893,7 +15912,7 @@ fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
         .get_mut(&"test/model".into())
         .expect("model")
         .supports_standalone_compaction = true;
-    resumed.handle_compact_request("s1".into(), Some(&agent_id));
+    resumed.handle_compact_request(test_session_id("s1"), Some(&agent_id));
     assert_eq!(
         event_log_events(&resumed)
             .into_iter()
@@ -15945,7 +15964,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
         h.tool_turn
             .record_unqueued_in_flight(cid.clone(), call_id.into());
         h.prompt_tool_call_prompts
-            .insert(call_id.into(), "sp-seeded-tools".into());
+            .insert(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
     }
     let compact_call = AgentToolCall {
         call_ref: None,
@@ -16163,7 +16182,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
         .expect("echo model")
         .supports_standalone_compaction = true;
     install_scheduler_compaction_tools(&mut h);
-    h.submit_user_prompt("s1".into(), "first ordinary turn".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "first ordinary turn".to_owned())
         .expect("submit first ordinary turn");
     let caller_cid = test_user_agent(&h);
     let caller_id = durable_agent_id_for_conversation(&h, &caller_cid);
@@ -16405,7 +16424,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
 
     resumed
         .submit_user_prompt(
-            "s1".into(),
+            test_session_id("s1"),
             "new ordinary turn after cold reopen".to_owned(),
         )
         .expect("submit post-reopen ordinary turn");
@@ -16562,7 +16581,7 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
     .expect("register placeholder interceptor");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
-    let prompt_id: AgentPromptId = "sp-scheduler-compact".into();
+    let prompt_id: AgentPromptId = test_agent_prompt_id("sp-scheduler-compact");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
     h.prompt_agents.insert(prompt_id.clone(), cid.clone());
 
@@ -16668,7 +16687,7 @@ fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live(
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let caller_id = h.agents[&caller_cid].agent_id.clone().expect("caller id");
     let target_id = h.agents[&target_cid].agent_id.clone().expect("target id");
-    let prompt_id: AgentPromptId = "sp-scheduler-agent-compact".into();
+    let prompt_id: AgentPromptId = test_agent_prompt_id("sp-scheduler-agent-compact");
     seed_agent_thinking(&mut h, &caller_cid, prompt_id.as_str());
     h.prompt_agents
         .insert(prompt_id.clone(), caller_cid.clone());
@@ -16763,7 +16782,7 @@ fn manual_self_compaction_pre_start_cancel_is_passive() {
         h.tool_turn
             .record_unqueued_in_flight(cid.clone(), call_id.into());
         h.prompt_tool_call_prompts
-            .insert(call_id.into(), "sp-seeded-tools".into());
+            .insert(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
     }
     let call = AgentToolCall {
         call_ref: None,
@@ -16835,8 +16854,10 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
     );
     h.tool_turn
         .record_unqueued_in_flight(cid.clone(), "call-replay-compact".into());
-    h.prompt_tool_call_prompts
-        .insert("call-replay-compact".into(), "sp-seeded-tools".into());
+    h.prompt_tool_call_prompts.insert(
+        "call-replay-compact".into(),
+        test_agent_prompt_id("sp-seeded-tools"),
+    );
     h.request_agent_tool_compaction(
         &cid,
         &AgentToolCall {
@@ -16989,8 +17010,8 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         tau_proto::CompactionRequestId::parse("cr-manual-completed-prefix").expect("request id");
     let transaction_id = tau_proto::CompactionTransactionId::parse("ct-manual-completed-prefix")
         .expect("transaction id");
-    let initiating_prompt_id = tau_proto::AgentPromptId::from("ap-manual-completed-prefix-0");
-    let compact_prompt_id = tau_proto::AgentPromptId::from("ap-manual-completed-prefix-1");
+    let initiating_prompt_id = test_agent_prompt_id("ap-manual-completed-prefix-0");
+    let compact_prompt_id = test_agent_prompt_id("ap-manual-completed-prefix-1");
     let call_id = ToolCallId::from("call-manual-completed-prefix");
     let tool_name = ToolName::new("compact");
     let model: tau_proto::ModelId = "test/model".into();
@@ -17095,7 +17116,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
 
                 agent_prompt_id: initiating_prompt_id.clone(),
                 agent_id: agent_id.clone(),
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 model: model.clone(),
                 operation: tau_proto::PromptOperation::Inference,
                 originator: tau_proto::PromptOriginator::User,
@@ -17228,7 +17249,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
 
                 agent_prompt_id: compact_prompt_id.clone(),
                 agent_id: agent_id.clone(),
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 model: model.clone(),
                 operation: tau_proto::PromptOperation::StandaloneCompaction,
                 originator: tau_proto::PromptOriginator::User,
@@ -17648,7 +17669,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         effective_skills: current_effective_skills,
         agents_files: current_agents_files,
     } = current;
-    assert_eq!(current_session_id, &tau_proto::SessionId::new("s1"));
+    assert_eq!(current_session_id, &test_session_id("s1"));
     assert_eq!(current_agent_id, &agent_id);
     assert_ne!(current_initialization_id, previous_initialization_id);
     assert_eq!(current_session_id, previous_session_id);
@@ -17767,8 +17788,8 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
         tau_proto::CompactionRequestId::parse("cr-interrupted-prefix").expect("request id");
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-interrupted-prefix").expect("transaction id");
-    let initiating_prompt_id = tau_proto::AgentPromptId::from("ap-caller-interrupted-prefix");
-    let compact_prompt_id = tau_proto::AgentPromptId::from("ap-target-interrupted-prefix-compact");
+    let initiating_prompt_id = test_agent_prompt_id("ap-caller-interrupted-prefix");
+    let compact_prompt_id = test_agent_prompt_id("ap-target-interrupted-prefix-compact");
     let call_id = ToolCallId::from("call-interrupted-prefix");
     let tool_name = ToolName::new("agent_compact");
     let is_target_correlation = |event: &Event| match event {
@@ -18245,7 +18266,7 @@ fn register_manual_cross_compaction_call(
     h.tool_turn
         .record_unqueued_in_flight(caller_cid.clone(), call_id.into());
     h.prompt_tool_call_prompts
-        .insert(call_id.into(), "sp-seeded-tools".into());
+        .insert(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
     AgentToolCall {
         call_ref: None,
         id: call_id.into(),
@@ -18617,7 +18638,7 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
             .expect("request id"),
         caller_agent_id: agent_id.clone(),
         target_agent_id: agent_id.clone(),
-        initiating_agent_prompt_id: "ap-self-historical".into(),
+        initiating_agent_prompt_id: test_agent_prompt_id("ap-self-historical"),
         initiating_tool_call_id: "call-self-historical".into(),
         initiating_tool_name: tau_proto::ManualCompactionTool::Compact,
         visible_tool_name: ToolName::new("compact"),
@@ -18653,8 +18674,10 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
     );
     h.tool_turn
         .record_unqueued_in_flight(cid.clone(), "call-self-blocked".into());
-    h.prompt_tool_call_prompts
-        .insert("call-self-blocked".into(), "sp-seeded-tools".into());
+    h.prompt_tool_call_prompts.insert(
+        "call-self-blocked".into(),
+        test_agent_prompt_id("sp-seeded-tools"),
+    );
     let call = AgentToolCall {
         call_ref: None,
         id: "call-self-blocked".into(),
@@ -18983,7 +19006,7 @@ fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
 
     let stats = tau_session_inspect::read_session_stats(
         &tau_config::settings::sessions_dir_of(&state),
-        session_id.as_str(),
+        &session_id,
     )
     .expect("read stats")
     .expect("session stats");
@@ -19029,7 +19052,7 @@ fn manual_compaction_accepts_later_inference_generation() {
         request_id: tau_proto::CompactionRequestId::parse("cr-historical").expect("request id"),
         caller_agent_id: durable_agent_id_for_conversation(&h, &caller),
         target_agent_id: target_id.clone(),
-        initiating_agent_prompt_id: "ap-older-caller-turn".into(),
+        initiating_agent_prompt_id: test_agent_prompt_id("ap-older-caller-turn"),
         initiating_tool_call_id: "call-historical".into(),
         initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
         visible_tool_name: ToolName::new("agent_compact"),
@@ -19398,7 +19421,7 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
 
     let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
     h.agents.get_mut(&target).expect("target").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "ap-busy".into(),
+        agent_prompt_id: test_agent_prompt_id("ap-busy"),
     };
     h.request_agent_tool_compaction(
         &caller,
@@ -19414,7 +19437,7 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
         .expect("target")
         .activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
         owner: crate::agent::InferenceCheckpointOwner::Inference,
-        agent_prompt_id: "ap-uncertain".into(),
+        agent_prompt_id: test_agent_prompt_id("ap-uncertain"),
         through: tau_proto::AgentHead::Root,
         model: Some("echo/model".into()),
         operation: Some(tau_proto::PromptOperation::Inference),
@@ -19491,7 +19514,7 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
                 .expect("caller public id"),
         ),
         target_agent_id: target_id.clone(),
-        initiating_agent_prompt_id: "ap-older-caller-turn".into(),
+        initiating_agent_prompt_id: test_agent_prompt_id("ap-older-caller-turn"),
         initiating_tool_call_id: "call-historical".into(),
         initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
         visible_tool_name: ToolName::new("agent_compact"),
@@ -19586,7 +19609,7 @@ fn start_background_tool_and_finish_placeholder_turn(
             ctx_id: None,
         }),
     );
-    let spid: AgentPromptId = format!("sp-{call_id}").into();
+    let spid: AgentPromptId = test_agent_prompt_id(format!("sp-{call_id}"));
     seed_agent_thinking(h, cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -20221,7 +20244,7 @@ fn manual_compaction_cancels_sole_input_wait_before_starting() {
     h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
         .expect("install input wait");
 
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
 
     let events = event_log_events(&h);
     let cancelled = events
@@ -20280,12 +20303,12 @@ fn successful_wait_preemption_installs_replacement_before_queued_activation() {
     seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
     h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
         .expect("install input wait");
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
     let compact_prompt = read_nth_prompt_created(&h, 0);
 
     assert_eq!(
         h.submit_prompt_to_agent(
-            "s1".into(),
+            test_session_id("s1"),
             agent_id.as_str(),
             PendingPrompt::internal("queued after compact".to_owned()),
         )
@@ -20363,8 +20386,8 @@ fn repeated_manual_compaction_coalesces_while_wait_cancellation_is_parked() {
     )
     .expect("register cancellation interceptor");
 
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
     assert!(
         !event_log_events(&h)
             .iter()
@@ -20423,10 +20446,10 @@ fn explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
         })),
     )
     .expect("register cancellation interceptor");
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
 
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(agent_id.clone()),
         agent_prompt_id: None,
     });
@@ -20473,9 +20496,9 @@ fn session_rollover_while_wait_preemption_is_parked_never_compacts() {
         })),
     )
     .expect("register cancellation interceptor");
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
 
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("roll over session");
 
     assert!(h.pending_ui_compactions_after_wait.is_empty());
@@ -20514,7 +20537,7 @@ fn failed_wait_cancellation_append_rolls_back_without_compaction() {
     )
     .expect("register cancellation interceptor");
 
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
     let journal = h
         .state_dir
         .join("agents")
@@ -20540,7 +20563,7 @@ fn failed_wait_cancellation_append_rolls_back_without_compaction() {
     assert!(h.input_wait_pending_for(&cid));
     std::fs::remove_dir(&journal).expect("remove journal blocker");
     std::fs::rename(&backup, &journal).expect("restore journal");
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
     h.handle_extension_event(
         "wait-append-failure-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -20599,7 +20622,7 @@ fn manual_compaction_preserves_cancelled_wait_correlation() {
     h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
         .expect("install provider-declared wait");
 
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
 
     let events: Vec<_> = h
         .agent_store
@@ -20657,7 +20680,7 @@ fn manual_compaction_rejects_already_terminalizing_wait() {
         },
     );
 
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
 
     assert!(h.input_wait_pending_for(&cid));
     assert!(!event_log_events(&h).iter().any(|event| {
@@ -20680,7 +20703,7 @@ fn manual_inline_compaction_cancels_sole_input_wait_first() {
     h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
         .expect("install input wait");
 
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
 
     let events = event_log_events(&h);
     let cancelled = events
@@ -21407,14 +21430,14 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     );
     let cid = ensure_test_user_agent(&mut h);
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
-    let spid: AgentPromptId = "sp-main".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-main");
     h.prompt_agents.insert(spid.clone(), cid.clone());
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -21672,7 +21695,7 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         literal: false,
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         text: "fresh worker turn".to_owned(),
         agent_id: worker_agent_id.clone(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -21838,7 +21861,7 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         literal: false,
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         text: "fresh after terminal cut".to_owned(),
         agent_id: worker_agent_id.clone(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -22057,7 +22080,7 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
     resumed
         .handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "fresh after compaction failure".to_owned(),
             agent_id: worker_agent_id.clone(),
             message_class: tau_proto::PromptMessageClass::User,
@@ -22180,7 +22203,7 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
     ));
     assert!(h.dispatch_blocked_for(&side_cid));
     assert!(matches!(
-        h.submit_prompt_to_agent("s1".into(), &side_agent_id, "overlap".to_owned())
+        h.submit_prompt_to_agent(test_session_id("s1"), &side_agent_id, "overlap".to_owned())
             .expect("queue overlapping prompt"),
         PromptSubmission::Queued
     ));
@@ -22263,8 +22286,12 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         .and_then(|conv| conv.agent_id.clone())
         .expect("side agent id");
 
-    h.submit_prompt_to_agent("s1".into(), &side_agent_id, "user follow-up".to_owned())
-        .expect("user prompt to delegate");
+    h.submit_prompt_to_agent(
+        test_session_id("s1"),
+        &side_agent_id,
+        "user follow-up".to_owned(),
+    )
+    .expect("user prompt to delegate");
 
     let side_spid = h
         .prompt_agents
@@ -22570,14 +22597,14 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
         },
     );
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-main".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -22710,14 +22737,14 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     // user-message → agent-final-response turn so the parent conv has
     // a non-empty history when the idle summary fires.
     let cid = ensure_test_user_agent(&mut h);
-    let main_spid: AgentPromptId = "sp-main".into();
+    let main_spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &cid, "sp-main");
     h.prompt_agents.insert(main_spid.clone(), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "find the bug in foo.rs".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -22878,7 +22905,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
     // Drive one full main-conv turn through the normal dispatch path
     // so `prompt_fingerprints`/`prompt_models` are populated and
     // `handle_provider_response_finished` actually mints the anchor.
-    h.submit_user_prompt("s1".into(), "find the bug in foo.rs".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "find the bug in foo.rs".to_owned())
         .expect("submit main");
     let main_prompt = read_nth_prompt_created(&h, 0);
     let main_spid = main_prompt.agent_prompt_id.clone();
@@ -22992,14 +23019,14 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let main_spid: AgentPromptId = "sp-main".into();
+    let main_spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &cid, "sp-main");
     h.prompt_agents.insert(main_spid.clone(), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "go".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -23129,7 +23156,7 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
     // User submits a real prompt — the harness must preempt the
     // side conv (cancel it, free the agent slot) before queueing or
     // dispatching the user's turn.
-    h.submit_user_prompt("s1".into(), "interrupting prompt".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "interrupting prompt".to_owned())
         .expect("submit user");
 
     let side_conv = h.agents.get(&side_cid).expect("side conv still tracked");
@@ -23209,14 +23236,14 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     // Main agent issues `agent_start`, putting an Exclusive call in flight
     // on the default conversation.
     let cid = ensure_test_user_agent(&mut h);
-    let main_spid: AgentPromptId = "sp-main".into();
+    let main_spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &cid, "sp-main");
     h.prompt_agents.insert(main_spid.clone(), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -23404,7 +23431,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         },
     );
     let parent_cid = ensure_test_user_agent(&mut h);
-    let main_spid: AgentPromptId = "sp-main".into();
+    let main_spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &parent_cid, "sp-main");
     h.prompt_agents
         .insert(main_spid.clone(), parent_cid.clone());
@@ -23412,7 +23439,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "delegate slow work".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -23838,7 +23865,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     );
     let parent_cid = ensure_test_user_agent(&mut h);
     let parent_agent_id = h.agents[&parent_cid].agent_id.clone().expect("agent id");
-    let main_spid: AgentPromptId = "sp-main-cancel".into();
+    let main_spid: AgentPromptId = test_agent_prompt_id("sp-main-cancel");
     seed_agent_thinking(&mut h, &parent_cid, "sp-main-cancel");
     h.prompt_agents
         .insert(main_spid.clone(), parent_cid.clone());
@@ -23846,7 +23873,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "delegate slow work".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -24039,14 +24066,14 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-bg-error".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-bg-error");
     seed_agent_thinking(&mut h, &cid, "sp-bg-error");
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "run fail".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -24285,14 +24312,14 @@ fn backgrounded_tool_progress_is_not_published() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-bg-progress".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-bg-progress");
     seed_agent_thinking(&mut h, &cid, "sp-bg-progress");
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "run slow".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -24519,7 +24546,7 @@ fn manually_created_agent_has_no_default_display_name() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let cid = h.create_durable_user_agent("s1".into(), "engineer-junior");
+    let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer-junior");
     let started = event_log_events(&h)
         .into_iter()
         .find_map(|event| match event {
@@ -24546,7 +24573,7 @@ fn explicit_display_name_equal_to_role_survives_restore() {
     let sp = td.path().join("state");
     let agent_id = {
         let mut h = echo_harness(&sp).expect("start");
-        let cid = h.create_durable_user_agent("s1".into(), "engineer-junior");
+        let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer-junior");
         let agent_id = crate::parse_agent_id(cid.as_str());
 
         h.handle_ui_set_agent_display_name(tau_proto::UiSetAgentDisplayName {
@@ -24593,7 +24620,7 @@ fn custom_role_display_name_survives_restore_under_built_in_template() {
     let agent_id = {
         let mut h = echo_harness(&sp).expect("start");
         h.agent_display_name_template = Some("{{role}}".to_owned());
-        let cid = h.create_durable_user_agent("s1".into(), "engineer-junior");
+        let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer-junior");
         let started = event_log_events(&h)
             .into_iter()
             .find_map(|event| match event {
@@ -24705,7 +24732,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
     let cid = ensure_test_user_agent(&mut h);
     append_user_message_via_event(&mut h, "s1", "wait on missing call");
     seed_agent_thinking(&mut h, &cid, "sp-wait");
-    let spid: AgentPromptId = "sp-wait".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-wait");
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -24813,7 +24840,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let spid: AgentPromptId = "sp-main".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &cid, "sp-main");
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -24912,7 +24939,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     // The parent creates two realistic side agents concurrently. The assertion
     // below is about mutating tools owned by those distinct side agents.
     let parent_cid = ensure_test_user_agent(&mut h);
-    let main_spid: AgentPromptId = "sp-main".into();
+    let main_spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &parent_cid, "sp-main");
     h.prompt_agents
         .insert(main_spid.clone(), parent_cid.clone());
@@ -24920,7 +24947,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "fan out".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -25364,7 +25391,7 @@ fn generic_agent_watch_snapshots_replay_and_clear_on_session_switch() {
         vec![crate::parse_agent_id("child-a")]
     );
 
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session");
     assert!(h.agent_watches.is_empty());
     assert!(h.agent_watchers.is_empty());
@@ -25549,7 +25576,7 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
     let late_id = durable_agent_id_for_conversation(&h, &late_cid).to_string();
     for cid in [&watcher_cid, &late_cid] {
         h.agents.get_mut(cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
-            agent_prompt_id: format!("busy-{cid}").into(),
+            agent_prompt_id: test_agent_prompt_id(format!("busy-{cid}")),
         };
     }
     h.set_agent_watch(
@@ -25564,7 +25591,7 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
         session_id: session_id.clone(),
         subscription_id: String::new(),
         turn_generation: 4,
-        agent_prompt_id: "sp-provider-watch".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-provider-watch"),
         state,
         initial: false,
     };
@@ -25733,7 +25760,7 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
     );
 
     h.switch_session(
-        "watch-status-next".into(),
+        test_session_id("watch-status-next"),
         tau_proto::SessionStartReason::New,
     )
     .expect("switch session");
@@ -25775,7 +25802,7 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
         session_id: session_id.clone(),
         subscription_id: String::new(),
         turn_generation: 1,
-        agent_prompt_id: "watcher-unload-prompt".into(),
+        agent_prompt_id: test_agent_prompt_id("watcher-unload-prompt"),
         state,
         initial: false,
     };
@@ -25793,7 +25820,7 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
             session_id: session_id.clone(),
             subscription_id: String::new(),
             turn_generation: 1,
-            agent_prompt_id: "unloaded-watcher-status".into(),
+            agent_prompt_id: test_agent_prompt_id("unloaded-watcher-status"),
             state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
             initial: false,
         },
@@ -25874,7 +25901,7 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
         session_id: session_id.clone(),
         subscription_id: String::new(),
         turn_generation: 1,
-        agent_prompt_id: "target-unload-prompt".into(),
+        agent_prompt_id: test_agent_prompt_id("target-unload-prompt"),
         state,
         initial: false,
     };
@@ -26051,7 +26078,7 @@ fn agent_watch_provider_dedupe_isolated_across_watched_agents() {
     let b_id = durable_agent_id_for_conversation(&h, &b_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
     h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "watcher-busy".into(),
+        agent_prompt_id: test_agent_prompt_id("watcher-busy"),
     };
     for watched in [&a_id, &b_id] {
         h.set_agent_watch(
@@ -26066,7 +26093,7 @@ fn agent_watch_provider_dedupe_isolated_across_watched_agents() {
         session_id: session_id.clone(),
         subscription_id: String::new(),
         turn_generation: 1,
-        agent_prompt_id: "sp-b-retry".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-b-retry"),
         state: tau_proto::AgentWatchProviderState::Retrying {
             category: tau_proto::AgentWatchProviderCategory::Transport,
             attempt,
@@ -26079,7 +26106,7 @@ fn agent_watch_provider_dedupe_isolated_across_watched_agents() {
         h.set_agent_turn_state(
             &a_cid,
             AgentTurnState::AgentThinking {
-                agent_prompt_id: format!("sp-a-{generation}").into(),
+                agent_prompt_id: test_agent_prompt_id(format!("sp-a-{generation}")),
             },
         );
         h.set_agent_turn_state(&a_cid, AgentTurnState::Idle);
@@ -26157,7 +26184,7 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
         watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
         h.agents.get_mut(&watcher_cid).expect("watcher").turn_state =
             AgentTurnState::AgentThinking {
-                agent_prompt_id: "watcher-busy".into(),
+                agent_prompt_id: test_agent_prompt_id("watcher-busy"),
             };
         h.set_agent_watch(
             &watcher_id,
@@ -26171,7 +26198,7 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
                 session_id: h.current_session_id.clone(),
                 subscription_id: String::new(),
                 turn_generation: 1,
-                agent_prompt_id: "sp-replay-status".into(),
+                agent_prompt_id: test_agent_prompt_id("sp-replay-status"),
                 state: tau_proto::AgentWatchProviderState::Retrying {
                     category: tau_proto::AgentWatchProviderCategory::Throttle,
                     attempt: 8,
@@ -26216,7 +26243,7 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
     resumed
         .handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "continue after restart".to_owned(),
             agent_id: crate::parse_agent_id(&watcher_id),
             message_class: tau_proto::PromptMessageClass::User,
@@ -26248,7 +26275,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
     h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "watcher-busy".into(),
+        agent_prompt_id: test_agent_prompt_id("watcher-busy"),
     };
     h.set_agent_watch(
         &watcher_id,
@@ -26257,7 +26284,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
 
-    let terminal_prompt: tau_proto::AgentPromptId = "sp-watch-terminal".into();
+    let terminal_prompt: tau_proto::AgentPromptId = test_agent_prompt_id("sp-watch-terminal");
     seed_agent_thinking(&mut h, &watched_cid, terminal_prompt.as_str());
     h.agents
         .get_mut(&watched_cid)
@@ -26375,7 +26402,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         before_duplicate
     );
 
-    let success_prompt: tau_proto::AgentPromptId = "sp-watch-success".into();
+    let success_prompt: tau_proto::AgentPromptId = test_agent_prompt_id("sp-watch-success");
     seed_agent_thinking(&mut h, &watched_cid, success_prompt.as_str());
     h.prompt_agents
         .insert(success_prompt.clone(), watched_cid.clone());
@@ -26405,7 +26432,8 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         "success must clear a prior retry snapshot"
     );
 
-    let first_attempt_prompt: tau_proto::AgentPromptId = "sp-watch-first-terminal".into();
+    let first_attempt_prompt: tau_proto::AgentPromptId =
+        test_agent_prompt_id("sp-watch-first-terminal");
     seed_agent_thinking(&mut h, &watched_cid, first_attempt_prompt.as_str());
     h.prompt_agents
         .insert(first_attempt_prompt.clone(), watched_cid.clone());
@@ -26468,7 +26496,7 @@ fn agent_watch_reports_structured_outer_agent_turn_state() {
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
     h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "watcher-busy".into(),
+        agent_prompt_id: test_agent_prompt_id("watcher-busy"),
     };
 
     h.set_agent_watch(
@@ -26494,7 +26522,7 @@ fn agent_watch_reports_structured_outer_agent_turn_state() {
     h.set_agent_turn_state(
         &watched_cid,
         AgentTurnState::AgentThinking {
-            agent_prompt_id: "watched-turn".into(),
+            agent_prompt_id: test_agent_prompt_id("watched-turn"),
         },
     );
     h.set_agent_turn_state(
@@ -26509,7 +26537,7 @@ fn agent_watch_reports_structured_outer_agent_turn_state() {
     h.set_agent_turn_state(
         &watched_cid,
         AgentTurnState::AgentThinking {
-            agent_prompt_id: "watched-continuation".into(),
+            agent_prompt_id: test_agent_prompt_id("watched-continuation"),
         },
     );
     h.set_agent_turn_state(&watched_cid, AgentTurnState::Idle);
@@ -26566,7 +26594,7 @@ fn agent_watch_reports_structured_outer_agent_turn_state() {
     h.set_agent_turn_state(
         &watched_cid,
         AgentTurnState::AgentThinking {
-            agent_prompt_id: "already-running-on-reenable".into(),
+            agent_prompt_id: test_agent_prompt_id("already-running-on-reenable"),
         },
     );
     h.set_agent_watch(
@@ -26613,7 +26641,7 @@ fn agent_watch_reports_structured_outer_agent_turn_state() {
     h.set_agent_turn_state(
         &watched_cid,
         AgentTurnState::AgentThinking {
-            agent_prompt_id: "notification-only-turn".into(),
+            agent_prompt_id: test_agent_prompt_id("notification-only-turn"),
         },
     );
     h.set_agent_turn_state(&watched_cid, AgentTurnState::Idle);
@@ -26659,7 +26687,7 @@ fn watch_chain_mixed_lifecycle_turn_emits_paired_state() {
     let c_id = durable_agent_id_for_conversation(&h, &c_cid).to_string();
     for cid in [&a_cid, &b_cid] {
         h.agents.get_mut(cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
-            agent_prompt_id: format!("busy-{cid}").into(),
+            agent_prompt_id: test_agent_prompt_id(format!("busy-{cid}")),
         };
     }
     h.set_agent_watch(
@@ -26720,7 +26748,7 @@ fn watch_chain_mixed_lifecycle_turn_emits_paired_state() {
         .get_mut(&fresh_cid)
         .expect("fresh watcher")
         .turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "fresh-watcher-busy".into(),
+        agent_prompt_id: test_agent_prompt_id("fresh-watcher-busy"),
     };
     h.set_agent_watch(
         &fresh_id,
@@ -26865,7 +26893,7 @@ fn watch_chain_provider_status_turn_does_not_fan_out_final_response() {
             session_id: h.current_session_id.clone(),
             subscription_id: String::new(),
             turn_generation: 1,
-            agent_prompt_id: "sp-a-retry".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-a-retry"),
             state: tau_proto::AgentWatchProviderState::Retrying {
                 category: tau_proto::AgentWatchProviderCategory::Transport,
                 attempt: 1,
@@ -26922,7 +26950,7 @@ fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
     h.set_agent_turn_state(
         &cid,
         AgentTurnState::AgentThinking {
-            agent_prompt_id: "sp-stats".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-stats"),
         },
     );
     h.bump_tools_started_for(&cid);
@@ -26990,7 +27018,7 @@ fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
     info_a.est_output_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(2);
     h.provider_model_info.insert(model_a.clone(), info_a);
     h.prompt_estimated_cost_rates.insert(
-        "cost-prompt".into(),
+        test_agent_prompt_id("cost-prompt"),
         h.provider_model_info[&model_a].estimated_api_cost_rates(),
     );
     let captured_rates = h.provider_model_info[&model_a].estimated_api_cost_rates();
@@ -27007,7 +27035,7 @@ fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
             stats: Default::default(),
         }),
         ..provider_text_response(
-            &tau_proto::AgentPromptId::from("cost-prompt"),
+            &test_agent_prompt_id("cost-prompt"),
             crate::parse_agent_id("main"),
             "ok",
         )
@@ -27212,14 +27240,14 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
 
     // Set up the main agent's turn that emits a single delegate call.
     let cid = ensure_test_user_agent(&mut h);
-    let main_spid: AgentPromptId = "sp-main".into();
+    let main_spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &cid, "sp-main");
     h.prompt_agents.insert(main_spid.clone(), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -27503,7 +27531,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     );
 
     let default_cid = ensure_test_user_agent(&mut h);
-    let main_spid: AgentPromptId = "sp-main".into();
+    let main_spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &default_cid, "sp-main");
     h.prompt_agents
         .insert(main_spid.clone(), default_cid.clone());
@@ -27511,7 +27539,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         &default_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -27688,14 +27716,14 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
 
     let cid = ensure_test_user_agent(&mut h);
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
-    let spid: AgentPromptId = "sp-main".into();
+    let spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &cid, "sp-main");
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "delegate something".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -27876,7 +27904,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     );
 
     let default_cid = ensure_test_user_agent(&mut h);
-    let main_spid: AgentPromptId = "sp-main".into();
+    let main_spid: AgentPromptId = test_agent_prompt_id("sp-main");
     seed_agent_thinking(&mut h, &default_cid, "sp-main");
     h.prompt_agents
         .insert(main_spid.clone(), default_cid.clone());
@@ -27884,7 +27912,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         &default_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "ROOT: ask top delegate to delegate again".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -28068,8 +28096,8 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
     let mut h = echo_harness(&sp).expect("start");
 
     let cid = ensure_test_user_agent(&mut h);
-    let old_spid: AgentPromptId = "sp-old".into();
-    let new_spid: AgentPromptId = "sp-new".into();
+    let old_spid: AgentPromptId = test_agent_prompt_id("sp-old");
+    let new_spid: AgentPromptId = test_agent_prompt_id("sp-new");
     h.prompt_agents.insert(old_spid.clone(), cid.clone());
     h.prompt_agents.insert(new_spid.clone(), cid.clone());
     {
@@ -28277,7 +28305,7 @@ fn external_agent_message_request_publishes_received_projection() {
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     h.agents.get_mut(&cid).expect("conversation").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "external-message-target".into(),
+        agent_prompt_id: test_agent_prompt_id("external-message-target"),
     };
 
     let result = h.handle_external_agent_message_request_without_auth_for_test(
@@ -28285,9 +28313,9 @@ fn external_agent_message_request_publishes_received_projection() {
             request_id: "external-ok".to_owned(),
             message_id: "msg-external-ok".into(),
             capability: "cap-ok".to_owned(),
-            sender_session_id: "other-session".into(),
+            sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: "s1".into(),
+            recipient_session_id: test_session_id("s1"),
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
                 &recipient_id,
             )),
@@ -28350,9 +28378,9 @@ fn external_agent_message_request_rejects_wrong_active_session() {
             request_id: "external-wrong-session".to_owned(),
             message_id: "msg-external-wrong-session".into(),
             capability: "cap-wrong-session".to_owned(),
-            sender_session_id: "other-session".into(),
+            sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: "not-s1".into(),
+            recipient_session_id: test_session_id("not-s1"),
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
                 &recipient_id,
             )),
@@ -28381,9 +28409,9 @@ fn external_agent_message_request_rejects_unknown_recipient() {
             request_id: "external-unknown".to_owned(),
             message_id: "msg-external-unknown".into(),
             capability: "cap-unknown".to_owned(),
-            sender_session_id: "other-session".into(),
+            sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: "s1".into(),
+            recipient_session_id: test_session_id("s1"),
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
                 "missing_agent",
             )),
@@ -28419,9 +28447,9 @@ fn external_agent_message_request_rejects_empty_message() {
             request_id: "external-empty".to_owned(),
             message_id: "msg-external-empty".into(),
             capability: "cap-empty".to_owned(),
-            sender_session_id: "other-session".into(),
+            sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: "s1".into(),
+            recipient_session_id: test_session_id("s1"),
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
                 &recipient_id,
             )),
@@ -28454,7 +28482,7 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
         request_id: "external-preauth".to_owned(),
         message_id: "msg-external-preauth".into(),
         capability: "cap-preauth".to_owned(),
-        sender_session_id: "other-session".into(),
+        sender_session_id: test_session_id("other-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: h.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
@@ -28468,7 +28496,7 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
         (
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "external-preauth-wrong-session".to_owned(),
-                recipient_session_id: "wrong-session".into(),
+                recipient_session_id: test_session_id("wrong-session"),
                 ..base.clone()
             },
             "target session unavailable",
@@ -28523,7 +28551,7 @@ fn external_agent_message_auth_binds_sender_identity_and_kind() {
             capability: "secret-capability".to_owned(),
             sender_session_id: h.current_session_id.clone(),
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: "target-session".into(),
+            recipient_session_id: test_session_id("target-session"),
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
                 "recipient_agent",
             )),
@@ -28538,7 +28566,7 @@ fn external_agent_message_auth_binds_sender_identity_and_kind() {
         capability: "secret-capability".to_owned(),
         sender_session_id: h.current_session_id.clone(),
         sender_id: crate::parse_agent_id("sender_agent"),
-        recipient_session_id: "target-session".into(),
+        recipient_session_id: test_session_id("target-session"),
         recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
             "recipient_agent",
         )),
@@ -28593,9 +28621,9 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
         request_id: "external-forged".to_owned(),
         message_id: "msg-external-forged".into(),
         capability: "cap-forged".to_owned(),
-        sender_session_id: "other-session".into(),
+        sender_session_id: test_session_id("other-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
-        recipient_session_id: "s1".into(),
+        recipient_session_id: test_session_id("s1"),
         recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
             &recipient_id,
         )),
@@ -28670,7 +28698,7 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
         .get_mut(&target_cid)
         .expect("target conversation")
         .turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "socket-external-message-target".into(),
+        agent_prompt_id: test_agent_prompt_id("socket-external-message-target"),
     };
 
     let socket_path = td.path().join("target.sock");
@@ -29024,7 +29052,7 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
                 request_id: "external-nonblocking-auth".to_owned(),
                 message_id: "msg-external-nonblocking-auth".into(),
                 capability: "cap-nonblocking".to_owned(),
-                sender_session_id: "missing-sender-session".into(),
+                sender_session_id: test_session_id("missing-sender-session"),
                 sender_id: crate::parse_agent_id("sender_agent"),
                 recipient_session_id: h.current_session_id.clone(),
                 recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
@@ -29073,7 +29101,7 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
 
     h.publish_external_agent_message_from_agent(
         &cid,
-        "missing-session".into(),
+        test_session_id("missing-session"),
         tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id("recipient_agent")),
         "hello".to_owned(),
         tau_proto::AgentMessageKind::Message,
@@ -29140,7 +29168,7 @@ fn external_message_success_completion_publishes_sent_projection_and_tool_result
             auth_message_id: "delivered-message".into(),
             publish_sent: true,
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: "other-session".into(),
+            recipient_session_id: test_session_id("other-session"),
             kind: tau_proto::AgentMessageKind::Message,
             message: "delivered".to_owned(),
         }),
@@ -29176,13 +29204,13 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
         .get_mut(&busy)
         .expect("busy agent")
         .published_runtime_state = tau_proto::AgentRuntimeState::Running;
-    let idle = h.create_durable_user_agent("s1".into(), "cross-group-reviewer");
+    let idle = h.create_durable_user_agent(test_session_id("s1"), "cross-group-reviewer");
     let idle_id = h.ensure_agent_id_for_agent(&idle).expect("idle id");
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "bare-select".to_owned(),
         message_id: "bare-select-message".into(),
         capability: "test-only".to_owned(),
-        sender_session_id: "sender-session".into(),
+        sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: h.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -29211,13 +29239,13 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     configure_inter_session_receivers(&mut h, &[("engineer", false)]);
-    h.create_durable_user_agent("s1".into(), "engineer");
+    h.create_durable_user_agent(test_session_id("s1"), "engineer");
     h.provider_model_info.clear();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "model-revoked".to_owned(),
         message_id: "model-revoked-message".into(),
         capability: "test-only".to_owned(),
-        sender_session_id: "sender-session".into(),
+        sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: h.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -29247,7 +29275,7 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
         request_id: "auto-start".to_owned(),
         message_id: "auto-start-message".into(),
         capability: "test-only".to_owned(),
-        sender_session_id: "sender-session".into(),
+        sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: h.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -29323,7 +29351,7 @@ fn bare_peer_auto_start_uses_first_configured_candidate() {
             request_id: "ordered-auto-start".to_owned(),
             message_id: "ordered-auto-start-message".into(),
             capability: "test-only".to_owned(),
-            sender_session_id: "sender-session".into(),
+            sender_session_id: test_session_id("sender-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: h.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -29366,7 +29394,7 @@ fn bare_peer_auto_start_skips_unavailable_role_model() {
             request_id: "skip-unavailable-auto-start".to_owned(),
             message_id: "skip-unavailable-auto-start-message".into(),
             capability: "test-only".to_owned(),
-            sender_session_id: "sender-session".into(),
+            sender_session_id: test_session_id("sender-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: h.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -29408,7 +29436,7 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
                 request_id: "restore-peer".to_owned(),
                 message_id: "restore-peer-message".into(),
                 capability: "test-only".to_owned(),
-                sender_session_id: "sender-session".into(),
+                sender_session_id: test_session_id("sender-session"),
                 sender_id: crate::parse_agent_id("sender_agent"),
                 recipient_session_id: h.current_session_id.clone(),
                 recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -29451,7 +29479,7 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
 fn peer_auto_start_requires_durable_marked_creation_before_receive_commit() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
-    let cid = h.create_durable_user_agent("s1".into(), "engineer");
+    let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer");
     let agent_id = crate::parse_agent_id(
         h.ensure_agent_id_for_agent(&cid)
             .expect("ordinary agent id"),
@@ -29479,7 +29507,7 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
             request_id: "peer-tool".to_owned(),
             message_id: "peer-tool-message".into(),
             capability: "test-only".to_owned(),
-            sender_session_id: "sender-session".into(),
+            sender_session_id: test_session_id("sender-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: h.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -29554,7 +29582,7 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
         request_id: format!("single-flight-{suffix}"),
         message_id: format!("single-flight-message-{suffix}").into(),
         capability: "test-only".to_owned(),
-        sender_session_id: "sender-session".into(),
+        sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: target_session.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -29590,7 +29618,7 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     configure_inter_session_receivers(&mut h, &[("engineer", true)]);
-    let cid = h.create_durable_user_agent("s1".into(), "engineer");
+    let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer");
     for index in 0..32 {
         h.agents
             .get_mut(&cid)
@@ -29612,7 +29640,7 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
         request_id: "queue-full".to_owned(),
         message_id: "queue-full-message".into(),
         capability: "test-only".to_owned(),
-        sender_session_id: "sender-session".into(),
+        sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: h.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -29704,7 +29732,7 @@ fn peer_input_rate_limit_bounds_live_burst() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     configure_inter_session_receivers(&mut h, &[("engineer", false)]);
-    let cid = h.create_durable_user_agent("s1".into(), "engineer");
+    let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer");
     let recipient =
         crate::parse_agent_id(h.ensure_agent_id_for_agent(&cid).expect("public agent id"));
     for index in 0..60 {
@@ -29736,7 +29764,7 @@ fn external_message_auth_rejects_bare_exact_capability_substitution() {
             capability: "typed-capability".to_owned(),
             sender_session_id: h.current_session_id.clone(),
             sender_id: sender_id.clone(),
-            recipient_session_id: "target-session".into(),
+            recipient_session_id: test_session_id("target-session"),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
             message: "same body".to_owned(),
@@ -29749,7 +29777,7 @@ fn external_message_auth_rejects_bare_exact_capability_substitution() {
             capability: "typed-capability".to_owned(),
             sender_session_id: h.current_session_id.clone(),
             sender_id,
-            recipient_session_id: "target-session".into(),
+            recipient_session_id: test_session_id("target-session"),
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
                 "known_agent",
             )),
@@ -29772,7 +29800,7 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
     let call_id: tau_proto::ToolCallId = "stale-external-message-call".into();
     h.tool_agents.insert(call_id.clone(), cid.clone());
 
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session");
     let replacement_cid = ensure_test_user_agent(&mut h);
     let replacement_agent = h
@@ -29795,7 +29823,7 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
             auth_message_id: "stale-message".into(),
             publish_sent: true,
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: "other-session".into(),
+            recipient_session_id: test_session_id("other-session"),
             kind: tau_proto::AgentMessageKind::Message,
             message: "stale".to_owned(),
         }),
@@ -29842,12 +29870,14 @@ fn switch_session_updates_runtime_metadata_active_session() {
     .expect("write metadata");
     h.set_runtime_harness_path(harness_path.clone());
 
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session");
 
     assert_eq!(
-        crate::runtime_dir::read_session_id(&harness_path).as_deref(),
-        Some("s2")
+        crate::runtime_dir::read_session_id(&harness_path)
+            .expect("session id")
+            .as_str(),
+        "s2"
     );
 
     h.shutdown().expect("shutdown");
@@ -29862,7 +29892,7 @@ fn switch_session_continues_when_runtime_metadata_update_fails() {
     let mut h = echo_harness(&sp).expect("start");
     h.set_runtime_harness_path(td.path().join("missing-runtime-harness"));
 
-    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+    h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session should continue after metadata update failure");
 
     assert_eq!(h.current_session_id.as_str(), "s2");
@@ -29888,7 +29918,7 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
         Agent::new(
             stopped_cid.clone(),
             1,
-            "s1".into(),
+            test_session_id("s1"),
             tau_proto::PromptOriginator::User,
             None,
             None,
@@ -29937,7 +29967,7 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
             Agent::new(
                 stopped_cid.clone(),
                 1,
-                "s1".into(),
+                test_session_id("s1"),
                 tau_proto::PromptOriginator::User,
                 None,
                 None,
@@ -29961,9 +29991,9 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
             request_id: "external-cold-stopped".to_owned(),
             message_id: "msg-external-cold-stopped".into(),
             capability: "cap-cold-stopped".to_owned(),
-            sender_session_id: "other-session".into(),
+            sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: "s1".into(),
+            recipient_session_id: test_session_id("s1"),
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
                 &recipient_id,
             )),
@@ -30270,7 +30300,7 @@ fn terminating_agent_route_rejects_direct_work() {
     );
     assert!(matches!(
         h.submit_prompt_to_agent(
-            "s1".into(),
+            test_session_id("s1"),
             &recipient_id,
             PendingPrompt::user("also rejected".to_owned())
         )
@@ -30289,7 +30319,7 @@ fn message_tool_to_agent_uses_canonical_projection_and_payload_free_wake() {
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     h.agents.get_mut(&cid).expect("conversation").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "sp-message-target".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-message-target"),
     };
 
     h.handle_message_tool_call(
@@ -30373,7 +30403,7 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "branch-message-busy".into(),
+        agent_prompt_id: test_agent_prompt_id("branch-message-busy"),
     };
 
     h.publish_event(
@@ -30472,7 +30502,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
 
-                agent_prompt_id: "ap-first-round".into(),
+                agent_prompt_id: test_agent_prompt_id("ap-first-round"),
                 agent_id: agent_id.clone(),
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
                     call_id: "call-first-round".into(),
@@ -30613,7 +30643,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
     h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "busy-standalone-race-watcher".into(),
+        agent_prompt_id: test_agent_prompt_id("busy-standalone-race-watcher"),
     };
     h.set_agent_watch(
         watcher_id.as_str(),
@@ -30621,7 +30651,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
-    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request(test_session_id("s1"), Some(agent_id.as_str()));
     let compact = read_nth_prompt_created(&h, 0);
     assert!(
         compact
@@ -30649,7 +30679,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
 
-                agent_prompt_id: "ap-racing-open-round".into(),
+                agent_prompt_id: test_agent_prompt_id("ap-racing-open-round"),
                 agent_id: agent_id.clone(),
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
                     call_id: "call-existing-round".into(),
@@ -30802,7 +30832,7 @@ fn agent_watch_response_uses_distinct_canonical_projection() {
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     h.agents.get_mut(&cid).expect("conversation").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "sp-watch-target".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-watch-target"),
     };
 
     h.publish_agent_watch_response_from_agent(
@@ -30870,7 +30900,7 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
         .get_mut(&watcher_cid)
         .expect("watcher conversation")
         .turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "sp-watcher-busy".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-watcher-busy"),
     };
     h.set_agent_watch(
         &watcher_id,
@@ -31008,13 +31038,13 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
         .get_mut(&watched_cid)
         .expect("watched conversation")
         .turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "sp-watched-current".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-watched-current"),
     };
     h.agents
         .get_mut(&watcher_cid)
         .expect("watcher conversation")
         .turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: "sp-watcher-busy".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-watcher-busy"),
     };
     h.set_agent_watch(
         &watcher_id,
@@ -31117,7 +31147,7 @@ fn inbound_agent_message_events_are_ignored() {
     let forged_received = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
         message_id: "test-message-received".into(),
         sender_id: crate::parse_agent_id("attacker"),
-        sender_session_id: Some("other-session".into()),
+        sender_session_id: Some(test_session_id("other-session")),
         recipient_id: crate::parse_agent_id("victim"),
         kind: tau_proto::AgentMessageKind::Message,
         watch_turn_state: None,
@@ -31157,21 +31187,21 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
 
     for forged in [
         Event::SessionStarted(tau_proto::SessionStarted {
-            session_id: "forged-session".into(),
+            session_id: test_session_id("forged-session"),
             reason: tau_proto::SessionStartReason::New,
         }),
         Event::SessionShutdown(tau_proto::SessionShutdown {
-            session_id: "forged-session".into(),
+            session_id: test_session_id("forged-session"),
         }),
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-            session_id: "forged-session".into(),
+            session_id: test_session_id("forged-session"),
             agent_id: crate::parse_agent_id("forged-agent"),
             ephemeral: false,
         }),
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-            session_id: "forged-session".into(),
+            session_id: test_session_id("forged-session"),
             agent_id: crate::parse_agent_id("forged-agent"),
         }),
         Event::AgentStarted(tau_proto::AgentStarted {
@@ -31206,7 +31236,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             display: None,
         }),
         Event::ProviderCacheMissDiagnostic(tau_proto::ProviderCacheMissDiagnostic {
-            agent_prompt_id: "forged-prompt".into(),
+            agent_prompt_id: test_agent_prompt_id("forged-prompt"),
             model: "provider/model".into(),
             originator: tau_proto::PromptOriginator::User,
             tool_choice: tau_proto::ToolChoice::default(),
@@ -31335,7 +31365,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
 
 fn cache_miss_diagnostic_for_test(prompt_id: &str) -> tau_proto::ProviderCacheMissDiagnostic {
     tau_proto::ProviderCacheMissDiagnostic {
-        agent_prompt_id: prompt_id.into(),
+        agent_prompt_id: test_agent_prompt_id(prompt_id),
         model: "provider/model".into(),
         originator: tau_proto::PromptOriginator::User,
         tool_choice: tau_proto::ToolChoice::default(),
@@ -31367,7 +31397,7 @@ fn provider_cache_miss_diagnostic_requires_prompt_owner() {
         tau_proto::ClientKind::Provider,
     );
     h.pending_provider_prompts
-        .insert("prompt-1".into(), "provider-a".into());
+        .insert(test_agent_prompt_id("prompt-1"), "provider-a".into());
 
     let baseline_seq = h.event_log.next_seq();
     h.handle_extension_message(
@@ -31592,7 +31622,7 @@ fn queued_extension_internal_prompt_submit_request_preserves_ctx_id_when_steered
     h.set_agent_turn_state(
         &cid,
         AgentTurnState::AgentThinking {
-            agent_prompt_id: "busy-prompt".into(),
+            agent_prompt_id: test_agent_prompt_id("busy-prompt"),
         },
     );
     h.handle_extension_event(
@@ -31640,7 +31670,7 @@ fn queued_extension_internal_prompt_submit_requests_preserve_individual_ctx_ids(
     h.set_agent_turn_state(
         &cid,
         AgentTurnState::AgentThinking {
-            agent_prompt_id: "busy-prompt".into(),
+            agent_prompt_id: test_agent_prompt_id("busy-prompt"),
         },
     );
 
@@ -31797,7 +31827,7 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let result_frames = connect_test_tool(&mut h, "conn-delegate");
-    h.submit_user_prompt("s1".into(), "parent prompt".to_owned())
+    h.submit_user_prompt(test_session_id("s1"), "parent prompt".to_owned())
         .expect("submit parent");
     let parent_agent_id = h
         .agents
@@ -31895,7 +31925,7 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         literal: false,
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         text: "fresh child turn".to_owned(),
         agent_id: child_agent_id.clone(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -32233,7 +32263,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         "navigation-ui",
         Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
             request_id: "stale".to_owned(),
-            session_id: "other-session".into(),
+            session_id: test_session_id("other-session"),
             agent_id: agent_id.clone(),
             action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
         }),
@@ -32438,8 +32468,11 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     assert!(!h.agent_navigation_modes.contains_key(&agent_id));
     h.agent_navigation_modes
         .insert(agent_id.clone(), tau_proto::AgentNavigationMode::Suspended);
-    h.switch_session("navigation-next".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        test_session_id("navigation-next"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
     assert!(h.agent_navigation_modes.is_empty());
     h.shutdown().expect("shutdown");
 }
@@ -32467,7 +32500,7 @@ fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
             "auto-running",
             tau_proto::AgentNavigationMode::ActiveAuto,
             AgentTurnState::AgentThinking {
-                agent_prompt_id: "current-auto".into(),
+                agent_prompt_id: test_agent_prompt_id("current-auto"),
             },
             tau_proto::AgentRuntimeState::Running,
         ),
@@ -32475,7 +32508,7 @@ fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
             "active-running",
             tau_proto::AgentNavigationMode::Active,
             AgentTurnState::AgentThinking {
-                agent_prompt_id: "current-active".into(),
+                agent_prompt_id: test_agent_prompt_id("current-active"),
             },
             tau_proto::AgentRuntimeState::Running,
         ),
@@ -32736,7 +32769,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
             h.agent_navigation_modes.remove(&target_id);
         }
         let session_id = if matches!(case, Case::StaleSession) {
-            tau_proto::SessionId::from("stale-session")
+            test_session_id("stale-session")
         } else {
             h.current_session_id.clone()
         };

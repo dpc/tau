@@ -197,8 +197,12 @@ pub enum SessionCommand {
     /// Show a single session's history.
     Show {
         /// Session identifier
-        #[arg(long, default_value_t = default_session_id().to_owned())]
-        session_id: String,
+        #[arg(
+            long,
+            default_value_t = tau_proto::SessionId::parse(default_session_id())
+                .expect("configured default session id must be valid")
+        )]
+        session_id: tau_proto::SessionId,
 
         /// Path to per-session storage root (`<state-dir>/sessions/`)
         #[arg(long, default_value_os_t = default_sessions_dir())]
@@ -209,7 +213,7 @@ pub enum SessionCommand {
     Stats {
         /// Session identifier to account.
         #[arg(long)]
-        session: String,
+        session: tau_proto::SessionId,
 
         /// Path to per-session storage root (`<state-dir>/sessions/`).
         #[arg(long, default_value_os_t = default_sessions_dir())]
@@ -263,7 +267,7 @@ pub struct AgentTraceArgs {
     #[arg(long, value_enum, default_value_t)]
     pub format: AgentTraceFormat,
 
-    /// Compact agent-tool output detail.
+    /// Compact semantic text and tool-output detail.
     #[arg(long, value_enum, default_value_t)]
     pub mode: AgentTraceMode,
 
@@ -279,22 +283,23 @@ pub enum AgentTraceFormat {
     TauJsonl,
     /// Lossy OTLP/OpenInference JSON visualization adapter.
     OtlpJson,
-    /// Compact model-visible tool calls as JSON Lines.
+    /// Compact assistant, message, reasoning, and tool-call timeline as JSON
+    /// Lines.
     AgentToolsJsonl,
-    /// Compact model-visible tool calls as TOON.
+    /// Compact assistant, message, reasoning, and tool-call timeline as TOON.
     #[default]
     AgentToolsToon,
     /// Content-free provider accounting and journal-wall timing as JSON Lines.
     AgentPerformanceJsonl,
 }
 
-/// Output detail for compact agent-tool trace formats.
+/// Content detail for compact semantic trace formats.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum AgentTraceMode {
-    /// Report complete-output metrics and at most 4 KiB of output context.
+    /// Report complete metrics and at most 4 KiB of each text/output item.
     #[default]
     Lite,
-    /// Report complete-output metrics and complete normalized output.
+    /// Report complete metrics and complete semantic text/normalized output.
     Full,
 }
 

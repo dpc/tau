@@ -172,8 +172,13 @@ fn rollover_applies_deferred_provider_models_for_current_generation() {
     let model: tau_proto::ModelId = "declared/rollover".into();
     assert!(!h.provider_model_routes.contains_key(&model));
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
 
     assert_eq!(
         h.provider_model_routes
@@ -739,8 +744,13 @@ fn rollover_message_report_is_observation_only() {
     h.handle_extension_event_inner_with_persist("bridge", report, Some(false))
         .expect("park report");
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
 
     assert!(event_log_events(&h).iter().any(|event| {
         matches!(
@@ -971,7 +981,9 @@ fn queue_intercepted_peer_receive(
             request_id: format!("peer-request-{suffix}"),
             message_id: format!("peer-message-{suffix}").into(),
             capability: "test-capability".to_owned(),
-            sender_session_id: "sender-session".into(),
+            sender_session_id: "sender-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: h.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id),
@@ -1291,7 +1303,9 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
             request_id: "coalesce-remote".to_owned(),
             message_id: "coalesce-remote-message".into(),
             capability: "capability".to_owned(),
-            sender_session_id: "sender-session".into(),
+            sender_session_id: "sender-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: h.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -1329,7 +1343,9 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
         request_id: "auth-before-spend".to_owned(),
         message_id: "auth-before-spend-message".into(),
         capability: "invalid".to_owned(),
-        sender_session_id: "sender-session".into(),
+        sender_session_id: "sender-session"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: h.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -1366,7 +1382,9 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
         request_id: format!("stale-auth-{suffix}"),
         message_id: format!("stale-auth-message-{suffix}").into(),
         capability: "valid".to_owned(),
-        sender_session_id: "sender-session".into(),
+        sender_session_id: "sender-session"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: target_session.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -1430,8 +1448,13 @@ fn local_peer_parked_across_rollover_has_no_stale_terminal() {
     )
     .expect("queue local peer");
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
     h.handle_extension_event(
         "local-rollover-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -1477,7 +1500,9 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
             request_id: "bare-revoke".to_owned(),
             message_id: "bare-revoke-message".into(),
             capability: "capability".to_owned(),
-            sender_session_id: "sender-session".into(),
+            sender_session_id: "sender-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: h.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -1509,7 +1534,11 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
     let mut h = echo_harness(tmp.path()).expect("harness");
     configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     ensure_test_user_agent(&mut h);
-    h.create_durable_user_agent("s1".into(), "engineer");
+    h.create_durable_user_agent(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        "engineer",
+    );
     let _interceptor = connect_test_tool(&mut h, "bare-reselect-interceptor");
     h.handle_extension_event(
         "bare-reselect-interceptor",
@@ -1530,7 +1559,9 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
             request_id: "bare-reselect".to_owned(),
             message_id: "bare-reselect-message".into(),
             capability: "capability".to_owned(),
-            sender_session_id: "sender-session".into(),
+            sender_session_id: "sender-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: h.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
@@ -1620,8 +1651,13 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
     assert_eq!(h.pending_external_receive_acks.len(), 1);
     assert_eq!(h.peer_input_rate[&recipient_id].len(), 1);
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
     assert!(h.pending_external_receive_acks.is_empty());
     assert!(h.peer_input_rate.is_empty());
     let peer_results_after_rollover = peer_results.lock().expect("peer results");
@@ -1721,7 +1757,9 @@ fn intercepted_final_response_cannot_fan_out_after_watched_agent_unload() {
     h.publish_for_agent(
         &watched_cid,
         Event::ProviderResponseFinished(provider_text_response(
-            &"sp-parked-watch-final".into(),
+            &"sp-parked-watch-final"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             crate::parse_agent_id(&watched_id),
             "must not cross unload",
         )),
@@ -2346,7 +2384,9 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
             resume_through: Some(batch_parent),
             model: "test/model".into(),
             branch_generation: 0,
-            compact_prompt_id: "ap-compact-steer-retry".into(),
+            compact_prompt_id: "ap-compact-steer-retry"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
         };
     let retry_prompt =
         PendingPrompt::human_ui_watch_notified("retry exact completion steer".to_owned());
@@ -2483,7 +2523,9 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
             resume_through: Some(batch_parent),
             model: "test/model".into(),
             branch_generation: 0,
-            compact_prompt_id: "ap-envelope-compact".into(),
+            compact_prompt_id: "ap-envelope-compact"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
         };
     let _interceptor = connect_test_tool(&mut h, "completion-envelope-owner");
     h.handle_extension_event(
@@ -2675,7 +2717,8 @@ fn unloading_intercepted_checkpoint_preserves_other_agent_deferred_publish() {
         })),
     )
     .expect("register completion interceptor");
-    let agent_prompt_id = tau_proto::AgentPromptId::from("ap-unload-a");
+    let agent_prompt_id = tau_proto::AgentPromptId::parse("ap-unload-a")
+        .expect("known-safe AgentPromptId must be valid");
     h.agents
         .get_mut(&cid_a)
         .expect("agent A")
@@ -2774,7 +2817,8 @@ fn suspended_interceptor_disconnect_reconnects_unsuspended() {
         })),
     )
     .expect("register checkpoint interceptor");
-    let agent_prompt_id = tau_proto::AgentPromptId::from("ap-suspended-reconnect");
+    let agent_prompt_id = tau_proto::AgentPromptId::parse("ap-suspended-reconnect")
+        .expect("known-safe AgentPromptId must be valid");
     h.agents.get_mut(&cid).expect("agent").activation_dispatch =
         crate::agent::ActivationDispatchState::AwaitingCheckpoint {
             owner: crate::agent::InferenceCheckpointOwner::Inference,
@@ -2855,7 +2899,9 @@ fn rollover_commits_deferred_default_mandatory_compaction_terminal() {
     h.publish_for_agent(
         &cid,
         Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
-            compact_prompt_id: "ap-rollover-terminal".into(),
+            compact_prompt_id: "ap-rollover-terminal"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             operation: tau_proto::PromptOperation::StandaloneCompaction,
             agent_id: agent_id.clone(),
             transaction_id: transaction_id.clone(),
@@ -2896,8 +2942,13 @@ fn rollover_commits_deferred_default_mandatory_compaction_terminal() {
         )
     }));
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
 
     assert!(event_log_events(&h).into_iter().any(|event| {
         matches!(
@@ -3916,7 +3967,9 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "sp-main".into(),
+            agent_prompt_id: "sp-main"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: call_id.clone(),
@@ -4171,7 +4224,9 @@ fn discovery_canonical_events_are_protected() {
     let initialization_id = tau_proto::AgentInitializationId::new("init-1");
     let events = [
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id.clone(),
             agent_initialization_id: initialization_id.clone(),
             agents_message: None,
@@ -4179,14 +4234,18 @@ fn discovery_canonical_events_are_protected() {
             agents_files: Vec::new(),
         }),
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id,
             agent_initialization_id: initialization_id,
             listed_skills: Vec::new(),
             agents_files: Vec::new(),
         }),
         Event::HarnessSessionSkillsAvailable(tau_proto::HarnessSessionSkillsAvailable {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             skills: Vec::new(),
         }),
     ];
@@ -4199,13 +4258,19 @@ fn discovery_canonical_events_are_protected() {
         let mut replacement = event.clone();
         match &mut replacement {
             Event::AgentInitializationContextSet(value) => {
-                value.session_id = "forged-session".into();
+                value.session_id = "forged-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid");
             }
             Event::HarnessAgentContextInitialized(value) => {
-                value.session_id = "forged-session".into();
+                value.session_id = "forged-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid");
             }
             Event::HarnessSessionSkillsAvailable(value) => {
-                value.session_id = "forged-session".into();
+                value.session_id = "forged-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid");
             }
             _ => unreachable!("discovery scaffold fixture"),
         }
@@ -4284,13 +4349,19 @@ fn discovery_canonical_events_are_protected() {
         let mut replacement = event.clone();
         match &mut replacement {
             Event::AgentInitializationContextSet(value) => {
-                value.session_id = "forged-session".into();
+                value.session_id = "forged-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid");
             }
             Event::HarnessAgentContextInitialized(value) => {
-                value.session_id = "forged-session".into();
+                value.session_id = "forged-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid");
             }
             Event::HarnessSessionSkillsAvailable(value) => {
-                value.session_id = "forged-session".into();
+                value.session_id = "forged-session"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid");
             }
             _ => unreachable!("discovery scaffold fixture"),
         }
@@ -4361,7 +4432,9 @@ fn outer_turn_accounting_facts_are_immutable_and_must_pass() {
     assert!(matches!(finished, Event::AgentOuterTurnFinished(_)));
     let mut replacement = finished.clone();
     if let Event::AgentOuterTurnFinished(turn) = &mut replacement {
-        turn.session_id = "forged-session".into();
+        turn.session_id = "forged-session"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid");
     }
     h.handle_extension_event(
         "outer-turn-interceptor",
@@ -4483,7 +4556,9 @@ fn session_agent_loaded_event(agent_id: &str) -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-        session_id: "session-intercept".into(),
+        session_id: "session-intercept"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         ephemeral: false,
     })
@@ -4491,7 +4566,9 @@ fn session_agent_loaded_event(agent_id: &str) -> Event {
 
 fn session_agent_unloaded_event(agent_id: &str) -> Event {
     Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-        session_id: "session-intercept".into(),
+        session_id: "session-intercept"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
     })
 }
@@ -4590,14 +4667,18 @@ fn interception_replacement_of_session_agent_unloaded_publishes_original() {
 
 fn session_started_event(session_id: &str) -> Event {
     Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: session_id.into(),
+        session_id: session_id
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         reason: tau_proto::SessionStartReason::New,
     })
 }
 
 fn session_shutdown_event(session_id: &str) -> Event {
     Event::SessionShutdown(tau_proto::SessionShutdown {
-        session_id: session_id.into(),
+        session_id: session_id
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
     })
 }
 
@@ -5671,8 +5752,13 @@ fn rollover_commits_deferred_mutation_correlated_metadata_set() {
     h.publish_event(None, metadata.clone());
     assert!(!event_log_events(&h).contains(&metadata));
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
 
     assert!(event_log_events(&h).contains(&metadata));
 }
@@ -5719,8 +5805,13 @@ fn rollover_commits_deferred_peer_observations_without_semantic_effects() {
             .expect("defer observation");
     }
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
 
     let events = event_log_events(&h);
     for observation in observations {
@@ -5799,7 +5890,9 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
     interceptor.lock().expect("events").clear();
     let finished = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
         command_id: "shell-finished".into(),
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         command: "pwd".to_owned(),
         include_in_context: false,
         target_agent_id: Some(agent_id.clone()),
@@ -5815,7 +5908,9 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
             action: InterceptAction::Pass(Some(Box::new(Event::ShellCommandFinished(
                 tau_proto::ShellCommandFinished {
                     command_id: "redirected".into(),
-                    session_id: "other-session".into(),
+                    session_id: "other-session"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     command: "malicious".to_owned(),
                     include_in_context: true,
                     target_agent_id: Some(
@@ -5845,7 +5940,9 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
     interceptor.lock().expect("events").clear();
     let must_pass = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
         command_id: "shell-must-pass".into(),
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         command: "pwd".to_owned(),
         include_in_context: false,
         target_agent_id: Some(agent_id),

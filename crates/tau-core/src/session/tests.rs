@@ -110,10 +110,14 @@ fn outer_turn_fold_distinguishes_crash_recovery_from_runtime_overlap() {
         }),
     );
     let start = |id: &str, runtime: &str| {
-        let prompt_id: tau_proto::AgentPromptId = id.into();
+        let prompt_id: tau_proto::AgentPromptId = id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid");
         Event::AgentOuterTurnStarted(tau_proto::AgentOuterTurnStarted {
             agent_id: agent_id.clone(),
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(&prompt_id),
             agent_prompt_id: prompt_id,
             runtime_id: tau_proto::AccountingRuntimeId::new(runtime),
@@ -126,7 +130,9 @@ fn outer_turn_fold_distinguishes_crash_recovery_from_runtime_overlap() {
         Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
             agent_id: agent_id.clone(),
             transaction_id: None,
-            agent_prompt_id: id.into(),
+            agent_prompt_id: id
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             through: tau_proto::AgentHead::Root,
             model: Some("test/model".into()),
             operation: Some(tau_proto::PromptOperation::Inference),
@@ -177,14 +183,22 @@ fn outer_turn_fold_distinguishes_crash_recovery_from_runtime_overlap() {
         AgentEventParent::InheritHead,
         Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
             agent_id,
-            session_id: "s1".into(),
-            outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(&"ap-second".into()),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(
+                &"ap-second"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            ),
             disposition: tau_proto::AgentOuterTurnDisposition::Settled,
         }),
     );
     assert!(
         !tree.outer_turn_is_open(&tau_proto::AgentOuterTurnId::for_prompt(
-            &"ap-second".into()
+            &"ap-second"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid")
         ))
     );
 }
@@ -295,7 +309,9 @@ fn provider_response_rejects_input_side_tool_result_items() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "ap-invalid-result".into(),
+        agent_prompt_id: "ap-invalid-result"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: agent_id(),
         output_items: vec![ContextItem::ToolResult(tau_proto::ToolResultItem {
             call_id: "call-image".into(),
@@ -359,7 +375,9 @@ fn manual_request(id: &str) -> tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse(id).expect("valid request id"),
         caller_agent_id: other_agent_id(),
         target_agent_id: agent_id(),
-        initiating_agent_prompt_id: "ap-tool-round".into(),
+        initiating_agent_prompt_id: "ap-tool-round"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         initiating_tool_call_id: "call-compact".into(),
         initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
         visible_tool_name: ToolName::new("agent_compact"),
@@ -372,7 +390,9 @@ fn manual_request(id: &str) -> tau_proto::AgentManualCompactionRequested {
 
 fn compaction_start(id: &str) -> tau_proto::AgentStandaloneCompactionStarted {
     tau_proto::AgentStandaloneCompactionStarted {
-        compact_prompt_id: "ap-agent-metadata-test-0".into(),
+        compact_prompt_id: "ap-agent-metadata-test-0"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         operation: tau_proto::PromptOperation::StandaloneCompaction,
         agent_id: agent_id(),
         transaction_id: tau_proto::CompactionTransactionId::parse(id).expect("valid id"),
@@ -430,7 +450,9 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "ap-tool-prefix".into(),
+            agent_prompt_id: "ap-tool-prefix"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: agent_id(),
             output_items: tool_types
                 .iter()
@@ -520,7 +542,9 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "ap-text-prefix".into(),
+            agent_prompt_id: "ap-text-prefix"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: agent_id(),
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
@@ -697,7 +721,9 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
     ));
 
     let mut successor = compaction_start("ct-corrected-successor");
-    successor.compact_prompt_id = "ap-agent-metadata-test-successor".into();
+    successor.compact_prompt_id = "ap-agent-metadata-test-successor"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     successor.cut = prefix;
     successor.resume_through = Some(resume);
     successor.supersedes = Some(failed.transaction_id);
@@ -728,7 +754,9 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
     let checkpoint = tau_proto::AgentInferenceDispatchStarted {
         agent_id: agent_id(),
         transaction_id: Some(successor.transaction_id.clone()),
-        agent_prompt_id: "ap-successor-continuation".into(),
+        agent_prompt_id: "ap-successor-continuation"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         through,
         model: Some(successor.model),
         operation: Some(tau_proto::PromptOperation::Inference),
@@ -783,7 +811,9 @@ fn reactive_overflow_recovery_is_claimed_exactly_once() {
     let checkpoint = tau_proto::AgentInferenceDispatchStarted {
         agent_id: agent_id(),
         transaction_id: None,
-        agent_prompt_id: "ap-overflow".into(),
+        agent_prompt_id: "ap-overflow"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
         model: Some("provider/model".into()),
         operation: Some(tau_proto::PromptOperation::Inference),
@@ -836,7 +866,9 @@ fn reactive_overflow_recovery_is_claimed_exactly_once() {
     let mut second_claim = started.clone();
     second_claim.transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-reactive-second").expect("valid id");
-    second_claim.compact_prompt_id = "ap-agent-metadata-test-1".into();
+    second_claim.compact_prompt_id = "ap-agent-metadata-test-1"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     assert!(
         validation_error(&tree, Event::AgentStandaloneCompactionStarted(second_claim))
             .contains("uniquely match"),
@@ -851,7 +883,9 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
     let base_checkpoint = tau_proto::AgentInferenceDispatchStarted {
         agent_id: agent_id(),
         transaction_id: None,
-        agent_prompt_id: "ap-overflow-negative".into(),
+        agent_prompt_id: "ap-overflow-negative"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
         model: Some("provider/model".into()),
         operation: Some(tau_proto::PromptOperation::Inference),
@@ -880,7 +914,9 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
     let claim = |source: &str| {
         let mut started = compaction_start("ct-negative");
         started.trigger = tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
-            failed_agent_prompt_id: source.into(),
+            failed_agent_prompt_id: source
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
         };
         started
     };
@@ -961,7 +997,9 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
 
     for (name, mutate) in [("transaction-bound", 0_u8), ("wrong-operation", 1_u8)] {
         let mut checkpoint = base_checkpoint.clone();
-        checkpoint.agent_prompt_id = format!("ap-{name}").into();
+        checkpoint.agent_prompt_id = format!("ap-{name}")
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid");
         if mutate == 0 {
             checkpoint.transaction_id =
                 Some(tau_proto::CompactionTransactionId::parse("ct-source").expect("id"));
@@ -1043,7 +1081,9 @@ fn compaction_fold_rejects_premature_and_unknown_checkpoints() {
     let checkpoint = tau_proto::AgentInferenceDispatchStarted {
         agent_id: agent_id(),
         transaction_id: Some(started.transaction_id),
-        agent_prompt_id: "ap-agent-metadata-test-1".into(),
+        agent_prompt_id: "ap-agent-metadata-test-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
         model: None,
         operation: None,
@@ -1099,7 +1139,9 @@ fn compaction_checkpoint_rejects_ownership_mismatches() {
     let checkpoint = tau_proto::AgentInferenceDispatchStarted {
         agent_id: agent_id(),
         transaction_id: Some(started.transaction_id),
-        agent_prompt_id: "ap-owned-inference".into(),
+        agent_prompt_id: "ap-owned-inference"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
         model: Some(started.model),
         operation: Some(tau_proto::PromptOperation::Inference),
@@ -1124,7 +1166,9 @@ fn compaction_checkpoint_rejects_ownership_mismatches() {
             value
         },
     ] {
-        mismatched.agent_prompt_id = format!("{}-mismatch", mismatched.agent_prompt_id).into();
+        mismatched.agent_prompt_id = format!("{}-mismatch", mismatched.agent_prompt_id)
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid");
         assert!(
             validation_error(&tree, Event::AgentInferenceDispatchStarted(mismatched))
                 .contains("mismatches its transaction")
@@ -1187,7 +1231,13 @@ fn compaction_boundary_validates_explicit_parent() {
             4 => compacted.model = None,
             5 => compacted.operation = None,
             6 => compacted.cut = Some(AgentHead::Root),
-            7 => compacted.compact_prompt_id = Some("ap-wrong".into()),
+            7 => {
+                compacted.compact_prompt_id = Some(
+                    "ap-wrong"
+                        .parse::<tau_proto::AgentPromptId>()
+                        .expect("known-safe AgentPromptId must be valid"),
+                )
+            }
             8 => compacted.model = Some("other/model".into()),
             9 => compacted.operation = Some(tau_proto::PromptOperation::Inference),
             _ => unreachable!(),
@@ -1259,7 +1309,9 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
     let id = agent_id();
     let tree = AgentTree::from_events(id.clone(), &[]);
     let payload = tau_proto::AgentWatchTurnStateNotification {
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         subscription_id: "watch-1".to_owned(),
         state: tau_proto::AgentRuntimeState::Running,
         initial: false,
@@ -1286,10 +1338,14 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
     }
 
     let provider_payload = tau_proto::AgentWatchProviderStatusNotification {
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         subscription_id: "watch-1".to_owned(),
         turn_generation: 1,
-        agent_prompt_id: "sp-watch".into(),
+        agent_prompt_id: "sp-watch"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         state: tau_proto::AgentWatchProviderState::Retrying {
             category: tau_proto::AgentWatchProviderCategory::Transport,
             attempt: 1,
@@ -1384,7 +1440,9 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
 
-                agent_prompt_id: "sp-tool-round".into(),
+                agent_prompt_id: "sp-tool-round"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
                 agent_id: agent_id.clone(),
                 output_items: vec![
                     ContextItem::ToolCall(ToolCallItem {
@@ -1720,7 +1778,9 @@ fn tool_calling_response(
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: prompt_id.into(),
+        agent_prompt_id: prompt_id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: agent_id.clone(),
         output_items: call_ids
             .into_iter()
@@ -1932,9 +1992,13 @@ fn manual_compaction_generation_excludes_standalone_prompts() {
             model_params: Some(tau_proto::ModelParams::default()),
             outer_turn_id: None,
 
-            agent_prompt_id: id.into(),
+            agent_prompt_id: id
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: agent_id(),
-            session_id: "session".into(),
+            session_id: "session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             model: "provider/model".into(),
             operation,
             originator: PromptOriginator::User,
@@ -1942,7 +2006,9 @@ fn manual_compaction_generation_excludes_standalone_prompts() {
         })
     };
     let mut compact_owner = compaction_start("ct-generation");
-    compact_owner.compact_prompt_id = "ap-compact".into();
+    compact_owner.compact_prompt_id = "ap-compact"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     compact_owner.model = "provider/model".into();
     tree.validate_event(&Event::AgentStandaloneCompactionStarted(
         compact_owner.clone(),
@@ -1960,7 +2026,9 @@ fn manual_compaction_generation_excludes_standalone_prompts() {
     let checkpoint = tau_proto::AgentInferenceDispatchStarted {
         agent_id: agent_id(),
         transaction_id: None,
-        agent_prompt_id: "ap-inference".into(),
+        agent_prompt_id: "ap-inference"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
         model: Some("provider/model".into()),
         operation: Some(tau_proto::PromptOperation::Inference),
@@ -1984,7 +2052,9 @@ fn prompt_started_requires_unique_matching_owner() {
     let checkpoint = tau_proto::AgentInferenceDispatchStarted {
         agent_id: agent_id(),
         transaction_id: None,
-        agent_prompt_id: "ap-owned".into(),
+        agent_prompt_id: "ap-owned"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         through: AgentHead::Root,
         model: Some("provider/model".into()),
         operation: Some(tau_proto::PromptOperation::Inference),
@@ -1996,7 +2066,9 @@ fn prompt_started_requires_unique_matching_owner() {
 
         agent_prompt_id: checkpoint.agent_prompt_id.clone(),
         agent_id: agent_id(),
-        session_id: "session".into(),
+        session_id: "session"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         model: checkpoint.model.clone().expect("model"),
         operation: tau_proto::PromptOperation::Inference,
         originator: PromptOriginator::User,
@@ -2046,9 +2118,13 @@ fn prompt_started_requires_unique_matching_owner() {
 fn persisted_full_prompt_record_is_explicitly_unsupported() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     let prompt = tau_proto::AgentPromptCreated {
-        agent_prompt_id: "ap-legacy-full".into(),
+        agent_prompt_id: "ap-legacy-full"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: agent_id(),
-        session_id: "session".into(),
+        session_id: "session"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         system_prompt: "legacy full body".to_owned(),
         context: tau_proto::PromptContext::default(),
         tools: Vec::new(),

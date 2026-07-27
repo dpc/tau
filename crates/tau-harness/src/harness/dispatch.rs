@@ -278,10 +278,11 @@ impl Harness {
                 let Some((durable_agent_id, prompt_id, through, activation_cut)) =
                     self.agents.get_mut(&agent_id).and_then(|agent| {
                         let durable_agent_id = agent.agent_id.clone()?;
-                        let prompt_id = tau_proto::AgentPromptId::from(format!(
+                        let prompt_id = tau_proto::AgentPromptId::parse(format!(
                             "ap-{durable_agent_id}-{}",
                             agent.next_prompt_index
-                        ));
+                        ))
+                        .expect("known-safe AgentPromptId must be valid");
                         agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
                         let through = agent
                             .head

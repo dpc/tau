@@ -613,8 +613,12 @@ fn new_session_reset_does_not_dedup_against_previous_branch() {
     let big = CborValue::Text("n".repeat(2048));
     let _ = run_tool_result(&mut h, "s1", &cid, "call_before_new", "ls", big.clone());
 
-    h.switch_session("s1".into(), tau_proto::SessionStartReason::New)
-        .expect("same-id :session new reset");
+    h.switch_session(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("same-id :session new reset");
 
     let cid = ensure_test_user_agent(&mut h);
     assert_eq!(
@@ -670,7 +674,8 @@ fn dedup_is_scoped_to_a_single_branch() {
         crate::agent::Agent::new(
             side_cid.clone(),
             1,
-            "s1".into(),
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             tau_proto::PromptOriginator::Extension {
                 name: "core-subagents".into(),
                 query_id: "q-test".to_owned(),

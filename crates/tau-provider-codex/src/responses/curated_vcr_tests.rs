@@ -132,7 +132,7 @@ fn curated_provider_vcr_replay_only_lane() {
         let cassette_text =
             std::fs::read_to_string(&cassette_path).expect("read declared cassette");
         audit_public_text(&cassette_text).expect("public-safe cassette text");
-        let session_id = SessionId::new("curated");
+        let session_id = SessionId::parse("curated").expect("known-safe SessionId must be valid");
         let agent_id = AgentId::parse("curated-agent").expect("synthetic agent id");
         let context = PromptContext::default();
         let originator = PromptOriginator::User;

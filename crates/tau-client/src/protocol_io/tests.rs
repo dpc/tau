@@ -80,7 +80,9 @@ fn protocol_io_input_message_key_uses_ui_detach_request_message_name() {
 #[test]
 fn protocol_io_input_message_key_uses_ui_tree_request_message_name() {
     let message = HarnessInputMessage::UiTreeRequest(tau_proto::UiTreeRequest {
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         target_agent_id: None,
     });
 
@@ -144,7 +146,9 @@ fn protocol_io_detailed_meter_integrates_delivery_and_cumulative_accounting() {
     );
     let boundary = HarnessOutputMessage::deliver(Event::SessionReplayComplete(
         tau_proto::SessionReplayComplete {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             error: None,
         },
     ));

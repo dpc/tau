@@ -235,12 +235,16 @@ marks unavailable facts rather than inferring them.
 Complete offline durable-agent exports are available through
 `tau agent trace <agent-id>`. See [Durable agent trace export](docs/agent-trace.md)
 for snapshot guarantees, the canonical native JSONL schema, and the lossy OTLP
-visualization adapter. `agent-tools-toon` and `agent-tools-jsonl` provide dense,
-explicit-observation views of provider-declared tool calls, activations, and causal
-relationships, with independently selected lite/full output detail. Lite retains
-exact source-output metrics and at most 4 KiB of diagnostic output per terminal
-call. Completion-delivering waits reference that source output without copying it.
+visualization adapter. `agent-tools-toon` and `agent-tools-jsonl` provide dense
+semantic timelines of provider-declared calls, assistant prose/reasoning,
+explicit directional agent messages, activations, and typed causal relationships.
+Every item retains journal-relative and qualified absolute append time plus
+authoritative journal sequence. Lite retains exact content metrics and at most
+4 KiB of each semantic text/output item; full retains complete content.
+Completion-delivering waits reference source-owned output without copying it.
 Agent trace defaults to TOON lite.
 `agent-performance-jsonl` instead emits content-free provider-prompt accounting,
 fixed-point cache ratios, missing-evidence coverage, and explicitly qualified
 journal recorded-at wall-clock intervals with one summary per included agent.
+
+Compact trace formats provide a semantic assistant/tool/message timeline in JSONL or TOON. Lite bounds each text/output item to 4 KiB while retaining exact complete-content metrics; full retains complete content. Journal sequence is authoritative within an agent, while cross-agent wall time is only a readable overview and not causality.

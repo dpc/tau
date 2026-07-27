@@ -132,8 +132,166 @@ macro_rules! string_newtype {
     };
 }
 
-string_newtype!(/// Session identifier.
-    SessionId);
+/// Maximum length for validated session and prompt identifiers.
+pub const SESSION_SCOPED_ID_MAX_LEN: usize = 128;
+
+macro_rules! validated_string_newtype {
+    ($(#[$meta:meta])* $name:ident, $error:ident, $label:literal) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, serde::Serialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        #[doc = concat!("Error returned when parsing ", $label, ".")]
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        pub enum $error {
+            /// Identifiers must not be empty.
+            Empty,
+            /// Identifiers must not exceed [`SESSION_SCOPED_ID_MAX_LEN`] bytes.
+            TooLong {
+                /// Maximum accepted byte length.
+                max: usize,
+                /// Rejected byte length.
+                actual: usize,
+            },
+            /// Identifiers may contain only ASCII letters, digits, `_`, and `-`.
+            InvalidByte {
+                /// Byte offset of the rejected value.
+                index: usize,
+                /// Rejected byte.
+                byte: u8,
+            },
+        }
+
+        impl std::fmt::Display for $error {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    Self::Empty => write!(f, "{} must not be empty", $label),
+                    Self::TooLong { max, actual } => {
+                        write!(f, "{} is too long: {actual} bytes; maximum is {max}", $label)
+                    }
+                    Self::InvalidByte { index, byte } => write!(
+                        f,
+                        "{} contains invalid byte 0x{byte:02x} at byte offset {index}",
+                        $label
+                    ),
+                }
+            }
+        }
+
+        impl std::error::Error for $error {}
+
+        impl $name {
+            #[doc = concat!(
+                "Parses and validates ",
+                $label,
+                ".\n\nAccepts 1 through 128 bytes containing only ASCII letters, digits, `_`, and `-`."
+            )]
+            pub fn parse(value: impl Into<String>) -> Result<Self, $error> {
+                let value = value.into();
+                if value.is_empty() {
+                    return Err($error::Empty);
+                }
+                if SESSION_SCOPED_ID_MAX_LEN < value.len() {
+                    return Err($error::TooLong {
+                        max: SESSION_SCOPED_ID_MAX_LEN,
+                        actual: value.len(),
+                    });
+                }
+                if let Some((index, byte)) = value
+                    .bytes()
+                    .enumerate()
+                    .find(|(_, byte)| !byte.is_ascii_alphanumeric() && *byte != b'_' && *byte != b'-')
+                {
+                    return Err($error::InvalidByte { index, byte });
+                }
+                Ok(Self(value))
+            }
+
+            /// Returns the validated identifier as a string slice.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            /// Consumes the identifier and returns its validated string.
+            pub fn into_string(self) -> String {
+                self.0
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = $error;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::parse(value)
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Self::parse(value).map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+
+            fn deref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        impl PartialEq<str> for $name {
+            fn eq(&self, other: &str) -> bool {
+                self.0 == other
+            }
+        }
+
+        impl PartialEq<&str> for $name {
+            fn eq(&self, other: &&str) -> bool {
+                self.0 == *other
+            }
+        }
+
+        impl PartialEq<String> for $name {
+            fn eq(&self, other: &String) -> bool {
+                self.0 == *other
+            }
+        }
+
+        impl std::borrow::Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+    };
+}
+
+validated_string_newtype!(
+    /// Stable identifier for one Tau session.
+    ///
+    /// Values contain 1 through 128 bytes of ASCII letters, digits, `_`, or
+    /// `-`. Construction and deserialization validate this grammar.
+    SessionId,
+    SessionIdParseError,
+    "session id"
+);
 /// Maximum length for a durable agent identifier.
 pub const AGENT_ID_MAX_LEN: usize = 64;
 
@@ -263,8 +421,15 @@ impl AsRef<str> for AgentId {
     }
 }
 
-string_newtype!(/// Stable identifier for one agent transcript prompt.
-    AgentPromptId);
+validated_string_newtype!(
+    /// Stable identifier for one agent transcript prompt.
+    ///
+    /// Values contain 1 through 128 bytes of ASCII letters, digits, `_`, or
+    /// `-`. Construction and deserialization validate this grammar.
+    AgentPromptId,
+    AgentPromptIdParseError,
+    "agent prompt id"
+);
 string_newtype!(/// Stable identifier for one global agent message.
     AgentMessageId);
 // ToolName is defined manually below with validation.

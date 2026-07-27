@@ -3331,7 +3331,9 @@ impl Harness {
             crate::session_cleanup::spawn_session_cleanup(
                 sessions_dir.clone(),
                 harness_settings.session_retention(),
-                vec![SessionId::from(eager_session_id)],
+                vec![
+                    SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid"),
+                ],
             );
         }
         let mut harness = Self::from_base_parts(HarnessBaseParts {
@@ -3344,7 +3346,9 @@ impl Harness {
             agent_store,
             session_persistence,
             project_root,
-            current_session_id: eager_session_id.into(),
+            current_session_id: eager_session_id
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             current_session_start_reason: launch.reason,
             available_roles,
             available_role_groups,
@@ -3411,7 +3415,12 @@ impl Harness {
         // Every past agent that touched this code has "noticed" that
         // the CLI uses `chat-<ts>` session ids and concluded the eager
         // init is wasted work. It isn't. Please resist the urge.
-        harness.start_session_init(eager_session_id.into(), launch.reason);
+        harness.start_session_init(
+            eager_session_id
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            launch.reason,
+        );
         harness.wait_for_session_init()?;
         harness.ensure_selected_role_available_after_required_skill_validation()?;
         Ok(harness)
@@ -3563,7 +3572,12 @@ impl Harness {
         harness.emit_missing_default_role(startup.missing_default_role);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "config checks complete");
 
-        harness.start_session_init(eager_session_id.into(), launch.reason);
+        harness.start_session_init(
+            eager_session_id
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            launch.reason,
+        );
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "session init started");
         if let Err(error) = harness.wait_for_session_init() {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
@@ -3695,7 +3709,9 @@ impl Harness {
             crate::session_cleanup::spawn_session_cleanup(
                 sessions_dir.clone(),
                 session_retention,
-                vec![SessionId::from(eager_session_id)],
+                vec![
+                    SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid"),
+                ],
             );
         }
         Ok((
@@ -3772,7 +3788,10 @@ impl Harness {
             agent_store: parts.agent_store,
             session_persistence: parts.launch.session_persistence,
             project_root: parts.project_root,
-            current_session_id: parts.eager_session_id.into(),
+            current_session_id: parts
+                .eager_session_id
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             current_session_start_reason: parts.launch.reason,
             available_roles: parts.roles.available_roles,
             available_role_groups: parts.roles.available_role_groups,
@@ -5930,10 +5949,11 @@ impl Harness {
             let durable_agent_id = agent.agent_id.as_deref().unwrap_or(cid.as_ref());
             (
                 crate::parse_agent_id(durable_agent_id),
-                tau_proto::AgentPromptId::from(format!(
+                tau_proto::AgentPromptId::parse(format!(
                     "ap-{durable_agent_id}-{}",
                     agent.next_prompt_index
-                )),
+                ))
+                .expect("known-safe AgentPromptId must be valid"),
             )
         }) else {
             return;
@@ -17416,8 +17436,11 @@ impl Harness {
             let transaction_id =
                 tau_proto::CompactionTransactionId::parse(format!("ct-{}", conv.next_prompt_index))
                     .expect("generated compaction transaction id is valid");
-            let compact_prompt_id =
-                tau_proto::AgentPromptId::from(format!("ap-{agent_id}-{}", conv.next_prompt_index));
+            let compact_prompt_id = tau_proto::AgentPromptId::parse(format!(
+                "ap-{agent_id}-{}",
+                conv.next_prompt_index
+            ))
+            .expect("known-safe AgentPromptId must be valid");
             let originator = conv.originator.clone();
             if let Some(agent) = self.agents.get_mut(cid) {
                 agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
@@ -17860,7 +17883,8 @@ impl Harness {
             tau_proto::CompactionTransactionId::parse(format!("ct-{next_prompt_index}"))
                 .expect("generated transaction id");
         let compact_prompt_id =
-            tau_proto::AgentPromptId::from(format!("ap-{target_public_id}-{next_prompt_index}"));
+            tau_proto::AgentPromptId::parse(format!("ap-{target_public_id}-{next_prompt_index}"))
+                .expect("known-safe AgentPromptId must be valid");
         if let Some(target) = self.agents.get_mut(target_cid) {
             target.next_prompt_index = target.next_prompt_index.saturating_add(1);
         }
@@ -18114,7 +18138,8 @@ impl Harness {
             tau_proto::CompactionTransactionId::parse(format!("ct-{}", conv.next_prompt_index))
                 .expect("generated compaction transaction id is valid");
         let compact_prompt_id =
-            tau_proto::AgentPromptId::from(format!("ap-{agent_id}-{}", conv.next_prompt_index));
+            tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{}", conv.next_prompt_index))
+                .expect("known-safe AgentPromptId must be valid");
         if let Some(agent) = self.agents.get_mut(cid) {
             agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
         }
@@ -20756,7 +20781,8 @@ impl Harness {
         let conv = self.agents.get_mut(cid)?;
         let agent_id = conv.agent_id.as_deref()?;
         let prompt_id =
-            tau_proto::AgentPromptId::from(format!("ap-{agent_id}-{}", conv.next_prompt_index));
+            tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{}", conv.next_prompt_index))
+                .expect("known-safe AgentPromptId must be valid");
         conv.next_prompt_index = conv.next_prompt_index.saturating_add(1);
         conv.activation_dispatch = crate::agent::ActivationDispatchState::AwaitingCheckpoint {
             owner: crate::agent::InferenceCheckpointOwner::Standalone {
@@ -21430,10 +21456,11 @@ impl Harness {
         let Some((agent_prompt_id, through)) = self.agents.get(target_cid).and_then(|agent| {
             let agent_id = agent.agent_id.clone()?;
             Some((
-                tau_proto::AgentPromptId::from(format!(
+                tau_proto::AgentPromptId::parse(format!(
                     "ap-{agent_id}-{}",
                     agent.next_prompt_index
-                )),
+                ))
+                .expect("known-safe AgentPromptId must be valid"),
                 agent
                     .head
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
@@ -22676,7 +22703,8 @@ impl Harness {
                 if let Some(agent) = self.agents.get_mut(cid) {
                     agent.next_prompt_index += 1;
                 }
-                AgentPromptId::from(format!("ap-{durable_agent_id}-{prompt_index}"))
+                AgentPromptId::parse(format!("ap-{durable_agent_id}-{prompt_index}"))
+                    .expect("known-safe AgentPromptId must be valid")
             });
         self.prompt_agents
             .insert(agent_prompt_id.clone(), cid.clone());
@@ -24089,7 +24117,8 @@ impl Harness {
         };
         let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{next}"))
             .expect("generated compaction transaction id is valid");
-        let compact_prompt_id = tau_proto::AgentPromptId::from(format!("ap-{agent_id}-{next}"));
+        let compact_prompt_id = tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{next}"))
+            .expect("known-safe AgentPromptId must be valid");
         if let Some(agent) = self.agents.get_mut(cid) {
             agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
         }
@@ -24160,7 +24189,8 @@ impl Harness {
             .map_or(0, |agent| agent.next_prompt_index);
         let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{next}"))
             .expect("generated compaction transaction id is valid");
-        let compact_prompt_id = tau_proto::AgentPromptId::from(format!("ap-{agent_id}-{next}"));
+        let compact_prompt_id = tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{next}"))
+            .expect("known-safe AgentPromptId must be valid");
         let originator = self
             .agents
             .get(cid)
@@ -26554,7 +26584,12 @@ impl Harness {
         // to drain a queued prompt, so the queued-until-model path would
         // deadlock. AGENTS.md session init is exercised separately in
         // unit tests via `submit_user_prompt` / manual turn-state setup.
-        self.dispatch_user_prompt(session_id.into(), text.to_owned())?;
+        self.dispatch_user_prompt(
+            session_id
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            text.to_owned(),
+        )?;
 
         let committed_observer_id = tau_proto::ConnectionId::from("__embedded_committed_observer");
         let (observer_tx, observer_rx) = mpsc::channel();
@@ -26715,7 +26750,11 @@ impl Harness {
         harness.selected_model = Some("test/model".parse().expect("model id"));
 
         let role = harness.selected_role.clone();
-        let cid = harness.try_create_durable_user_agent("s1".into(), &role)?;
+        let cid = harness.try_create_durable_user_agent(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            &role,
+        )?;
         let agent_id = harness
             .target_agent_id_for_agent(&cid)
             .expect("agent has durable id");

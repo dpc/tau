@@ -349,11 +349,15 @@ fn check_trace(seed: u64, trace: &[ModelCommand]) -> Result<(), TestCaseError> {
                     "model-retry-{request}"
                 ))
                 .expect("valid fixed request ID"),
-                agent_prompt_id: PROMPTS[prompt].into(),
+                agent_prompt_id: PROMPTS[prompt]
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
             }),
-            ModelCommand::Cancel { prompt } => {
-                sut.step(SchedulerCommand::Cancel(PROMPTS[prompt].into()))
-            }
+            ModelCommand::Cancel { prompt } => sut.step(SchedulerCommand::Cancel(
+                PROMPTS[prompt]
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            )),
             ModelCommand::CancelAll => sut.step(SchedulerCommand::CancelAll),
             ModelCommand::Advance { .. } => {
                 sut.advance(epoch + Duration::from_millis(reference.now))

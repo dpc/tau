@@ -5,7 +5,7 @@ use super::*;
 /// Build one per-agent context value with an easily inspected payload.
 fn context(agent_id: &str, value: &str) -> Event {
     Event::ExtAgentContextPublish(tau_proto::ExtAgentContextPublish {
-        session_id: tau_proto::SessionId::new("s1"),
+        session_id: tau_proto::SessionId::parse("s1").expect("known-safe SessionId must be valid"),
         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
@@ -147,7 +147,9 @@ fn parked_context_value_prevents_readiness_overtake() {
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id.clone(),
         }),
     )
@@ -358,8 +360,13 @@ fn rollover_releases_stale_context_registration_reservation() {
     assert_eq!(stage.retained_message_count, 1);
     assert!(stage.retained_message_bytes > 0);
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
 
     assert!(source_committed(&h, "context-owner", |event| {
         matches!(event, Event::ExtensionContextProviderRegister(_))
@@ -421,8 +428,13 @@ fn rollover_rejects_already_staged_context_declarations_on_ready() {
         2
     );
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
     h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
         .expect("activate owner");
 
@@ -521,15 +533,22 @@ fn pre_ready_context_readiness_after_rollover_is_observation_only() {
             tau_proto::ExtensionContextReady {
                 agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                session_id: "replacement".into(),
+                session_id: "replacement"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: agent_id.clone(),
             },
         )),
     )
     .expect("defer readiness before Ready");
 
-    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
-        .expect("switch session");
+    h.switch_session(
+        "replacement"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
@@ -573,7 +592,9 @@ fn context_ready_does_not_release_session_wait() {
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
     h.initialized_sessions.remove("s1");
     h.turn_state = TurnState::InitializingSession {
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         reason: tau_proto::SessionStartReason::Initial,
         waiting_on: [source.clone()].into_iter().collect(),
     };
@@ -584,7 +605,9 @@ fn context_ready_does_not_release_session_wait() {
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id.clone(),
         }),
     )
@@ -610,7 +633,9 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
     let source = tau_proto::ConnectionId::from("context-owner");
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
     h.turn_state = TurnState::InitializingSession {
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         reason: tau_proto::SessionStartReason::Initial,
         waiting_on: [source.clone()].into_iter().collect(),
     };
@@ -623,7 +648,9 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-            session_id: session_id.into(),
+            session_id: session_id
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id.clone(),
         })
     };
@@ -771,8 +798,12 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
     )
     .expect("publish stable fragment");
 
-    h.dispatch_user_prompt("s1".into(), "dispatch after readiness".to_owned())
-        .expect("dispatch prompt");
+    h.dispatch_user_prompt(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        "dispatch after readiness".to_owned(),
+    )
+    .expect("dispatch prompt");
     let agent_id = h
         .agents
         .values()
@@ -784,7 +815,9 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
         .clone();
     let correlated_context = |value: &str| {
         Event::ExtAgentContextPublish(tau_proto::ExtAgentContextPublish {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id.clone(),
             agent_initialization_id: initialization_id.clone(),
             key: "test".into(),
@@ -803,7 +836,9 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
             agent_initialization_id: initialization_id,
 
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id.clone(),
         }),
     )

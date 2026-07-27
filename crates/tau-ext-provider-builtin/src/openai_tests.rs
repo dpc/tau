@@ -269,7 +269,9 @@ fn input_event(message: &HarnessInputMessage) -> Option<&Event> {
 
 fn session_dir(status: tau_proto::SessionDirStatus) -> tau_proto::HarnessSessionDir {
     tau_proto::HarnessSessionDir {
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         path: std::path::PathBuf::from("/tmp/tau-test-session-1"),
         status,
     }
@@ -281,7 +283,7 @@ fn retry_banner_emits_status_not_message_delta() {
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         emit_retry_banner(
-            "sp-retry",
+            &tau_proto::AgentPromptId::parse("sp-retry").expect("test prompt id"),
             &tau_proto::AgentId::parse("main").expect("agent id"),
             &tau_proto::PromptOriginator::User,
             &mut writer,
@@ -313,9 +315,13 @@ fn model_id(provider: &str, model: &str) -> ModelId {
 
 pub(super) fn prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
-        agent_prompt_id: "sp-1".into(),
+        agent_prompt_id: "sp-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         system_prompt: String::new(),
         context: tau_proto::PromptContext {
             blocks: vec![tau_proto::ContextBlock::UserInput(
@@ -489,7 +495,9 @@ fn session_shutdown_cancels_and_joins_silent_prewarm() {
     input.push(encode_frames(&[live_event(
         12,
         Event::SessionShutdown(tau_proto::SessionShutdown {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
         }),
     )]));
     canceled_rx
@@ -674,7 +682,9 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
         profile.auth.access_token = "rotated-access".to_owned();
     }
     let mut rotated = prompt();
-    rotated.agent_prompt_id = "rotated".into();
+    rotated.agent_prompt_id = "rotated"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[live_event(
         12,
         Event::AgentPromptCreated(rotated),
@@ -793,7 +803,9 @@ fn stale_old_identity_retry_cannot_park_new_profile_work() {
         profile.auth.access_token = "new-identity".to_owned();
     }
     let mut rotated = prompt();
-    rotated.agent_prompt_id = "rotated-first".into();
+    rotated.agent_prompt_id = "rotated-first"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[live_event(
         12,
         Event::AgentPromptCreated(rotated),
@@ -816,7 +828,9 @@ fn stale_old_identity_retry_cannot_park_new_profile_work() {
         })
     });
     let mut peer = prompt();
-    peer.agent_prompt_id = "new-peer".into();
+    peer.agent_prompt_id = "new-peer"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[live_event(
         13,
         Event::AgentPromptCreated(peer),
@@ -844,7 +858,9 @@ fn stale_old_identity_retry_cannot_park_new_profile_work() {
 /// Builds scheduler-owned logical state without starting a provider worker.
 pub(super) fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
     let mut prompt = prompt();
-    prompt.agent_prompt_id = prompt_id.into();
+    prompt.agent_prompt_id = prompt_id
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     prompt.model.provider = ProviderName::new(provider);
     PromptJob {
         agent_prompt_id: prompt.agent_prompt_id.clone(),
@@ -1204,7 +1220,9 @@ fn removed_and_readded_profile_does_not_inherit_shared_cooldown() {
 #[test]
 fn successful_probe_requires_current_generation_and_successful_terminal() {
     let provider = ProviderName::new("limited");
-    let prompt_id: tau_proto::AgentPromptId = "probe".into();
+    let prompt_id: tau_proto::AgentPromptId = "probe"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let probe = CooldownProbe {
         provider: provider.clone(),
         generation: 7,
@@ -1246,7 +1264,8 @@ fn successful_probe_requires_current_generation_and_successful_terminal() {
     );
     assert!(!successful_probe_matches(
         &success_message,
-        &tau_proto::AgentPromptId::from("different"),
+        &tau_proto::AgentPromptId::parse("different")
+            .expect("known-safe AgentPromptId must be valid"),
         &probe,
         &cooldowns
     ));
@@ -1440,7 +1459,11 @@ fn retry_schedule_queue_cancellation_is_prompt_scoped_and_immediate() {
         .schedule(due, None, scheduled_job("peer", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
 
-    let canceled = queue.cancel(&"target".into());
+    let canceled = queue.cancel(
+        &"target"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
     assert_eq!(canceled.len(), 1);
     assert_eq!(canceled[0].agent_prompt_id.as_str(), "target");
     assert_eq!(queue.len(), 1, "same-cooldown peer must remain delayed");
@@ -1462,13 +1485,30 @@ fn retry_schedule_queue_timer_and_manual_release_are_mutually_exclusive() {
         .schedule(now, None, scheduled_job("timer-wins", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
     assert!(timer_wins.pop_due(now).is_some());
-    assert!(timer_wins.cancel(&"timer-wins".into()).is_empty());
+    assert!(
+        timer_wins
+            .cancel(
+                &"timer-wins"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid")
+            )
+            .is_empty()
+    );
 
     let mut manual_wins = RetryScheduleQueue::default();
     manual_wins
         .schedule(now, None, scheduled_job("manual-wins", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
-    assert_eq!(manual_wins.cancel(&"manual-wins".into()).len(), 1);
+    assert_eq!(
+        manual_wins
+            .cancel(
+                &"manual-wins"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid")
+            )
+            .len(),
+        1
+    );
     assert!(manual_wins.pop_due(now).is_none());
 }
 
@@ -1485,13 +1525,27 @@ fn retry_schedule_queue_double_manual_release_moves_exactly_one_job() {
         .schedule(due, None, scheduled_job("peer", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
 
-    let first = queue.cancel(&"target".into());
-    let second = queue.cancel(&"target".into());
+    let first = queue.cancel(
+        &"target"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
+    let second = queue.cancel(
+        &"target"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
     assert_eq!(first.len(), 1);
     assert!(second.is_empty());
     assert_eq!(queue.len(), 1);
     assert_eq!(
-        queue.cancel(&"peer".into())[0].agent_prompt_id.as_str(),
+        queue.cancel(
+            &"peer"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid")
+        )[0]
+        .agent_prompt_id
+        .as_str(),
         "peer"
     );
 }
@@ -1514,7 +1568,14 @@ fn retry_schedule_queue_manual_transfer_preserves_logical_prompt_state() {
         "unique parked prompt"
     );
 
-    let mut transferred = queue.cancel(&"target".into()).pop().expect("parked job");
+    let mut transferred = queue
+        .cancel(
+            &"target"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+        )
+        .pop()
+        .expect("parked job");
     assert_eq!(transferred.retry_state.attempts, 7);
     assert_eq!(transferred.retry_state.previous, 13);
     assert_eq!(transferred.retry_state.current, 21);
@@ -1532,8 +1593,12 @@ fn retry_schedule_queue_manual_transfer_preserves_logical_prompt_state() {
 #[test]
 fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     let (tx, rx) = mpsc::channel();
-    let target: tau_proto::AgentPromptId = "target".into();
-    let peer: tau_proto::AgentPromptId = "peer".into();
+    let target: tau_proto::AgentPromptId = "target"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    let peer: tau_proto::AgentPromptId = "peer"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
     tx.send(WorkerMessage::Output {
@@ -1851,9 +1916,13 @@ fn prompt_workers_start_concurrently() {
     // one finishes. A serial dispatcher would time out the first worker's
     // wait and never observe two active starts at once.
     let mut first = prompt();
-    first.agent_prompt_id = "sp-par-1".into();
+    first.agent_prompt_id = "sp-par-1"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let mut second = prompt();
-    second.agent_prompt_id = "sp-par-2".into();
+    second.agent_prompt_id = "sp-par-2"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let input = encode_frames(&[
         live_event(11, Event::AgentPromptCreated(first)),
         live_event(12, Event::AgentPromptCreated(second)),
@@ -2015,11 +2084,17 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
         Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
             request_id: tau_proto::RetryPromptRequestId::parse("runtime-manual-1")
                 .expect("valid retry request id"),
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: Some(
                 tau_proto::AgentId::parse("agent-1").expect("valid test agent id"),
             ),
-            agent_prompt_id: Some("sp-1".into()),
+            agent_prompt_id: Some(
+                "sp-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            ),
         }),
     )]));
 
@@ -2141,9 +2216,15 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
         Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
             request_id: tau_proto::RetryPromptRequestId::parse("count-transfer")
                 .expect("valid retry request id"),
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
-            agent_prompt_id: Some("sp-1".into()),
+            agent_prompt_id: Some(
+                "sp-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            ),
         }),
     )]));
     assert_eq!(attempt_rx.recv().expect("manually admitted attempt"), 1);
@@ -2170,7 +2251,9 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
     let clock = Arc::new(VirtualRetryClock::new(epoch));
     let input = BlockingInput::default();
     let mut probe = prompt();
-    probe.agent_prompt_id = "probe".into();
+    probe.agent_prompt_id = "probe"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[live_event(
         11,
         Event::AgentPromptCreated(probe),
@@ -2373,11 +2456,17 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
     assert_eq!(calls.lock().expect("call log").as_slice(), ["probe"]);
 
     let mut peer_one = prompt();
-    peer_one.agent_prompt_id = "peer-1".into();
+    peer_one.agent_prompt_id = "peer-1"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let mut peer_two = prompt();
-    peer_two.agent_prompt_id = "peer-2".into();
+    peer_two.agent_prompt_id = "peer-2"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let mut unrelated = prompt();
-    unrelated.agent_prompt_id = "unrelated".into();
+    unrelated.agent_prompt_id = "unrelated"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     unrelated.model = model_id("healthy", "model");
     input.push(encode_frames(&[
         live_event(12, Event::AgentPromptCreated(peer_one)),
@@ -2413,9 +2502,15 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
         Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
             request_id: tau_proto::RetryPromptRequestId::parse(request_id)
                 .expect("retry request id"),
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
-            agent_prompt_id: Some("probe".into()),
+            agent_prompt_id: Some(
+                "probe"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            ),
         })
     };
     input.push(encode_frames(&[
@@ -2470,7 +2565,9 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
     // a deterministic no-side-effect result is paired to the validated call and
     // submitted as a production provider continuation.
     let mut continuation = prompt();
-    continuation.agent_prompt_id = "continuation".into();
+    continuation.agent_prompt_id = "continuation"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     continuation
         .context
         .blocks
@@ -2700,7 +2797,9 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
         })
     });
     let mut peer = prompt();
-    peer.agent_prompt_id = "telemetry-peer".into();
+    peer.agent_prompt_id = "telemetry-peer"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[live_event(
         12,
         Event::AgentPromptCreated(peer),
@@ -2774,7 +2873,9 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
         live_event(
             12,
             Event::SessionShutdown(tau_proto::SessionShutdown {
-                session_id: "session-1".into(),
+                session_id: "session-1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
             }),
         ),
         live_event(
@@ -2782,9 +2883,15 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
             Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
                 request_id: tau_proto::RetryPromptRequestId::parse("after-shutdown")
                     .expect("valid retry request id"),
-                session_id: "session-1".into(),
+                session_id: "session-1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 target_agent_id: None,
-                agent_prompt_id: Some("sp-1".into()),
+                agent_prompt_id: Some(
+                    "sp-1"
+                        .parse::<tau_proto::AgentPromptId>()
+                        .expect("known-safe AgentPromptId must be valid"),
+                ),
             }),
         ),
     ]));
@@ -2906,9 +3013,15 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
             Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
                 request_id: tau_proto::RetryPromptRequestId::parse(request_id)
                     .expect("valid retry request id"),
-                session_id: "session-1".into(),
+                session_id: "session-1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 target_agent_id: None,
-                agent_prompt_id: Some("sp-1".into()),
+                agent_prompt_id: Some(
+                    "sp-1"
+                        .parse::<tau_proto::AgentPromptId>()
+                        .expect("known-safe AgentPromptId must be valid"),
+                ),
             }),
         )]));
         assert_eq!(attempt_rx.recv().expect("manual attempt"), expected_attempt);
@@ -3043,12 +3156,16 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
     let mut frames = Vec::new();
     for index in 1..=4 {
         let mut limited = prompt();
-        limited.agent_prompt_id = format!("limited-{index}").into();
+        limited.agent_prompt_id = format!("limited-{index}")
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid");
         limited.model.provider = ProviderName::new("limited");
         frames.push(live_event(10 + index, Event::AgentPromptCreated(limited)));
     }
     let mut healthy = prompt();
-    healthy.agent_prompt_id = "healthy".into();
+    healthy.agent_prompt_id = "healthy"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     healthy.model.provider = ProviderName::new("healthy");
     frames.push(live_event(20, Event::AgentPromptCreated(healthy)));
     input.push(encode_frames(&frames));
@@ -3462,12 +3579,18 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
 fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
     let input = BlockingInput::default();
     let mut chatgpt_prompt = prompt();
-    chatgpt_prompt.agent_prompt_id = "chatgpt-retry".into();
+    chatgpt_prompt.agent_prompt_id = "chatgpt-retry"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let mut generic_prompt = prompt();
-    generic_prompt.agent_prompt_id = "generic-retry".into();
+    generic_prompt.agent_prompt_id = "generic-retry"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     generic_prompt.model = model_id("generic", "generic-model");
     let mut router_prompt = prompt();
-    router_prompt.agent_prompt_id = "router-retry".into();
+    router_prompt.agent_prompt_id = "router-retry"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     router_prompt.model = model_id("router", "router-model");
     input.push(encode_frames(&[
         live_event(11, Event::AgentPromptCreated(chatgpt_prompt)),
@@ -3651,11 +3774,17 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
     let input = BlockingInput::default();
     let mut delayed = prompt();
-    delayed.agent_prompt_id = "mixed-delayed".into();
+    delayed.agent_prompt_id = "mixed-delayed"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let mut active = prompt();
-    active.agent_prompt_id = "mixed-active".into();
+    active.agent_prompt_id = "mixed-active"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let mut queued = prompt();
-    queued.agent_prompt_id = "mixed-queued".into();
+    queued.agent_prompt_id = "mixed-queued"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[
         live_event(11, Event::AgentPromptCreated(delayed)),
         live_event(12, Event::AgentPromptCreated(active)),
@@ -3774,7 +3903,9 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         })
     });
     let mut cooldown_peer = prompt();
-    cooldown_peer.agent_prompt_id = "mixed-cooldown-peer".into();
+    cooldown_peer.agent_prompt_id = "mixed-cooldown-peer"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[live_event(
         14,
         Event::AgentPromptCreated(cooldown_peer),
@@ -3799,7 +3930,8 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
             input.push(encode_frames(&[live_event(
                 20,
                 Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-                    session_id: tau_proto::SessionId::new("test-session"),
+                    session_id: tau_proto::SessionId::parse("test-session")
+                        .expect("known-safe SessionId must be valid"),
                     target_agent_id: None,
                     agent_prompt_id: None,
                 }),
@@ -3907,7 +4039,9 @@ fn cold_restart_discards_old_work_and_cooldown() {
 
     let input = BlockingInput::default();
     let mut fresh = prompt();
-    fresh.agent_prompt_id = "fresh-after-restart".into();
+    fresh.agent_prompt_id = "fresh-after-restart"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[live_event(
         40,
         Event::AgentPromptCreated(fresh),
@@ -4025,7 +4159,9 @@ fn real_repetition_failure_finishes_once_without_scheduler_retry() {
     });
     let input = BlockingInput::default();
     let mut created = prompt();
-    created.agent_prompt_id = "real-terminal".into();
+    created.agent_prompt_id = "real-terminal"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     created.model = model_id("generic", "generic-model");
     input.push(encode_frames(&[live_event(
         11,
@@ -4220,9 +4356,13 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
 fn queued_targeted_cancel_allows_prompt_id_reuse() {
     let input = BlockingInput::default();
     let mut active = prompt();
-    active.agent_prompt_id = "occupying".into();
+    active.agent_prompt_id = "occupying"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     let mut queued = prompt();
-    queued.agent_prompt_id = "reused".into();
+    queued.agent_prompt_id = "reused"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[
         live_event(11, Event::AgentPromptCreated(active)),
         live_event(12, Event::AgentPromptCreated(queued)),
@@ -4277,14 +4417,21 @@ fn queued_targeted_cancel_allows_prompt_id_reuse() {
     input.push(encode_frames(&[live_event(
         13,
         Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-            session_id: tau_proto::SessionId::new("test-session"),
+            session_id: tau_proto::SessionId::parse("test-session")
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
-            agent_prompt_id: Some("reused".into()),
+            agent_prompt_id: Some(
+                "reused"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            ),
         }),
     )]));
     input.wait_for_reader_waiting(Duration::from_secs(1));
     let mut reused_prompt = prompt();
-    reused_prompt.agent_prompt_id = "reused".into();
+    reused_prompt.agent_prompt_id = "reused"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[live_event(
         14,
         Event::AgentPromptCreated(reused_prompt),
@@ -4401,9 +4548,14 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
     input.push(encode_frames(&[live_event(
         12,
         Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-            session_id: tau_proto::SessionId::new("test-session"),
+            session_id: tau_proto::SessionId::parse("test-session")
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
-            agent_prompt_id: Some("sp-1".into()),
+            agent_prompt_id: Some(
+                "sp-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            ),
         }),
     )]));
     input.wait_for_reader_waiting(Duration::from_secs(1));

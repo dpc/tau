@@ -29,7 +29,9 @@ fn snapshot(
     agents_files: Vec<tau_proto::DiscoveryAgentsFile>,
 ) -> tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
     tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         skills,
         agents_files,
     }
@@ -223,7 +225,9 @@ fn wrong_session_snapshot_is_effect_free() {
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let path = tmp.path().join("wrong.md");
     let mut wrong = snapshot(vec![skill(&path, "wrong", None)], vec![]);
-    wrong.session_id = "other".into();
+    wrong.session_id = "other"
+        .parse::<tau_proto::SessionId>()
+        .expect("known-safe SessionId must be valid");
     h.apply_session_discovery_snapshot("source", wrong);
     assert!(!h.discovered_skills.contains_key("wrong"));
 }
@@ -385,7 +389,9 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
     let event = |initialization_id| {
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: agent_id.clone(),
                 agent_initialization_id: initialization_id,
                 skills: vec![skill(&path, "agent-skill", None)],
@@ -521,7 +527,9 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
     let event = |candidate| {
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: agent_id.clone(),
                 agent_initialization_id: initialization_id.clone(),
                 skills: candidate,
@@ -655,7 +663,9 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
         "snapshot-owner",
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id: agent_id.clone(),
                 agent_initialization_id: initialization_id,
                 skills: vec![skill(&path, "unloaded", None)],
@@ -665,7 +675,9 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
     )
     .expect("park agent snapshot");
     let unloaded = Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: agent_id.clone(),
     });
     h.react_to_committed_event(None, &unloaded, true, None);
@@ -796,7 +808,9 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
                  skills| {
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
-                session_id: "s1".into(),
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 agent_id,
                 agent_initialization_id: initialization_id,
                 skills,
@@ -806,7 +820,9 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
     };
     let ready = |agent_id, agent_initialization_id| {
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id,
             agent_initialization_id,
         })

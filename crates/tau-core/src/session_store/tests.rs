@@ -13,7 +13,7 @@ fn loaded_event(session_id: &str, agent_id: &str) -> Event {
     Event::SessionAgentLoaded(SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-        session_id: SessionId::from(session_id),
+        session_id: SessionId::parse(session_id).expect("known-safe SessionId must be valid"),
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         ephemeral: false,
     })
@@ -292,7 +292,7 @@ fn repaired_session_metadata_rebuild_retries() {
     assert!(
         store
             .dirty_meta_rebuilds
-            .contains(&SessionId::from("session-1"))
+            .contains(&SessionId::parse("session-1").expect("known-safe SessionId must be valid"))
     );
     drop(store);
 
@@ -303,7 +303,7 @@ fn repaired_session_metadata_rebuild_retries() {
     assert!(
         store
             .dirty_meta_rebuilds
-            .contains(&SessionId::from("session-1"))
+            .contains(&SessionId::parse("session-1").expect("known-safe SessionId must be valid"))
     );
 
     fs::remove_dir(&meta_path).expect("remove obstruction");

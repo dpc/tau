@@ -23,7 +23,7 @@ const BETA_INITIAL: &str = concat!(
 /// completion, roster-row, or resumed-activation order.
 #[test]
 fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std::error::Error>> {
-    let session_id = SessionId::from(SESSION);
+    let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
     let scenario = s4_scenario();
     let action_counts = scenario
         .lanes

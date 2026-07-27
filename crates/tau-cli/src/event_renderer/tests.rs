@@ -62,7 +62,9 @@ fn watch_turn_state_event(
         recipient_id: agent_id("manager"),
         kind: tau_proto::AgentMessageKind::WatchTurnState,
         watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             subscription_id: "watch-1".to_owned(),
             state,
             initial: false,
@@ -80,7 +82,9 @@ fn watched_agent_turn_state_is_authoritative_for_running_counts() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             watcher_id: agent_id("manager"),
             watched_agent_ids: vec![agent_id("worker")],
             changed_agent_id: Some(agent_id("worker")),
@@ -97,7 +101,9 @@ fn watched_agent_turn_state_is_authoritative_for_running_counts() {
 
     renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             watcher_id: agent_id("reviewer"),
             watched_agent_ids: vec![agent_id("worker")],
             changed_agent_id: Some(agent_id("worker")),
@@ -152,7 +158,9 @@ fn watched_agent_count_projects_recursive_activity() {
 fn watched_agent_turn_state_rejects_stale_start_and_clears_with_scope() {
     let mut renderer = renderer_for_agent_id_tests();
     let watch_update = tau_proto::AgentWatchesUpdated {
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         watcher_id: agent_id("manager"),
         watched_agent_ids: vec![agent_id("worker")],
         changed_agent_id: Some(agent_id("worker")),
@@ -217,7 +225,9 @@ fn watched_agent_turn_state_does_not_survive_scope_boundaries() {
             orphan.watch_turn_state.expect("watch state"),
         );
     let live_enable = tau_proto::AgentWatchesUpdated {
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         watcher_id: agent_id("manager"),
         watched_agent_ids: vec![agent_id("worker")],
         changed_agent_id: Some(agent_id("worker")),
@@ -263,10 +273,15 @@ fn watched_agent_turn_state_does_not_survive_scope_boundaries() {
     );
 
     renderer.clear_for_new_session();
-    renderer.current_session_id = Some("s2".into());
+    renderer.current_session_id = Some(
+        "s2".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+    );
     renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
-            session_id: "s2".into(),
+            session_id: "s2"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             watcher_id: agent_id("manager"),
             watched_agent_ids: vec![agent_id("worker")],
             changed_agent_id: Some(agent_id("worker")),
@@ -288,12 +303,16 @@ fn watched_agent_turn_state_does_not_survive_scope_boundaries() {
         .watch_turn_state
         .as_mut()
         .expect("watch state")
-        .session_id = "s2".into();
+        .session_id = "s2"
+        .parse::<tau_proto::SessionId>()
+        .expect("known-safe SessionId must be valid");
     renderer.handle(&current_session);
     assert_eq!(renderer.active_side_agent_count(), 1);
     renderer.handle(&tau_proto::Event::SessionAgentUnloaded(
         tau_proto::SessionAgentUnloaded {
-            session_id: "s2".into(),
+            session_id: "s2"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id("manager"),
         },
     ));
@@ -324,9 +343,17 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
         std::sync::Mutex::new(DraftSlot::default()),
         std::sync::Condvar::new(),
     ));
-    let session_id = std::sync::Arc::new(std::sync::Mutex::new("s1".to_owned()));
+    let session_id = std::sync::Arc::new(std::sync::Mutex::new(
+        tau_proto::SessionId::parse("s1").expect("session id"),
+    ));
     renderer.set_draft_retargeter(draft_handle.clone(), session_id);
-    queue_prompt_draft_snapshot(draft_handle.as_ref(), "s1".into(), None, "draft".to_owned());
+    queue_prompt_draft_snapshot(
+        draft_handle.as_ref(),
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        None,
+        "draft".to_owned(),
+    );
 
     renderer.handle_recorded_at(
         &tau_proto::Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -347,7 +374,10 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
     let slot = mtx.lock().expect("draft slot");
     let (epoch, draft) = slot.pending.as_ref().expect("retargeted draft");
     assert_eq!(*epoch, 1);
-    assert_eq!(draft.session_id, tau_proto::SessionId::from("s1"));
+    assert_eq!(
+        draft.session_id,
+        tau_proto::SessionId::parse("s1").expect("known-safe SessionId must be valid")
+    );
     assert_eq!(draft.target_agent_id, Some(agent_id("agent-a")));
     assert_eq!(draft.text, "draft");
 }
@@ -657,7 +687,9 @@ fn agent_message_summary_projects_known_names_independently() {
     );
     renderer.handle(&tau_proto::Event::SessionAgentUnloaded(
         tau_proto::SessionAgentUnloaded {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id("agent-b"),
         },
     ));
@@ -714,7 +746,9 @@ fn peer_message_names_require_endpoint_authority() {
         message_id: "peer-message".into(),
         sender_id: agent_id("agent-a"),
         recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
-            session_id: "remote-session".into(),
+            session_id: "remote-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id("agent-b"),
         },
         kind: tau_proto::AgentMessageKind::Message,
@@ -795,7 +829,9 @@ fn resumed_session_clears_agent_display_name_authority() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.handle(&tau_proto::Event::SessionStarted(
         tau_proto::SessionStarted {
-            session_id: "session-a".into(),
+            session_id: "session-a"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             reason: tau_proto::SessionStartReason::Initial,
         },
     ));
@@ -808,7 +844,9 @@ fn resumed_session_clears_agent_display_name_authority() {
 
     renderer.handle(&tau_proto::Event::SessionStarted(
         tau_proto::SessionStarted {
-            session_id: "session-b".into(),
+            session_id: "session-b"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             reason: tau_proto::SessionStartReason::Resume,
         },
     ));
@@ -830,7 +868,9 @@ fn watch_turn_state_renders_as_compact_typed_status() {
         recipient_id: agent_id("manager"),
         kind: tau_proto::AgentMessageKind::WatchTurnState,
         watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             subscription_id: "subscription-1".to_owned(),
             state: tau_proto::AgentRuntimeState::Running,
             initial: false,
@@ -907,8 +947,17 @@ fn agent_activity_stays_busy_until_requested_tools_finish() {
     activity.mark_optimistic_submission();
     assert!(activity.is_in_progress());
 
-    activity.start_prompt(&"sp1".into());
-    activity.finish_prompt(&"sp1".into(), &[tool_call("call1")]);
+    activity.start_prompt(
+        &"sp1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
+    activity.finish_prompt(
+        &"sp1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        &[tool_call("call1")],
+    );
     assert!(activity.is_in_progress());
 
     activity.finish_tool(&"call1".into());
@@ -921,10 +970,19 @@ fn agent_activity_stays_busy_until_requested_tools_finish() {
 #[test]
 fn agent_activity_tracks_side_conversation_prompts() {
     let mut activity = AgentActivity::default();
-    activity.start_prompt(&"side-sp1".into());
+    activity.start_prompt(
+        &"side-sp1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+    );
     assert!(activity.is_in_progress());
 
-    activity.finish_prompt(&"side-sp1".into(), &[]);
+    activity.finish_prompt(
+        &"side-sp1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        &[],
+    );
     assert!(!activity.is_in_progress());
 }
 
@@ -1070,7 +1128,10 @@ fn embedded_tool_continuation_trace_renders_fully_idle() {
         })
         .expect("fixture agent");
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.current_session_id = Some("s1".into());
+    renderer.current_session_id = Some(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+    );
     renderer.switch_agent(fixture_agent.to_string());
     let mut saw_main_active = false;
     let mut saw_global_active = false;
@@ -1083,11 +1144,16 @@ fn embedded_tool_continuation_trace_renders_fully_idle() {
     }
 
     let mut watched_renderer = renderer_for_agent_id_tests();
-    watched_renderer.current_session_id = Some("s1".into());
+    watched_renderer.current_session_id = Some(
+        "s1".parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+    );
     watched_renderer.current_agent_id = Some("manager".to_owned());
     watched_renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             watcher_id: agent_id("manager"),
             watched_agent_ids: vec![fixture_agent.clone()],
             changed_agent_id: Some(fixture_agent),

@@ -1859,7 +1859,8 @@ where
     fn handle_session_shutdown(&mut self, handle: &ClientHandle) -> ClientResult<()> {
         self.handle_cancel_prompt(
             tau_proto::UiCancelPrompt {
-                session_id: tau_proto::SessionId::default(),
+                session_id: tau_proto::SessionId::parse("shutdown")
+                    .expect("static session id must be valid"),
                 target_agent_id: None,
                 agent_prompt_id: None,
             },
@@ -3695,7 +3696,10 @@ fn materialize_prompt(prompt: &tau_proto::AgentPromptCreated) -> tau_proto::Agen
     materialized
 }
 
-fn trace_provider_prompt(prompt: &tau_proto::AgentPromptCreated, agent_prompt_id: &str) {
+fn trace_provider_prompt(
+    prompt: &tau_proto::AgentPromptCreated,
+    agent_prompt_id: &tau_proto::AgentPromptId,
+) {
     if !tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
         return;
     }
@@ -3704,32 +3708,36 @@ fn trace_provider_prompt(prompt: &tau_proto::AgentPromptCreated, agent_prompt_id
     trace_prompt_like("provider prompt", &redacted, agent_prompt_id);
 }
 
-fn trace_prompt_like<T: serde::Serialize>(label: &str, value: &T, agent_prompt_id: &str) {
+fn trace_prompt_like<T: serde::Serialize>(
+    label: &str,
+    value: &T,
+    agent_prompt_id: &tau_proto::AgentPromptId,
+) {
     if !tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
         return;
     }
     match serde_json::to_string_pretty(value) {
         Ok(json) => tracing::trace!(
             target: LOG_TARGET,
-            agent_prompt_id,
+            agent_prompt_id = %agent_prompt_id,
             "{label}:\n{json}"
         ),
         Err(error) => tracing::trace!(
             target: LOG_TARGET,
-            agent_prompt_id,
+            agent_prompt_id = %agent_prompt_id,
             "{label} (failed to serialize for log: {error})"
         ),
     }
 }
 
 fn write_prompt_submitted<W: Write>(
-    agent_prompt_id: &str,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     originator: &tau_proto::PromptOriginator,
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     writer.write_message(&HarnessInputMessage::emit_transient(
         Event::ProviderPromptSubmittedReported(ProviderPromptSubmitted {
-            agent_prompt_id: agent_prompt_id.into(),
+            agent_prompt_id: agent_prompt_id.clone(),
             originator: originator.clone(),
         }),
     ))?;
@@ -3738,18 +3746,18 @@ fn write_prompt_submitted<W: Write>(
 }
 
 fn finish_canceled<W: Write>(
-    agent_prompt_id: &str,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     tracing::info!(
         target: LOG_TARGET,
-        agent_prompt_id,
+        agent_prompt_id = %agent_prompt_id,
         "skipping provider request — already canceled by harness",
     );
     writer.write_message(&HarnessInputMessage::emit_transient(
         Event::ProviderResponseFinishedReported(simple_finished(
-            agent_prompt_id.into(),
+            agent_prompt_id.clone(),
             prompt.agent_id.clone(),
             prompt.originator.clone(),
             "(cancelled by harness)",
@@ -4173,7 +4181,7 @@ fn jwt_issued_at_ms(jwt: &str) -> Option<u64> {
 
 #[cfg(test)]
 fn emit_retry_banner<W: Write>(
-    agent_prompt_id: &str,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
     writer: &mut PeerOutputWriter<W>,
@@ -4189,7 +4197,7 @@ fn emit_retry_banner<W: Write>(
     );
     let _ = writer.write_message(&HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
-            agent_prompt_id: agent_prompt_id.into(),
+            agent_prompt_id: agent_prompt_id.clone(),
             agent_id: agent_id.clone(),
             deltas: Vec::new(),
             compaction: None,
@@ -4297,7 +4305,7 @@ where
     match backend {
         PromptBackend::Unavailable => Ok(Some(RetryDecision::new(RetryClass::Auth))),
         PromptBackend::Responses(config) => handle_prompt(
-            agent_prompt_id.as_str(),
+            agent_prompt_id,
             config,
             prompt,
             writer,
@@ -4417,7 +4425,7 @@ struct ChatGptPromptExecutionContext<'a> {
 }
 
 fn handle_compact_prompt<R, W: Write>(
-    agent_prompt_id: &str,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     config: &ResolvedConfig,
     prompt: &tau_proto::AgentPromptCreated,
     request: &CodexPrompt<'_>,
@@ -4439,7 +4447,7 @@ where
                     estimated_api_cost_rates: None,
                     estimated_api_cost_increment: None,
 
-                    agent_prompt_id: agent_prompt_id.into(),
+                    agent_prompt_id: agent_prompt_id.clone(),
                     agent_id: prompt.agent_id.clone(),
                     output_items,
                     stop_reason: ProviderStopReason::EndTurn,
@@ -4485,7 +4493,7 @@ where
 }
 
 fn handle_prompt<R, W: Write>(
-    agent_prompt_id: &str,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     config: &ResolvedConfig,
     prompt: &tau_proto::AgentPromptCreated,
     writer: &mut PeerOutputWriter<W>,
@@ -4583,7 +4591,7 @@ where
         CodexAttemptOutcome::Canceled { progress } => {
             if progress == CodexSemanticProgress::Parsed {
                 emit_chat_completions_partial_clear(
-                    &agent_prompt_id.into(),
+                    agent_prompt_id,
                     prompt,
                     "request canceled; discarding partial provider output",
                     writer,
@@ -4594,7 +4602,7 @@ where
         CodexAttemptOutcome::Terminal { error, progress } if error.repetition().is_some() => {
             if progress == CodexSemanticProgress::Parsed {
                 emit_chat_completions_partial_clear(
-                    &agent_prompt_id.into(),
+                    agent_prompt_id,
                     prompt,
                     "provider stream ended with an error; discarding partial output",
                     writer,
@@ -4622,7 +4630,7 @@ where
         CodexAttemptOutcome::Retry { decision, progress } => {
             if progress == CodexSemanticProgress::Parsed {
                 emit_chat_completions_partial_clear(
-                    &agent_prompt_id.into(),
+                    agent_prompt_id,
                     prompt,
                     "provider stream interrupted after partial output; preparing retry",
                     writer,
@@ -4633,7 +4641,7 @@ where
         CodexAttemptOutcome::Terminal { error, progress } => {
             if progress == CodexSemanticProgress::Parsed {
                 emit_chat_completions_partial_clear(
-                    &agent_prompt_id.into(),
+                    agent_prompt_id,
                     prompt,
                     "provider stream ended with an error; discarding partial output",
                     writer,
@@ -4655,13 +4663,13 @@ where
 }
 
 fn emit_chatgpt_connecting_update<W: Write>(
-    agent_prompt_id: &str,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
     writer: &mut PeerOutputWriter<W>,
 ) {
     let update = ProviderResponseUpdated {
-        agent_prompt_id: agent_prompt_id.into(),
+        agent_prompt_id: agent_prompt_id.clone(),
         agent_id: agent_id.clone(),
         deltas: Vec::new(),
         compaction: None,
@@ -4690,7 +4698,7 @@ struct RateLimitedResponseUpdateEmitter {
 }
 
 struct ResponseUpdateTarget<'a> {
-    agent_prompt_id: &'a str,
+    agent_prompt_id: &'a tau_proto::AgentPromptId,
     agent_id: &'a tau_proto::AgentId,
     originator: &'a tau_proto::PromptOriginator,
 }
@@ -4719,7 +4727,7 @@ impl RateLimitedResponseUpdateEmitter {
 
     fn emit_if_due<W: Write>(
         &mut self,
-        agent_prompt_id: &str,
+        agent_prompt_id: &tau_proto::AgentPromptId,
         agent_id: &tau_proto::AgentId,
         originator: &tau_proto::PromptOriginator,
         state: &CodexStreamState,
@@ -4735,7 +4743,7 @@ impl RateLimitedResponseUpdateEmitter {
 
     fn emit_terminal_flush<W: Write>(
         &mut self,
-        agent_prompt_id: &str,
+        agent_prompt_id: &tau_proto::AgentPromptId,
         agent_id: &tau_proto::AgentId,
         originator: &tau_proto::PromptOriginator,
         state: &CodexStreamState,
@@ -4804,7 +4812,7 @@ impl RateLimitedResponseUpdateEmitter {
 }
 
 fn emit_chatgpt_stream_update<W: Write>(
-    agent_prompt_id: &str,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
     state: &CodexStreamState,
@@ -4830,7 +4838,7 @@ fn emit_chatgpt_stream_update<W: Write>(
     }
     let Ok(()) = writer.write_message(&HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
-            agent_prompt_id: agent_prompt_id.into(),
+            agent_prompt_id: agent_prompt_id.clone(),
             agent_id: agent_id.clone(),
             deltas,
             compaction,
@@ -4874,7 +4882,7 @@ fn maybe_debug_write_provider_response(
 #[allow(clippy::too_many_arguments)]
 fn finish_stream<W: Write>(
     session_id: &str,
-    agent_prompt_id: &str,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     request: &CodexPrompt<'_>,
     backend: &ProviderBackend,
@@ -4890,7 +4898,7 @@ fn finish_stream<W: Write>(
     let output_tokens = token_counts.output;
     tracing::debug!(
         target: LOG_TARGET,
-        agent_prompt_id,
+        agent_prompt_id = %agent_prompt_id,
         input_tokens,
         cached_tokens,
         output_tokens,
@@ -4903,7 +4911,7 @@ fn finish_stream<W: Write>(
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: agent_prompt_id.into(),
+        agent_prompt_id: agent_prompt_id.clone(),
         agent_id: prompt.agent_id.clone(),
         stop_reason: stop_reason_from_output_items(&output_items),
         error: None,
@@ -4977,7 +4985,7 @@ fn cache_miss_diagnostic(
 }
 
 fn finish_error<W: Write>(
-    agent_prompt_id: &str,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     backend: &ProviderBackend,
     error: CodexError,
@@ -4989,7 +4997,7 @@ fn finish_error<W: Write>(
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: agent_prompt_id.into(),
+        agent_prompt_id: agent_prompt_id.clone(),
         agent_id: prompt.agent_id.clone(),
         output_items: Vec::new(),
         stop_reason: if error.repetition().is_some() {
@@ -5023,7 +5031,7 @@ fn finish_error<W: Write>(
 }
 
 fn emit_repetition_detected_update<W: Write>(
-    agent_prompt_id: &str,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
     repetition: &tau_provider::StreamRepetition,
@@ -5034,7 +5042,7 @@ fn emit_repetition_detected_update<W: Write>(
     ));
     let _ = writer.write_message(&HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
-            agent_prompt_id: agent_prompt_id.into(),
+            agent_prompt_id: agent_prompt_id.clone(),
             agent_id: agent_id.clone(),
             deltas: Vec::new(),
             compaction: None,

@@ -981,7 +981,8 @@ fn public_run_installs_storage_and_skips_replayed_actions() {
 fn unknown_action(invocation_id: &str) -> Event {
     Event::ActionInvoke(tau_proto::ActionInvoke {
         invocation_id: tau_proto::ActionInvocationId::new(invocation_id),
-        session_id: tau_proto::SessionId::new("session-1"),
+        session_id: tau_proto::SessionId::parse("session-1")
+            .expect("known-safe SessionId must be valid"),
         extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
         instance_id: tau_proto::ExtensionInstanceId::from(1),
         action_id: "pim.unknown".to_owned(),

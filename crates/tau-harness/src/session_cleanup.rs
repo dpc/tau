@@ -256,7 +256,7 @@ mod tests {
         cleanup_old_sessions(
             sessions_dir.clone(),
             Duration::from_secs(1),
-            vec![SessionId::from("current")],
+            vec![SessionId::parse("current").expect("known-safe SessionId must be valid")],
         );
 
         assert!(sessions_dir.join("current").exists());
@@ -299,7 +299,8 @@ mod tests {
                 Event::SessionAgentLoaded(SessionAgentLoaded {
                     agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                    session_id: SessionId::from("old"),
+                    session_id: SessionId::parse("old")
+                        .expect("known-safe SessionId must be valid"),
                     agent_id: AgentId::parse("old-agent").expect("agent id"),
                     ephemeral: false,
                 }),
@@ -341,7 +342,8 @@ mod tests {
                                 "test-init",
                             ),
 
-                            session_id: SessionId::from("old"),
+                            session_id: SessionId::parse("old")
+                                .expect("known-safe SessionId must be valid"),
                             agent_id: AgentId::parse("new-agent").expect("agent id"),
                             ephemeral: false,
                         }),

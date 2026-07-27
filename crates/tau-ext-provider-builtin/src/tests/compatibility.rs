@@ -110,9 +110,13 @@ fn compatibility_route_snapshot(
 
 fn responses_event_snapshot() -> Vec<Event> {
     let mut prompt = minimal_prompt();
-    prompt.agent_prompt_id = "compat-prompt".into();
+    prompt.agent_prompt_id = "compat-prompt"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     prompt.agent_id = tau_proto::AgentId::parse("compat-agent").expect("agent id");
-    prompt.session_id = "compat-session".into();
+    prompt.session_id = "compat-session"
+        .parse::<tau_proto::SessionId>()
+        .expect("known-safe SessionId must be valid");
     let request = CodexPrompt {
         system_prompt: "",
         context: &prompt.context,
@@ -139,7 +143,8 @@ fn responses_event_snapshot() -> Vec<Event> {
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let emitted = emit_chatgpt_stream_update(
-            prompt.agent_prompt_id.as_str(),
+            &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
             &prompt.agent_id,
             &prompt.originator,
             &state,
@@ -156,7 +161,8 @@ fn responses_event_snapshot() -> Vec<Event> {
         assert!(emitted, "compatibility update must cross the output seam");
         finish_stream(
             prompt.session_id.as_str(),
-            prompt.agent_prompt_id.as_str(),
+            &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+                .expect("test prompt id"),
             &prompt,
             &request,
             &backend,
@@ -206,9 +212,13 @@ fn chat_completions_event_snapshot(
     });
     provider.base_url = format!("http://{address}");
     let mut prompt = minimal_prompt();
-    prompt.agent_prompt_id = format!("{provider_name}-compat-prompt").into();
+    prompt.agent_prompt_id = format!("{provider_name}-compat-prompt")
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     prompt.agent_id = tau_proto::AgentId::parse("compat-agent").expect("agent id");
-    prompt.session_id = "compat-session".into();
+    prompt.session_id = "compat-session"
+        .parse::<tau_proto::SessionId>()
+        .expect("known-safe SessionId must be valid");
     prompt.model = ModelId::new(ProviderName::new(provider_name), model.id.clone());
     let backend = PromptBackend::ChatCompletions { provider, model };
     let mut bytes = Vec::new();

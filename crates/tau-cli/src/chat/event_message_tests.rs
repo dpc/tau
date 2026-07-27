@@ -6,12 +6,16 @@ use super::*;
 fn durable_emit_message_uses_false_metadata_for_liveness_events() {
     for event in [
         Event::UiPromptDraft(UiPromptDraft {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
             text: "typing".to_owned(),
         }),
         Event::UiFocusChanged(UiFocusChanged {
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             focused: true,
         }),
     ] {

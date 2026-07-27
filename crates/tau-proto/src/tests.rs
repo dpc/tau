@@ -1,5 +1,58 @@
 use super::*;
 
+fn test_session_id(value: impl Into<String>) -> SessionId {
+    SessionId::parse(value).expect("test session id")
+}
+
+fn test_agent_prompt_id(value: impl Into<String>) -> AgentPromptId {
+    AgentPromptId::parse(value).expect("test agent prompt id")
+}
+
+/// Session and prompt identifiers accept only the approved bounded ASCII
+/// grammar.
+#[test]
+fn session_scoped_identifiers_enforce_their_grammar() {
+    let max = "a".repeat(SESSION_SCOPED_ID_MAX_LEN);
+    assert_eq!(
+        SessionId::parse("session_A-1")
+            .expect("valid session id")
+            .as_str(),
+        "session_A-1"
+    );
+    assert_eq!(
+        AgentPromptId::parse(max.clone())
+            .expect("maximum-length prompt id")
+            .as_str(),
+        max
+    );
+
+    for invalid in ["", ".", "has/slash", "has space", "nul\0", "é"] {
+        assert!(SessionId::parse(invalid).is_err(), "{invalid:?}");
+        assert!(AgentPromptId::parse(invalid).is_err(), "{invalid:?}");
+    }
+    assert!(SessionId::parse("a".repeat(SESSION_SCOPED_ID_MAX_LEN + 1)).is_err());
+    assert!(AgentPromptId::parse("a".repeat(SESSION_SCOPED_ID_MAX_LEN + 1)).is_err());
+}
+
+/// Serde decoding must reject invalid controlled identifiers so journals and
+/// protocol messages fail closed instead of retaining unsafe historical values.
+#[test]
+fn session_scoped_identifier_deserialization_fails_closed() {
+    for encoded in [r#""""#, r#""bad\u001bvalue""#, r#""bad.value""#] {
+        assert!(serde_json::from_str::<SessionId>(encoded).is_err());
+        assert!(serde_json::from_str::<AgentPromptId>(encoded).is_err());
+    }
+
+    let mut invalid_session = Vec::new();
+    let mut invalid_prompt = Vec::new();
+    ciborium::into_writer("bad.session", &mut invalid_session)
+        .expect("encode invalid historical session id");
+    ciborium::into_writer("bad prompt", &mut invalid_prompt)
+        .expect("encode invalid historical prompt id");
+    assert!(ciborium::from_reader::<SessionId, _>(invalid_session.as_slice()).is_err());
+    assert!(ciborium::from_reader::<AgentPromptId, _>(invalid_prompt.as_slice()).is_err());
+}
+
 /// The transient internal-prompt request must preserve absent/default
 /// provenance and encode explicit timer provenance canonically.
 #[test]
@@ -103,9 +156,9 @@ fn outer_turn_activation_shapes_round_trip_in_json_and_cbor() {
 fn outer_turn_started_event_preserves_nested_activation_shape() {
     let event = Event::AgentOuterTurnStarted(AgentOuterTurnStarted {
         agent_id: AgentId::parse("agent-7").expect("agent id"),
-        session_id: "session-7".into(),
-        outer_turn_id: AgentOuterTurnId::for_prompt(&"ap-agent-7-0".into()),
-        agent_prompt_id: "ap-agent-7-0".into(),
+        session_id: test_session_id("session-7"),
+        outer_turn_id: AgentOuterTurnId::for_prompt(&test_agent_prompt_id("ap-agent-7-0")),
+        agent_prompt_id: test_agent_prompt_id("ap-agent-7-0"),
         runtime_id: AccountingRuntimeId::new("runtime-7"),
         activation: AgentOuterTurnActivation::Journal {
             occurrence: AgentHead::Node(NodeId::new(7)),
@@ -224,7 +277,7 @@ fn metadata_requests_have_distinct_transient_wire_names() {
 #[test]
 fn ui_prompt_literal_marker_round_trips_and_defaults_false() {
     let request = UiPromptSubmitted {
-        session_id: "session".into(),
+        session_id: test_session_id("session"),
         text: ":skill example".to_owned(),
         literal: true,
         agent_id: AgentId::parse("worker").expect("agent id"),
@@ -346,9 +399,9 @@ fn typed_image_clone_shares_immutable_bytes() {
 fn retry_prompt_events_round_trip() {
     let request = Event::UiRetryPrompt(UiRetryPrompt {
         request_id: RetryPromptRequestId::parse("retry-1").expect("valid retry request id"),
-        session_id: "session-1".into(),
+        session_id: test_session_id("session-1"),
         target_agent_id: Some(AgentId::parse("agent-1").expect("valid agent id")),
-        agent_prompt_id: Some("prompt-1".into()),
+        agent_prompt_id: Some(test_agent_prompt_id("prompt-1")),
     });
     let mut encoded = Vec::new();
     ciborium::into_writer(&request, &mut encoded).expect("encode retry request");
@@ -359,7 +412,7 @@ fn retry_prompt_events_round_trip() {
 
     let result = Event::ProviderRetryPromptResultReported(ProviderRetryPromptResult {
         request_id: RetryPromptRequestId::parse("retry-1").expect("valid retry request id"),
-        agent_prompt_id: "prompt-1".into(),
+        agent_prompt_id: test_agent_prompt_id("prompt-1"),
         status: RetryPromptStatus::Accepted,
     });
     let mut encoded = Vec::new();
@@ -392,7 +445,7 @@ fn retry_prompt_events_round_trip() {
 fn retry_prompt_events_use_emit_and_deliver_directional_wrappers() {
     let request = HarnessInputMessage::emit(Event::UiRetryPrompt(UiRetryPrompt {
         request_id: RetryPromptRequestId::parse("retry-direction").expect("valid retry request id"),
-        session_id: "session-1".into(),
+        session_id: test_session_id("session-1"),
         target_agent_id: Some(agent_id("agent-1")),
         agent_prompt_id: None,
     }));
@@ -400,7 +453,7 @@ fn retry_prompt_events_use_emit_and_deliver_directional_wrappers() {
         Event::ProviderRetryPromptResultReported(ProviderRetryPromptResult {
             request_id: RetryPromptRequestId::parse("retry-direction")
                 .expect("valid retry request id"),
-            agent_prompt_id: "prompt-1".into(),
+            agent_prompt_id: test_agent_prompt_id("prompt-1"),
             status: RetryPromptStatus::NotParked,
         }),
     );
@@ -448,7 +501,7 @@ fn manual_compaction_request_events_round_trip() {
         request_id: CompactionRequestId::parse("cr-wire").expect("request id"),
         caller_agent_id: AgentId::parse("caller").expect("caller"),
         target_agent_id: AgentId::parse("target").expect("target"),
-        initiating_agent_prompt_id: "ap-origin".into(),
+        initiating_agent_prompt_id: test_agent_prompt_id("ap-origin"),
         initiating_tool_call_id: "call-origin".into(),
         initiating_tool_name: ManualCompactionTool::AgentCompact,
         visible_tool_name: ToolName::new("compact_other"),
@@ -491,7 +544,7 @@ fn ui_prompt_draft_target_agent_id_defaults_to_none() {
 
     let draft: UiPromptDraft = serde_json::from_value(value).expect("legacy prompt draft");
 
-    assert_eq!(draft.session_id, SessionId::from("s1"));
+    assert_eq!(draft.session_id, test_session_id("s1"));
     assert_eq!(draft.target_agent_id, None);
     assert_eq!(draft.text, "draft");
 }
@@ -796,7 +849,7 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ActionInvoke(ActionInvoke {
             invocation_id: "act-1".into(),
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             extension_name: "std-email".into(),
             instance_id: 7.into(),
             action_id: "email.out.list".to_owned(),
@@ -901,7 +954,7 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "hello".to_owned(),
             agent_id: agent_id("agent"),
             message_class: PromptMessageClass::User,
@@ -926,14 +979,14 @@ fn representative_events() -> Vec<Event> {
             message: "hello back".to_owned(),
         }),
         Event::AgentWatchesUpdated(AgentWatchesUpdated {
-            session_id: "session_123".into(),
+            session_id: test_session_id("session_123"),
             watcher_id: agent_id("engineer_parent"),
             watched_agent_ids: vec![agent_id("engineer_child")],
             changed_agent_id: Some(agent_id("engineer_child")),
             cause: AgentWatchUpdateCause::AgentWatchEnable,
         }),
         Event::AgentStatsUpdated(AgentStatsUpdated {
-            session_id: "session_123".into(),
+            session_id: test_session_id("session_123"),
             agent_id: agent_id("engineer_child"),
             navigation_mode: AgentNavigationMode::Active,
             runtime_state: AgentRuntimeState::Running,
@@ -945,25 +998,25 @@ fn representative_events() -> Vec<Event> {
             estimated_api_cost: Default::default(),
         }),
         Event::SessionStarted(SessionStarted {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             reason: SessionStartReason::Initial,
         }),
         Event::SessionAgentLoaded(SessionAgentLoaded {
             agent_initialization_id: AgentInitializationId::new("test-init"),
 
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             agent_id: agent_id("engineer_abcd1234"),
             ephemeral: false,
         }),
         Event::SessionShutdown(SessionShutdown {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
         }),
         Event::SessionAgentUnloaded(SessionAgentUnloaded {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             agent_id: agent_id("engineer_abcd1234"),
         }),
         Event::SessionReplayComplete(SessionReplayComplete {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             error: None,
         }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
@@ -1011,7 +1064,7 @@ fn representative_events() -> Vec<Event> {
             replacement_window: vec![user_text_item("summary")],
         }),
         Event::AgentStandaloneCompactionStarted(AgentStandaloneCompactionStarted {
-            compact_prompt_id: "ap-legacy-default".into(),
+            compact_prompt_id: test_agent_prompt_id("ap-legacy-default"),
             operation: PromptOperation::StandaloneCompaction,
             agent_id: agent_id("engineer_abcd1234"),
             transaction_id: CompactionTransactionId::parse("ct-1").expect("transaction id"),
@@ -1032,16 +1085,16 @@ fn representative_events() -> Vec<Event> {
         Event::AgentInferenceDispatchStarted(AgentInferenceDispatchStarted {
             agent_id: agent_id("engineer_abcd1234"),
             transaction_id: Some(CompactionTransactionId::parse("ct-1").expect("transaction id")),
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-1"),
             through: AgentHead::Node(NodeId::new(1)),
             model: None,
             operation: None,
             activation_cut: None,
         }),
         Event::AgentPromptCreated(AgentPromptCreated {
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-1"),
             agent_id: agent_id("engineer_abcd1234"),
-            session_id: "session_123".into(),
+            session_id: test_session_id("session_123"),
             system_prompt: "You are helpful.".to_owned(),
             context: PromptContext {
                 blocks: vec![ContextBlock::UserInput(UserInputBlock {
@@ -1070,9 +1123,9 @@ fn representative_events() -> Vec<Event> {
             model_params: Some(ModelParams::default()),
             outer_turn_id: None,
 
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-1"),
             agent_id: agent_id("engineer_abcd1234"),
-            session_id: "session_123".into(),
+            session_id: test_session_id("session_123"),
             model: "test/model".parse().expect("model id"),
             operation: PromptOperation::Inference,
             originator: PromptOriginator::User,
@@ -1080,13 +1133,13 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::AgentPromptTerminated(AgentPromptTerminated {
             agent_id: agent_id("engineer_abcd1234"),
-            agent_prompt_id: "sp-stale".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-stale"),
             reason: AgentPromptTerminationReason::Stale,
             originator: PromptOriginator::User,
         }),
         Event::AgentPromptPrewarmRequested(AgentPromptPrewarmRequested {
             agent_id: agent_id("engineer_abcd1234"),
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             system_prompt: "You are helpful.".to_owned(),
             context: PromptContext { blocks: Vec::new() },
             tools: Vec::new(),
@@ -1144,15 +1197,15 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::AgentReplayComplete(AgentReplayComplete {
             agent_id: agent_id("engineer_abcd1234"),
-            session_id: Some("s1".into()),
+            session_id: Some(test_session_id("s1")),
             error: None,
         }),
         Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-1"),
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-1"),
             agent_id: agent_id("engineer_abcd1234"),
             deltas: vec![ProviderResponseTextDelta::Message {
                 output_index: 0,
@@ -1168,7 +1221,7 @@ fn representative_events() -> Vec<Event> {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-1"),
             agent_id: agent_id("engineer_abcd1234"),
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
@@ -1193,7 +1246,7 @@ fn representative_events() -> Vec<Event> {
             ws_pool_delta: None,
         }),
         Event::ProviderCacheMissDiagnostic(ProviderCacheMissDiagnostic {
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-1"),
             model: "openai/gpt-4.1".parse().expect("model id"),
             originator: PromptOriginator::User,
             tool_choice: ToolChoice::Auto,
@@ -1230,7 +1283,7 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ExtensionSessionDiscoverySnapshotDeclared(
             ExtensionSessionDiscoverySnapshotDeclared {
-                session_id: "s1".into(),
+                session_id: test_session_id("s1"),
                 skills: vec![DiscoverySkillCandidate {
                     name: "brave-search".into(),
                     description: "Web search via Brave API".to_owned(),
@@ -1248,7 +1301,7 @@ fn representative_events() -> Vec<Event> {
             },
         ),
         Event::ExtensionAgentDiscoverySnapshotDeclared(ExtensionAgentDiscoverySnapshotDeclared {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
             agent_initialization_id: AgentInitializationId::new("init-1"),
             skills: vec![DiscoverySkillCandidate {
@@ -1271,14 +1324,14 @@ fn representative_events() -> Vec<Event> {
         Event::ExtensionContextReady(ExtensionContextReady {
             agent_initialization_id: AgentInitializationId::new("test-init"),
 
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
         }),
         Event::ExtensionSessionContextReady(ExtensionSessionContextReady {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
         }),
         Event::ExtAgentContextPublish(ExtAgentContextPublish {
-            session_id: SessionId::new("test-session"),
+            session_id: test_session_id("test-session"),
             agent_initialization_id: AgentInitializationId::new("test-init"),
 
             agent_id: agent_id("agent-1"),
@@ -1317,7 +1370,7 @@ fn representative_events() -> Vec<Event> {
             error: None,
         }),
         Event::AgentInitializationContextSet(AgentInitializationContextSet {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
             agent_initialization_id: AgentInitializationId::new("init-1"),
             agents_message: Some("project instructions".to_owned()),
@@ -1352,7 +1405,7 @@ fn representative_events() -> Vec<Event> {
         Event::ExtensionEvent(
             CustomEvent::try_new(
                 "demo.progress".parse().expect("event name"),
-                Some("s1".into()),
+                Some(test_session_id("s1")),
                 CborValue::Text("working".to_owned()),
             )
             .expect("valid custom event"),
@@ -1382,7 +1435,7 @@ fn representative_events() -> Vec<Event> {
             }],
         }),
         Event::HarnessAgentContextInitialized(HarnessAgentContextInitialized {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
             agent_initialization_id: AgentInitializationId::new("init-1"),
             listed_skills: vec![DiscoveryEffectiveSkill {
@@ -1401,7 +1454,7 @@ fn representative_events() -> Vec<Event> {
             }],
         }),
         Event::HarnessSessionSkillsAvailable(HarnessSessionSkillsAvailable {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             skills: vec![DiscoveryEffectiveSkill {
                 name: "brave-search".into(),
                 description: "Web search via Brave API".to_owned(),
@@ -1460,7 +1513,7 @@ fn representative_events() -> Vec<Event> {
             NoticeLevel::Info,
         )),
         Event::HarnessSessionDir(HarnessSessionDir {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             path: "/tmp/tau/session".into(),
             status: SessionDirStatus::New,
         }),
@@ -1537,7 +1590,7 @@ fn representative_events() -> Vec<Event> {
             role: "engineer".to_owned(),
         }),
         Event::UiAgentModelSelect(UiAgentModelSelect {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
             model: "openai/gpt-4.1".parse().expect("model id"),
         }),
@@ -1548,19 +1601,19 @@ fn representative_events() -> Vec<Event> {
             },
         }),
         Event::UiShellCommand(UiShellCommand {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             command_id: "shell-1".into(),
             command: "pwd".to_owned(),
             include_in_context: true,
             target_agent_id: Some(agent_id("agent-1")),
         }),
         Event::UiSwitchSession(UiSwitchSession {
-            new_session_id: "s2".into(),
+            new_session_id: test_session_id("s2"),
             reason: SessionStartReason::New,
         }),
         Event::UiCreateAgent(UiCreateAgent {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             role: "engineer".to_owned(),
             model_override: Some("openai/gpt-4.1".parse().expect("model id")),
             metadata: vec![AgentInitialMetadata {
@@ -1576,34 +1629,34 @@ fn representative_events() -> Vec<Event> {
             ephemeral: false,
         }),
         Event::UiNavigateTree(UiNavigateTree {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
             target: UiTreeNavigationTarget::Root,
         }),
         Event::UiCompactRequest(UiCompactRequest {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
         }),
         Event::UiPromptDraft(UiPromptDraft {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
             text: "draft".to_owned(),
         }),
         Event::UiFocusChanged(UiFocusChanged {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             focused: true,
         }),
         Event::UiCancelPrompt(UiCancelPrompt {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
-            agent_prompt_id: Some("sp-1".into()),
+            agent_prompt_id: Some(test_agent_prompt_id("sp-1")),
         }),
         Event::UiRecallQueuedPrompt(UiRecallQueuedPrompt {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
         }),
         Event::UiSetAgentDisplayName(UiSetAgentDisplayName {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
             display_name: "Main".to_owned(),
         }),
@@ -1620,7 +1673,7 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ShellCommandFinished(ShellCommandFinished {
             command_id: "shell-1".into(),
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             command: "pwd".to_owned(),
             include_in_context: true,
             target_agent_id: Some(agent_id("agent-1")),
@@ -1636,7 +1689,7 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ShellCommandFinishedReported(ShellCommandFinished {
             command_id: "shell-report-1".into(),
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             command: "pwd".to_owned(),
             include_in_context: true,
             target_agent_id: Some(agent_id("agent-1")),
@@ -1675,7 +1728,7 @@ fn representative_events() -> Vec<Event> {
     events.push(Event::ProviderRetryPromptResultReported(
         ProviderRetryPromptResult {
             request_id: RetryPromptRequestId::parse("retry-representative").expect("retry id"),
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-1"),
             status: RetryPromptStatus::Accepted,
         },
     ));
@@ -1684,7 +1737,7 @@ fn representative_events() -> Vec<Event> {
 
 fn sample_session_started() -> Event {
     Event::SessionStarted(SessionStarted {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         reason: SessionStartReason::Initial,
     })
 }
@@ -1725,7 +1778,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             event: Box::new(Event::ExtensionEvent(
                 CustomEvent::try_new(
                     "demo.persist_progress".parse().expect("event name"),
-                    Some("s1".into()),
+                    Some(test_session_id("s1")),
                     CborValue::Text("working".to_owned()),
                 )
                 .expect("valid custom event"),
@@ -1737,8 +1790,8 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         }),
         HarnessInputMessage::GetAgentPromptCreated(GetAgentPromptCreated {
             request_id: "prompt-1".to_owned(),
-            session_id: "s1".into(),
-            agent_prompt_id: "sp-1".into(),
+            session_id: test_session_id("s1"),
+            agent_prompt_id: test_agent_prompt_id("sp-1"),
         }),
         HarnessInputMessage::GetRenderedSystemPrompt(GetRenderedSystemPrompt {
             request_id: "render-system-prompt-1".to_owned(),
@@ -1758,12 +1811,12 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         }),
         HarnessInputMessage::GetSessionAgentList(GetSessionAgentList {
             request_id: "agent-list-1".to_owned(),
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             scope: SessionAgentListScope::History,
         }),
         HarnessInputMessage::UiDetachRequest(UiDetachRequest {}),
         HarnessInputMessage::UiTreeRequest(UiTreeRequest {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
         }),
         HarnessInputMessage::ExtensionDataRequest(ExtensionDataRequest {
@@ -1777,9 +1830,9 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             request_id: "external-1".to_owned(),
             message_id: "msg-external-1".into(),
             capability: "capability-1".to_owned(),
-            sender_session_id: "sender-session".into(),
+            sender_session_id: test_session_id("sender-session"),
             sender_id: agent_id("sender_agent"),
-            recipient_session_id: "recipient-session".into(),
+            recipient_session_id: test_session_id("recipient-session"),
             recipient: ExternalAgentMessageRecipient::Exact(agent_id("recipient_agent")),
             kind: AgentMessageKind::Message,
             message: "hello external".to_owned(),
@@ -1788,9 +1841,9 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             request_id: "external-auth-1".to_owned(),
             message_id: "msg-external-1".into(),
             capability: "capability-1".to_owned(),
-            sender_session_id: "sender-session".into(),
+            sender_session_id: test_session_id("sender-session"),
             sender_id: agent_id("sender_agent"),
-            recipient_session_id: "recipient-session".into(),
+            recipient_session_id: test_session_id("recipient-session"),
             recipient: ExternalAgentMessageRecipient::Exact(agent_id("recipient_agent")),
             kind: AgentMessageKind::Message,
             message: "hello external".to_owned(),
@@ -1821,7 +1874,7 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
         HarnessOutputMessage::Deliver(EventDelivery::direct(Event::ExtensionEvent(
             CustomEvent::try_new(
                 "demo.snapshot".parse().expect("event name"),
-                Some("s1".into()),
+                Some(test_session_id("s1")),
                 CborValue::Text("snapshot".to_owned()),
             )
             .expect("valid custom event"),
@@ -1860,12 +1913,12 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
         )),
         HarnessOutputMessage::CurrentSessionResult(CurrentSessionResult {
             request_id: "current-session-1".to_owned(),
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             project_root: std::path::PathBuf::from("/work/project"),
         }),
         HarnessOutputMessage::SessionAgentListResult(Box::new(SessionAgentListResult {
             request_id: "agent-list-1".to_owned(),
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             result: SessionAgentListResultPayload::Ok {
                 agents: vec![SessionAgentListEntry {
                     agent_id: agent_id("agent-1"),
@@ -2116,7 +2169,7 @@ fn discovery_snapshot_timestamp_and_empty_replacement_wire_shapes_are_stable() {
     assert!(absent_json.get("sampled_modified").is_none());
 
     let empty = Event::AgentInitializationContextSet(AgentInitializationContextSet {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         agent_id: agent_id("agent-1"),
         agent_initialization_id: AgentInitializationId::new("init-empty"),
         agents_message: None,
@@ -2433,7 +2486,7 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
     let watch_turn = AgentMessageReceived {
         kind: AgentMessageKind::WatchTurnState,
         watch_turn_state: Some(AgentWatchTurnStateNotification {
-            session_id: "session-1".into(),
+            session_id: test_session_id("session-1"),
             subscription_id: "watch-subscription-1".to_owned(),
             state: AgentRuntimeState::Running,
             initial: true,
@@ -2947,7 +3000,7 @@ fn removed_ui_detach_request_event_has_no_decoder() {
 #[test]
 fn ui_tree_request_uses_dedicated_input_message() {
     let input = HarnessInputMessage::UiTreeRequest(UiTreeRequest {
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         target_agent_id: Some(agent_id("agent-1")),
     });
     let json = serde_json::to_value(&input).expect("serialize input");
@@ -2963,7 +3016,7 @@ fn ui_tree_request_uses_dedicated_input_message() {
     );
     assert_eq!(
         serde_json::to_value(HarnessInputMessage::UiTreeRequest(UiTreeRequest {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: None,
         }))
         .expect("serialize request without target"),
@@ -3359,14 +3412,14 @@ fn execution_events_use_provider_wire_family() {
     let cases = [
         (
             Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
-                agent_prompt_id: "sp-1".into(),
+                agent_prompt_id: test_agent_prompt_id("sp-1"),
                 originator: PromptOriginator::User,
             }),
             "provider.prompt_submitted",
         ),
         (
             Event::ProviderResponseUpdated(ProviderResponseUpdated {
-                agent_prompt_id: "sp-1".into(),
+                agent_prompt_id: test_agent_prompt_id("sp-1"),
                 agent_id: agent_id("engineer_abcd1234"),
                 deltas: Vec::new(),
                 compaction: None,
@@ -3381,7 +3434,7 @@ fn execution_events_use_provider_wire_family() {
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
 
-                agent_prompt_id: "sp-1".into(),
+                agent_prompt_id: test_agent_prompt_id("sp-1"),
                 agent_id: agent_id("engineer_abcd1234"),
                 stop_reason: ProviderStopReason::EndTurn,
                 error: None,
@@ -3412,7 +3465,7 @@ fn execution_events_use_provider_wire_family() {
 /// canonical execution facts and directed retry outcomes.
 #[test]
 fn provider_execution_reports_use_distinct_transient_wires() {
-    let prompt_id = AgentPromptId::from("sp-1");
+    let prompt_id = test_agent_prompt_id("sp-1");
     let agent_id = agent_id("engineer_abcd1234");
     let reports = [
         (
@@ -3530,7 +3583,7 @@ fn provider_response_updated_requires_delta_routing_fields() {
 #[test]
 fn provider_response_updated_response_stats_round_trip() {
     let update = ProviderResponseUpdated {
-        agent_prompt_id: "sp-1".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-1"),
         agent_id: agent_id("engineer_abcd1234"),
         deltas: Vec::new(),
         compaction: None,
@@ -3563,7 +3616,7 @@ fn provider_response_updated_response_stats_round_trip() {
 #[test]
 fn agent_watches_updated_serde_round_trip() {
     let update = AgentWatchesUpdated {
-        session_id: "session_123".into(),
+        session_id: test_session_id("session_123"),
         watcher_id: agent_id("engineer_parent"),
         watched_agent_ids: vec![agent_id("engineer_child")],
         changed_agent_id: None,
@@ -3582,7 +3635,7 @@ fn agent_watches_updated_serde_round_trip() {
 #[test]
 fn agent_stats_updated_serde_round_trip() {
     let update = AgentStatsUpdated {
-        session_id: "session_123".into(),
+        session_id: test_session_id("session_123"),
         agent_id: agent_id("engineer_child"),
         navigation_mode: AgentNavigationMode::Active,
         runtime_state: AgentRuntimeState::Running,
@@ -3871,7 +3924,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
     // Lock it down here so any future edit to the matcher is intentional.
     let transient = [
         Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            agent_prompt_id: "sp-1".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-1"),
             agent_id: agent_id("engineer_abcd1234"),
             deltas: Vec::new(),
             compaction: None,
@@ -3901,7 +3954,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
         }),
         Event::ShellCommandFinishedReported(ShellCommandFinished {
             command_id: "shell-finished".into(),
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             command: "pwd".to_owned(),
             include_in_context: false,
             target_agent_id: Some(agent_id("worker")),
@@ -3925,7 +3978,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
         }),
         Event::ActionInvoke(ActionInvoke {
             invocation_id: "act-1".into(),
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             extension_name: "std-email".into(),
             instance_id: 7.into(),
             action_id: "email.out.list".to_owned(),
@@ -3954,13 +4007,13 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             ),
         }),
         Event::UiPromptDraft(UiPromptDraft {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
             text: "draft".to_owned(),
         }),
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             text: "hi".to_owned(),
             agent_id: agent_id("agent"),
             message_class: PromptMessageClass::User,
@@ -3978,7 +4031,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
         }),
         Event::AgentPromptTerminated(AgentPromptTerminated {
             agent_id: agent_id("worker"),
-            agent_prompt_id: "sp-stale".into(),
+            agent_prompt_id: test_agent_prompt_id("sp-stale"),
             reason: AgentPromptTerminationReason::Stale,
             originator: PromptOriginator::User,
         }),
@@ -3993,7 +4046,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
 
     let durable = [
         Event::SessionStarted(SessionStarted {
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             reason: SessionStartReason::Initial,
         }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
@@ -4010,7 +4063,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
         Event::SessionAgentLoaded(SessionAgentLoaded {
             agent_initialization_id: AgentInitializationId::new("test-init"),
 
-            session_id: "s1".into(),
+            session_id: test_session_id("s1"),
             agent_id: agent_id("worker"),
             ephemeral: false,
         }),
@@ -4200,7 +4253,7 @@ fn ephemeral_agent_fields_default_false_and_skip_serializing() {
     let loaded = SessionAgentLoaded {
         agent_initialization_id: AgentInitializationId::new("test-init"),
 
-        session_id: "s1".into(),
+        session_id: test_session_id("s1"),
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         ephemeral: true,
     };
@@ -4848,7 +4901,7 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-wire".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-wire"),
         agent_id: agent_id("engineer_abcd1234"),
         output_items: Vec::new(),
         stop_reason: ProviderStopReason::Error,
@@ -4966,10 +5019,10 @@ fn agent_watch_provider_state_wire_contract_enforces_phase_invariants() {
     }
 
     let notification = AgentWatchProviderStatusNotification {
-        session_id: "session-wire".into(),
+        session_id: test_session_id("session-wire"),
         subscription_id: "watch-wire".to_owned(),
         turn_generation: 4,
-        agent_prompt_id: "sp-wire".into(),
+        agent_prompt_id: test_agent_prompt_id("sp-wire"),
         state: AgentWatchProviderState::Retrying {
             category: AgentWatchProviderCategory::Throttle,
             attempt: 5,
@@ -5069,7 +5122,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     let mut started = AgentStandaloneCompactionStarted {
         agent_id: AgentId::parse("wire-agent").expect("agent id"),
         transaction_id: CompactionTransactionId::parse("ct-wire").expect("transaction id"),
-        compact_prompt_id: "ap-compact".into(),
+        compact_prompt_id: test_agent_prompt_id("ap-compact"),
         cut: AgentHead::Root,
         resume_through: Some(AgentHead::Root),
         model: "provider/model".into(),
@@ -5090,7 +5143,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     );
 
     started.trigger = StandaloneCompactionTrigger::ReactiveContextOverflow {
-        failed_agent_prompt_id: "ap-overflow".into(),
+        failed_agent_prompt_id: test_agent_prompt_id("ap-overflow"),
     };
     let encoded = serde_json::to_value(&started).expect("encode reactive start");
     assert_eq!(
@@ -5137,7 +5190,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
     let checkpoint = AgentInferenceDispatchStarted {
         agent_id: started.agent_id.clone(),
         transaction_id: None,
-        agent_prompt_id: "ap-inference".into(),
+        agent_prompt_id: test_agent_prompt_id("ap-inference"),
         through: AgentHead::Root,
         model: Some("provider/model".into()),
         operation: Some(PromptOperation::Inference),
@@ -5288,7 +5341,7 @@ fn agent_navigation_mode_request_round_trips_with_snake_case_actions() {
     ] {
         let event = Event::UiSetAgentNavigationMode(UiSetAgentNavigationMode {
             request_id: "navigation-1".to_owned(),
-            session_id: "session-1".into(),
+            session_id: test_session_id("session-1"),
             agent_id: AgentId::parse("agent-1").expect("valid agent id"),
             action,
         });
@@ -5318,7 +5371,7 @@ fn agent_navigation_mode_results_round_trip() {
     ] {
         let event = Event::UiSetAgentNavigationModeResult(UiSetAgentNavigationModeResult {
             request_id: "navigation-result".to_owned(),
-            session_id: "session-1".into(),
+            session_id: test_session_id("session-1"),
             agent_id: AgentId::parse("agent-1").expect("valid agent id"),
             outcome,
         });

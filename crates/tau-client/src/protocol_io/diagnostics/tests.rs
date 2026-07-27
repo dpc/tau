@@ -64,7 +64,9 @@ fn agent_id() -> tau_proto::AgentId {
 fn finish_protocol_io_cold_attach(meter: &mut TestMeter) {
     meter.record_downlink_frame(&HarnessOutputMessage::deliver(
         Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             error: None,
         }),
     ));
@@ -86,7 +88,9 @@ fn protocol_io_meter_splits_catch_up_from_steady_live() {
     let live = HarnessOutputMessage::deliver_live(UnixMicros::new(2), event);
     let boundary = HarnessOutputMessage::deliver(Event::SessionReplayComplete(
         tau_proto::SessionReplayComplete {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             error: None,
         },
     ));
@@ -376,7 +380,9 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "prompt-1".into(),
+        agent_prompt_id: "prompt-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: agent_id(),
         output_items,
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -448,7 +454,9 @@ fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
     let mut meter = TestMeter::default();
     finish_protocol_io_cold_attach(&mut meter);
     let stats = tau_proto::AgentStatsUpdated {
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: agent_id(),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Running,
@@ -467,7 +475,9 @@ fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
     meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
         UnixMicros::new(2),
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id(),
         }),
     ));
@@ -478,7 +488,9 @@ fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             agent_id: agent_id(),
             ephemeral: false,
         }),
@@ -488,7 +500,9 @@ fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
     meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
         UnixMicros::new(4),
         Event::SessionStarted(tau_proto::SessionStarted {
-            session_id: "session-2".into(),
+            session_id: "session-2"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             reason: tau_proto::SessionStartReason::Initial,
         }),
     ));
@@ -514,7 +528,9 @@ fn protocol_io_meter_counts_exact_stats_duplicates_per_loaded_epoch() {
 fn protocol_io_meter_separates_equality_caches_by_attach_and_delivery_kind() {
     let mut meter = TestMeter::default();
     let stats = tau_proto::AgentStatsUpdated {
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         agent_id: agent_id(),
         navigation_mode: tau_proto::AgentNavigationMode::Active,
         runtime_state: tau_proto::AgentRuntimeState::Idle,
@@ -654,7 +670,9 @@ fn protocol_io_meter_classifies_quota_snapshot_changes() {
     meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
         UnixMicros::new(2),
         Event::SessionStarted(tau_proto::SessionStarted {
-            session_id: "session-2".into(),
+            session_id: "session-2"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             reason: tau_proto::SessionStartReason::Initial,
         }),
     ));

@@ -674,7 +674,9 @@ mod tests {
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                     agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                    session_id: "session-1".into(),
+                    session_id: "session-1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     agent_id: agent_id.clone(),
                     ephemeral: false,
                 }),
@@ -689,7 +691,11 @@ mod tests {
             .handle_event(
                 Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
                     agent_id: agent_id.clone(),
-                    session_id: Some("session-1".into()),
+                    session_id: Some(
+                        "session-1"
+                            .parse::<tau_proto::SessionId>()
+                            .expect("known-safe SessionId must be valid"),
+                    ),
                     error: None,
                 }),
                 false,
@@ -740,7 +746,9 @@ mod tests {
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                     agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
 
-                    session_id: "session-1".into(),
+                    session_id: "session-1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     agent_id: agent_id.clone(),
                     ephemeral: false,
                 }),
@@ -763,7 +771,11 @@ mod tests {
             .handle_event(
                 Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
                     agent_id: agent_id.clone(),
-                    session_id: Some("session-1".into()),
+                    session_id: Some(
+                        "session-1"
+                            .parse::<tau_proto::SessionId>()
+                            .expect("known-safe SessionId must be valid"),
+                    ),
                     error: None,
                 }),
                 false,
@@ -813,7 +825,9 @@ mod tests {
         runtime.cwd_state.set_invalid(agent_id.clone());
         runtime
             .handle_ui_shell_command(tau_proto::UiShellCommand {
-                session_id: "session-1".into(),
+                session_id: "session-1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 command_id: "command-1".into(),
                 command: "pwd".to_owned(),
                 include_in_context: false,
@@ -840,12 +854,16 @@ mod tests {
         let agent_id = tau_proto::AgentId::parse("agent-replay-pending-shell").expect("agent id");
         runtime.cwd_state.set_pending_ready(
             agent_id.clone(),
-            "session-1".into(),
+            "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             tau_proto::AgentInitializationId::new("init-1"),
         );
         runtime
             .handle_ui_shell_command(tau_proto::UiShellCommand {
-                session_id: "session-1".into(),
+                session_id: "session-1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
                 command_id: "command-pending".into(),
                 command: "touch must-not-exist".to_owned(),
                 include_in_context: false,
@@ -1034,7 +1052,9 @@ mod tests {
         runtime
             .handle_event(
                 Event::SessionShutdown(tau_proto::SessionShutdown {
-                    session_id: "session-1".into(),
+                    session_id: "session-1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                 }),
                 false,
             )

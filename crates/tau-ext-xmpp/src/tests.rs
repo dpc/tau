@@ -196,10 +196,16 @@ fn assert_room_shape(room: &BareJid, agent_id: &str) {
 
 fn default_muc_room(worker: &WorkerState, agent_id: &AgentId) -> BareJid {
     let state = State::default();
-    let localpart =
-        room_localpart_for_registration(&state, &worker.cfg, &"session-1".into(), agent_id)
-            .expect("render default room")
-            .expect("MUC localpart");
+    let localpart = room_localpart_for_registration(
+        &state,
+        &worker.cfg,
+        &"session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        agent_id,
+    )
+    .expect("render default room")
+    .expect("MUC localpart");
     worker.muc_room_for(&localpart).expect("room")
 }
 
@@ -353,7 +359,9 @@ fn generic_prefixes_scope_xmpp_instances() {
 
 fn session_started_message(session_id: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: session_id.into(),
+        session_id: session_id
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         reason: tau_proto::SessionStartReason::Initial,
     }))
 }
@@ -409,7 +417,11 @@ fn extension() -> (
     bridge.set_ready(true);
     let ext = Extension::new(bridge.clone(), tx);
     ext.apply_config(cfg()).expect("apply config");
-    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
+    ext.state.lock().expect("lock").current_session_id = Some(
+        "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+    );
     (ext, rx, bridge)
 }
 
@@ -726,7 +738,9 @@ fn run_replayed_session_started_enables_later_register() {
             HarnessOutputMessage::deliver_replay(
                 tau_proto::UnixMicros::new(1_700_000_000_000_000),
                 Event::SessionStarted(tau_proto::SessionStarted {
-                    session_id: "session-1".into(),
+                    session_id: "session-1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     reason: tau_proto::SessionStartReason::Resume,
                 }),
             ),
@@ -769,14 +783,18 @@ fn run_replayed_unload_and_shutdown_do_not_clear_registration() {
             HarnessOutputMessage::deliver_replay(
                 tau_proto::UnixMicros::new(1_700_000_000_000_000),
                 Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-                    session_id: "session-1".into(),
+                    session_id: "session-1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                     agent_id: agent_id("agent-1"),
                 }),
             ),
             HarnessOutputMessage::deliver_replay(
                 tau_proto::UnixMicros::new(1_700_000_000_000_001),
                 Event::SessionShutdown(tau_proto::SessionShutdown {
-                    session_id: "session-1".into(),
+                    session_id: "session-1"
+                        .parse::<tau_proto::SessionId>()
+                        .expect("known-safe SessionId must be valid"),
                 }),
             ),
             HarnessOutputMessage::deliver(Event::ToolStarted(tool(
@@ -803,7 +821,11 @@ fn xmpp_register_waits_for_online_readiness() {
     let bridge = FakeBridge::new();
     let ext = Extension::new(bridge.clone(), tx);
     ext.apply_config(cfg()).expect("apply config");
-    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
+    ext.state.lock().expect("lock").current_session_id = Some(
+        "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+    );
 
     std::thread::scope(|scope| {
         let handle = scope.spawn(|| {
@@ -837,7 +859,11 @@ fn xmpp_register_readiness_timeout_is_clear_and_does_not_register() {
     );
     let ext = Extension::new(bridge.clone(), tx);
     ext.apply_config(cfg()).expect("apply config");
-    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
+    ext.state.lock().expect("lock").current_session_id = Some(
+        "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+    );
 
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("progress");
@@ -1485,10 +1511,16 @@ fn muc_room_template_can_use_identity_without_mandatory_randomness() {
         .role_groups
         .insert("engineer".to_owned(), "engineering".to_owned());
 
-    let localpart =
-        room_localpart_for_registration(&state, &cfg, &"session-1".into(), &agent_id("agent-1"))
-            .expect("render")
-            .expect("MUC room");
+    let localpart = room_localpart_for_registration(
+        &state,
+        &cfg,
+        &"session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        &agent_id("agent-1"),
+    )
+    .expect("render")
+    .expect("MUC room");
 
     assert_eq!(
         localpart,
@@ -1508,7 +1540,9 @@ fn muc_room_template_exposes_missing_metadata_flags() {
     let localpart = room_localpart_for_registration(
         &State::default(),
         &cfg,
-        &"session-1".into(),
+        &"session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         &agent_id("agent-1"),
     )
     .expect("render")
@@ -1528,7 +1562,9 @@ fn muc_room_template_supports_opt_in_random_alphanumeric() {
     let localpart = room_localpart_for_registration(
         &State::default(),
         &cfg,
-        &"session-1".into(),
+        &"session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         &agent_id("agent-1"),
     )
     .expect("render")
@@ -1601,7 +1637,11 @@ fn actual_room_template_metadata_is_validated_before_bridge_start() {
     cfg.muc.room_template = "{{role}}".to_owned();
     ext.apply_config(cfg).expect("apply config");
     let mut state = ext.state.lock().expect("lock");
-    state.current_session_id = Some("session-1".into());
+    state.current_session_id = Some(
+        "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+    );
     state
         .agent_roles
         .insert(agent_id("agent-1"), "bad@role".to_owned());

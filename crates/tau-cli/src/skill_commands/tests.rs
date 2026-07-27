@@ -19,7 +19,9 @@ fn completes_only_user_invocable_skills() {
         }
     };
     state.apply_session_snapshot(&tau_proto::HarnessSessionSkillsAvailable {
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         skills: vec![
             skill("visible", "Visible skill", true, Some("[topic]")),
             skill("hidden", "Hidden skill", false, None),
@@ -51,7 +53,9 @@ fn counts_available_skills_not_advertised_to_the_agent() {
     };
     let advertised = skill("advertised", true);
     state.apply_session_snapshot(&tau_proto::HarnessSessionSkillsAvailable {
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         skills: vec![
             advertised.clone(),
             skill("manual", true),

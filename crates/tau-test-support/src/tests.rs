@@ -304,9 +304,13 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     use tau_proto::ToolDefinition;
 
     let prompt = AgentPromptCreated {
-        agent_prompt_id: "sp-1".into(),
+        agent_prompt_id: "sp-1"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        session_id: "session-1".into(),
+        session_id: "session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         system_prompt: "You are helpful.".to_owned(),
         context: tau_proto::PromptContext {
             blocks: vec![tau_proto::ContextBlock::UserInput(
@@ -379,9 +383,15 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         &provider_id,
         None,
         HarnessOutputMessage::deliver(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-            session_id: "session-1".into(),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             target_agent_id: None,
-            agent_prompt_id: Some("sp-1".into()),
+            agent_prompt_id: Some(
+                "sp-1"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            ),
         })),
     );
 

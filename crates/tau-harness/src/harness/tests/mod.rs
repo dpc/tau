@@ -429,7 +429,9 @@ fn literal_existing_agent_skill_text_bypasses_skill_expansion() {
 
     h.handle_authenticated_ui_prompt_submitted(UiPromptSubmitted {
         literal: true,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         text: ":skill definitely-not-installed".to_owned(),
         agent_id,
         message_class: tau_proto::PromptMessageClass::User,
@@ -464,7 +466,9 @@ fn literal_new_agent_skill_text_bypasses_skill_expansion() {
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: true,
         parent_agent: None,
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         role: h.selected_role.clone(),
         model_override: None,
         metadata: Vec::new(),
@@ -653,8 +657,16 @@ fn minted_agent_ids_use_deterministic_test_rng_sequence() {
         let tmp = TempDir::new().expect("tempdir");
         let mut h = echo_harness(tmp.path()).expect("harness");
         let role = h.selected_role.clone();
-        let first = h.create_durable_user_agent("s1".into(), &role);
-        let second = h.create_durable_user_agent("s1".into(), &role);
+        let first = h.create_durable_user_agent(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            &role,
+        );
+        let second = h.create_durable_user_agent(
+            "s1".parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            &role,
+        );
         (first.to_string(), second.to_string())
     };
 
@@ -1332,7 +1344,11 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
         .model_for_agent_role(conv)
         .or_else(|| h.selected_model.clone());
     let tool_specs = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
-    h.prompt_tool_specs.insert(spid.into(), tool_specs);
+    h.prompt_tool_specs.insert(
+        spid.parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        tool_specs,
+    );
     let conv = h.agents.get_mut(cid).expect("conversation present");
     if let Some(next_index) = spid
         .rsplit_once('-')
@@ -1342,11 +1358,17 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
         conv.next_prompt_index = conv.next_prompt_index.max(next_index);
     }
     conv.turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: spid.into(),
+        agent_prompt_id: spid
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
     };
     h.agent_routes.insert(agent_id.clone(), cid.clone());
     if let Some(model) = model {
-        h.prompt_models.insert(spid.into(), model);
+        h.prompt_models.insert(
+            spid.parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+            model,
+        );
     }
 }
 
@@ -1375,7 +1397,9 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
 
-            agent_prompt_id: "sp-seeded-tools".into(),
+            agent_prompt_id: "sp-seeded-tools"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
             agent_id: crate::parse_agent_id(&agent_id),
             output_items: calls
                 .iter()
@@ -1429,7 +1453,9 @@ fn rewrite_finished_response_tool_call_items_preserves_provider_replay_sidecars(
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
 
-        agent_prompt_id: "sp-raw".into(),
+        agent_prompt_id: "sp-raw"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: crate::parse_agent_id("main"),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "call-original".into(),
@@ -1656,7 +1682,9 @@ fn intercepted_payload(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> (Event, bool) {
 
 fn draft_event(text: &str) -> Event {
     Event::UiPromptDraft(UiPromptDraft {
-        session_id: "s1".into(),
+        session_id: "s1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         target_agent_id: None,
         text: text.to_owned(),
     })

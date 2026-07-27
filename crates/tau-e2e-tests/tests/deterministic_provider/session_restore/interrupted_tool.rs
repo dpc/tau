@@ -19,7 +19,7 @@ const SCENARIO_BYTES: usize = 1_259;
 /// once on resume and remains balanced across a second cold resume.
 #[test]
 fn cold_resume_repairs_interrupted_worker_tool_once() -> Result<(), Box<dyn std::error::Error>> {
-    let session_id = SessionId::from(SESSION);
+    let session_id = SessionId::parse(SESSION).expect("known-safe SessionId must be valid");
     let diagnostic = interruption::interrupted_tool_diagnostic(&TOOL_CALL_ID.into());
     let scenario = interrupted_tool_scenario(&diagnostic);
     assert_scenario_budget(&scenario)?;

@@ -690,7 +690,12 @@ fn rollover_commits_deferred_request_without_semantic_effects() {
     assert!(committed_request_family(&harness, "rollover-deferred-request").is_empty());
 
     harness
-        .switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .switch_session(
+            "replacement"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionStartReason::New,
+        )
         .expect("switch session");
 
     assert!(matches!(
@@ -1058,7 +1063,9 @@ fn peer_internal_ephemeral_lifecycle_is_suppressed_from_debug_log() {
     harness
         .handle_ui_create_agent(tau_proto::UiCreateAgent {
             literal: false,
-            session_id: "s1".into(),
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             role: "engineer".to_owned(),
             model_override: None,
             metadata: Vec::new(),

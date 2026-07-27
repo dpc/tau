@@ -146,7 +146,8 @@ fn pool_routes_each_thread_to_its_own_socket_and_reuses_them() {
     // Two turns on cache bucket A, interleaved with one on cache bucket B.
     // Expected: 2 upgrades total (one per prompt-cache bucket), 3 turns.
     for agent in ["agent-a", "agent-b", "agent-a"] {
-        let session_id = tau_proto::SessionId::new("session-pool-routing");
+        let session_id = tau_proto::SessionId::parse("session-pool-routing")
+            .expect("known-safe SessionId must be valid");
         let agent_id = tau_proto::AgentId::parse(agent).expect("agent id");
         let request = PromptPayload {
             system_prompt: "sys",
@@ -198,7 +199,8 @@ fn local_websocket_usage_window_contract_returns_typed_retry() {
         }
     }));
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
-    let session_id = tau_proto::SessionId::new("session-wire-error");
+    let session_id = tau_proto::SessionId::parse("session-wire-error")
+        .expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("agent-wire-error").expect("agent id");
     let request = PromptPayload {
         system_prompt: "sys",
@@ -510,7 +512,8 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
         let config = config.clone();
         let pool = pool.clone();
         thread::spawn(move || {
-            let session_id = tau_proto::SessionId::new("same-session");
+            let session_id = tau_proto::SessionId::parse("same-session")
+                .expect("known-safe SessionId must be valid");
             let originator = tau_proto::PromptOriginator::User;
             let request = PromptPayload {
                 system_prompt: "sys",
@@ -586,7 +589,8 @@ fn shared_prewarm_silent_peer_cancels_and_releases_reservation() {
         let canceled = Arc::clone(&canceled);
         let waker = Arc::clone(&waker);
         thread::spawn(move || {
-            let session_id = tau_proto::SessionId::new("silent-prewarm");
+            let session_id = tau_proto::SessionId::parse("silent-prewarm")
+                .expect("known-safe SessionId must be valid");
             let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
             let originator = tau_proto::PromptOriginator::User;
             let request = PromptPayload {
@@ -814,7 +818,8 @@ fn shared_prewarm_socket_is_reused_by_real_turn() {
     let (addr, server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
-    let session_id = tau_proto::SessionId::new("shared-prewarm-reuse");
+    let session_id = tau_proto::SessionId::parse("shared-prewarm-reuse")
+        .expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
     let request = PromptPayload {
@@ -846,7 +851,8 @@ fn shared_prewarm_socket_is_reused_by_real_turn() {
 fn shared_prewarm_connect_failure_releases_reservation() {
     let config = make_config("file:///unsupported", Some("acc"));
     let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
-    let session_id = tau_proto::SessionId::new("prewarm-failure");
+    let session_id =
+        tau_proto::SessionId::parse("prewarm-failure").expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
     let request = PromptPayload {
@@ -884,7 +890,8 @@ fn already_canceled_cached_prewarm_sends_no_request() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
     run_shared_turn(&pool, &config, "already-canceled", "sp-warm");
-    let session_id = tau_proto::SessionId::new("already-canceled");
+    let session_id = tau_proto::SessionId::parse("already-canceled")
+        .expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
     let request = PromptPayload {
@@ -1087,7 +1094,8 @@ fn ws_turn_captures_response_id_for_chain_continuation() {
         last_text = state.text.clone();
     };
 
-    let session_id = tau_proto::SessionId::new("session-x");
+    let session_id =
+        tau_proto::SessionId::parse("session-x").expect("known-safe SessionId must be valid");
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
@@ -1294,7 +1302,8 @@ fn ws_upgrade_thread_headers_match_prompt_cache_key() {
     let mut pool = WsPool::new();
     let mut on_update = |_: &crate::common::StreamState| {};
 
-    let session_id = tau_proto::SessionId::new("session-headers");
+    let session_id =
+        tau_proto::SessionId::parse("session-headers").expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("header-agent").expect("agent id");
     let request = PromptPayload {
         system_prompt: "sys",
@@ -1341,7 +1350,8 @@ fn prewarm_chains_exact_prefix_on_same_socket() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let mut pool = WsPool::new();
     let mut on_update = |_: &crate::common::StreamState| {};
-    let session_id = tau_proto::SessionId::new("session-prewarm");
+    let session_id =
+        tau_proto::SessionId::parse("session-prewarm").expect("known-safe SessionId must be valid");
     let prewarmed_messages = vec![user_msg("AGENTS.md context")];
     let real_messages = vec![user_msg("AGENTS.md context"), user_msg("actual request")];
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
@@ -1432,7 +1442,8 @@ fn prewarm_fingerprint_divergence_discards_chain_anchor() {
     let (addr, server) = spawn_fake_codex_server();
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let mut pool = WsPool::new();
-    let session_id = tau_proto::SessionId::new("session-prewarm-divergence");
+    let session_id = tau_proto::SessionId::parse("session-prewarm-divergence")
+        .expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
     let prefix = vec![user_msg("stable prefix")];
@@ -1517,7 +1528,8 @@ fn fresh_open_with_previous_response_rebuilds_ws_warmth() {
     let mut pool = WsPool::new();
     let mut on_update = |_: &crate::common::StreamState| {};
 
-    let session_id = tau_proto::SessionId::new("session-fresh");
+    let session_id =
+        tau_proto::SessionId::parse("session-fresh").expect("known-safe SessionId must be valid");
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
@@ -1556,7 +1568,8 @@ fn fresh_open_with_previous_response_preserves_compacted_items() {
     let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
     let mut pool = WsPool::new();
     let mut on_update = |_: &crate::common::StreamState| {};
-    let session_id = tau_proto::SessionId::new("session-compacted");
+    let session_id = tau_proto::SessionId::parse("session-compacted")
+        .expect("known-safe SessionId must be valid");
     let messages = vec![
         tau_proto::ContextItem::Compaction(tau_proto::OpaqueProviderItem::new(
             crate::common::json_to_cbor(&serde_json::json!({
@@ -1625,7 +1638,8 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
 
     // Turn 1: opens conn-0, returns a `response_id` the harness
     // would chain off for turn 2.
-    let session_id = tau_proto::SessionId::new("session-die");
+    let session_id =
+        tau_proto::SessionId::parse("session-die").expect("known-safe SessionId must be valid");
     let req1 = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
@@ -1744,7 +1758,8 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
         }
     };
 
-    let session_id = tau_proto::SessionId::new("session-shared-die");
+    let session_id = tau_proto::SessionId::parse("session-shared-die")
+        .expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
     let req1 = PromptPayload {
@@ -2296,7 +2311,8 @@ fn pool_key_for(
     originator: tau_proto::PromptOriginator,
     share_user_cache_key: bool,
 ) -> PoolKey {
-    let session_id = tau_proto::SessionId::new("test-session");
+    let session_id =
+        tau_proto::SessionId::parse("test-session").expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse(agent).expect("agent id");
     let request = PromptPayload {
         system_prompt: "sys",
@@ -2341,7 +2357,8 @@ fn run_context_turn(
     agent_prompt_id: &str,
     prompt_context: &'static tau_proto::PromptContext,
 ) -> crate::common::StreamState {
-    let session_id = tau_proto::SessionId::new(session);
+    let session_id =
+        tau_proto::SessionId::parse(session).expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
     let request = PromptPayload {
         system_prompt: "sys",
@@ -2374,7 +2391,8 @@ fn run_turn_for_agent(
     agent: &str,
     on_update: &mut impl FnMut(&crate::common::StreamState),
 ) {
-    let session_id = tau_proto::SessionId::new(session);
+    let session_id =
+        tau_proto::SessionId::parse(session).expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse(agent).expect("agent id");
     let request = PromptPayload {
         system_prompt: "sys",
@@ -2421,7 +2439,8 @@ fn run_shared_turn_with_abort(
     agent_prompt_id: &str,
     abort: &mut impl TurnAbort,
 ) {
-    let session_id = tau_proto::SessionId::new(session);
+    let session_id =
+        tau_proto::SessionId::parse(session).expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse(agent).expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
     let request = PromptPayload {
@@ -2476,7 +2495,8 @@ fn pool_key_separates_responses_modes() {
     let mut lite = standard.clone();
     standard.mode = ResponsesMode::Standard;
     lite.mode = ResponsesMode::LiteCompatibility;
-    let session_id = tau_proto::SessionId::new("mode-test");
+    let session_id =
+        tau_proto::SessionId::parse("mode-test").expect("known-safe SessionId must be valid");
     let agent_id = tau_proto::AgentId::parse("mode-agent").expect("agent id");
     let prompt_context = context(&[]);
     let request = PromptPayload {

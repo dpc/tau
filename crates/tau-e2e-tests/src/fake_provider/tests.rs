@@ -1052,9 +1052,13 @@ fn v2_dummy_mismatch_leaves_cursor_and_binding_unconsumed() {
     let checkpoint = tempdir.path().join("cursor.json");
     state.checkpoint = Some(checkpoint.clone());
     let mut prompt = tau_proto::AgentPromptCreated {
-        agent_prompt_id: "ap-test-0".into(),
+        agent_prompt_id: "ap-test-0"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
-        session_id: "session".into(),
+        session_id: "session"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         system_prompt: String::new(),
         context: tau_proto::PromptContext {
             blocks: vec![tau_proto::ContextBlock::UserInput(
@@ -1312,7 +1316,9 @@ fn watch_turn(
         recipient_id: parent.clone(),
         kind: tau_proto::AgentMessageKind::WatchTurnState,
         watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-            session_id: "session".into(),
+            session_id: "session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
             subscription_id: "subscription".to_owned(),
             state,
             initial: false,
@@ -1329,9 +1335,13 @@ fn prompt_for(
     ctx_id: Option<&str>,
 ) -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
-        agent_prompt_id: "ap-test".into(),
+        agent_prompt_id: "ap-test"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
         agent_id: agent_id.clone(),
-        session_id: "session".into(),
+        session_id: "session"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
         system_prompt: String::new(),
         context: tau_proto::PromptContext {
             blocks: vec![tau_proto::ContextBlock::UserInput(
