@@ -174,11 +174,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1784873470,
-        "narHash": "sha256-OUmoYQZuLV+GFMhFYjSVwYjNAHXhNRvBJ8Mq7z8S/bs=",
+        "lastModified": 1785120481,
+        "narHash": "sha256-qjGfBBvX05xMt0le8fo3IIHR4B5y2/6frdYMu6sOqiI=",
         "ref": "refs/heads/master",
-        "rev": "63173e634ae963af6771d0f59ae7ef9013442447",
-        "revCount": 73,
+        "rev": "9e55d85928c390c1d91cba1456c00f40fadc348f",
+        "revCount": 83,
         "type": "git",
         "url": "https://radicle.dpc.pw/z2HR882B4c4mTdAgdt4SozpdeTuMf.git"
       },
