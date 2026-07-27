@@ -1,5 +1,11 @@
 # SPEC-tau-ext-websearch-provider-boundary: Hosted provider boundary
 
+## Record justification
+
+The provider boundary spans adapter-specific tool schemas, endpoint
+configuration, MCP transport, result projection, and diagnostic sanitization, so
+no single implementation area can own the complete external-content contract.
+
 Provider calls send model-supplied tool arguments to external hosted MCP
 services. Provider output is untrusted web content that can contain prompt
 injection, misleading text, or large payloads before it re-enters model context.
@@ -25,12 +31,6 @@ injection and grants no identity, routing, instruction, tool, authorization, or
 egress authority. See
 [SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
 
-Exa defaults to `https://mcp.exa.ai/mcp`. Parallel defaults to the
-unauthenticated `https://search.parallel.ai/mcp` endpoint; the extension has no
-Parallel API-key configuration and sends no Parallel Authorization header.
-`endpoint` remains a backwards-compatible alias for `exa_endpoint`; setting both
-to different values is invalid.
-
 Endpoint URLs are validated when configuration is applied. Production endpoints
 must use HTTPS; plaintext HTTP is accepted only for loopback test endpoints.
 Userinfo credentials and unsupported schemes are rejected. Provider requests do
@@ -41,11 +41,11 @@ boundary. A provider that redirects must be configured using its final URL.
 Raw endpoint URLs are log-sensitive because userinfo, query strings, or
 fragments can contain secrets, so logs do not print them. Provider transport
 diagnostics and JSON-RPC error messages can become model-visible tool errors.
-Before return, configured endpoint echoes, request targets, query keys and
-values, fragments, and userinfo are sanitized, then the resulting diagnostic is
+Before return, endpoint-derived secrets are sanitized and the diagnostic is
 bounded.
 
 Response and diagnostic bounds are specified by
 [SPEC-tau-ext-websearch-runtime-safeguards](SPEC-tau-ext-websearch-runtime-safeguards.md).
-The component and default-tool shape is described by
+Provider defaults, configuration aliases, and tool shape are described by
+[the component README](../README.md) and
 [ARCH-tau-ext-websearch](ARCH-tau-ext-websearch.md).

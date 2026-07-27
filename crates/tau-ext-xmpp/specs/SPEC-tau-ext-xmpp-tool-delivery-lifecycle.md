@@ -83,12 +83,6 @@ remote cleanup cannot keep a local route alive.
 
 ## Terminal ownership and reports
 
-Each call moves through:
-
-```text
-Queued -> Active { completed_parts, current_stanza_started } -> Terminal(outcome)
-```
-
 A compare-and-swap selects one terminal owner among deadline, revocation, worker
 completion/death, and output failure. Losers emit nothing. This gives one local
 terminal disposition and at most one attempted terminal report, not exactly-once

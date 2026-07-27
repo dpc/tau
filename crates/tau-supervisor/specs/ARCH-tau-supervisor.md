@@ -4,32 +4,36 @@
 
 ## Scope
 
-This crate is currently non-production. The production harness supervisor still lives in `tau-harness`, so reliability guarantees here only apply to direct users of this crate until the harness integrates it or duplicates the same contracts.
+This crate is non-production. The production extension supervisor remains in
+`tau-harness`; guarantees here apply only to direct users until the harness
+integrates this crate or independently adopts its contracts.
 
 ## Process ownership
 
-`SupervisedChild::spawn` owns the spawned direct child lifecycle from successful process creation onward. During initialization a guard kill/waits the child if pipe setup, stdout-reader startup, pidfd setup, or child-waiter startup fails. Once construction succeeds, a dedicated waiter thread owns the `std::process::Child` handle and reports the single exit status through a channel; `try_wait` and `wait_for_exit` observe and cache that notification rather than polling child status.
+`SupervisedChild` owns one direct child. Failed initialization kills and waits
+for a child that was already spawned. After successful construction, one waiter
+thread owns the `std::process::Child`; observers consume its single exit
+notification rather than polling child status.
 
-On Linux, spawn opens a pidfd before disarming the initialization guard. `SupervisedChild::terminate` and best-effort `Drop` hard-kill through that pidfd, then wait for the waiter notification, so cleanup does not signal a reused numeric PID after the waiter reaps the child. Hard termination is currently unsupported on non-Linux targets under this waiter-thread design. Callers should prefer explicit protocol shutdown or `SupervisedChild::terminate`; `Drop` is only best-effort cleanup with ignored errors. Termination intentionally targets only the direct child process, not a process tree or grandchildren.
-
-Lifecycle helpers on `SupervisedChild` use the pid recorded during spawn before the `Child` handle is handed to the waiter thread. Use `ExtensionCommand::pre_spawn_starting_event` only for pid-less pre-spawn lifecycle reporting.
+Linux termination uses a pidfd opened before initialization ownership transfers,
+avoiding numeric-PID reuse after the waiter reaps the child. Hard termination is
+unsupported on other targets under this design. Callers should prefer protocol
+shutdown or explicit `terminate`; `Drop` is best effort. Termination covers only
+the direct child, not its process tree.
 
 ## Stdio transport
 
-Children communicate with the harness over CBOR protocol frames on stdin/stdout. A dedicated stdout reader thread decodes frames and forwards them through a bounded buffer. Frames are decoded before queueing, so the queue does not bound memory used to decode one oversized frame. Callers supervising a child that may emit during shutdown must keep draining stdout or avoid waiting indefinitely for exit.
-
-Receive outcomes distinguish decoded messages, timeout, and clean stdout closure. Corrupt or truncated frames remain decode errors.
-
-## Integration-test fixture
-
-Integration tests use the `tau-supervisor-test-child` binary target in
-`src/bin/` as a real subprocess fixture. Keeping it as a Cargo binary target lets
-tests use `CARGO_BIN_EXE_tau-supervisor-test-child` and exercise normal
-child-launch semantics. The fixture is internal to this crate's tests and is not
-part of the production supervisor path.
+Children exchange CBOR protocol frames over stdin/stdout. A reader thread
+decodes stdout frames and forwards them through a bounded queue; because decode
+precedes queueing, that queue does not bound one oversized encoded frame.
+Callers must continue draining a child that can emit during shutdown instead of
+waiting indefinitely for exit.
 
 ## Child environment
 
-Children inherit the supervisor environment except variables with names starting `TAU_SECRET_`; those are stripped before launch. Command configuration also controls argv, optional working directory, and stderr policy. When `working_dir` is set, `program` must be absolute; relative program paths are rejected so executable resolution does not depend on platform-specific `Command` semantics.
+Children inherit the supervisor environment except names starting
+`TAU_SECRET_`. With an explicit working directory, the program path must be
+absolute so executable resolution does not depend on platform-specific command
+semantics.
 
 `tau-supervisor` launches trusted local child programs. It does not sandbox child code, validate child behavior, or protect the host from a malicious configured executable. Do not pass secrets through environment variable names outside the stripped `TAU_SECRET_` namespace unless the child is trusted to receive them.

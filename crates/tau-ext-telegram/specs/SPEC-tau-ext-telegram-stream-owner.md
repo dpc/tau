@@ -15,12 +15,10 @@ in-flight request so retirement cannot release ownership underneath an old
 request. Gateway mode instead retains one owner lock for the gateway lifetime.
 
 After locking, `getWebhookInfo` must report no webhook. Tau never removes a
-webhook or drops its pending updates. HTTP 409 `getUpdates` contention produces a
-bounded sanitized diagnostic of at most 1,024 bytes, stops polling, and clears
-active registrations. Production requires HTTPS; loopback HTTP is test-only;
-endpoint userinfo, query, and fragment are rejected. A non-secret API base may
-appear in lock metadata and bounded diagnostics; tokens, token-bearing URLs, and
-private text never do.
+webhook or drops its pending updates. HTTP 409 `getUpdates` contention stops
+polling, clears active registrations, and produces a bounded diagnostic.
+Diagnostics and lock metadata may expose the non-secret API base and
+fingerprint, but never tokens, token-bearing URLs, or private text.
 
 An in-progress registration reserves stream-owner interest while its
 `getWebhookInfo` preflight runs without the state lock, but that reservation
@@ -31,12 +29,11 @@ poller coordination.
 
 The first lazy local poll drains backlog without long polling and publishes none
 of the old updates. A stale-generation response cannot advance offset, mark the
-backlog drained, or route work. Reconfigure invalidates registrations,
-selections, links, offsets, and in-flight responses. Accepted original bodies
-submit `message.delivered_reported`; successful sends submit
-`message.sent_reported` before transient `tool.result_reported`, from which the
-harness derives canonical facts.
+backlog drained, or route work. Reconfiguration invalidates the local stream
+generation and its registrations, offset, backlog state, and in-flight
+responses.
 
-Harness replay performs no Telegram I/O or report submission and reconstructs no live
-registration, route, link, or stream ownership. This is distinct from gateway
-restart recovery of its own durable cursor and deduplication state.
+Harness replay performs no Telegram I/O and reconstructs no live stream
+ownership. Gateway restart recovery of its own durable cursor and deduplication
+state is governed separately by
+[SPEC-tau-telegram-gateway](SPEC-tau-telegram-gateway.md).

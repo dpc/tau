@@ -226,10 +226,10 @@ ephemeral current state and publishing protected harness-sourced
 clients and extensions, sequences events, applies interception, persists durable
 session/agent facts, and delivers committed events to subscribers.
 
-The harness also owns the bounded, redacted discovery snapshots specified by
-[SPEC-tau-harness-peer-discovery](SPEC-tau-harness-peer-discovery.md).
-Runtime metadata advertises only an untrusted entrypoint hint; the live harness
-confirms its current session and effective policy through a narrow probe.
+The harness also owns bounded, redacted peer and local-agent discovery
+snapshots. Runtime metadata advertises only an untrusted entrypoint hint; the
+live harness confirms its current session and effective policy through a narrow
+probe.
 The same event loop owns inter-session receiver admission, fair live selection,
 and configured-order role auto-start. It admits bounded count/bytes/rate before
 creation, treats pending and busy eligible agents as reusable endpoints, and
