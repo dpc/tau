@@ -139,12 +139,21 @@ test -n "$scratch_root" && test "$scratch_root" != / &&
 ## Durable journal append tests
 
 Keep failure-atomic journal tests separated by ownership. `tau-core`'s
-`record_log` tests exhaust length-prefix and payload offsets, commit sync, and
-both rollback operations. Agent and session store tests prove derived-state,
+`record_log` tests exhaust length-prefix and payload offsets plus rollback
+truncation. Agent and session store tests prove derived-state,
 metadata/checkpoint, sequence-retry, restore-stream, and per-path poison
-behavior. Replay tests append a valid frame after a partial frame to preserve the
-strict no-salvage contract. Use deterministic injected I/O failures without
+behavior. Recovery tests append a valid frame after a partial or semantically
+invalid frame and prove the entire suffix is truncated. Read-only snapshot tests
+remain strict. Use deterministic injected I/O failures without
 sleeps or timing assumptions.
+
+`tau-core::journal_sync::JournalSyncWorker` owns deterministic writeback tests.
+They cover lazy spawn attempts and target-kind ordering,
+generation/offset lost-wake handshakes, exact created-directory coverage, fair
+per-path retry backoff, partial directory retry through dirty-state clearance,
+and detached shutdown. Store tests prove a later semantic append and fold completes
+while sync is blocked. Recovery tests prove repair marks the journal dirty and
+failed session-metadata rebuild remains retryable across restart.
 
 ## Provider response streaming tests
 

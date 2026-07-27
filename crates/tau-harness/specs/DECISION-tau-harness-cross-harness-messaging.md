@@ -8,11 +8,17 @@ authentication run off the central harness event loop with bounded admission and
 deadlines. Sender identity and exact-versus-bare recipient authority remain typed
 protocol values rather than being packed into agent IDs.
 
-A sender records success only after the target commits its receive projection.
+A sender records success only after the target completes the authoritative
+foreground framed write for its receive projection. This commit does not wait
+for background filesystem sync, so an acknowledgement can escape and survive a
+crash that loses the receive fact.
 Delivery is nevertheless cooperative same-UID, best-effort at-least-once IPC; a
 crash after commit but before acknowledgement can duplicate work. Tau accepts
 that ambiguity rather than adding a distributed WAL, restart deduplication, or a
 transaction coordinator.
+
+The storage boundary is governed by
+[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
 
 The RPC protects against accidental misrouting, not malicious same-user
 processes. Exact behavior is specified by

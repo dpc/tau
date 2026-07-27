@@ -73,7 +73,7 @@ human-confirmed decision mandated by
 
 Provider prompt materialization crosses the semantic-store and extension-route
 boundary: a durable dispatch owner permits one content-free prompt-start append,
-and only its data-synced post-commit continuation directs the transient full
+and only its write-complete post-commit continuation directs the transient full
 request to the selected provider. The authority and crash cuts are governed by
 [DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
 
@@ -143,7 +143,9 @@ worker owns every append handle and performs directory/open work, per-line
 accounting includes queued and in-flight line-plus-path bytes; overflow and
 recoverable I/O omit diagnostics, while uncertain rollback poisons the singleton.
 No harness lifecycle owns, drains, joins, or fsyncs this worker. Authoritative
-CBOR journals never use its queue or lock. See
+CBOR journals never use its queue or lock; they use a separate lifecycle-owned
+coalesced sync worker under
+[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md). See
 [DECISION-async-debug-event-log-writes](../../../specs/DECISION-async-debug-event-log-writes.md).
 
 Configured Provider execution uses the same generic commit boundary. Five `_reported`

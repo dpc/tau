@@ -73,15 +73,16 @@ is not transacted with it. Completed-call tracking then prevents a duplicate
 report from repeating canonical projections or cleanup; the duplicate report
 itself remains an ordinary committed peer observation.
 
-An authoritative append error caused by physical storage or persisted-journal
-integrity failure storage-faults the live harness epoch. Pre-write validation,
-encoding, size-limit, identity, and persistence-mode rejection does not latch
-the fail-stop. After a storage fault, the harness publishes no renderer
-projection, applies no terminal-dependent state, rejects further semantic work,
-and retains no exact terminal or continuation for online retry. Reopen or
-restart rebuilds from the committed prefix; cold recovery never automatically
+An authoritative foreground append error rejects that terminal operation before
+renderer projection or terminal-dependent state. Clean open, lock, and write
+failures remain retryable; an unrestored partial write poisons only its journal.
+Background sync failure neither retracts the semantic append nor fail-stops the
+live harness epoch. Reopen or restart rebuilds the longest valid prefix; cold
+recovery never automatically
 resends an uncertain tool, provider, or compaction effect. This is governed by
 [DECISION-tool-terminal-publication-transactions](DECISION-tool-terminal-publication-transactions.md).
+The writeback and recovery boundary is governed by
+[DECISION-semantic-journal-writeback-durability](DECISION-semantic-journal-writeback-durability.md).
 
 ## Persistence, debug logging, and replay
 

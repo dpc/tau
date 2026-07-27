@@ -55,10 +55,10 @@ fn reply(harness: &mut Harness, action: InterceptAction) {
         .expect("resolve terminal interception");
 }
 
-/// A provider-terminal append error fail-stops the live semantic epoch without
-/// projecting, settling, or retrying the rejected result online.
+/// A provider-terminal append error rejects that attempt without faulting the
+/// live epoch; the same report may retry after the path recovers.
 #[test]
-fn provider_terminal_append_failure_fail_stops_semantic_work() {
+fn provider_terminal_append_failure_remains_retryable() {
     let (_tmp, mut harness) = setup_routed_test_tool_call("store-fault", "owned_tool");
     let cid = harness.tool_agents["store-fault"].clone();
     let tools_in_flight = harness.agents[&cid].tools_in_flight;
@@ -82,11 +82,6 @@ fn provider_terminal_append_failure_fail_stops_semantic_work() {
         .handle_extension_event("conn-owner", TestProtocolItem::Event(report.clone()))
         .expect("raw report remains a bounded observation");
 
-    let fault = harness
-        .semantic_storage_fault
-        .as_ref()
-        .expect("append failure faults the live epoch");
-    assert_eq!(fault.event_name, tau_proto::EventName::PROVIDER_TOOL_RESULT);
     assert!(harness.tool_agents.contains_key("store-fault"));
     assert_eq!(harness.agents[&cid].tools_in_flight, tools_in_flight);
     assert!(
@@ -104,26 +99,19 @@ fn provider_terminal_append_failure_fail_stops_semantic_work() {
             .any(|call| call.call_id.as_str() == "store-fault")
     );
 
-    intercept_terminal_names(
-        &mut harness,
-        vec![tau_proto::EventName::PROVIDER_TOOL_RESULT],
-    );
     std::fs::remove_dir(&journal).expect("remove journal blocker");
     std::fs::rename(&backup, &journal).expect("restore journal");
     harness
         .handle_extension_event("conn-owner", TestProtocolItem::Event(report))
         .expect("later observation remains bounded");
-    assert!(
-        harness.pending_intercept.is_none(),
-        "faulted semantic work must be rejected before interception"
-    );
+    assert!(harness.pending_intercept.is_none());
     assert!(harness.deferred_publishes.is_empty());
     assert!(harness.agents[&cid].pending_prompts.is_empty());
     let notices_before = event_log_events(&harness)
         .iter()
         .filter(|event| matches!(event, Event::HarnessNotice(_)))
         .count();
-    harness.emit_info("nonsemantic publication remains live after fail-stop");
+    harness.emit_info("nonsemantic publication remains live after append failure");
     assert_eq!(
         event_log_events(&harness)
             .iter()
@@ -131,15 +119,15 @@ fn provider_terminal_append_failure_fail_stops_semantic_work() {
             .count(),
         notices_before + 1
     );
-    assert!(harness.tool_agents.contains_key("store-fault"));
-    assert_eq!(harness.agents[&cid].tools_in_flight, tools_in_flight);
+    assert!(!harness.tool_agents.contains_key("store-fault"));
+    assert_eq!(harness.agents[&cid].tools_in_flight, tools_in_flight - 1);
     assert!(
-        !committed_terminal_events(&harness, "store-fault")
+        committed_terminal_events(&harness, "store-fault")
             .iter()
             .any(|(_, event)| matches!(event, Event::ToolResult(_)))
     );
     assert!(
-        !harness
+        harness
             .agent_store
             .agent_events(&agent_id)
             .expect("read restored agent journal")
@@ -149,7 +137,7 @@ fn provider_terminal_append_failure_fail_stops_semantic_work() {
 }
 
 /// Transcript validation rejection is not a physical or integrity storage
-/// failure and does not fault the live semantic epoch.
+/// failure while later clean appends remain retryable.
 #[test]
 fn provider_terminal_validation_rejection_does_not_fail_stop() {
     let tmp = TempDir::new().expect("tempdir");
@@ -160,7 +148,6 @@ fn provider_terminal_validation_rejection_does_not_fail_stop() {
         Event::ProviderToolResult(final_tool_result("missing-open-call", "missing", "invalid")),
     );
 
-    assert!(harness.semantic_storage_fault.is_none());
     let agent_id = harness.agents[&cid]
         .agent_id
         .clone()
@@ -225,10 +212,9 @@ fn direct_append_fault_discards_deferred_terminal() {
     std::fs::rename(&backup, &journal).expect("restore journal");
 
     reply(&mut harness, InterceptAction::Pass(None));
-    assert!(harness.semantic_storage_fault.is_some());
     assert!(harness.pending_intercept.is_none());
     assert!(harness.deferred_publishes.is_empty());
-    assert!(harness.tool_agents.contains_key("deferred-fault"));
+    assert!(!harness.tool_agents.contains_key("deferred-fault"));
     harness.publish_terminal_tool_result(
         None,
         None,
@@ -261,8 +247,8 @@ fn direct_append_fault_discards_deferred_terminal() {
     assert!(
         harness
             .try_create_durable_user_agent(session_id, &role)
-            .is_err(),
-        "direct semantic work stays fail-stopped"
+            .is_ok(),
+        "later semantic work remains available"
     );
 }
 

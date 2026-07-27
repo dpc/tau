@@ -21,7 +21,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, ConnectionId, Event, SessionId, UnixMicros};
 
-use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES};
+use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES, missing_directories};
 use crate::session::SessionMeta;
 
 /// Persistence policy for session events and sidecar state.
@@ -368,11 +368,11 @@ impl SessionMembership {
 /// logs, metadata, or locks. Both ordinary session events and execution/restore
 /// facts remain available for same-daemon replay.
 ///
-/// Durable frame failures return their original I/O error after an exact-EOF,
-/// data-synced rollback. If rollback is uncertain, the store poisons only that
+/// Durable frame failures return their original I/O error after an exact-EOF
+/// rollback. If truncation cannot restore that EOF, the store poisons only that
 /// ordinary or restore journal and rejects later appends before reopening it.
-/// Sequences, membership, and session metadata advance only after frame data
-/// sync.
+/// Complete frames advance in-memory state immediately while a coalesced worker
+/// syncs journals in the background.
 ///
 /// Durable replay and memory-only parity follow
 /// `DECISION-tau-core-semantic-store-durability`.
@@ -381,6 +381,8 @@ pub struct SessionStore {
     sessions_dir: PathBuf,
     /// Failure-atomic append and per-journal poison state.
     framed_appends: FramedAppendState,
+    /// Store-root boundary re-covered after the first successful branch lock.
+    pending_root_boundary: Option<PathBuf>,
     sessions: HashMap<SessionId, SessionMembership>,
     /// Ordinary replay records retained by a wholly ephemeral session.
     ephemeral_events: HashMap<SessionId, Vec<PersistedSessionEvent>>,
@@ -391,6 +393,8 @@ pub struct SessionStore {
     ephemeral_membership_overlay: HashMap<SessionId, Vec<PersistedSessionEvent>>,
     restore_events: HashMap<SessionId, Vec<PersistedSessionEvent>>,
     locks: HashMap<SessionId, File>,
+    /// Sessions whose journal-derived metadata sidecar still needs rebuilding.
+    dirty_meta_rebuilds: std::collections::HashSet<SessionId>,
     mode: SessionPersistenceMode,
 }
 
@@ -423,20 +427,25 @@ impl SessionStore {
     /// Opens the session store without loading existing session logs.
     pub fn open_lazy(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
         let sessions_dir = sessions_dir.into();
+        let created_directories = missing_directories(&sessions_dir);
         fs::create_dir_all(&sessions_dir).map_err(|source| {
             SessionStoreError::CreateParentDirectory {
                 path: sessions_dir.clone(),
                 source,
             }
         })?;
+        let mut framed_appends = FramedAppendState::default();
+        framed_appends.note_created_directories(created_directories);
         Ok(Self {
-            sessions_dir,
-            framed_appends: FramedAppendState::default(),
+            sessions_dir: sessions_dir.clone(),
+            framed_appends,
+            pending_root_boundary: Some(sessions_dir.clone()),
             sessions: HashMap::new(),
             ephemeral_events: HashMap::new(),
             ephemeral_membership_overlay: HashMap::new(),
             restore_events: HashMap::new(),
             locks: HashMap::new(),
+            dirty_meta_rebuilds: std::collections::HashSet::new(),
             mode: SessionPersistenceMode::Durable,
         })
     }
@@ -450,11 +459,13 @@ impl SessionStore {
         Ok(Self {
             sessions_dir: sessions_dir.into(),
             framed_appends: FramedAppendState::default(),
+            pending_root_boundary: None,
             sessions: HashMap::new(),
             ephemeral_events: HashMap::new(),
             ephemeral_membership_overlay: HashMap::new(),
             restore_events: HashMap::new(),
             locks: HashMap::new(),
+            dirty_meta_rebuilds: std::collections::HashSet::new(),
             mode: SessionPersistenceMode::Ephemeral,
         })
     }
@@ -492,12 +503,15 @@ impl SessionStore {
             return Ok(false);
         }
         let session_dir = self.session_dir(&sid);
+        let created_directories = missing_directories(&session_dir);
         fs::create_dir_all(&session_dir).map_err(|source| {
             SessionStoreError::CreateParentDirectory {
                 path: session_dir.clone(),
                 source,
             }
         })?;
+        self.framed_appends
+            .note_created_directories(created_directories);
         let lock_path = session_dir.join("lock");
         let mut file = OpenOptions::new()
             .create(true)
@@ -517,6 +531,10 @@ impl SessionStore {
                 holder,
             });
         }
+        if let Some(root) = self.pending_root_boundary.take() {
+            self.framed_appends.note_directory_boundary_chain(&root);
+        }
+        self.framed_appends.note_directory_boundary(&session_dir);
         file.set_len(0).map_err(|source| SessionStoreError::Write {
             path: lock_path.clone(),
             source,
@@ -589,8 +607,8 @@ impl SessionStore {
     /// non-membership/durable-agent facts requested as ephemeral in a durable
     /// store, unmatched overlay unloads, lock failures, or durable I/O
     /// failures. Rollback uncertainty poisons only the selected durable
-    /// journal; sequences, membership, and metadata advance only after
-    /// frame data sync.
+    /// journal. Complete frames advance sequences, membership, and metadata
+    /// before background writeback.
     pub fn append_session_event_at_with_persistence(
         &mut self,
         session_id: &str,
@@ -740,9 +758,9 @@ impl SessionStore {
     /// # Errors
     ///
     /// Returns [`SessionStoreError`] for invalid restore facts or session ids,
-    /// strict replay, lock, and durable I/O failures, or a restore journal
-    /// poisoned by uncertain rollback. A frame failure returns its original
-    /// error after successful rollback.
+    /// lock and foreground I/O failures, or a restore journal poisoned by an
+    /// unrestored partial write. Locked replay truncates an invalid suffix
+    /// before choosing the next sequence.
     pub fn append_session_restore_event_at(
         &mut self,
         session_id: &str,
@@ -771,10 +789,21 @@ impl SessionStore {
                 source,
             })?;
         let _ = self.lock_and_load_session(session_id)?;
-        let events = load_session_events(&path)?;
-        for record in &events {
-            validate_restore_event(&record.event)?;
-        }
+        let mut expected_seq = PersistedSessionEventSeq::new(0);
+        let recovered = self
+            .framed_appends
+            .recover(&path, |record: &PersistedSessionEvent| {
+                if record.seq != expected_seq || validate_restore_event(&record.event).is_err() {
+                    return false;
+                }
+                expected_seq = expected_seq.next();
+                true
+            })
+            .map_err(|source| SessionStoreError::Read {
+                path: path.clone(),
+                source,
+            })?;
+        let events = recovered.records;
         let seq = PersistedSessionEventSeq::new(events.len() as u64);
         append_cbor_record(
             &mut self.framed_appends,
@@ -817,6 +846,33 @@ impl SessionStore {
         Ok(events)
     }
 
+    /// Acquires the session writer lock and recovers the longest valid restore
+    /// journal prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionStoreError`] for invalid ids, lock or journal I/O
+    /// failure, or inability to truncate an invalid suffix.
+    pub fn lock_and_recover_session_restore_events(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
+        let sid = validate_session_id(session_id)?;
+        let _ = self.lock_and_load_session(session_id)?;
+        let path = self.session_dir(&sid).join("restore-events.cbor");
+        let mut expected_seq = PersistedSessionEventSeq::new(0);
+        self.framed_appends
+            .recover(&path, |record: &PersistedSessionEvent| {
+                if record.seq != expected_seq || validate_restore_event(&record.event).is_err() {
+                    return false;
+                }
+                expected_seq = expected_seq.next();
+                true
+            })
+            .map(|recovered| recovered.records)
+            .map_err(|source| SessionStoreError::Read { path, source })
+    }
+
     /// Returns the storage root for session event containers.
     #[must_use]
     pub fn sessions_dir(&self) -> &Path {
@@ -846,11 +902,64 @@ impl SessionStore {
         if self.ensure_locked(session_id.as_str())? {
             self.sessions.remove(&session_id);
         }
+        if self.dirty_meta_rebuilds.contains(&session_id) {
+            let meta_path = self.session_dir(&session_id).join("meta.json");
+            match fs::remove_file(&meta_path) {
+                Ok(()) => {
+                    self.dirty_meta_rebuilds.remove(&session_id);
+                    self.sessions.remove(&session_id);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    self.dirty_meta_rebuilds.remove(&session_id);
+                    self.sessions.remove(&session_id);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "tau: failed to retry repaired session metadata rebuild {}: {error}",
+                        meta_path.display()
+                    );
+                }
+            }
+        }
         if self.mode.is_durable() && !self.sessions.contains_key(&session_id) {
             let path = self.session_dir(&session_id).join("events.cbor");
             let overlay = self.ephemeral_membership_overlay.get(&session_id);
             if path.exists() || overlay.is_some_and(|events| !events.is_empty()) {
-                let events = load_session_events(&path)?;
+                let mut expected_seq = PersistedSessionEventSeq::new(0);
+                let recovered = self
+                    .framed_appends
+                    .recover(&path, |record: &PersistedSessionEvent| {
+                        if record.seq != expected_seq
+                            || validate_session_event(session_id.as_str(), &record.event).is_err()
+                        {
+                            return false;
+                        }
+                        expected_seq = expected_seq.next();
+                        true
+                    })
+                    .map_err(|source| SessionStoreError::Read {
+                        path: path.clone(),
+                        source,
+                    })?;
+                let events = recovered.records;
+                let meta_path = self.session_dir(&session_id).join("meta.json");
+                let rebuilt_meta = SessionMeta {
+                    created_at: events
+                        .first()
+                        .map_or(0, |record| record.recorded_at.get() / 1_000_000),
+                    last_touched: events
+                        .last()
+                        .map_or(0, |record| record.recorded_at.get() / 1_000_000),
+                };
+                if let Err(error) = write_meta(&meta_path, &rebuilt_meta) {
+                    eprintln!(
+                        "tau: failed to rebuild session metadata {}: {error}",
+                        meta_path.display()
+                    );
+                    self.dirty_meta_rebuilds.insert(session_id.clone());
+                } else {
+                    self.dirty_meta_rebuilds.remove(&session_id);
+                }
                 let mut membership =
                     SessionMembership::try_from_events(session_id.clone(), &events)?;
                 if let Some(overlay) = overlay {
@@ -1118,6 +1227,7 @@ fn append_cbor_record<T: Serialize>(
     })?;
     let record_length = encoded.len() as u64;
     validate_record_length(path, record_length)?;
+    let newly_created = !path.exists();
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1126,6 +1236,9 @@ fn append_cbor_record<T: Serialize>(
             path: path.to_path_buf(),
             source,
         })?;
+    if newly_created {
+        framed_appends.note_created_journal(path, &file);
+    }
     framed_appends
         .append(path, &mut file, &encoded)
         .map(|_| ())
@@ -1203,12 +1316,21 @@ where
                 path: path.to_path_buf(),
                 source,
             })?;
-        let record = ciborium::from_reader(record_bytes.as_slice()).map_err(|source| {
-            SessionStoreError::Decode {
+        let mut cursor = io::Cursor::new(record_bytes.as_slice());
+        let record =
+            ciborium::from_reader(&mut cursor).map_err(|source| SessionStoreError::Decode {
                 path: path.to_path_buf(),
                 source,
-            }
-        })?;
+            })?;
+        if cursor.position() != record_length {
+            return Err(SessionStoreError::Read {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "record payload contains trailing bytes",
+                ),
+            });
+        }
         handle(record);
     }
 }

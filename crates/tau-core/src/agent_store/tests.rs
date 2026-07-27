@@ -1,4 +1,5 @@
 use super::*;
+use crate::journal_sync::SyncTargetKind;
 use crate::record_log::AppendFault;
 
 fn facts_budget(max_record_bytes: u64, remaining_bytes: u64) -> AgentCreationFactsBudget {
@@ -22,6 +23,79 @@ fn write_record_limit_matches_read_limit() {
             ..
         } if record_length == MAX_RECORD_BYTES + 1
     ));
+}
+
+/// A later semantic append and fold complete while prior journal sync remains
+/// blocked in the background.
+#[test]
+fn semantic_append_continues_while_sync_is_blocked() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+    let sync = store.framed_appends.inject_blocking_sync();
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation appends");
+    assert!(sync.wait_until_blocked(), "worker did not block");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let continued_id = agent_id.clone();
+    let continuation = std::thread::spawn(move || {
+        let result = store.append_agent_event(
+            continued_id.as_str(),
+            None,
+            display_name_event(&continued_id, "continued"),
+        );
+        tx.send((store, result)).expect("send continuation");
+    });
+    let received = rx.recv_timeout(std::time::Duration::from_secs(2));
+    sync.release();
+    let (store, result) = received.expect("later semantic append blocked on sync");
+    result.expect("later semantic append completes");
+    continuation.join().expect("continuation thread");
+    assert_eq!(
+        store.agent(&agent_id).and_then(AgentTree::display_name),
+        Some("continued")
+    );
+}
+
+/// A later writable lifetime re-covers both an existing store root and its
+/// locked branch as independent typed boundary targets.
+#[test]
+fn writable_reopen_recovers_store_root_and_branch_boundaries() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = temp.path().join("state/agents");
+    {
+        let created = missing_directories(&agents_dir);
+        fs::create_dir_all(&agents_dir).expect("first lifetime creates root");
+        let mut first = FramedAppendState::default();
+        first.inject_sync_spawn_failure();
+        first.note_created_directories(created);
+        assert!(first.dirty_target(&agents_dir).is_some());
+    }
+    let mut store = AgentStore::open_lazy(&agents_dir).expect("second store opens");
+    store.framed_appends.inject_sync_spawn_failure();
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("writable append");
+
+    let root_target = store
+        .framed_appends
+        .dirty_target(&agents_dir)
+        .expect("store-root target");
+    assert!(root_target.directories.contains(&temp.path().join("state")));
+    assert!(root_target.directories.contains(&temp.path().to_path_buf()));
+    assert_eq!(root_target.kind, SyncTargetKind::DirectoryBoundary);
+    let branch = agents_dir.join(agent_id.as_str());
+    let branch_target = store
+        .framed_appends
+        .dirty_target(&branch)
+        .expect("branch target");
+    assert_eq!(
+        branch_target.directories,
+        [agents_dir].into_iter().collect()
+    );
+    assert_eq!(branch_target.kind, SyncTargetKind::DirectoryBoundary);
 }
 
 /// The roster enrichment path reads immutable creation fields and the latest
@@ -391,7 +465,7 @@ fn rollback_failure_poisons_agent_journal() {
     assert!(
         poisoned
             .to_string()
-            .contains("append disabled after an incomplete durable rollback")
+            .contains("append disabled after an incomplete rollback")
     );
     assert_eq!(other.seq, PersistedAgentEventSeq::new(0));
     assert_eq!(
@@ -400,8 +474,8 @@ fn rollback_failure_poisons_agent_journal() {
     );
 }
 
-/// Strict replay rejects a partial frame even when a complete valid frame
-/// follows it, preventing suffix-based salvage.
+/// Read-only replay rejects a partial frame, while the next locked append keeps
+/// the valid prefix and removes the torn frame plus valid-looking suffix.
 #[test]
 fn strict_replay_rejects_partial_frame_before_valid_suffix() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -442,6 +516,25 @@ fn strict_replay_rejects_partial_frame_before_valid_suffix() {
     let error = AgentStore::open(temp.path()).expect_err("strict replay rejects torn frame");
 
     assert!(matches!(error, AgentStoreError::Read { .. }));
+    let mut store = AgentStore::open_lazy(temp.path()).expect("lazy store opens");
+    let appended = store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            display_name_event(&agent_id, "recovered"),
+            UnixMicros::new(43),
+        )
+        .expect("locked append repairs suffix");
+    assert_eq!(appended.seq, PersistedAgentEventSeq::new(1));
+    let events = store
+        .agent_events(agent_id.as_str())
+        .expect("journal reads");
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[1].event,
+        Event::AgentDisplayNameSet(name) if name.display_name == "recovered"
+    ));
 }
 
 /// Builds the immutable first event used by durable append tests.

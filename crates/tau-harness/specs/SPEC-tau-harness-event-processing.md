@@ -291,8 +291,9 @@ must remain live-only and must not run from replayed delivery envelopes.
 Historical catch-up also includes replay-marked current-state snapshots (for
 example loaded-agent, metadata, and session-dir facts), with live events buffered
 until the non-replay replay-complete boundary. Ephemeral session stores keep
-restore facts only in same-daemon memory, while durable restore logs fail closed
-on corrupt or semantically invalid existing records instead of being extended.
+restore facts only in same-daemon memory. A journal-backed writer recovers
+restore facts under the session lock by truncating the first invalid record and
+its complete suffix before append; read-only historical replay remains strict.
 
 ## Interceptor confidentiality
 

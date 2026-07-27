@@ -10,9 +10,10 @@ Nothing that assumes the terminal exists may advance before its semantic append
 commits. Renderer-facing output is derived and delivered afterward; renderer and
 provider publications are not one transaction.
 
-Physical-storage or persisted-journal-integrity failure puts the affected
-journal and live session/harness epoch into a fail-stop state until reopen or
-restart. Recovery rebuilds only from the committed prefix and must not
+Foreground open, lock, write, or unrecoverable rollback failure prevents that
+semantic append. Background sync failure does not fail-stop the journal or live
+epoch. Locked recovery rebuilds the longest valid prefix, truncates its invalid
+suffix, and must not
 automatically resend uncertain tool, provider, or compaction effects.
 
 ## Rationale
@@ -25,3 +26,5 @@ This decision is governed by
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md)
 and constrains
 [SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+The physical-storage failure clause is superseded by
+[DECISION-semantic-journal-writeback-durability](DECISION-semantic-journal-writeback-durability.md).

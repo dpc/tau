@@ -77,8 +77,11 @@ agents, model work, and spend. Each accepted directional occurrence is its
 owning journal's sole canonical payload projection. Local inbound provider
 context exact-close-frames peer text inside a sender-labelled wrapper; live activation
 uses a payload-free sequence wake, and replay restores context without waking.
-The target commit remains ACK authority, so Tau adds no restart deduplication,
-distributed WAL, or cross-journal transaction.
+The target's complete foreground framed write remains ACK authority; ACK does
+not wait for background filesystem sync. An ACK or provider effect can therefore
+survive a crash that loses its journal fact. Tau adds no restart deduplication,
+distributed WAL, or cross-journal transaction. See
+[DECISION-semantic-journal-writeback-durability](specs/DECISION-semantic-journal-writeback-durability.md).
 
 ## Agent journals and summary checkpoints
 
@@ -91,20 +94,24 @@ and time budgets. Metadata-only, empty, corrupt, or otherwise unvalidated
 artifacts reserve ids but cannot receive routed facts.
 
 Agent `events.cbor` and session `events.cbor`/`restore-events.cbor` use
-length-prefixed CBOR frames. Prefix, payload, or frame-data-sync failure triggers
-truncation to the exact pre-append EOF and a rollback data sync before the caller
-receives the original append error. Failure of either rollback operation poisons
-only that journal path in the live store; later appends reject it before opening
-the journal. Folded state, sequences, agent checkpoints, and session metadata
-advance only after frame data sync succeeds. Poison is process-local: a crash
-during rollback can leave a partial frame, and restart remains strict rather than
-salvaging a valid-looking suffix. Re-check byte-boundary, commit-sync,
-rollback-failure, retry-sequence, restore-journal, and suffix regressions whenever
+length-prefixed CBOR frames. Prefix or payload-write failure triggers truncation
+to the exact pre-append EOF before the caller receives the original append
+error. Only failure to restore that EOF poisons the journal path in the live
+store. A complete frame immediately advances folded state and sequence.
+
+A lifecycle-owned worker coalesces dirty journals and required directory
+coverage, syncs in the background, tracks generations to avoid lost wakes, and
+retries failures without retracting accepted facts. Locked recovery truncates
+the first invalid frame and all later bytes, invalidates derived metadata, and
+never salvages a valid-looking suffix. Re-check byte-boundary, rollback-failure,
+retry-sequence, restore-journal, writeback, and suffix regressions whenever
 framed I/O changes.
 
-Provider work leaves the harness only after its durable inference or compaction
-owner and one matching source-free `agent.prompt_started` frame have both
-data-synced. The fact's one-shot continuation rechecks the semantic epoch, session,
+Provider work leaves the harness only after its inference or compaction owner
+and one matching source-free `agent.prompt_started` frame have completed
+foreground semantic appends. Delivery does not wait for background sync, so a
+crash can preserve provider effects while losing journal facts. The fact's
+one-shot continuation rechecks the session,
 loaded runtime incarnation, unresolved owner, exact identity, and captured route
 before directing the transient full prompt; an owner-only or owner-plus-start crash
 cut never resends work. Persisted old full prompts are unsupported. Debug JSONL
@@ -133,8 +140,9 @@ warning coalescing, and nonjoining exit whenever debug-log I/O changes.
 
 Summary files intentionally omit prompt previews. Legacy preview-bearing
 sidecars are unverified hints and are scrubbed when strict journal migration can
-acquire the agent lock. Repair never rewrites or salvages a journal, and failure
-to publish derived metadata does not invalidate an already committed record.
+acquire the agent lock. Bounded checkpoint repair never rewrites journal facts;
+writer recovery may truncate an invalid suffix but never salvages later bytes.
+Failure to publish derived metadata does not invalidate an already committed record.
 This is cooperative same-UID crash consistency, not tamper detection: arbitrary
 same-inode/same-size journal mutation is outside the append-only store contract.
 

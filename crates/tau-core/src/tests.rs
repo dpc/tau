@@ -1688,10 +1688,10 @@ fn ephemeral_session_restore_log_replays_from_memory_only() {
     assert_eq!(events[0].event, started);
 }
 
-/// Restore logs fail closed on corrupt sequence state rather than silently
-/// restarting at sequence zero and appending over suspect history.
+/// Restore logs truncate at the first invalid sequence and restart at the
+/// recovered prefix cursor.
 #[test]
-fn session_restore_append_rejects_invalid_existing_sequence() {
+fn session_restore_append_recovers_invalid_existing_sequence() {
     let sessions_dir = temp_dir("bad-session-restore-seq");
     let session_dir = sessions_dir.join("session-1");
     let path = session_dir.join("restore-events.cbor");
@@ -1710,23 +1710,27 @@ fn session_restore_append_rejects_invalid_existing_sequence() {
     append_raw_cbor(&path, &bad);
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
 
-    let error = store
+    store
         .append_session_restore_event_at(
             "session-1",
             None,
             bad.event.clone(),
             tau_proto::UnixMicros::new(2),
         )
-        .expect_err("invalid restore sequence must fail");
-    assert!(matches!(error, SessionStoreError::InvalidSequence { .. }));
+        .expect("invalid restore sequence is truncated");
+    let records = store
+        .session_restore_events("session-1")
+        .expect("recovered restore log reads");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].seq, PersistedSessionEventSeq::new(0));
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
-/// Restore-log appends read existing records first, so a torn restore log is
-/// reported instead of being extended with a misleading fresh sequence.
+/// Restore-log append recovery removes a torn suffix before appending sequence
+/// zero again.
 #[test]
-fn session_restore_append_rejects_truncated_existing_log() {
+fn session_restore_append_recovers_truncated_existing_log() {
     let sessions_dir = temp_dir("bad-session-restore-truncated");
     let path = sessions_dir.join("session-1").join("restore-events.cbor");
     std::fs::create_dir_all(path.parent().expect("restore parent")).expect("create parent");
@@ -1740,19 +1744,22 @@ fn session_restore_append_rejects_truncated_existing_log() {
         originator: PromptOriginator::User,
     });
 
-    let error = store
+    store
         .append_session_restore_event_at("session-1", None, event, tau_proto::UnixMicros::new(2))
-        .expect_err("truncated restore log must fail");
-    assert!(matches!(error, SessionStoreError::Read { .. }));
+        .expect("truncated restore log recovers");
+    let records = store
+        .session_restore_events("session-1")
+        .expect("recovered restore log reads");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].seq, PersistedSessionEventSeq::new(0));
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
-/// Restore-log appends validate the semantic contents of existing records, not
-/// only their CBOR framing and sequence numbers, so a membership log cannot be
-/// accidentally extended as if it were a restore stream.
+/// Restore-log append recovery removes a semantically invalid suffix before
+/// appending the next valid restore fact.
 #[test]
-fn session_restore_append_rejects_wrong_existing_event_kind() {
+fn session_restore_append_recovers_wrong_existing_event_kind() {
     let sessions_dir = temp_dir("bad-session-restore-kind");
     let path = sessions_dir.join("session-1").join("restore-events.cbor");
     let wrong = PersistedSessionEvent {
@@ -1777,10 +1784,14 @@ fn session_restore_append_rejects_wrong_existing_event_kind() {
         originator: PromptOriginator::User,
     });
 
-    let error = store
+    store
         .append_session_restore_event_at("session-1", None, event, tau_proto::UnixMicros::new(2))
-        .expect_err("wrong restore event kind must fail");
-    assert!(matches!(error, SessionStoreError::InvalidEvent { .. }));
+        .expect("wrong restore event kind is truncated");
+    let records = store
+        .session_restore_events("session-1")
+        .expect("recovered restore log reads");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].seq, PersistedSessionEventSeq::new(0));
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
@@ -2056,11 +2067,10 @@ fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
-/// A failed lock-time reload must invalidate an unlocked cached view so retries
-/// cannot bypass corruption validation and append with its stale sequence
-/// cursor.
+/// A lock-time reload truncates an invalid sequence suffix and appends from the
+/// recovered cursor rather than reusing an unlocked cached cursor.
 #[test]
-fn session_store_revalidates_after_failed_lock_time_reload() {
+fn session_store_recovers_at_lock_time_reload() {
     let sessions_dir = temp_dir("sessions-lock-reload-corrupt");
     let events_path = sessions_dir.join("session-1").join("events.cbor");
     let mut setup = SessionStore::open(&sessions_dir).expect("setup session store");
@@ -2084,40 +2094,25 @@ fn session_store_revalidates_after_failed_lock_time_reload() {
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );
-    let journal_before = std::fs::read(&events_path).expect("corrupt journal");
-
-    for attempt in 0..2 {
-        let error = store
-            .lock_and_load_session("session-1")
-            .expect_err("corrupt reload must fail");
-        assert!(
-            matches!(error, SessionStoreError::InvalidSequence { .. }),
-            "attempt {attempt} must retain typed corruption: {error}"
-        );
-    }
-    let append_error = store
+    let membership = store
+        .lock_and_load_session("session-1")
+        .expect("corrupt suffix recovers")
+        .expect("empty recovered membership exists");
+    assert!(membership.loaded_agents().is_empty());
+    let appended = store
         .append_session_event(
             "session-1",
             None,
             session_loaded("session-1", "agent-new", false),
         )
-        .expect_err("append must not reuse stale cached sequence");
-    assert!(matches!(
-        append_error,
-        SessionStoreError::InvalidSequence { .. }
-    ));
-    assert_eq!(
-        std::fs::read(&events_path).expect("journal remains"),
-        journal_before,
-        "failed retries must not mutate the corrupt journal"
-    );
+        .expect("append uses recovered sequence");
+    assert_eq!(appended.seq, PersistedSessionEventSeq::new(0));
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
-/// A successful retry after lock-time replay failure must compose the existing
-/// process-local overlay instead of restoring only the repaired durable
-/// journal.
+/// Lock-time recovery preserves and composes the existing process-local
+/// ephemeral membership overlay.
 #[test]
 fn session_store_replay_retry_preserves_ephemeral_membership_overlay() {
     let sessions_dir = temp_dir("sessions-lock-reload-overlay");
@@ -2131,7 +2126,6 @@ fn session_store_replay_retry_preserves_ephemeral_membership_overlay() {
         )
         .expect("baseline membership");
     drop(setup);
-    let durable_journal = std::fs::read(&events_path).expect("baseline journal");
     let mut store = SessionStore::open(&sessions_dir).expect("preload unlocked membership");
     store
         .append_session_event_at_with_persistence(
@@ -2153,17 +2147,11 @@ fn session_store_replay_retry_preserves_ephemeral_membership_overlay() {
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );
-    assert!(matches!(
-        store.lock_and_load_session("session-1"),
-        Err(SessionStoreError::InvalidSequence { .. })
-    ));
-
-    std::fs::write(&events_path, durable_journal).expect("repair durable journal");
     let membership = store
         .lock_and_load_session("session-1")
-        .expect("repaired retry")
-        .expect("repaired membership");
-    assert!(membership.contains_agent(&AgentId::parse("agent-durable").expect("agent id")));
+        .expect("corrupt suffix recovers")
+        .expect("overlay membership");
+    assert!(!membership.contains_agent(&AgentId::parse("agent-durable").expect("agent id")));
     assert!(membership.contains_agent(&AgentId::parse("agent-ephemeral").expect("agent id")));
 
     let _ = std::fs::remove_dir_all(sessions_dir);

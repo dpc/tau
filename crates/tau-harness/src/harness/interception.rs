@@ -1364,16 +1364,6 @@ impl Harness {
         sync_head_for: Option<ConversationHeadSync>,
         admission: Option<ExtensionFrameAdmission>,
     ) {
-        if self.semantic_publication_is_fail_stopped(&event, persist, sync_head_for.as_ref()) {
-            if let Some(prompt_id) = sync_head_for
-                .as_ref()
-                .and_then(ConversationHeadSync::prompt_dispatch)
-                .map(|continuation| continuation.started.agent_prompt_id.clone())
-            {
-                self.dispose_prompt_dispatch_bookkeeping(&prompt_id);
-            }
-            return;
-        }
         let shell_report_targets_ephemeral = match &event {
             Event::ShellCommandProgressReported(progress) => Some(&progress.command_id),
             Event::ShellCommandFinishedReported(finished) => Some(&finished.command_id),
@@ -1765,16 +1755,6 @@ impl Harness {
                 must_pass,
                 sync_head_for,
             } = deferred;
-            if self.semantic_publication_is_fail_stopped(&event, persist, sync_head_for.as_ref()) {
-                if let Some(prompt_id) = sync_head_for
-                    .as_ref()
-                    .and_then(ConversationHeadSync::prompt_dispatch)
-                    .map(|continuation| continuation.started.agent_prompt_id.clone())
-                {
-                    self.dispose_prompt_dispatch_bookkeeping(&prompt_id);
-                }
-                continue;
-            }
             self.dispatch_publish_step(source, event, persist, must_pass, sync_head_for, None);
         }
     }
@@ -1861,9 +1841,6 @@ impl Harness {
                     .iter()
                     .any(|queued| Self::same_deferred_prompt_dispatch(queued, &deferred))
             {
-                if self.semantic_storage_fault.is_some() {
-                    break;
-                }
                 attempted.push(deferred);
             }
         }

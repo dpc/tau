@@ -147,20 +147,22 @@ created. This implements
 
 ## Prompt dispatch lifecycle split
 
-Prompt dispatch first commits and syncs a lightweight, harness-authored durable
+Prompt dispatch first completes the foreground append of a lightweight, harness-authored
 `agent.prompt_started` materialization fact. That fact includes the provider
 operation, captured `ModelParams`, and the owning durable outer-turn id for
 ordinary inference, and must uniquely match one unresolved durable inference
 checkpoint or standalone-compaction start. Its one-shot live post-commit continuation then
 publishes the full transient `agent.prompt_created` provider work request.
+Provider delivery does not wait for background journal sync; a crash can leave a
+delivered request without that fact in the recovered prefix.
 Providers consume `agent.prompt_created`; UIs and side-effect observers should
 subscribe to `agent.prompt_started` so materialized prompt context and tool
 schemas are not sent over UI/control channels unnecessarily. Cold replay folds
 prompt-start facts for audit and generation state but never recreates full work
 or includes prompt starts in subscriber catch-up.
 
-Immediately before selected-provider delivery, the harness requires an
-unfaulted semantic epoch, the same session generation and loaded runtime
+Immediately before selected-provider delivery, the harness requires the same
+session generation and loaded runtime
 incarnation, the exact unresolved owner and compact fact, unchanged
 agent/prompt/model/operation identity, and the route captured from that model.
 Any mismatch fails closed. Persisted full `agent.prompt_created` records are

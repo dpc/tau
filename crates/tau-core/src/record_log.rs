@@ -3,10 +3,17 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+use serde::de::DeserializeOwned;
+
+#[cfg(test)]
+use crate::journal_sync::BlockingSyncHandle;
+#[cfg(test)]
+use crate::journal_sync::DirtyTargetSnapshot;
+use crate::journal_sync::JournalSyncWorker;
 
 /// Largest individual CBOR record that durable journal readers allocate.
 ///
@@ -14,6 +21,25 @@ use std::path::{Path, PathBuf};
 /// unbounded allocation. Writers use the same limit so every committed record
 /// remains readable by the matching loader.
 pub(crate) const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Returns the currently missing path components that `create_dir_all(path)`
+/// will create, from the highest missing ancestor through `path`.
+pub(crate) fn missing_directories(path: &Path) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let mut candidate = path;
+    while !candidate.exists() {
+        missing.push(candidate.to_path_buf());
+        let Some(parent) = candidate.parent() else {
+            break;
+        };
+        if parent == candidate {
+            break;
+        }
+        candidate = parent;
+    }
+    missing.reverse();
+    missing
+}
 
 /// Byte offsets for one successfully committed frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,10 +50,18 @@ pub(crate) struct FrameAppend {
     pub end_offset: u64,
 }
 
-/// One failed frame append and the status of its durable rollback.
+/// Records retained by prefix recovery and whether it truncated a suffix.
+pub(crate) struct RecoveredRecords<T> {
+    /// Fully decoded and caller-validated prefix.
+    pub records: Vec<T>,
+    /// Whether recovery removed an invalid suffix.
+    pub repaired: bool,
+}
+
+/// One failed frame append and the status of its exact-EOF rollback.
 #[derive(Debug)]
 struct FrameAppendError {
-    /// Original prefix, payload, or commit-sync failure.
+    /// Original prefix or payload-write failure.
     source: io::Error,
     /// Rollback failure, when the stream can no longer be trusted for appends.
     rollback: Option<io::Error>,
@@ -43,9 +77,6 @@ trait FrameIo {
 
     /// Truncates the stream to the supplied byte offset.
     fn truncate(&mut self, offset: u64) -> io::Result<()>;
-
-    /// Makes preceding data or truncation changes durable.
-    fn sync_data(&mut self) -> io::Result<()>;
 }
 
 impl FrameIo for File {
@@ -60,20 +91,18 @@ impl FrameIo for File {
     fn truncate(&mut self, offset: u64) -> io::Result<()> {
         self.set_len(offset)
     }
-
-    fn sync_data(&mut self) -> io::Result<()> {
-        File::sync_data(self)
-    }
 }
 
 /// Per-process append safety state shared by the durable store writers.
 ///
-/// A path enters `poisoned` only when Tau cannot durably restore its exact
-/// pre-append EOF. Later appends reject that path before opening it.
+/// A path enters `poisoned` only when Tau cannot restore its exact pre-append
+/// EOF. Later appends reject that path before opening it.
 #[derive(Debug, Default)]
 pub(crate) struct FramedAppendState {
-    /// Journal paths whose last rollback could not be made durable.
-    poisoned: HashSet<PathBuf>,
+    /// Journal paths whose last rollback could not restore the old EOF.
+    poisoned: std::collections::HashSet<PathBuf>,
+    /// Coalesced nonblocking background writeback.
+    sync_worker: JournalSyncWorker,
     /// Deterministic one-shot append faults used by store-level tests.
     #[cfg(test)]
     faults: std::collections::HashMap<PathBuf, AppendFault>,
@@ -85,7 +114,7 @@ impl FramedAppendState {
     pub(crate) fn ensure_appendable(&self, path: &Path) -> io::Result<()> {
         if self.poisoned.contains(path) {
             Err(io::Error::other(
-                "journal append disabled after an incomplete durable rollback",
+                "journal append disabled after an incomplete rollback",
             ))
         } else {
             Ok(())
@@ -102,10 +131,7 @@ impl FramedAppendState {
         self.ensure_appendable(path)?;
         #[cfg(test)]
         let result = if let Some(fault) = self.faults.remove(path) {
-            append_frame(
-                &mut FaultInjectingFile::new(file, fault, 8_usize.saturating_add(payload.len())),
-                payload,
-            )
+            append_frame(&mut FaultInjectingFile::new(file, fault), payload)
         } else {
             append_frame(file, payload)
         };
@@ -113,7 +139,11 @@ impl FramedAppendState {
         let result = append_frame(file, payload);
 
         match result {
-            Ok(appended) => Ok(appended),
+            Ok(appended) => {
+                self.sync_worker
+                    .mark_dirty(path, appended.end_offset, std::iter::empty());
+                Ok(appended)
+            }
             Err(error) => {
                 if error.rollback.is_some() {
                     self.poisoned.insert(path.to_path_buf());
@@ -123,10 +153,99 @@ impl FramedAppendState {
         }
     }
 
+    /// Queues one deepest-boundary target from an ancestor-to-descendant chain
+    /// created by the store.
+    pub(crate) fn note_created_directories(
+        &mut self,
+        directories: impl IntoIterator<Item = PathBuf>,
+    ) {
+        let directories: Vec<_> = directories.into_iter().collect();
+        let Some(deepest) = directories.last() else {
+            return;
+        };
+        let parents = directories
+            .iter()
+            .filter_map(|directory| directory.parent().map(normalized_directory));
+        self.sync_worker.mark_directory_boundary(deepest, parents);
+    }
+
+    /// Re-covers one store boundary so a prior process cannot strand its entry.
+    pub(crate) fn note_directory_boundary(&mut self, directory: &Path) {
+        let parent = directory
+            .parent()
+            .map(normalized_directory)
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.sync_worker
+            .mark_directory_boundary(directory, [parent]);
+    }
+
+    /// Uses `directory` as the primary boundary and covers every normalized
+    /// ancestor through `.` for relative paths or `/` for absolute paths.
+    pub(crate) fn note_directory_boundary_chain(&mut self, directory: &Path) {
+        self.sync_worker
+            .mark_directory_boundary(directory, directory_ancestors(directory));
+    }
+
+    /// Queues a newly created journal and its immediate parent-entry coverage.
+    pub(crate) fn note_created_journal(&mut self, path: &Path, file: &File) {
+        let directories = path.parent().map(normalized_directory);
+        let end_offset = file.metadata().map_or(0, |metadata| metadata.len());
+        self.sync_worker.mark_dirty(path, end_offset, directories);
+    }
+
+    /// Recovers the longest decoded and caller-validated prefix, truncating the
+    /// first invalid frame and its complete suffix.
+    pub(crate) fn recover<T, F>(
+        &mut self,
+        path: &Path,
+        validate: F,
+    ) -> io::Result<RecoveredRecords<T>>
+    where
+        T: DeserializeOwned,
+        F: FnMut(&T) -> bool,
+    {
+        if !path.exists() {
+            return Ok(RecoveredRecords {
+                records: Vec::new(),
+                repaired: false,
+            });
+        }
+        let recovery = recover_prefix(path, validate)?;
+        let repaired = recovery.truncated_to.is_some();
+        if let Some(end_offset) = recovery.truncated_to {
+            self.sync_worker
+                .mark_dirty(path, end_offset, std::iter::empty());
+        }
+        Ok(RecoveredRecords {
+            records: recovery.records,
+            repaired,
+        })
+    }
+
     /// Installs one deterministic fault for the next append to `path`.
     #[cfg(test)]
     pub(crate) fn inject_fault(&mut self, path: impl Into<PathBuf>, fault: AppendFault) {
         self.faults.insert(path.into(), fault);
+    }
+
+    /// Prevents worker startup so tests can inspect retained dirty targets.
+    #[cfg(test)]
+    pub(crate) fn inject_sync_spawn_failure(&self) {
+        self.sync_worker.inject_spawn_failure();
+    }
+
+    /// Installs a deterministic backend that blocks journal file sync.
+    #[cfg(test)]
+    pub(crate) fn inject_blocking_sync(&mut self) -> BlockingSyncHandle {
+        let (worker, handle) = JournalSyncWorker::blocking_for_test();
+        self.sync_worker = worker;
+        handle
+    }
+
+    /// Returns one retained dirty watermark and its directory coverage.
+    #[cfg(test)]
+    pub(crate) fn dirty_target(&self, path: &Path) -> Option<DirtyTargetSnapshot> {
+        self.sync_worker.dirty_target(path)
     }
 }
 
@@ -136,12 +255,10 @@ impl FramedAppendState {
 pub(crate) struct AppendFault {
     /// Frame-byte offset that fails before that byte is written.
     pub fail_write_at: Option<usize>,
-    /// Whether the frame commit sync fails.
-    pub fail_commit_sync: bool,
     /// Whether rollback truncation fails.
     pub fail_truncate: bool,
-    /// Whether the sync that should make rollback durable fails.
-    pub fail_rollback_sync: bool,
+    /// Whether the EOF probe after a failed write also fails.
+    pub fail_seek_after_write: bool,
 }
 
 /// A real file wrapped with one deterministic append failure plan.
@@ -153,22 +270,16 @@ struct FaultInjectingFile<'a> {
     fault: AppendFault,
     /// Number of frame bytes successfully written.
     written: usize,
-    /// Complete prefix-plus-payload byte length.
-    frame_bytes: usize,
-    /// Number of data-sync calls made by the append primitive.
-    sync_calls: usize,
 }
 
 #[cfg(test)]
 impl<'a> FaultInjectingFile<'a> {
     /// Wraps `file` with `fault`.
-    fn new(file: &'a mut File, fault: AppendFault, frame_bytes: usize) -> Self {
+    fn new(file: &'a mut File, fault: AppendFault) -> Self {
         Self {
             file,
             fault,
             written: 0,
-            frame_bytes,
-            sync_calls: 0,
         }
     }
 }
@@ -176,6 +287,9 @@ impl<'a> FaultInjectingFile<'a> {
 #[cfg(test)]
 impl FrameIo for FaultInjectingFile<'_> {
     fn seek_to_end(&mut self) -> io::Result<u64> {
+        if 0 < self.written && self.fault.fail_seek_after_write {
+            return Err(injected_error("post-write seek"));
+        }
         self.file.seek(SeekFrom::End(0))
     }
 
@@ -203,18 +317,6 @@ impl FrameIo for FaultInjectingFile<'_> {
             self.file.set_len(offset)
         }
     }
-
-    fn sync_data(&mut self) -> io::Result<()> {
-        self.sync_calls = self.sync_calls.saturating_add(1);
-        let is_commit_sync = self.sync_calls == 1 && self.written == self.frame_bytes;
-        if (is_commit_sync && self.fault.fail_commit_sync)
-            || (!is_commit_sync && self.fault.fail_rollback_sync)
-        {
-            Err(injected_error("data sync"))
-        } else {
-            self.file.sync_data()
-        }
-    }
 }
 
 /// Creates a stable injected I/O error for assertions.
@@ -223,7 +325,7 @@ fn injected_error(operation: &str) -> io::Error {
     io::Error::other(format!("injected {operation} failure"))
 }
 
-/// Writes and durably commits one `[u64 length][payload]` frame.
+/// Writes one complete `[u64 length][payload]` frame.
 fn append_frame(io: &mut impl FrameIo, payload: &[u8]) -> Result<FrameAppend, FrameAppendError> {
     let start_offset = io.seek_to_end().map_err(|source| FrameAppendError {
         source,
@@ -233,20 +335,121 @@ fn append_frame(io: &mut impl FrameIo, payload: &[u8]) -> Result<FrameAppend, Fr
         .expect("usize payload length always fits the journal's u64 frame prefix");
     let append_result = io
         .write_all(&length.to_le_bytes())
-        .and_then(|()| io.write_all(payload))
-        .and_then(|()| io.sync_data());
+        .and_then(|()| io.write_all(payload));
     if let Err(source) = append_result {
-        let truncate_error = io.truncate(start_offset).err();
-        let rollback_sync_error = io.sync_data().err();
-        return Err(FrameAppendError {
-            source,
-            rollback: truncate_error.or(rollback_sync_error),
-        });
+        let rollback = match io.seek_to_end() {
+            Ok(current_offset) if current_offset == start_offset => None,
+            Ok(_) => io.truncate(start_offset).err(),
+            Err(_) => io.truncate(start_offset).err(),
+        };
+        return Err(FrameAppendError { source, rollback });
     }
     Ok(FrameAppend {
         start_offset,
         end_offset: start_offset.saturating_add(8).saturating_add(length),
     })
+}
+
+/// Internal result from strict framed-prefix recovery.
+struct PrefixRecovery<T> {
+    /// Records retained before the first invalid frame.
+    records: Vec<T>,
+    /// Exact repaired EOF, or `None` when no repair was needed.
+    truncated_to: Option<u64>,
+}
+
+fn recover_prefix<T, F>(path: &Path, mut validate: F) -> io::Result<PrefixRecovery<T>>
+where
+    T: DeserializeOwned,
+    F: FnMut(&T) -> bool,
+{
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let mut records = Vec::new();
+    loop {
+        let frame_start = file.stream_position()?;
+        let length = match read_record_length(&mut file) {
+            Ok(Some(length)) if length <= MAX_RECORD_BYTES => length,
+            Ok(None) => {
+                return Ok(PrefixRecovery {
+                    records,
+                    truncated_to: None,
+                });
+            }
+            Ok(Some(_)) => {
+                file.set_len(frame_start)?;
+                return Ok(PrefixRecovery {
+                    records,
+                    truncated_to: Some(frame_start),
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                file.set_len(frame_start)?;
+                return Ok(PrefixRecovery {
+                    records,
+                    truncated_to: Some(frame_start),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let mut bytes = vec![0_u8; length as usize];
+        match file.read_exact(&mut bytes) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                file.set_len(frame_start)?;
+                return Ok(PrefixRecovery {
+                    records,
+                    truncated_to: Some(frame_start),
+                });
+            }
+            Err(error) => return Err(error),
+        }
+        let mut cursor = io::Cursor::new(bytes.as_slice());
+        let Ok(record) = ciborium::from_reader(&mut cursor) else {
+            file.set_len(frame_start)?;
+            return Ok(PrefixRecovery {
+                records,
+                truncated_to: Some(frame_start),
+            });
+        };
+        if cursor.position() != length || !validate(&record) {
+            file.set_len(frame_start)?;
+            return Ok(PrefixRecovery {
+                records,
+                truncated_to: Some(frame_start),
+            });
+        }
+        records.push(record);
+    }
+}
+
+/// Represents the current directory for paths whose parent is the empty
+/// relative-path component.
+fn normalized_directory(path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Returns normalized parents from the immediate parent through `.` or `/`.
+fn directory_ancestors(path: &Path) -> Vec<PathBuf> {
+    let mut ancestors = Vec::new();
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        let normalized = normalized_directory(parent);
+        let terminal =
+            normalized == Path::new(".") || normalized.parent() == Some(normalized.as_path());
+        ancestors.push(normalized);
+        if terminal {
+            break;
+        }
+        current = parent.parent();
+    }
+    ancestors
 }
 
 /// Reads the next little-endian record length from a durable record log.

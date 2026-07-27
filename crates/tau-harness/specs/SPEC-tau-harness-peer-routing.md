@@ -67,7 +67,9 @@ up the live reservation instead of acknowledging.
 After validation and endpoint selection, the target enqueues the exact
 `AgentMessageReceived` projection but does not acknowledge it. A bounded
 in-memory, generation-bound continuation acknowledges only from the
-post-persistence commit hook. Interception rejection, persistence failure,
+post-persistence commit hook. Here commit means completion of the authoritative
+foreground framed write; it does not wait for background filesystem sync.
+Interception rejection, persistence failure,
 target disappearance, disconnect, or rollover before commit fails or removes
 the continuation without success. Only confirmed acknowledgement permits the
 sender's `AgentMessageSent` projection. The same-loop post-commit reaction
@@ -76,6 +78,8 @@ issuing the ACK, but durable receive commit remains the ACK authority; provider
 dispatch and response are not prerequisites. Exact transcript placement and
 activation are specified by
 [SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
+The append/sync crash boundary is governed by
+[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
 If receive cancellation removes an already-delivered interception request, the
 responder is bypassed until one stale reply is consumed without action. A
 replacement registration remains suspended, no timeout applies, and disconnect
@@ -86,7 +90,9 @@ Delivery is best-effort at-least-once, not distributed exactly-once. A crash or
 transport loss after receive commit but before acknowledgement is indeterminate;
 retry may duplicate the receive occurrence and live model work. There is no cross-session WAL, restart resumption,
 or deduplication index. Crash ambiguity may duplicate prompts, agents, model work,
-and spend. Immediately before receive commit, bare authority, creation-role
+and spend. An ACK or provider effect can also escape after foreground commit and
+before background sync, then survive a crash that loses the journal fact.
+Immediately before receive commit, bare authority, creation-role
 membership, provider/model/skill availability, endpoint liveness, and generation
 are revalidated. Authority loss reselects once; a second loss fails. Exact routes
 never redirect.

@@ -2050,6 +2050,55 @@ fn seed_main_agent_loaded(state_dir: &Path) {
     seed_agent_loaded(state_dir, "s1", "main");
 }
 
+/// Resume acquires writer locks and truncates torn suffixes from all semantic
+/// journal classes before reconstructing runtime state.
+#[test]
+fn cold_resume_recovers_agent_session_and_restore_suffixes() {
+    use std::io::Write;
+
+    let temp = TempDir::new().expect("tempdir");
+    let state_dir = temp.path().join("state");
+    seed_main_agent_loaded(&state_dir);
+    let paths = [
+        state_dir.join("agents/main/events.cbor"),
+        tau_config::settings::sessions_dir_of(&state_dir).join("s1/events.cbor"),
+        tau_config::settings::sessions_dir_of(&state_dir).join("s1/restore-events.cbor"),
+    ];
+    for path in &paths {
+        std::fs::create_dir_all(path.parent().expect("journal parent")).expect("create parent");
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open journal")
+            .write_all(&[1, 2, 3])
+            .expect("append torn header");
+    }
+
+    let harness =
+        quiet_provider_harness_with_start_reason(&state_dir, tau_proto::SessionStartReason::Resume)
+            .expect("resume harness");
+
+    assert!(harness.agent_store.agent("main").is_some());
+    for path in &paths {
+        let bytes = std::fs::read(path).expect("recovered journal");
+        assert!(!bytes.ends_with(&[1, 2, 3]));
+    }
+    tau_core::AgentStore::open(state_dir.join("agents")).expect("strict agent replay");
+    let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
+    let session_store = tau_core::SessionStore::open(&sessions_dir).expect("strict session replay");
+    session_store
+        .session_restore_events("s1")
+        .expect("strict restore replay");
+    let main_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let entry = tau_core::list_agent_entries(&state_dir.join("agents"))
+        .expect("list agents")
+        .into_iter()
+        .find(|entry| entry.id == main_id)
+        .expect("main agent entry");
+    assert_eq!(entry.status, tau_core::AgentListStatus::Fresh);
+}
+
 fn seed_agent_loaded(state_dir: &Path, session_id: &str, agent_id: &str) {
     let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
     let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
@@ -4299,10 +4348,10 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     h.shutdown().expect("shutdown");
 }
 
-/// A synchronous terminal append fault during disconnect must discard the batch
-/// continuation without dispatching queued work to another live provider.
+/// A synchronous terminal append fault during disconnect retains the batch for
+/// retry without dispatching queued work to another live provider.
 #[test]
-fn disconnect_append_fault_does_not_drain_queued_work() {
+fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
     let (_td, mut h) = setup_routed_test_tool_call("disconnect-fault", "owned_tool");
     let cid = h.tool_agents["disconnect-fault"].clone();
     let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
@@ -4332,10 +4381,9 @@ fn disconnect_append_fault_does_not_drain_queued_work() {
     std::fs::create_dir(&journal).expect("block journal");
     h.handle_disconnect("conn-owner");
 
-    assert!(h.semantic_storage_fault.is_some());
     assert_eq!(h.tool_turn.pending_len(), 1);
     assert!(tool_invoke_call_ids(&live_events).is_empty());
-    assert!(h.disconnect_terminal_batch_pending.is_empty());
+    assert!(!h.disconnect_terminal_batch_pending.is_empty());
     assert!(h.disconnect_terminal_batch_completed.is_empty());
 
     std::fs::remove_dir(&journal).expect("remove journal blocker");
@@ -4465,9 +4513,9 @@ fn ext_query(query_id: &str) -> StartAgentRequest {
 }
 
 /// A physical post-accept creation failure terminalizes accepted requests
-/// without exposing identities and fail-stops later FIFO semantic work.
+/// without exposing the failed identity while later FIFO work continues.
 #[test]
-fn accepted_start_storage_failure_terminalizes_and_fail_stops_fifo() {
+fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let mut h = quiet_provider_harness(&state).expect("harness");
@@ -4545,15 +4593,14 @@ fn accepted_start_storage_failure_terminalizes_and_fail_stops_fifo() {
         event,
         Event::SessionAgentLoaded(loaded) if loaded.agent_id.as_str() == first_agent_id
     )));
-    assert!(h.semantic_storage_fault.is_some());
-    assert!(!h.agent_routes.contains_key(&second_agent_id));
+    assert!(h.agent_routes.contains_key(&second_agent_id));
     let second_records = h
         .agent_store
         .agent_events(&second_agent_id)
         .expect("second agent records");
-    assert!(second_records.is_empty());
-    assert!(h.store.session("s1").is_none_or(|membership| {
-        !membership.contains_agent(&crate::parse_agent_id(&second_agent_id))
+    assert!(!second_records.is_empty());
+    assert!(h.store.session("s1").is_some_and(|membership| {
+        membership.contains_agent(&crate::parse_agent_id(&second_agent_id))
     }));
     assert_eq!(
         events
@@ -4561,12 +4608,12 @@ fn accepted_start_storage_failure_terminalizes_and_fail_stops_fifo() {
             .filter(|event| matches!(
                 event,
                 Event::StartAgentResult(result)
-                    if result.query_id == "q-next" && result.error.is_some()
+                    if result.query_id == "q-next" && result.error.is_none()
             ))
             .count(),
-        1
+        0
     );
-    assert!(events.iter().all(|event| !matches!(
+    assert!(events.iter().any(|event| matches!(
         event,
         Event::AgentStarted(started) if started.agent_id.as_str() == second_agent_id
     )));
@@ -14812,10 +14859,10 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
 }
 
 /// A restored standalone continuation rejects off-branch reconciliation
-/// without an attempt marker, then fail-stops after a journal append failure
+/// without an attempt marker, then retries after a journal append failure
 /// without retrying on owning-branch reselection.
 #[test]
-fn standalone_checkpoint_storage_rejection_fail_stops_without_retry() {
+fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("start");
@@ -14882,7 +14929,6 @@ fn standalone_checkpoint_storage_rejection_fail_stops_without_retry() {
     );
     std::fs::remove_dir(&event_path).expect("remove append blocker");
     std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
-    assert!(h.semantic_storage_fault.is_some());
 
     h.publish_for_agent(
         &cid,
@@ -14902,7 +14948,7 @@ fn standalone_checkpoint_storage_rejection_fail_stops_without_retry() {
             head: through,
         }),
     );
-    assert!(!event_log_events(&h).iter().any(|event| matches!(
+    assert!(event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::AgentPromptCreated(created) if created.agent_prompt_id == prompt_id
     )));
@@ -14920,7 +14966,7 @@ fn standalone_checkpoint_storage_rejection_fail_stops_without_retry() {
             _ => None,
         })
         .collect();
-    assert!(committed.is_empty());
+    assert_eq!(committed.len(), 1);
     h.publish_for_agent(
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
@@ -14933,7 +14979,7 @@ fn standalone_checkpoint_storage_rejection_fail_stops_without_retry() {
             .iter()
             .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
             .count(),
-        0
+        1
     );
 }
 
@@ -16065,7 +16111,6 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
         h.tool_turn
             .is_backgrounded(&ToolCallId::from("scheduler-compact"))
     );
-    assert!(h.semantic_storage_fault.is_none());
     let notices_before = event_log_count(&h, |event| matches!(event, Event::HarnessNotice(_)));
     h.emit_info("publication still advances after scheduler compact");
     assert_eq!(
@@ -16145,7 +16190,6 @@ fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live(
         h.tool_turn
             .is_backgrounded(&ToolCallId::from("scheduler-agent-compact"))
     );
-    assert!(h.semantic_storage_fault.is_none());
     let notices_before = event_log_count(&h, |event| matches!(event, Event::HarnessNotice(_)));
     h.emit_info("publication still advances after scheduler agent compact");
     assert_eq!(

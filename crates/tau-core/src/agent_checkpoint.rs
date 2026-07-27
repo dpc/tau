@@ -707,9 +707,16 @@ fn read_one_record_or_eof(
     }
     let mut bytes = vec![0; length as usize];
     file.read_exact(&mut bytes)?;
-    ciborium::from_reader(bytes.as_slice())
-        .map(Some)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    let mut cursor = io::Cursor::new(bytes.as_slice());
+    let record = ciborium::from_reader(&mut cursor)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if cursor.position() != length {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "record payload contains trailing bytes",
+        ));
+    }
+    Ok(Some(record))
 }
 
 fn read_legacy_hint(path: &Path) -> Option<AgentSummary> {

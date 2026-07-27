@@ -28,9 +28,9 @@ compact durable fact.
 
 ### Commit and delivery boundary
 
-The durable owner must commit before full prompt materialization. The compact
-prompt-start fact must then append and sync successfully before the full
-request can leave the harness for provider delivery. The full request must be
+The durable owner must semantically append before full prompt materialization.
+The compact prompt-start fact must then complete its foreground frame write
+before the full request can leave the harness for provider delivery. The full request must be
 owned by that compact fact's post-commit continuation rather than published
 independently or released by FIFO timing.
 
@@ -39,13 +39,14 @@ materialization fact and one live continuation. A duplicate live compact append
 must be rejected before it can acquire a continuation, and delivery consumes
 that continuation once. Replay never recreates it.
 
-Immediately before provider send, delivery must require an unfaulted live
-semantic epoch, the same current session and loaded runtime incarnation that
+Immediately before provider send, delivery must require the same current
+session and loaded runtime incarnation that
 admitted the request, an unresolved owner, and its unique compact fact. The
 full request, compact fact, and owner must agree on agent, prompt, model, and
 operation. The current route is resolved from that model; any failed check
-fails closed. Failure to append or sync the compact fact must make delivery of
-its full request impossible. Recovery never reconstructs or resends the
+fails closed. Failure to complete the compact fact's foreground append makes
+delivery of its full request impossible. Background sync failure does not block
+delivery. Recovery never reconstructs or resends the
 transient request, including after a crash between owner commit, compact-fact
 commit, and provider delivery.
 
@@ -104,8 +105,9 @@ or establish the internal materialized-prompt counter as a public contract.
 Durable full prompts repeatedly snapshot growing transcript, tool, system, and
 image content even though recovery does not use those snapshots. The compact
 fact preserves the generation guard and a bounded audit join, while
-commit-coupled transient delivery preserves commit-before-effects and no-resend
-semantics without creating a second content authority.
+append-coupled transient delivery preserves semantic ordering and no-resend
+semantics without creating a second content authority. It deliberately does not
+provide a durability barrier before provider effects.
 
 The existing prompt-start fact already denotes a fully materialized request
 admitted before provider receipt, so reusing it avoids a new protocol concept
@@ -115,3 +117,5 @@ This decision refines the generic publication and persistence contract in
 [DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md)
 and is governed by
 [DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
+Its former append-and-sync delivery barrier is superseded by
+[DECISION-semantic-journal-writeback-durability](DECISION-semantic-journal-writeback-durability.md).

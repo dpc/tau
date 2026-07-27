@@ -32,7 +32,7 @@ use crate::agent_checkpoint::{
     AgentCheckpoint, AgentSummary, CommittedJournalPosition, journal_position, read_checkpoint,
     read_journal_bound_checkpoint, write_checkpoint_atomic,
 };
-use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES};
+use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES, missing_directories};
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
     PersistedAgentEventSeq,
@@ -375,11 +375,10 @@ pub struct AgentAppendOutcome {
 /// on first durable write so read-only consumers (e.g. inspection commands)
 /// don't contend with a running daemon.
 ///
-/// Durable frame failures return their original I/O error after an exact-EOF,
-/// data-synced rollback. If that rollback is uncertain, the store poisons only
-/// that journal and rejects later appends before reopening it. Trees,
-/// sequences, summaries, and checkpoints advance only after the frame data sync
-/// succeeds.
+/// Durable frame failures return their original I/O error after an exact-EOF
+/// rollback. If truncation cannot restore that EOF, the store poisons only that
+/// journal and rejects later appends before reopening it. Complete frames enter
+/// the tree immediately and a coalesced worker syncs them in the background.
 ///
 /// Durable replay and memory-only parity follow
 /// `DECISION-tau-core-semantic-store-durability`.
@@ -388,6 +387,8 @@ pub struct AgentStore {
     agents_dir: PathBuf,
     /// Failure-atomic append and per-journal poison state.
     framed_appends: FramedAppendState,
+    /// Store-root boundary re-covered after the first successful branch lock.
+    pending_root_boundary: Option<PathBuf>,
     agents: HashMap<AgentId, AgentTree>,
     /// Agents whose validated stream begins with their immutable creation fact.
     created_agents: HashSet<AgentId>,
@@ -451,6 +452,7 @@ impl AgentStore {
     /// [`Self::open`].
     pub fn open_lazy(agents_dir: impl Into<PathBuf>) -> Result<Self, AgentStoreError> {
         let agents_dir = agents_dir.into();
+        let created_directories = missing_directories(&agents_dir);
         fs::create_dir_all(&agents_dir).map_err(|source| {
             AgentStoreError::CreateParentDirectory {
                 path: agents_dir.clone(),
@@ -458,9 +460,12 @@ impl AgentStore {
             }
         })?;
 
+        let mut framed_appends = FramedAppendState::default();
+        framed_appends.note_created_directories(created_directories);
         Ok(Self {
-            agents_dir,
-            framed_appends: FramedAppendState::default(),
+            agents_dir: agents_dir.clone(),
+            framed_appends,
+            pending_root_boundary: Some(agents_dir.clone()),
             agents: HashMap::new(),
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
@@ -503,7 +508,33 @@ impl AgentStore {
                 .ok()
                 .filter(|file| FileExt::try_lock_exclusive(file).is_ok())
         };
-        let events = load_agent_events(&events_path)?;
+        let events = if self.locks.contains_key(&aid) {
+            let mut tree = AgentTree::from_events(aid.clone(), &[]);
+            let recovered = self
+                .framed_appends
+                .recover(&events_path, |record: &PersistedAgentEvent| {
+                    tree.apply_persisted_record(record).is_ok()
+                })
+                .map_err(|source| AgentStoreError::Read {
+                    path: events_path.clone(),
+                    source,
+                })?;
+            if recovered.repaired {
+                let checkpoint_path = self.agent_dir(agent_id).join("meta.json");
+                if let Err(error) = fs::remove_file(&checkpoint_path)
+                    && error.kind() != io::ErrorKind::NotFound
+                {
+                    self.dirty_checkpoints.insert(aid.clone());
+                    eprintln!(
+                        "tau: failed to invalidate repaired checkpoint {}: {error}",
+                        checkpoint_path.display()
+                    );
+                }
+            }
+            recovered.records
+        } else {
+            load_agent_events(&events_path)?
+        };
         let tree = AgentTree::try_from_events(aid.clone(), &events)
             .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         if records_begin_with_creation(&aid, &events) {
@@ -757,12 +788,15 @@ impl AgentStore {
             return Ok(());
         }
         let agent_dir = self.agent_dir(agent_id);
+        let created_directories = missing_directories(&agent_dir);
         fs::create_dir_all(&agent_dir).map_err(|source| {
             AgentStoreError::CreateParentDirectory {
                 path: agent_dir.clone(),
                 source,
             }
         })?;
+        self.framed_appends
+            .note_created_directories(created_directories);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -799,6 +833,10 @@ impl AgentStore {
                 holder,
             });
         }
+        if let Some(root) = self.pending_root_boundary.take() {
+            self.framed_appends.note_directory_boundary_chain(&root);
+        }
+        self.framed_appends.note_directory_boundary(&agent_dir);
         // Replace lock contents with our PID + start time.
         file.set_len(0).map_err(|source| AgentStoreError::Write {
             path: lock_path.clone(),
@@ -861,9 +899,8 @@ impl AgentStore {
     /// # Errors
     ///
     /// Returns [`AgentStoreError`] for invalid ids, events, parents, locks,
-    /// durable I/O, or a journal poisoned by an uncertain prior rollback.
-    /// Durable state advances only after the complete frame and its data
-    /// sync succeed.
+    /// foreground I/O, or a journal poisoned by an unrestored prior write.
+    /// State advances after the complete frame write, before background sync.
     pub fn append_agent_event_at(
         &mut self,
         agent_id: &str,
@@ -1169,6 +1206,36 @@ impl AgentStore {
         Ok(self.agents.get(&agent_id))
     }
 
+    /// Acquires the agent writer lock and recovers its longest valid journal
+    /// prefix before returning the folded tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentStoreError`] for invalid ids, lock or journal I/O
+    /// failure, or inability to truncate an invalid suffix.
+    pub fn lock_and_recover_agent(
+        &mut self,
+        agent_id: &str,
+    ) -> Result<Option<&AgentTree>, AgentStoreError> {
+        let parsed = parse_agent_id_for_store(agent_id)?;
+        let path = self.agent_dir(agent_id).join("events.cbor");
+        if !path.exists() {
+            return Ok(None);
+        }
+        self.framed_appends
+            .ensure_appendable(&path)
+            .map_err(|source| AgentStoreError::Write {
+                path: path.clone(),
+                source,
+            })?;
+        self.ensure_locked(agent_id)?;
+        self.agents.remove(&parsed);
+        self.created_agents.remove(&parsed);
+        self.summaries.remove(&parsed);
+        self.load_agent_if_needed(agent_id)?;
+        Ok(self.agents.get(&parsed))
+    }
+
     /// Returns one already-loaded agent tree if it exists.
     #[must_use]
     pub fn agent(&self, agent_id: &str) -> Option<&AgentTree> {
@@ -1437,13 +1504,7 @@ fn append_cbor_record<T: Serialize>(
             source,
         })?;
     if newly_created {
-        // Make the new journal and directory entries durable before any record
-        // commit. Failures here are safe to return and retry because no frame
-        // bytes have been written.
-        sync_parent_directory(path)?;
-        if let Some(agent_dir) = path.parent() {
-            sync_parent_directory(agent_dir)?;
-        }
+        framed_appends.note_created_journal(path, &file);
     }
     let start = journal_position(&mut file).map_err(|source| AgentStoreError::Read {
         path: path.to_path_buf(),
@@ -1468,18 +1529,6 @@ fn append_cbor_record<T: Serialize>(
         end_offset: appended.end_offset,
         boundary: committed_boundary,
     })
-}
-
-fn sync_parent_directory(path: &Path) -> Result<(), AgentStoreError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| AgentStoreError::Write {
-            path: parent.to_path_buf(),
-            source,
-        })
 }
 
 fn validate_record_length(path: &Path, record_length: u64) -> Result<(), AgentStoreError> {
@@ -1615,12 +1664,21 @@ where
                 path: path.to_path_buf(),
                 source,
             })?;
-        let record: T = ciborium::from_reader(record_bytes.as_slice()).map_err(|source| {
-            AgentStoreError::Decode {
+        let mut cursor = io::Cursor::new(record_bytes.as_slice());
+        let record: T =
+            ciborium::from_reader(&mut cursor).map_err(|source| AgentStoreError::Decode {
                 path: path.to_path_buf(),
                 source,
-            }
-        })?;
+            })?;
+        if cursor.position() != record_length {
+            return Err(AgentStoreError::Read {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "record payload contains trailing bytes",
+                ),
+            });
+        }
         handle(record);
     }
 }

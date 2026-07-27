@@ -216,7 +216,11 @@ projection, and success is not proof that a UI observed it. No automatic
 model-level ACK is introduced. Cross-harness callback-bound typed authority and
 bounded admission remain unchanged.
 
-The target ACK becomes eligible after the exact receive occurrence commits.
+The target ACK becomes eligible after the exact receive occurrence completes its
+authoritative foreground framed write. It does not wait for background
+filesystem sync, so an ACK or provider effect can survive a crash that loses the
+journal fact. This boundary is governed by
+[DECISION-semantic-journal-writeback-durability](DECISION-semantic-journal-writeback-durability.md).
 The target's same-loop post-commit reaction queues or transfers the live wake
 before sending that ACK, but model inference and response are not ACK
 prerequisites. Only a confirmed target ACK permits the sender projection.

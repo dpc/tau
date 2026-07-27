@@ -1980,15 +1980,6 @@ impl Borrow<tau_proto::ShellCommandId> for UiShellRouteId {
 
 const MAX_UI_SHELL_COMMAND_ID_BYTES: usize = 256;
 
-/// Semantic-store failure that ends the current live harness epoch.
-#[derive(Clone, Debug)]
-pub(crate) struct SemanticStorageFault {
-    /// Publication whose authoritative append failed.
-    pub(crate) event_name: tau_proto::EventName,
-    /// Stable diagnostic text from the rejected append.
-    pub(crate) error: String,
-}
-
 /// Central harness event loop and runtime state.
 ///
 /// Owns the event bus, live connections, durable stores, and provider/tool
@@ -2217,7 +2208,7 @@ pub struct Harness {
     next_user_interaction_order: u64,
     /// Creation facts already committed before their normal publish pipeline.
     precommitted_agent_starts: HashSet<String>,
-    /// Counts interaction facts durably committed before central delivery.
+    /// Counts interaction facts journal-appended before central delivery.
     precommitted_user_interactions: HashMap<String, u64>,
     /// Agent ids already loaded, or with a must-pass membership publish queued,
     /// for the current session. This closes the race where interception parks
@@ -2276,10 +2267,6 @@ pub struct Harness {
     /// Fatal error raised while a parked publish commits downstream. The
     /// surrounding runtime/interception operation takes and propagates it.
     pending_publish_error: Option<HarnessError>,
-    /// First semantic append failure in this live harness epoch.
-    ///
-    /// Once set, authoritative work stays fail-stopped until reopen/restart.
-    pub(crate) semantic_storage_fault: Option<SemanticStorageFault>,
     /// Foreground terminals synthesized as one disconnect batch.
     disconnect_terminal_batch_pending: HashSet<ToolCallId>,
     /// Calls whose runtime settlement waits for the whole disconnect batch.
@@ -3068,7 +3055,6 @@ impl Harness {
             suspended_interceptor_connections: HashSet::new(),
             pending_intercept: None,
             pending_publish_error: None,
-            semantic_storage_fault: None,
             disconnect_terminal_batch_pending: HashSet::new(),
             disconnect_terminal_batch_completed: Vec::new(),
             deferred_publishes: VecDeque::new(),
@@ -4871,8 +4857,7 @@ impl Harness {
         continuation: &PromptDispatchContinuation,
         require_compact_fact: bool,
     ) -> bool {
-        if self.semantic_storage_fault.is_some()
-            || sync.session_generation != self.current_session_generation
+        if sync.session_generation != self.current_session_generation
             || continuation.started.session_id != self.current_session_id
             || !self
                 .pending_prompt_dispatches
@@ -4995,9 +4980,6 @@ impl Harness {
     /// calling this canonical-fact commit path.
     pub(crate) fn commit_message_fact(&mut self, source: Option<&str>, event: Event) {
         debug_assert_eq!(event.name().category(), &tau_proto::EventCategory::Message);
-        if self.semantic_storage_fault.is_some() {
-            return;
-        }
         let recorded_at = tau_proto::UnixMicros::now();
         let source_id = source.map(tau_proto::ConnectionId::from);
         let skip_debug_log = self.event_targets_ephemeral_agent(&event, None);
@@ -5008,7 +4990,6 @@ impl Harness {
         let persisted_agent = match self.persist_message_fact_record(source, &event, recorded_at) {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.enter_semantic_storage_fault(event.name(), &error);
                 tracing::warn!(
                     target: "tau_harness",
                     event = %event.name(),
@@ -5039,133 +5020,16 @@ impl Harness {
         });
     }
 
-    /// End the live semantic epoch after its first physical or persisted-
-    /// integrity append error.
-    fn enter_semantic_storage_fault(
-        &mut self,
-        event_name: tau_proto::EventName,
-        error: &HarnessError,
-    ) {
-        let storage_fault = match error {
-            HarnessError::AgentStore(error) => matches!(
-                error,
-                tau_core::AgentStoreError::CreateParentDirectory { .. }
-                    | tau_core::AgentStoreError::Open { .. }
-                    | tau_core::AgentStoreError::Read { .. }
-                    | tau_core::AgentStoreError::Write { .. }
-                    | tau_core::AgentStoreError::Decode { .. }
-                    | tau_core::AgentStoreError::Locked { .. }
-                    | tau_core::AgentStoreError::InvalidSequence { .. }
-            ),
-            HarnessError::SessionStore(error) => matches!(
-                error,
-                tau_core::SessionStoreError::CreateParentDirectory { .. }
-                    | tau_core::SessionStoreError::Open { .. }
-                    | tau_core::SessionStoreError::Read { .. }
-                    | tau_core::SessionStoreError::Write { .. }
-                    | tau_core::SessionStoreError::Decode { .. }
-                    | tau_core::SessionStoreError::Locked { .. }
-                    | tau_core::SessionStoreError::InvalidSequence { .. }
-            ),
-            HarnessError::Io(_) => true,
-            _ => false,
-        };
-        if !storage_fault {
-            return;
-        }
-        if self.semantic_storage_fault.is_none() {
-            self.semantic_storage_fault = Some(SemanticStorageFault {
-                event_name,
-                error: error.to_string(),
-            });
-            self.disconnect_terminal_batch_pending.clear();
-            self.disconnect_terminal_batch_completed.clear();
-        }
-    }
-
-    /// Return whether this publication would mutate authoritative semantic
-    /// state.
-    fn publication_requires_semantic_store(
-        &self,
-        event: &Event,
-        persist: bool,
-        sync_head_for: Option<&ConversationHeadSync>,
-    ) -> bool {
-        if event.message_agent_target().is_some() {
-            return true;
-        }
-        if !semantic_event_router::should_persist_event(event, persist) {
-            return false;
-        }
-        if matches!(event, Event::ToolRequest(_) | Event::ToolStarted(_))
-            || semantic_event_router::session_membership_id_for_event(event).is_some()
-        {
-            return true;
-        }
-        self.agent_id_for_event(event).is_some()
-            || self
-                .agent_scoped_agent_id_for_event(event, sync_head_for)
-                .is_some()
-    }
-
-    /// Reject direct semantic work after the live epoch storage-faults.
-    fn ensure_semantic_epoch_live(&self, operation: &str) -> Result<(), HarnessError> {
-        let Some(fault) = self.semantic_storage_fault.as_ref() else {
-            return Ok(());
-        };
-        Err(HarnessError::Participant(format!(
-            "semantic work `{operation}` rejected after {} storage fault: {}",
-            fault.event_name, fault.error
-        )))
-    }
-
-    /// Append a direct agent semantic fact under the same live-epoch fail-stop
-    /// policy as publication-driven semantic facts.
+    /// Append a direct agent semantic fact after any explicit lifecycle stop.
     fn append_direct_agent_semantic_event(
         &mut self,
         agent_id: &str,
         parent: tau_core::AgentEventParent,
         event: Event,
     ) -> Result<tau_core::AgentAppendOutcome, HarnessError> {
-        self.ensure_semantic_epoch_live(&event.name().to_string())?;
-        let event_name = event.name();
         self.agent_store
             .append_agent_event_at(agent_id, None, parent, event, tau_proto::UnixMicros::now())
-            .map_err(|error| {
-                let error = HarnessError::AgentStore(error);
-                self.enter_semantic_storage_fault(event_name, &error);
-                error
-            })
-    }
-
-    /// Reject semantic work before it can park in interception after a storage
-    /// fault.
-    pub(crate) fn semantic_publication_is_fail_stopped(
-        &mut self,
-        event: &Event,
-        persist: bool,
-        sync_head_for: Option<&ConversationHeadSync>,
-    ) -> bool {
-        if !self.publication_requires_semantic_store(event, persist, sync_head_for) {
-            return false;
-        }
-        let Some(fault) = self.semantic_storage_fault.as_ref() else {
-            return false;
-        };
-        tracing::warn!(
-            target: "tau_harness",
-            event = %event.name(),
-            fault_event = %fault.event_name,
-            fault_error = %fault.error,
-            "rejecting semantic publication after storage fault"
-        );
-        if let Some(sync) = sync_head_for
-            && let Some(completion) = sync.completion()
-        {
-            self.discard_deferred_agent_publish_batch(&sync.cid, completion);
-            self.pending_agent_publish_completions.remove(&sync.cid);
-        }
-        true
+            .map_err(HarnessError::AgentStore)
     }
 
     /// Select and append the canonical journal record for one stamped fact.
@@ -5275,9 +5139,6 @@ impl Harness {
                 sync_head_for.as_ref(),
                 "prompt publication lost its compact-fact delivery authority",
             );
-            return;
-        }
-        if self.semantic_publication_is_fail_stopped(&event, persist, sync_head_for.as_ref()) {
             return;
         }
         if event.message_agent_target().is_some() {
@@ -5390,18 +5251,8 @@ impl Harness {
             Ok(append_outcome) => append_outcome,
             Err(error) => {
                 commit_timing.result = CommitEventTimingResult::SemanticPersistError;
-                self.enter_semantic_storage_fault(event.name(), &error);
                 self.rollback_rejected_activation_successor(&event);
-                if self.semantic_storage_fault.is_some() {
-                    if let Some(sync) = sync_head_for.as_ref()
-                        && let Some(completion) = sync.completion()
-                    {
-                        self.discard_deferred_agent_publish_batch(&sync.cid, completion);
-                        self.pending_agent_publish_completions.remove(&sync.cid);
-                    }
-                } else {
-                    self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
-                }
+                self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
                 if semantic_event_router::session_membership_id_for_event(&event)
                     .is_some_and(|session_id| session_id == self.current_session_id)
                 {
@@ -6387,9 +6238,7 @@ impl Harness {
             self.clear_tool_call_tracking(call_id.as_str());
             self.disconnect_terminal_batch_completed
                 .push((call_id.clone(), cid));
-            if self.disconnect_terminal_batch_pending.is_empty()
-                && self.semantic_storage_fault.is_none()
-            {
+            if self.disconnect_terminal_batch_pending.is_empty() {
                 let completed = std::mem::take(&mut self.disconnect_terminal_batch_completed);
                 self.drain_pending_tool_invocations_or_report();
                 for (completed_call_id, completed_cid) in completed {
@@ -15021,9 +14870,7 @@ impl Harness {
             self.refresh_provider_models_and_publish_state();
         }
         if !self.resolving_initial_extension_collisions {
-            if self.disconnect_terminal_batch_pending.is_empty()
-                && self.semantic_storage_fault.is_none()
-            {
+            if self.disconnect_terminal_batch_pending.is_empty() {
                 self.drain_pending_tool_invocations_or_report();
                 for (call_id, cid) in completed_foreground_calls {
                     self.maybe_complete_agent_turn_for(&cid, call_id.as_str());
@@ -16694,7 +16541,6 @@ impl Harness {
         publish_initial_instruction: bool,
         peer_entrypoint_endpoint: bool,
     ) -> Result<(), HarnessError> {
-        self.ensure_semantic_epoch_live("start agent")?;
         let PendingStartAgentRequest {
             source_id,
             extension_name,
@@ -20332,6 +20178,25 @@ impl Harness {
     }
 
     fn rehydrate_agents_from_session(&mut self) {
+        if let Err(error) = self
+            .store
+            .lock_and_load_session(self.current_session_id.as_str())
+        {
+            self.session_roster_valid = false;
+            self.emit_harness_failure(&format!(
+                "failed to recover session membership during restore: {error}"
+            ));
+            return;
+        }
+        if let Err(error) = self
+            .store
+            .lock_and_recover_session_restore_events(self.current_session_id.as_str())
+        {
+            self.emit_harness_failure(&format!(
+                "failed to recover session restore facts during restore: {error}"
+            ));
+            return;
+        }
         let history = self.store.session_events(self.current_session_id.as_str());
         let ephemeral_history = self
             .store
@@ -20380,7 +20245,7 @@ impl Harness {
         self.session_roster_loaded_agents = loaded_agents.iter().cloned().collect();
         for agent_id in loaded_agents {
             let agent_id_string = agent_id.to_string();
-            match self.agent_store.load_agent(agent_id.as_str()) {
+            match self.agent_store.lock_and_recover_agent(agent_id.as_str()) {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     self.emit_harness_failure(&format!(
@@ -21386,7 +21251,6 @@ impl Harness {
         metadata: Vec<tau_proto::AgentInitialMetadata>,
         persistence: tau_core::AgentPersistenceMode,
     ) -> Result<AgentId, HarnessError> {
-        self.ensure_semantic_epoch_live("create agent")?;
         let agent_id = self.mint_available_agent_id_for_role(role);
         if persistence.is_ephemeral() {
             self.agent_store.mark_agent_ephemeral(&agent_id)?;
@@ -21454,9 +21318,6 @@ impl Harness {
             self.ensure_loaded_agent_for_agent(cid, &agent_id);
             self.emit_agent_stats_updated(cid);
             return Some(agent_id);
-        }
-        if self.ensure_semantic_epoch_live("create agent").is_err() {
-            return None;
         }
         let role = self
             .agents
@@ -21562,9 +21423,6 @@ impl Harness {
             .agent_store
             .agent_has_committed_identity(&agent_id_proto);
         if !has_creation {
-            if self.ensure_semantic_epoch_live("create agent").is_err() {
-                return;
-            }
             let persistence = self
                 .agents
                 .get(cid)

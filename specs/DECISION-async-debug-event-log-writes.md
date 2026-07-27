@@ -17,8 +17,10 @@ Process exit neither joins the worker nor guarantees that queued work drains.
 
 Debug JSONL is non-authoritative best-effort diagnostics. It provides no crash
 or power-loss durability and never calls `fsync`. Authoritative semantic
-journals retain their existing synchronous durability, ordering, locking, and
-replay behavior.
+journals retain foreground ordering and locking but use their separate
+lifecycle-owned coalesced writeback contract under
+[DECISION-semantic-journal-writeback-durability](DECISION-semantic-journal-writeback-durability.md),
+not this droppable debug queue.
 
 ## Rationale
 

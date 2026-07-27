@@ -187,8 +187,8 @@ impl Harness {
     /// Drains every runnable agent's pending prompt queue.
     ///
     /// There is no global agent slot. The harness materializes one prompt per
-    /// runnable agent (Idle turn state, non-empty queue), durably commits its
-    /// compact fact, directs the transient full request to the selected
+    /// runnable agent (Idle turn state, non-empty queue), appends its compact
+    /// fact, directs the transient full request to the selected
     /// provider, and routes responses back via `prompt_agents`.
     ///
     /// Session initialization still happens before prompt dispatch, so

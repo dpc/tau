@@ -9,6 +9,7 @@ mod agent_checkpoint;
 mod agent_store;
 mod bus;
 mod connection;
+mod journal_sync;
 mod memory;
 mod policy;
 mod record_log;

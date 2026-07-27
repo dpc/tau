@@ -5,6 +5,7 @@ use tau_proto::{
 };
 
 use super::*;
+use crate::journal_sync::SyncTargetKind;
 use crate::record_log::AppendFault;
 
 /// Builds one fold-changing durable membership fact.
@@ -16,6 +17,50 @@ fn loaded_event(session_id: &str, agent_id: &str) -> Event {
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         ephemeral: false,
     })
+}
+
+/// A later writable lifetime re-covers the complete session-store ancestor
+/// chain plus its locked session branch.
+#[test]
+fn writable_reopen_recovers_session_root_and_branch_boundaries() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join("state/sessions");
+    {
+        let created = missing_directories(&sessions_dir);
+        fs::create_dir_all(&sessions_dir).expect("first lifetime creates root");
+        let mut first = FramedAppendState::default();
+        first.inject_sync_spawn_failure();
+        first.note_created_directories(created);
+        assert!(first.dirty_target(&sessions_dir).is_some());
+    }
+    let mut store = SessionStore::open_lazy(&sessions_dir).expect("second store opens");
+    store.framed_appends.inject_sync_spawn_failure();
+    store
+        .append_session_event_at(
+            "session-1",
+            None,
+            loaded_event("session-1", "agent-1"),
+            UnixMicros::new(42),
+        )
+        .expect("writable append");
+
+    let root_target = store
+        .framed_appends
+        .dirty_target(&sessions_dir)
+        .expect("store-root target");
+    assert!(root_target.directories.contains(&temp.path().join("state")));
+    assert!(root_target.directories.contains(&temp.path().to_path_buf()));
+    assert_eq!(root_target.kind, SyncTargetKind::DirectoryBoundary);
+    let branch = sessions_dir.join("session-1");
+    let branch_target = store
+        .framed_appends
+        .dirty_target(&branch)
+        .expect("branch target");
+    assert_eq!(
+        branch_target.directories,
+        [sessions_dir].into_iter().collect()
+    );
+    assert_eq!(branch_target.kind, SyncTargetKind::DirectoryBoundary);
 }
 
 /// Builds one valid fallback message fact.
@@ -138,7 +183,7 @@ fn rollback_failure_poisons_only_selected_session_journal() {
         &journal_path,
         AppendFault {
             fail_write_at: Some(3),
-            fail_rollback_sync: true,
+            fail_truncate: true,
             ..AppendFault::default()
         },
     );
@@ -172,7 +217,7 @@ fn rollback_failure_poisons_only_selected_session_journal() {
     assert!(
         poisoned
             .to_string()
-            .contains("append disabled after an incomplete durable rollback")
+            .contains("append disabled after an incomplete rollback")
     );
     assert_eq!(other.seq, PersistedSessionEventSeq::new(0));
     assert_eq!(
@@ -210,6 +255,62 @@ fn strict_replay_rejects_partial_frame_before_valid_suffix() {
     let error = SessionStore::open(temp.path()).expect_err("strict replay rejects torn frame");
 
     assert!(matches!(error, SessionStoreError::Read { .. }));
+}
+
+/// Failed journal-derived metadata rebuild remains explicit debt, survives a
+/// restart, and retries after the obstruction clears.
+#[test]
+fn repaired_session_metadata_rebuild_retries() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_dir = temp.path().join("session-1");
+    let journal_path = session_dir.join("events.cbor");
+    {
+        let mut store = SessionStore::open(temp.path()).expect("store opens");
+        store
+            .append_session_event_at(
+                "session-1",
+                None,
+                delivered_message("baseline"),
+                UnixMicros::new(41),
+            )
+            .expect("baseline appends");
+    }
+    OpenOptions::new()
+        .append(true)
+        .open(&journal_path)
+        .expect("open journal")
+        .write_all(&[1, 2, 3])
+        .expect("append torn header");
+    let meta_path = session_dir.join("meta.json");
+    fs::remove_file(&meta_path).expect("remove metadata file");
+    fs::create_dir(&meta_path).expect("obstruct metadata removal");
+
+    let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
+    store
+        .lock_and_load_session("session-1")
+        .expect("recovery succeeds");
+    assert!(
+        store
+            .dirty_meta_rebuilds
+            .contains(&SessionId::from("session-1"))
+    );
+    drop(store);
+
+    let mut store = SessionStore::open_lazy(temp.path()).expect("store restarts");
+    store
+        .lock_and_load_session("session-1")
+        .expect("cold validation rediscovers metadata debt");
+    assert!(
+        store
+            .dirty_meta_rebuilds
+            .contains(&SessionId::from("session-1"))
+    );
+
+    fs::remove_dir(&meta_path).expect("remove obstruction");
+    store
+        .lock_and_load_session("session-1")
+        .expect("retry succeeds");
+    assert!(store.dirty_meta_rebuilds.is_empty());
 }
 
 /// A restore-stream write failure leaves bytes and sequence unchanged and
@@ -317,7 +418,7 @@ fn rollback_failure_poisons_only_restore_journal() {
     assert!(
         poisoned
             .to_string()
-            .contains("append disabled after an incomplete durable rollback")
+            .contains("append disabled after an incomplete rollback")
     );
     assert_eq!(ordinary.seq, PersistedSessionEventSeq::new(0));
     assert_eq!(

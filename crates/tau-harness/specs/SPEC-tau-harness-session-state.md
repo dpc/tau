@@ -69,20 +69,28 @@ work does not accidentally create durable child transcripts.
 
 Memory-only agent and session stores fold the same semantic facts as durable
 stores for live and same-daemon replay while creating no reserved state
-directories, sidecars, locks, or event files. Durable `events.cbor` replay
+directories, sidecars, locks, or event files. Journal `events.cbor` replay
 validates framing, monotonic durable sequence numbers, path-safe store IDs, and
-the same semantic event/parent invariants as live append. Corrupt, truncated,
-spliced, or semantically invalid records fail with a typed store error rather
-than being skipped or partially folded.
+the same semantic event/parent invariants as live append. Read-only inspection
+remains strict. Recovery under the writer lock retains the longest valid prefix
+and truncates the first corrupt, truncated, spliced, or semantically invalid
+frame and every later byte, even if a later frame looks valid.
 
-Durable agent, ordinary-session, and session-restore appends capture the exact
+Journal-backed agent, ordinary-session, and session-restore appends capture the exact
 journal EOF before writing a length-prefixed CBOR frame. Prefix, payload, or
-commit-sync failure rolls the journal back to that EOF and durably syncs the
-truncation before returning the original append error. A live store that cannot
-complete either rollback operation rejects later appends to that journal without
-touching it. Sequence, folded state, agent checkpoints, and session metadata
-advance only after the frame commit succeeds; strict replay never salvages a
-valid suffix after a partial frame.
+payload-write failure rolls the journal back to that EOF before returning the
+original append error. A live store that cannot truncate to the old EOF rejects
+later appends to that journal without touching it. A complete frame immediately
+advances sequence and folded state. A coalesced lifecycle-owned worker later
+syncs journal data and newly created directory entries, retries failures, and
+never blocks or retracts semantic acceptance. Recovery truncation is itself
+marked dirty for background sync.
+
+No durability barrier precedes provider, tool, renderer, or other external
+effects. A crash may therefore preserve an external effect while losing its
+journal fact. Process crash relies on ordinary kernel writeback; kernel or power
+loss may lose or tear an unsynced suffix. This boundary is governed by
+[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
 
 Durable sequence numbers count only records written to that stream. In a
 durable session, memory-only ephemeral-agent membership is retained in a

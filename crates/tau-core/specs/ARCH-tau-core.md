@@ -12,14 +12,21 @@ not a transcript node. The latest bootstrap/skill replacement survives replay
 and remains outside branch-head movement and compaction.
 
 Agent journals and both ordinary and restore session journals use the same
-failure-atomic frame append. A writer captures the exact pre-append EOF, commits
-the length prefix and CBOR payload with a data sync, and advances folded state,
-sequence, checkpoint, or session metadata only after that commit. A prefix,
-payload, or commit-sync failure truncates to the captured EOF and durably syncs
-the rollback. If either rollback operation fails, the live store poisons that
-journal path and rejects later appends without reopening it. Verification
-ownership is documented in
+failure-atomic frame append. A writer captures the exact pre-append EOF, writes
+the complete length prefix and CBOR payload, then advances folded state and
+sequence without waiting for sync. A prefix or payload failure truncates to the
+captured EOF. Only inability to restore that EOF poisons the live path.
+
+A lifecycle-owned worker coalesces one dirty state per journal or directory
+boundary, syncs complete frames and typed child-before-parent directory targets
+in the background, tracks generations
+so concurrent writes cannot lose a wake, and retries failures. Sync failure does
+not retract or fail an accepted semantic append. Locked recovery truncates the
+first invalid frame and all later bytes, rebuilds folded state, and rebuilds
+derived metadata from retained records. Verification ownership is documented in
 [Durable journal append tests](../../../docs/testing.md#durable-journal-append-tests).
+The full crash and external-effect boundary is governed by
+[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
 
 Agent journals accept one source-free `agent.prompt_started` only when it uniquely
 matches an unresolved durable inference or standalone-compaction owner; they
@@ -39,6 +46,30 @@ process-local, independently sequenced overlay. Late same-daemon replay first
 validates and folds the durable snapshot, then validates and composes the
 overlay. Cached membership never bypasses durable journal validation, and restart
 discards the overlay with the corresponding ephemeral transcripts.
+
+Each durable `AgentStore` and `SessionStore` owns one lazily spawned
+`JournalSyncWorker` through its `FramedAppendState`. The worker keeps at most one
+merged dirty target and one ready-or-in-flight position per journal or directory
+boundary. A journal target records its generation, exact end offset, and required
+parent directories. A directory-boundary target records its distinct kind and
+child-before-parent directory chain. Newly created directories submit immediately;
+after acquiring writable branch ownership, stores deliberately re-cover the
+existing branch boundary and a pending store-root chain through `.` or filesystem
+root, so a prior process cannot strand any ancestor entry. Opening retains that
+root debt without submitting it; read-only use and losing lock contenders neither
+submit nor consume it. Foreground appends update their journal target and return
+without waiting.
+
+The worker syncs each journal file before its required directories and each
+directory boundary child before its parent. It compares the full
+kind/generation/offset/directory target before clearing it, and immediately requeues
+a concurrently advanced target. Failed paths use independent capped retry
+deadlines and rotate fairly behind ready paths. A new dirty notification clears
+no existing backoff: later bytes coalesce under the failed path's deadline while
+newly dirty paths wake promptly. Thread creation is lazy and best-effort; store destruction
+signals one final pass but detaches rather than joining a potentially blocked
+filesystem sync. Exact semantics are governed by
+[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
 
 Store IDs used as path components share one bounded safe grammar with CLI
 minting, metadata listing, lock probes, and cleanup. They exclude path separators,

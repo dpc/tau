@@ -1916,7 +1916,6 @@ fn intercepted_prompt_start_append_failure_prevents_provider_delivery() {
     std::fs::remove_dir(&journal_path).expect("remove append blocker");
     std::fs::rename(&backup_path, &journal_path).expect("restore agent journal");
 
-    assert!(h.semantic_storage_fault.is_some());
     assert!(
         !h.pending_prompt_dispatches
             .contains(&started.agent_prompt_id)
@@ -2063,106 +2062,6 @@ fn unload_disposes_parked_prompt_delivery() {
         tau_proto::EventName::AGENT_PROMPT_CREATED,
         "delivery-unload-owner",
     );
-}
-
-/// A poisoned semantic epoch disposes a parked full request instead of leaving
-/// prompt tracking and accounting behind.
-#[test]
-fn semantic_fault_disposes_parked_prompt_delivery() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    let cid = ensure_test_user_agent(&mut h);
-    let interceptor = connect_test_tool(&mut h, "semantic-fault-prompt-owner");
-    h.handle_extension_event(
-        "semantic-fault-prompt-owner",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::AGENT_PROMPT_CREATED,
-            )],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("register interceptor");
-    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("fault before send".to_owned()))
-        .expect("dispatch inference");
-    let (parked, _) = intercepted_payload(&interceptor);
-    let Event::AgentPromptCreated(prompt) = parked else {
-        panic!("full prompt intercepted");
-    };
-    h.semantic_storage_fault = Some(crate::harness::SemanticStorageFault {
-        event_name: tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
-        error: "injected prior append failure".to_owned(),
-    });
-    h.handle_extension_event(
-        "semantic-fault-prompt-owner",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("release full prompt");
-
-    assert!(
-        !h.pending_prompt_dispatches
-            .contains(&prompt.agent_prompt_id)
-    );
-    assert!(
-        !h.prompt_agents
-            .contains_key(prompt.agent_prompt_id.as_str())
-    );
-    assert!(!h.prompt_models.contains_key(&prompt.agent_prompt_id));
-    assert_eq!(h.current_session_state.token_usage.total.requests, 0);
-    h.shutdown().expect("shutdown");
-}
-
-/// Deferred prompt envelopes skipped after an earlier semantic fault use the
-/// same idempotent disposal path as directly rejected delivery.
-#[test]
-fn semantic_fault_disposes_deferred_prompt_materialization() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    let cid = ensure_test_user_agent(&mut h);
-    let _interceptor = connect_test_tool(&mut h, "deferred-fault-prompt-owner");
-    h.handle_extension_event(
-        "deferred-fault-prompt-owner",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::AGENT_PROMPT_STARTED,
-            )],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("register interceptor");
-    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("defer before fault".to_owned()))
-        .expect("dispatch inference");
-    let pending = h.pending_intercept.as_ref().expect("parked full prompt");
-    let Event::AgentPromptStarted(prompt) = &pending.event else {
-        panic!("compact prompt fact intercepted");
-    };
-    let prompt_id = prompt.agent_prompt_id.clone();
-    h.enqueue_publish(
-        None,
-        pending.event.clone(),
-        false,
-        true,
-        pending.sync_head_for.clone(),
-    );
-    h.semantic_storage_fault = Some(crate::harness::SemanticStorageFault {
-        event_name: tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
-        error: "injected prior append failure".to_owned(),
-    });
-    h.handle_extension_event(
-        "deferred-fault-prompt-owner",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("release original and drain deferred prompt");
-
-    assert!(!h.pending_prompt_dispatches.contains(&prompt_id));
-    assert!(!h.prompt_agents.contains_key(prompt_id.as_str()));
-    assert!(!h.prompt_models.contains_key(&prompt_id));
-    assert_eq!(h.current_session_state.token_usage.total.requests, 0);
-    h.shutdown().expect("shutdown");
 }
 
 /// A standalone start parked before commit owns the compact request model even
@@ -2409,9 +2308,9 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
 }
 
 /// A first-suffix persistence failure drops the interceptor-approved
-/// continuation and fail-stops later semantic work in the live epoch.
+/// continuation and retains exact retry state for later semantic work.
 #[test]
-fn rejected_compaction_completion_steer_fail_stops_without_retry() {
+fn rejected_compaction_completion_steer_retries_after_recovery() {
     let tmp = TempDir::new().expect("tempdir");
     let state_dir = tmp.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("harness");
@@ -2509,10 +2408,9 @@ fn rejected_compaction_completion_steer_fail_stops_without_retry() {
     )
     .expect("release approved replacement into append failure");
     assert!(
-        !h.pending_agent_publish_completions.contains_key(&cid),
-        "storage failure must not retain an exact completion envelope"
+        h.pending_agent_publish_completions.contains_key(&cid),
+        "clean storage failure retains the exact retry envelope"
     );
-    assert!(h.semantic_storage_fault.is_some());
     assert!(matches!(
         h.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Running { .. }
@@ -2539,9 +2437,17 @@ fn rejected_compaction_completion_steer_fail_stops_without_retry() {
             head: batch_parent,
         }),
     );
+    assert!(h.pending_intercept.is_some());
+    h.handle_extension_event(
+        "retry-replacement-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release retained retry");
     assert!(h.pending_intercept.is_none());
     assert!(!h.pending_agent_publish_completions.contains_key(&cid));
-    assert_eq!(prompt_created_count(&h), 0);
+    assert_eq!(prompt_created_count(&h), 2);
 }
 
 fn session_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMessageReceived> {
@@ -5448,7 +5354,7 @@ fn intercepted_sibling_activations_retain_distinct_obligations() {
 }
 
 /// An activating fact rejected by the agent journal leaves no detached
-/// activation ownership and fail-stops later semantic work in the live epoch.
+/// activation ownership without fail-stopping later semantic work.
 #[test]
 fn rejected_activating_append_leaves_no_stale_dispatch() {
     let tmp = TempDir::new().expect("tempdir");
@@ -5495,8 +5401,7 @@ fn rejected_activating_append_leaves_no_stale_dispatch() {
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("committed activation".to_owned()))
         .expect("dispatch later activation");
     assert!(h.pending_publish_idle_dispatches.is_empty());
-    assert!(h.semantic_storage_fault.is_some());
-    assert_eq!(prompt_created_count(&h), 0);
+    assert_eq!(prompt_created_count(&h), 1);
 }
 
 #[test]
