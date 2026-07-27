@@ -511,6 +511,8 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
             tau_proto::AgentId::parse("forged-durable-agent").expect("agent id"),
             "ephemeral-provider-finished-secret",
         ));
+    h.remove_agent(&cid);
+    assert!(!h.agents.contains_key(&cid));
     h.log_event(&crate::event::HarnessEvent::FromConnection {
         connection_id: provider.into(),
         message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
@@ -519,10 +521,6 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     });
     h.handle_extension_event_inner(provider, finished.clone())
         .expect("commit ephemeral finished report");
-
-    h.agents
-        .remove(&cid)
-        .expect("remove completed ephemeral runtime agent");
     h.log_event(&crate::event::HarnessEvent::FromConnection {
         connection_id: provider.into(),
         message: Box::new(tau_proto::HarnessInputMessage::emit_transient(

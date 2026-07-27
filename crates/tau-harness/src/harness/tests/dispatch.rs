@@ -3581,6 +3581,126 @@ fn side_agent_error_response_propagates_error_result() {
     assert!(h.turn_state.is_idle());
 }
 
+/// A rejected tool call can synchronously dispatch the side agent's automatic
+/// continuation. The rejection path must preserve that new running state so
+/// request completion cannot unload the agent before the continuation finishes.
+#[test]
+fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let _frames = connect_test_client(&mut h, "conn-side-invalid", tau_proto::ClientKind::External);
+    h.submit_user_prompt("s1".into(), "parent prompt".to_owned())
+        .expect("submit parent");
+    let parent = h
+        .agents
+        .get(&test_user_agent(&h))
+        .and_then(|agent| agent.agent_id.as_deref())
+        .and_then(|agent_id| tau_proto::AgentId::parse(agent_id).ok())
+        .expect("parent agent id");
+
+    h.handle_start_agent_request(
+        "conn-side-invalid",
+        StartAgentRequest {
+            parent_agent: Some(parent),
+            query_id: "q-invalid-tool".to_owned(),
+            instruction: "review the change".to_owned(),
+            role: None,
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: None,
+            task_name: None,
+        },
+    )
+    .expect("start side agent");
+    let side_cid = ext_query_cid(&h, "q-invalid-tool").expect("side conversation");
+    let first_prompt_id = h
+        .agents
+        .get(&side_cid)
+        .and_then(|agent| agent.in_flight_prompt.clone())
+        .expect("first side prompt");
+    let mut response = provider_text_response(
+        &first_prompt_id,
+        durable_agent_id_for_conversation(&h, &side_cid),
+        "",
+    );
+    response.output_items = vec![ContextItem::ToolCall(ToolCallItem {
+        call_id: "invalid-side-call".into(),
+        name: ToolName::new("tool_that_does_not_exist"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    })];
+    response.stop_reason = tau_proto::ProviderStopReason::ToolCalls;
+    response.originator = tau_proto::PromptOriginator::Extension {
+        name: "conn-side-invalid".into(),
+        query_id: "q-invalid-tool".to_owned(),
+    };
+
+    h.handle_provider_response_finished(response)
+        .expect("reject invalid side-agent tool call");
+
+    let side_agent = h.agents.get(&side_cid).expect("side agent remains loaded");
+    let continuation = side_agent
+        .in_flight_prompt
+        .as_ref()
+        .expect("automatic continuation remains in flight");
+    assert_ne!(continuation, &first_prompt_id);
+    assert!(matches!(
+        side_agent.turn_state,
+        AgentTurnState::AgentThinking { .. }
+    ));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::SessionAgentUnloaded(unloaded)
+            if unloaded.agent_id == durable_agent_id_for_conversation(&h, &side_cid)
+    )));
+}
+
+/// A provider terminal that races after committed unload must consume stale
+/// prompt correlation without publishing a response or panicking. Re-delivery
+/// remains an idempotent duplicate.
+#[test]
+fn provider_completion_after_agent_unload_is_discarded_idempotently() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let prompt_id: AgentPromptId = "sp-late-after-unload".into();
+    seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
+    h.prompt_agents.insert(prompt_id.clone(), cid.clone());
+    let response = provider_text_response(
+        &prompt_id,
+        durable_agent_id_for_conversation(&h, &cid),
+        "must be discarded",
+    );
+
+    h.remove_agent(&cid);
+    assert!(!h.agents.contains_key(&cid));
+    assert!(h.prompt_agents.contains_key(&prompt_id));
+
+    h.handle_provider_response_finished(response.clone())
+        .expect("late completion discarded");
+    h.handle_provider_response_finished(response)
+        .expect("duplicate late completion discarded");
+
+    assert!(!h.prompt_agents.contains_key(&prompt_id));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderResponseFinished(finished)
+            if finished.agent_prompt_id == prompt_id
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::HarnessNotice(notice)
+            if notice.level == tau_proto::NoticeLevel::Info
+                && notice.message.contains("after owner unload")
+                && notice.message.contains(prompt_id.as_str())
+    )));
+}
+
 #[test]
 fn loop_guard_detects_repeated_same_failing_tool_call() {
     let td = TempDir::new().expect("tempdir");

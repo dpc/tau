@@ -6939,6 +6939,7 @@ impl Harness {
                 .retain(|dispatch| dispatch.cid != cid);
             self.enqueued_standalone_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloaded.agent_id);
+            self.tombstone_ephemeral_provider_prompts_for_agent(&cid);
             self.agents.remove(&cid);
             self.cancel_agent_synchronized_publications(&cid);
         }
@@ -20521,6 +20522,7 @@ impl Harness {
     }
 
     fn remove_agent(&mut self, cid: &AgentId) {
+        self.tombstone_ephemeral_provider_prompts_for_agent(cid);
         self.pending_agent_publish_completions.remove(cid);
         self.pending_publish_idle_dispatches
             .retain(|dispatch| &dispatch.cid != cid);
@@ -23410,7 +23412,9 @@ impl Harness {
             self.emit_duplicate_finished_response_notice(&response.agent_prompt_id);
             return Ok(());
         };
-        self.assign_finished_response_agent_id(&cid, &mut response);
+        if !self.assign_finished_response_agent_id(&cid, &mut response) {
+            return Ok(());
+        }
         let active_compaction_response = self.agents.get(&cid).is_some_and(|agent| {
             matches!(
                 &agent.activation_dispatch,
@@ -24357,6 +24361,23 @@ impl Harness {
         }
     }
 
+    /// Preserve debug-suppression classification before an ephemeral runtime
+    /// owner disappears while provider prompts remain correlated.
+    fn tombstone_ephemeral_provider_prompts_for_agent(&mut self, cid: &AgentId) {
+        if !self
+            .agents
+            .get(cid)
+            .is_some_and(|agent| agent.persistence.is_ephemeral())
+        {
+            return;
+        }
+        self.ephemeral_provider_prompts.extend(
+            self.prompt_agents
+                .iter()
+                .filter_map(|(prompt_id, owner)| (owner == cid).then_some(prompt_id.clone())),
+        );
+    }
+
     fn update_finished_response_context_usage(
         &mut self,
         response_cid: Option<&AgentId>,
@@ -24427,14 +24448,22 @@ impl Harness {
     }
 
     fn assign_finished_response_agent_id(
-        &self,
+        &mut self,
         cid: &AgentId,
         response: &mut ProviderResponseFinished,
-    ) {
-        response.agent_id = crate::parse_agent_id(
-            self.target_agent_id_for_agent(cid)
-                .expect("agent has durable id"),
-        );
+    ) -> bool {
+        let Some(agent_id) = self.target_agent_id_for_agent(cid) else {
+            if !self.provider_prompt_targets_ephemeral(&response.agent_prompt_id) {
+                self.emit_info(&format!(
+                    "discarding agent response after owner unload for agent_prompt_id={}",
+                    response.agent_prompt_id
+                ));
+            }
+            self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+            return false;
+        };
+        response.agent_id = crate::parse_agent_id(&agent_id);
+        true
     }
 
     fn discard_finished_response_if_stale(
@@ -24814,7 +24843,6 @@ impl Harness {
                 source,
             );
         }
-        self.set_agent_turn_state(cid, AgentTurnState::Idle);
     }
 
     fn finished_side_conversation_error(
