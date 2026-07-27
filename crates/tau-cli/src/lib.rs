@@ -25,6 +25,7 @@ mod prompt_history;
 mod prompt_stdin;
 mod provider_quota;
 mod render_request;
+mod renderer_handle;
 mod send;
 mod settings_registry;
 mod skill_commands;

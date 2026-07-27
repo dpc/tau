@@ -229,11 +229,11 @@ Several execution contexts cooperate:
 Any thread holding a `TermHandle` can mutate zones and trigger a redraw.
 Multiple redraws coalesce into one via the notify channel.
 
-Callers that temporarily install an off-screen output snapshot and then restore
-the visible snapshot must wrap the whole sequence in
-`TermHandle::with_output_transaction`. Ordinary `TermHandle` output mutations
-from cloned handles wait for that transaction, so local terminal output cannot
-attach to the temporary snapshot.
+Callers that perform a multi-step visible output replacement alongside cloned
+handles can wrap the sequence in `TermHandle::with_output_transaction`.
+Ordinary output mutations from cloned handles then wait for that atomic visible
+transition. Tau CLI hidden-agent folding does not use this mechanism: it mutates
+detached presentation models without installing them in the terminal.
 
 ## Test strategy
 

@@ -25,7 +25,8 @@ use super::chat::{
 };
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
 
-fn cli_test_theme() -> tau_themes::Theme {
+/// Returns the stable inline theme shared by CLI renderer tests.
+pub(crate) fn cli_test_theme() -> tau_themes::Theme {
     tau_themes::Theme::parse(
         r##"
         {

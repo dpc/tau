@@ -35,6 +35,17 @@ restoration whenever terminal layout or tool presentation changes. See
 [`ARCH-tau-term-screen`](crates/tau-term-screen/specs/ARCH-tau-term-screen.md)
 and [`ARCH-tau-cli`](crates/tau-cli/specs/ARCH-tau-cli.md).
 
+Interactive frontend progress diagnostics contain only process-local delivery
+ids, typed event names, agent routing ids, selected/hidden classification,
+queue item/encoded-byte counts and ages, stage durations, output block counts,
+and cancel target resolution. They never retain prompt, response, tool, event,
+terminal-output, or disconnect-reason bodies. Trace-level paired stage markers
+localize an operation that never returns; warnings for completed stages at or
+above 500 ms are rate-limited per frontend component to one per five seconds.
+The CLI socket-to-renderer FIFO is bounded at 1,024 items and 64 MiB, but
+backpressure can migrate backlog to the harness writer queue. These bounds
+therefore do not promise whole-process or end-to-end slow-client memory limits.
+
 ## Command-mode and prompt boundary
 
 First-non-whitespace `:` selects non-provider command authority. Unknown or

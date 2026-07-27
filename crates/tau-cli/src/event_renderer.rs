@@ -18,13 +18,13 @@ use tau_proto::{
 use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
 use crate::agent_navigation::AgentNavigation;
-use crate::build_banner;
 use crate::chat::{DraftSlot, invalidate_pending_draft, retarget_prompt_draft_snapshot};
 use crate::markdown_render::{
     MarkdownStreamCache, markdown_block_with_osc8, markdown_prefixed_block_with_osc8,
     markdown_prefixed_streaming_block_with_osc8, markdown_prompt_block_with_osc8,
     markdown_streaming_block_with_osc8,
 };
+use crate::renderer_handle::RendererHandle;
 use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolStatus, ToolSuffixSegment, ToolSummaryDisplay,
@@ -37,12 +37,59 @@ use crate::tool_render::{
     synthesize_fallback_display, tool_duration_suffix, ui_dir_block,
 };
 use crate::watch_activity::WatchActivityProjection;
+use crate::{MUTEX_POISONED, build_banner};
 
 pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
 const UI_IO_HIGH_BYTES_PER_SEC: u64 = 100 * 1024;
 
 const AGENT_START_TOOL_NAME: &str = "agent_start";
 const TIMER_WAKEUP_CTX_PREFIX: &str = "timer:";
+static LAST_HANDLER_STALL_WARNING: std::sync::OnceLock<Mutex<Option<Instant>>> =
+    std::sync::OnceLock::new();
+
+fn admit_handler_stall_warning(now: Instant) -> bool {
+    let mut last = LAST_HANDLER_STALL_WARNING
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect(MUTEX_POISONED);
+    if last.is_some_and(|last| now.duration_since(last) < Duration::from_secs(5)) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// Content-free renderer stage timing emitted on every handler exit.
+struct HandlerProgress {
+    /// Process-local delivery correlation when the socket supplied this event.
+    delivery_id: Option<u64>,
+    /// Stable content-free protocol event name.
+    event_name: tau_proto::EventName,
+    /// Monotonic handler start time.
+    started_at: Instant,
+}
+
+impl Drop for HandlerProgress {
+    fn drop(&mut self) {
+        let elapsed = self.started_at.elapsed();
+        tracing::trace!(
+            target: "tau_cli::frontend_progress",
+            delivery_id = self.delivery_id,
+            event_name = %self.event_name,
+            handler_us = elapsed.as_micros(),
+            "renderer handler finished"
+        );
+        if Duration::from_millis(500) <= elapsed && admit_handler_stall_warning(Instant::now()) {
+            tracing::warn!(
+                target: "tau_cli::frontend_progress",
+                delivery_id = self.delivery_id,
+                event_name = %self.event_name,
+                handler_ms = elapsed.as_millis(),
+                "renderer handler stalled"
+            );
+        }
+    }
+}
 const COMPLETED_AGENT_RESPONSE_PREFIX: &str = "◆ ";
 const STREAMING_AGENT_RESPONSE_PREFIX: &str = "◇ ";
 /// Maximum rendered terminal columns for a supplemental agent message name.
@@ -82,7 +129,7 @@ pub(crate) struct UiIoStats {
 }
 
 pub(crate) struct EventRenderer {
-    handle: tau_cli_term::TermHandle,
+    handle: RendererHandle,
     completion_data: tau_cli_term::CompletionData,
     action_state: ActionCommandState,
     skill_state: SkillCommandState,
@@ -457,6 +504,14 @@ struct AgentUiState {
     contains_overview_message: bool,
     cumulative_agent_latency: Duration,
     agent_activity: AgentActivity,
+}
+
+/// Selects which parts of an agent UI state become externally visible.
+enum AgentUiRestoreMode {
+    /// Materialize the output model and publish its editor context.
+    Visible,
+    /// Restore only renderer bookkeeping around a detached hidden fold.
+    DetachedBookkeeping,
 }
 
 #[derive(Default)]
@@ -1376,7 +1431,7 @@ impl EventRenderer {
         let cli_state_mirror = std::sync::Arc::new(std::sync::Mutex::new(state.clone()));
         handle.set_redraw_history_size(state.redraw_history_size);
         Self {
-            handle,
+            handle: RendererHandle::new(handle),
             completion_data,
             action_state: ActionCommandState::new(std::iter::empty::<&str>()),
             skill_state: SkillCommandState::new(),
@@ -1582,7 +1637,7 @@ impl EventRenderer {
         agent_id: String,
         after_display_update: impl FnOnce(),
     ) {
-        let handle = self.handle.clone();
+        let handle = self.handle.terminal_handle();
         // A selection transition publishes one coherent transcript, target,
         // status, and placeholder frame. Input routing is mirrored earlier by
         // the input thread and is intentionally outside this renderer batch.
@@ -1623,7 +1678,7 @@ impl EventRenderer {
     }
 
     fn clear_selected_agent_after_display_update(&mut self, after_display_update: impl FnOnce()) {
-        let handle = self.handle.clone();
+        let handle = self.handle.terminal_handle();
         handle.with_redraw_suppressed(|| {
             let target_changed = self.current_agent_id.is_some();
             let display_changed = self.displayed_agent_id.is_some();
@@ -2124,8 +2179,20 @@ impl EventRenderer {
     }
 
     fn take_visible_agent_state(&mut self) -> AgentUiState {
+        let output = self.handle.output_snapshot();
+        self.take_visible_agent_state_with_output(output)
+    }
+
+    /// Moves renderer bookkeeping into a state paired with the supplied model.
+    ///
+    /// Hidden folding supplies its already-detached model here, avoiding a
+    /// snapshot of the selected terminal transcript.
+    fn take_visible_agent_state_with_output(
+        &mut self,
+        output: tau_cli_term::OutputSnapshot,
+    ) -> AgentUiState {
         AgentUiState {
-            output: self.handle.output_snapshot(),
+            output,
             watched_agent_blocks: std::mem::take(&mut self.watched_agent_blocks),
             editor_conversation_context: std::mem::take(&mut self.editor_conversation_context),
             prompts: std::mem::take(&mut self.prompts),
@@ -2161,27 +2228,20 @@ impl EventRenderer {
     }
 
     fn restore_visible_agent_state(&mut self, state: AgentUiState) {
-        self.restore_visible_agent_state_inner(state, true, true);
+        self.restore_agent_ui_state(state, AgentUiRestoreMode::Visible);
     }
 
-    fn restore_hidden_agent_state(&mut self, state: AgentUiState) {
-        self.restore_visible_agent_state_inner(state, false, false);
+    fn restore_renderer_bookkeeping(&mut self, state: AgentUiState) {
+        self.restore_agent_ui_state(state, AgentUiRestoreMode::DetachedBookkeeping);
     }
 
-    fn restore_visible_agent_state_inner(
-        &mut self,
-        state: AgentUiState,
-        redraw: bool,
-        publish_editor_context: bool,
-    ) {
-        if redraw {
+    fn restore_agent_ui_state(&mut self, state: AgentUiState, mode: AgentUiRestoreMode) {
+        if matches!(mode, AgentUiRestoreMode::Visible) {
             self.handle.replace_output_snapshot(state.output);
-        } else {
-            self.handle.replace_output_snapshot_quiet(state.output);
         }
         self.editor_conversation_context = state.editor_conversation_context;
         self.watched_agent_blocks = state.watched_agent_blocks;
-        if publish_editor_context {
+        if matches!(mode, AgentUiRestoreMode::Visible) {
             self.publish_editor_conversation_context();
         }
         self.prompts = state.prompts;
@@ -3649,7 +3709,39 @@ impl EventRenderer {
         self.handle_recorded_at(event, UnixMicros::now());
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
+        self.handle_recorded_delivery(event, recorded_at, None);
+    }
+
+    /// Handles one socket delivery with its content-free frontend correlation.
+    pub(crate) fn handle_socket_delivery(
+        &mut self,
+        event: &Event,
+        recorded_at: UnixMicros,
+        delivery_id: u64,
+    ) {
+        self.handle_recorded_delivery(event, recorded_at, Some(delivery_id));
+    }
+
+    fn handle_recorded_delivery(
+        &mut self,
+        event: &Event,
+        recorded_at: UnixMicros,
+        delivery_id: Option<u64>,
+    ) {
+        let event_name = event.name();
+        tracing::trace!(
+            target: "tau_cli::frontend_progress",
+            delivery_id,
+            %event_name,
+            "renderer handler started"
+        );
+        let _progress = HandlerProgress {
+            delivery_id,
+            event_name,
+            started_at: Instant::now(),
+        };
         self.learn_agent_metadata(event);
         if let Event::HarnessAgentContextInitialized(initialized) = event
             && self.current_agent_id.is_none()
@@ -3686,6 +3778,14 @@ impl EventRenderer {
             return;
         }
         let target_agent_id = self.agent_id_for_event(event);
+        if let Some(target_agent_id) = target_agent_id.as_deref() {
+            tracing::trace!(
+                target: "tau_cli::frontend_progress",
+                agent_id = target_agent_id,
+                selected = self.displayed_agent_id.as_deref() == Some(target_agent_id),
+                "renderer target resolved"
+            );
+        }
         let Some(target_agent_id) = target_agent_id else {
             self.handle_recorded_at_for_visible_agent(event, recorded_at);
             self.update_agent_in_progress();
@@ -3733,26 +3833,7 @@ impl EventRenderer {
                 self.update_agent_in_progress();
                 return;
             }
-            let handle = self.handle.clone();
-            handle.with_output_transaction(|| {
-                let visible_state = self.take_visible_agent_state();
-                let target_state = self
-                    .agents_ui_state
-                    .remove(&target_agent_id)
-                    .unwrap_or_default();
-                handle.with_redraw_suppressed(|| {
-                    self.with_editor_context_publish_suppressed(|this| {
-                        this.restore_hidden_agent_state(target_state);
-                        this.displayed_agent_id = Some(target_agent_id.clone());
-                        this.handle_recorded_at_for_visible_agent(event, recorded_at);
-                        let target_state = this.take_visible_agent_state();
-                        this.agents_ui_state.insert(target_agent_id, target_state);
-                        this.restore_hidden_agent_state(visible_state);
-                    });
-                });
-            });
-            self.displayed_agent_id = None;
-            self.publish_editor_conversation_context();
+            self.handle_recorded_at_for_hidden_agent(event, recorded_at, target_agent_id);
             self.update_agent_in_progress();
             return;
         }
@@ -3762,37 +3843,7 @@ impl EventRenderer {
             return;
         }
 
-        let visible_agent_id = self
-            .displayed_agent_id
-            .clone()
-            .or_else(|| self.current_agent_id.clone())
-            .unwrap_or_else(|| target_agent_id.clone());
-        let handle = self.handle.clone();
-        handle.with_output_transaction(|| {
-            let visible_state = self.take_visible_agent_state();
-            self.agents_ui_state
-                .insert(visible_agent_id.clone(), visible_state);
-            let target_state = self
-                .agents_ui_state
-                .remove(&target_agent_id)
-                .unwrap_or_default();
-            handle.with_redraw_suppressed(|| {
-                self.with_editor_context_publish_suppressed(|this| {
-                    this.restore_hidden_agent_state(target_state);
-                    this.displayed_agent_id = Some(target_agent_id.clone());
-                    this.handle_recorded_at_for_visible_agent(event, recorded_at);
-                    let target_state = this.take_visible_agent_state();
-                    this.agents_ui_state.insert(target_agent_id, target_state);
-                    let visible_state = this
-                        .agents_ui_state
-                        .remove(&visible_agent_id)
-                        .unwrap_or_default();
-                    this.restore_hidden_agent_state(visible_state);
-                });
-            });
-        });
-        self.displayed_agent_id = Some(visible_agent_id);
-        self.publish_editor_conversation_context();
+        self.handle_recorded_at_for_hidden_agent(event, recorded_at, target_agent_id);
         self.update_agent_in_progress();
     }
 
@@ -3925,36 +3976,25 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         target_agent_id: String,
     ) {
-        let handle = self.handle.clone();
         let visible_agent_id = self.displayed_agent_id.clone();
-        handle.with_output_transaction(|| {
-            let visible_state = self.take_visible_agent_state();
-            if let Some(visible_agent_id) = visible_agent_id.as_ref() {
-                self.agents_ui_state
-                    .insert(visible_agent_id.clone(), visible_state);
-            } else {
-                self.no_agent_ui_state = visible_state;
-            }
-            let target_state = self
-                .agents_ui_state
-                .remove(&target_agent_id)
-                .unwrap_or_default();
-            handle.with_redraw_suppressed(|| {
-                self.with_editor_context_publish_suppressed(|this| {
-                    this.restore_hidden_agent_state(target_state);
-                    this.displayed_agent_id = Some(target_agent_id.clone());
-                    this.handle_recorded_at_for_visible_agent(event, recorded_at);
-                    let target_state = this.take_visible_agent_state();
-                    this.agents_ui_state
-                        .insert(target_agent_id.clone(), target_state);
-                    let visible_state = visible_agent_id
-                        .as_ref()
-                        .and_then(|id| this.agents_ui_state.remove(id))
-                        .unwrap_or_else(|| std::mem::take(&mut this.no_agent_ui_state));
-                    this.restore_hidden_agent_state(visible_state);
-                });
-            });
+        let visible_state =
+            self.take_visible_agent_state_with_output(tau_cli_term::OutputSnapshot::default());
+        let mut target_state = self
+            .agents_ui_state
+            .remove(&target_agent_id)
+            .unwrap_or_default();
+        self.handle
+            .select_detached(std::mem::take(&mut target_state.output));
+        self.with_editor_context_publish_suppressed(|this| {
+            this.restore_renderer_bookkeeping(target_state);
+            this.displayed_agent_id = Some(target_agent_id.clone());
+            this.handle_recorded_at_for_visible_agent(event, recorded_at);
         });
+        let target_output = self.handle.take_detached();
+        tracing::trace!(target: "tau_cli::frontend_progress", agent_id = target_agent_id, blocks = target_output.block_count(), "hidden presentation updated");
+        let target_state = self.take_visible_agent_state_with_output(target_output);
+        self.agents_ui_state.insert(target_agent_id, target_state);
+        self.restore_renderer_bookkeeping(visible_state);
         self.displayed_agent_id = visible_agent_id;
         self.publish_editor_conversation_context();
     }
@@ -3975,31 +4015,20 @@ impl EventRenderer {
     /// publishing its editor context or disturbing the visible agent
     /// transcript.
     fn update_hidden_no_agent_state(&mut self, update: impl FnOnce(&mut Self)) {
-        let handle = self.handle.clone();
         let visible_agent_id = self.displayed_agent_id.clone();
-        handle.with_output_transaction(|| {
-            let visible_state = self.take_visible_agent_state();
-            if let Some(visible_agent_id) = visible_agent_id.as_ref() {
-                self.agents_ui_state
-                    .insert(visible_agent_id.clone(), visible_state);
-            } else {
-                self.no_agent_ui_state = visible_state;
-            }
-            let no_agent_state = std::mem::take(&mut self.no_agent_ui_state);
-            handle.with_redraw_suppressed(|| {
-                self.with_editor_context_publish_suppressed(|this| {
-                    this.restore_hidden_agent_state(no_agent_state);
-                    this.displayed_agent_id = None;
-                    update(this);
-                    this.no_agent_ui_state = this.take_visible_agent_state();
-                    let visible_state = visible_agent_id
-                        .as_ref()
-                        .and_then(|id| this.agents_ui_state.remove(id))
-                        .unwrap_or_default();
-                    this.restore_hidden_agent_state(visible_state);
-                });
-            });
+        let visible_state =
+            self.take_visible_agent_state_with_output(tau_cli_term::OutputSnapshot::default());
+        let mut no_agent_state = std::mem::take(&mut self.no_agent_ui_state);
+        self.handle
+            .select_detached(std::mem::take(&mut no_agent_state.output));
+        self.with_editor_context_publish_suppressed(|this| {
+            this.restore_renderer_bookkeeping(no_agent_state);
+            this.displayed_agent_id = None;
+            update(this);
         });
+        let no_agent_output = self.handle.take_detached();
+        self.no_agent_ui_state = self.take_visible_agent_state_with_output(no_agent_output);
+        self.restore_renderer_bookkeeping(visible_state);
         self.displayed_agent_id = visible_agent_id;
         self.publish_editor_conversation_context();
     }

@@ -23,7 +23,7 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
     super::EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        crate::tests::cli_test_theme(),
     )
 }
 
@@ -318,7 +318,7 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
     let mut renderer = super::EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        crate::tests::cli_test_theme(),
     );
     let draft_handle = std::sync::Arc::new((
         std::sync::Mutex::new(DraftSlot::default()),
@@ -366,6 +366,73 @@ fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::
         kind: tau_proto::AgentMessageKind::Message,
         message: message.to_owned(),
     })
+}
+
+/// Large hidden transcripts must fold one event without cloning the selected
+/// terminal snapshot; this guards the permanent-freeze amplification found
+/// under sustained multi-agent traffic.
+#[test]
+fn generated_multi_agent_load_avoids_hidden_terminal_snapshot_clones() {
+    let (_term, handle, _input) = Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        tau_cli_term::CursorShape::Bar,
+    );
+    let mut renderer = super::EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        crate::tests::cli_test_theme(),
+    );
+    renderer.switch_agent("worker-0".to_owned());
+
+    for agent_index in 0..8 {
+        let agent_id = format!("worker-{agent_index}");
+        if agent_index == 0 {
+            for block_index in 0..6_250 {
+                renderer.handle.print_output(
+                    "generated-load",
+                    tau_cli_term::StyledBlock::new(format!("{agent_id}:{block_index}")),
+                );
+            }
+            continue;
+        }
+        let mut state = super::AgentUiState::default();
+        for block_index in 0..6_250 {
+            state.output.print_output(
+                "generated-load",
+                tau_cli_term::StyledBlock::new(format!("{agent_id}:{block_index}")),
+            );
+        }
+        renderer.agents_ui_state.insert(agent_id, state);
+    }
+
+    let snapshots_before = handle.output_snapshot_count();
+    let blocks_before = (1..8)
+        .map(|agent_index| {
+            renderer.agents_ui_state[&format!("worker-{agent_index}")]
+                .output
+                .block_count()
+        })
+        .collect::<Vec<_>>();
+    for agent_index in 1..8 {
+        renderer.handle(&agent_message(
+            &format!("worker-{agent_index}"),
+            "worker-0",
+            "generated update",
+        ));
+    }
+
+    assert_eq!(handle.output_snapshot_count(), snapshots_before);
+    for (agent_index, blocks_before) in (1..8).zip(blocks_before) {
+        assert_eq!(
+            renderer.agents_ui_state[&format!("worker-{agent_index}")]
+                .output
+                .block_count(),
+            blocks_before + 1
+        );
+    }
 }
 
 /// User-directed agent messages are broadcasts rendered without an owning

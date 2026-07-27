@@ -8,18 +8,18 @@ requests. These cooperating areas collectively define which visible state
 follows an agent or editor and cannot be documented coherently beside any one
 renderer or input-loop implementation.
 
-The terminal UI keeps visible transcript state in renderer fields and snapshots
-hidden agent transcripts in `AgentUiState`. Response text used by the external
+The terminal UI keeps visible transcript state in renderer fields and detached
+hidden-agent presentation models in `AgentUiState`. Response text used by the external
 prompt editor's trailer follows the same per-agent snapshot boundary: current and
 last assistant response context belongs to the viewed/no-agent transcript, while
 prompt-local fields such as previous prompt and trailer recovery stay with the
 active input/editor flow.
 
 Live UI blocks that have a distinct start/completion lifecycle must complete in
-the same transcript snapshot that rendered their start block, even if the user
-switches viewed agents before completion arrives. Hidden completion folding may
-temporarily restore the owning agent or no-agent snapshot, update/remove the live
-block there, then restore the actually visible transcript without publishing
+the same transcript presentation model that rendered their start block, even if
+the user switches viewed agents before completion arrives. Hidden completion
+folding updates or removes the live block directly in the owning agent or
+no-agent model without replacing the actually visible transcript or publishing
 hidden prompt-editor context.
 
 While an event folds into a hidden transcript, shared input-loop mirrors and

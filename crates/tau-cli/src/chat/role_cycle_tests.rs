@@ -346,7 +346,10 @@ fn agent_cycle_dispatches_overview_and_agent_transitions() {
     ])));
     let suspended = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let routing = routing_state(known, live, suspended);
-    let (renderer_tx, renderer_rx) = mpsc::channel();
+    let (renderer_tx, renderer_rx) = LocalRendererSender::channel(
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        Arc::new(Mutex::new(())),
+    );
 
     routing.set_selected_agent(Some("bravo".to_owned()));
     assert_eq!(

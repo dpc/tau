@@ -746,10 +746,10 @@ fn dirty_suppression_guard_notifies_redraw_channel() {
     drop(term);
 }
 
-/// Output transactions must make multi-step snapshot swaps atomic with respect
-/// to cloned handles that print local terminal output from other threads. This
-/// prevents local messages from attaching to a temporary hidden transcript
-/// snapshot while the CLI folds a background-agent event.
+/// Output transactions must make a caller's multi-step visible snapshot
+/// replacement atomic with respect to cloned handles that print concurrently.
+/// This generic guarantee remains useful even though hidden-agent folding owns
+/// detached models and no longer installs temporary terminal snapshots.
 #[test]
 fn output_transaction_blocks_concurrent_local_output_until_visible_snapshot_restored() {
     let buf = SharedBuffer::new();
@@ -804,6 +804,75 @@ fn output_transaction_blocks_concurrent_local_output_until_visible_snapshot_rest
     assert!(!rendered_text.contains("hidden base"));
 
     drop(term);
+}
+
+/// Detached snapshot mutation must preserve the same block identities, content,
+/// and zone semantics as applying the equivalent operations through a terminal
+/// handle. The CLI relies on this parity before materializing on selection.
+#[test]
+fn output_snapshot_mutation_matches_terminal_handle() {
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(std::io::sink()), CursorShape::Bar);
+    let mut model = OutputSnapshot::default();
+
+    let terminal_first = handle.new_block("first", plain_block("first"));
+    let model_first = model.new_block("first", plain_block("first"));
+    assert_eq!(terminal_first, model_first);
+    handle.push_history(terminal_first);
+    model.push_history(model_first);
+
+    let terminal_live = handle.new_block("live", plain_block("live"));
+    let model_live = model.new_block("live", plain_block("live"));
+    handle.push_above_active(terminal_live);
+    model.push_above_active(model_live);
+    handle.push_above_sticky(terminal_live);
+    model.push_above_sticky(model_live);
+    handle.push_below(terminal_live);
+    model.push_below(model_live);
+    handle.set_block(terminal_live, plain_block("updated"));
+    model.set_block(model_live, plain_block("updated"));
+    handle.remove_above_sticky(terminal_live);
+    model.remove_above_sticky(model_live);
+
+    let terminal_before = handle.new_block("before", plain_block("before"));
+    let model_before = model.new_block("before", plain_block("before"));
+    handle.push_above_active_before_any(terminal_before, [terminal_live]);
+    model.push_above_active_before_any(model_before, [model_live]);
+
+    let terminal_printed = handle.print_output("printed", plain_block("printed"));
+    let model_printed = model.print_output("printed", plain_block("printed"));
+    assert_eq!(terminal_printed, model_printed);
+
+    let terminal_removed = handle.new_block("removed", plain_block("removed"));
+    let model_removed = model.new_block("removed", plain_block("removed"));
+    handle.push_above_active(terminal_removed);
+    model.push_above_active(model_removed);
+    handle.remove_block(terminal_removed);
+    model.remove_block(model_removed);
+
+    let terminal = handle.output_snapshot();
+    assert_eq!(
+        terminal
+            .blocks
+            .keys()
+            .collect::<std::collections::HashSet<_>>(),
+        model
+            .blocks
+            .keys()
+            .collect::<std::collections::HashSet<_>>()
+    );
+    for (id, terminal_block) in &terminal.blocks {
+        assert_eq!(
+            format!("{terminal_block:?}"),
+            format!("{:?}", model.blocks.get(id).expect("matching model block"))
+        );
+    }
+    assert_eq!(terminal.block_debug_ids, model.block_debug_ids);
+    assert_eq!(terminal.history, model.history);
+    assert_eq!(terminal.above_active, model.above_active);
+    assert_eq!(terminal.above_sticky, model.above_sticky);
+    assert_eq!(terminal.suggestions, model.suggestions);
+    assert_eq!(terminal.below, model.below);
 }
 
 /// Input shutdown requests must wake a virtual input loop without requiring an
@@ -1550,6 +1619,72 @@ fn ctrl_c_empty_prompt_requires_second_press_to_cancel() {
         term.get_next_event().expect("event"),
         Event::CancelPrompt
     ));
+}
+
+/// A terminal sink blocked inside `write` must not hold prompt-input state or
+/// prevent the caller from resolving a cancellation event.
+#[test]
+fn blocked_terminal_sink_keeps_cancel_input_responsive() {
+    /// Writer that announces its first write and blocks until released.
+    struct BlockingWriter {
+        /// Signals that a terminal write reached the sink.
+        entered: std::sync::mpsc::Sender<()>,
+        /// Shared release flag and condition variable for the blocked write.
+        release: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl std::io::Write for BlockingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let _ = self.entered.send(());
+            let (lock, wake) = &*self.release;
+            let released = lock.lock().expect("release mutex");
+            let _released = wake
+                .wait_while(released, |released| !*released)
+                .expect("release mutex");
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let release = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (term, _handle, input_tx) = Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(BlockingWriter {
+            entered: entered_tx,
+            release: release.clone(),
+        }),
+        CursorShape::Bar,
+    );
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("redraw entered blocked sink");
+
+    for _ in 0..2 {
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )))
+            .expect("ctrl-c");
+    }
+    assert!(matches!(
+        term.get_next_event().expect("first ctrl-c"),
+        Event::Notice(_)
+    ));
+    assert!(matches!(
+        term.get_next_event().expect("second ctrl-c"),
+        Event::CancelPrompt
+    ));
+
+    let (lock, wake) = &*release;
+    *lock.lock().expect("release mutex") = true;
+    wake.notify_all();
 }
 
 /// Any intervening key should disarm the empty-prompt Ctrl-C cancel guard so
@@ -5262,4 +5397,16 @@ fn external_pause_failure_rolls_back_through_resume() {
     let st = term.handle.lock();
     assert!(!st.external_paused);
     assert!(st.invalidate_screen);
+}
+
+/// The global warning policy should admit the first warning, reject one just
+/// before the interval, and admit one exactly at the interval boundary.
+#[test]
+fn stall_warning_limiter_rate_limits_deterministically() {
+    let start = std::time::Instant::now();
+    let mut limiter = StallWarningLimiter { last: None };
+
+    assert!(limiter.admit(start));
+    assert!(!limiter.admit(start + Duration::from_millis(4_999)));
+    assert!(limiter.admit(start + Duration::from_secs(5)));
 }

@@ -18,7 +18,38 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, BufWriter, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 const PROMPT_INPUT_MAX_HEIGHT_PERCENT: usize = 33;
+const STALL_WARNING_INTERVAL: Duration = Duration::from_secs(5);
+static STALL_WARNING_LIMITER: Mutex<StallWarningLimiter> =
+    Mutex::new(StallWarningLimiter { last: None });
+
+/// Limits repeated slow-stage warnings across terminal operations.
+struct StallWarningLimiter {
+    /// Most recent admitted warning timestamp.
+    last: Option<std::time::Instant>,
+}
+
+impl StallWarningLimiter {
+    /// Admits the first warning in each fixed minimum interval.
+    fn admit(&mut self, now: std::time::Instant) -> bool {
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) < STALL_WARNING_INTERVAL)
+        {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+}
+
+fn admit_stall_warning() -> bool {
+    STALL_WARNING_LIMITER
+        .lock()
+        .expect("stall warning mutex poisoned")
+        .admit(std::time::Instant::now())
+}
 
 use crossterm::cursor::{MoveToColumn, MoveUp, SetCursorStyle};
 use crossterm::event::{
@@ -849,6 +880,8 @@ fn remove_all_from_zone(zone: &mut Vec<BlockId>, id: BlockId) -> usize {
 pub struct OutputSnapshot {
     blocks: HashMap<BlockId, StyledBlock>,
     block_debug_ids: HashMap<BlockId, String>,
+    /// Next block identity allocated within this presentation model.
+    next_id: u64,
     history: Vec<BlockId>,
     above_active: Vec<BlockId>,
     above_sticky: Vec<BlockId>,
@@ -857,9 +890,103 @@ pub struct OutputSnapshot {
 }
 
 impl OutputSnapshot {
+    /// Returns the number of blocks retained by this presentation model.
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
     /// Returns the ordered block ids currently present in the suggestions zone.
     pub fn suggestion_ids(&self) -> &[BlockId] {
         &self.suggestions
+    }
+
+    /// Allocates and stores a block in this output snapshot.
+    pub fn new_block(
+        &mut self,
+        debug_id: impl Into<String>,
+        block: impl Into<StyledBlock>,
+    ) -> BlockId {
+        let id = BlockId(self.next_id);
+        self.next_id = self.next_id.saturating_add(1);
+        self.blocks.insert(id, block.into());
+        self.block_debug_ids.insert(id, debug_id.into());
+        id
+    }
+
+    /// Replaces one block in this output snapshot.
+    pub fn set_block(&mut self, id: BlockId, block: impl Into<StyledBlock>) {
+        self.blocks.insert(id, block.into());
+        self.block_debug_ids
+            .entry(id)
+            .or_insert_with(|| format!("set-block-{}", id.0));
+    }
+
+    /// Removes one block and all of its zone references.
+    pub fn remove_block(&mut self, id: BlockId) {
+        self.blocks.remove(&id);
+        self.block_debug_ids.remove(&id);
+        remove_all_from_zone(&mut self.history, id);
+        remove_all_from_zone(&mut self.above_active, id);
+        remove_all_from_zone(&mut self.above_sticky, id);
+        remove_all_from_zone(&mut self.suggestions, id);
+        remove_all_from_zone(&mut self.below, id);
+    }
+
+    /// Appends a block to snapshot history.
+    pub fn push_history(&mut self, id: BlockId) {
+        self.history.push(id);
+    }
+
+    /// Appends a block to the snapshot active zone.
+    pub fn push_above_active(&mut self, id: BlockId) {
+        if !self.above_active.contains(&id) {
+            self.above_active.push(id);
+        }
+    }
+
+    /// Moves a block before the first matching snapshot active-zone anchor.
+    pub fn push_above_active_before_any<I>(&mut self, id: BlockId, anchors: I)
+    where
+        I: IntoIterator<Item = BlockId>,
+    {
+        let anchors = anchors.into_iter().collect::<HashSet<_>>();
+        self.above_active.retain(|active_id| *active_id != id);
+        let insert_at = self
+            .above_active
+            .iter()
+            .position(|active_id| anchors.contains(active_id))
+            .unwrap_or(self.above_active.len());
+        self.above_active.insert(insert_at, id);
+    }
+
+    /// Appends a block to the snapshot sticky zone.
+    pub fn push_above_sticky(&mut self, id: BlockId) {
+        if !self.above_sticky.contains(&id) {
+            self.above_sticky.push(id);
+        }
+    }
+
+    /// Removes a block reference from the snapshot sticky zone.
+    pub fn remove_above_sticky(&mut self, id: BlockId) {
+        self.above_sticky.retain(|block_id| *block_id != id);
+    }
+
+    /// Appends a block to the snapshot below-prompt zone.
+    pub fn push_below(&mut self, id: BlockId) {
+        if !self.below.contains(&id) {
+            self.below.push(id);
+        }
+    }
+
+    /// Creates and appends one snapshot history block.
+    pub fn print_output(
+        &mut self,
+        debug_id: impl Into<String>,
+        block: impl Into<StyledBlock>,
+    ) -> BlockId {
+        let id = self.new_block(debug_id, block);
+        self.push_history(id);
+        id
     }
 }
 
@@ -874,6 +1001,8 @@ pub struct TermHandle {
     sync_condvar: Arc<std::sync::Condvar>,
     redraw: tau_blocking_notify_channel::Sender,
     input_tx: std::sync::mpsc::Sender<InputMessage>,
+    /// Number of transcript-sized output snapshot clones requested.
+    output_snapshot_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 thread_local! {
@@ -903,6 +1032,21 @@ impl Drop for OutputTransactionDepthGuard {
 struct OutputTransactionGuard<'a> {
     _guard: MutexGuard<'a, ()>,
     _depth: OutputTransactionDepthGuard,
+    /// Monotonic acquisition time used for content-free hold diagnostics.
+    acquired_at: std::time::Instant,
+}
+
+impl Drop for OutputTransactionGuard<'_> {
+    fn drop(&mut self) {
+        let held = self.acquired_at.elapsed();
+        if Duration::from_millis(500) <= held && admit_stall_warning() {
+            tracing::warn!(
+                target: "tau_cli_term_raw::frontend_progress",
+                hold_ms = held.as_millis(),
+                "terminal output transaction stalled"
+            );
+        }
+    }
 }
 
 struct RedrawSuppressionGuard<'a> {
@@ -964,14 +1108,33 @@ impl TermHandle {
         if self.output_transaction_is_held() {
             return None;
         }
+        let waiting_at = std::time::Instant::now();
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            "terminal output transaction acquisition started"
+        );
         let guard = self
             .output_transaction
             .lock()
             .expect("term output transaction mutex poisoned");
+        let waited = waiting_at.elapsed();
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            wait_us = waited.as_micros(),
+            "terminal output transaction acquired"
+        );
+        if Duration::from_millis(500) <= waited && admit_stall_warning() {
+            tracing::warn!(
+                target: "tau_cli_term_raw::frontend_progress",
+                wait_ms = waited.as_millis(),
+                "terminal output transaction acquisition stalled"
+            );
+        }
         let depth = self.mark_output_transaction_held();
         Some(OutputTransactionGuard {
             _guard: guard,
             _depth: depth,
+            acquired_at: std::time::Instant::now(),
         })
     }
 
@@ -1056,17 +1219,30 @@ impl TermHandle {
     /// Returns a clone of all output blocks/zones, excluding prompt input and
     /// prompt-history state.
     pub fn output_snapshot(&self) -> OutputSnapshot {
+        self.output_snapshot_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _transaction = self.output_transaction_barrier();
         let st = self.lock();
         OutputSnapshot {
             blocks: st.blocks.clone(),
             block_debug_ids: st.block_debug_ids.clone(),
+            next_id: st.next_id,
             history: st.history.clone(),
             above_active: st.above_active.clone(),
             above_sticky: st.above_sticky.clone(),
             suggestions: st.suggestions.clone(),
             below: st.below.clone(),
         }
+    }
+
+    /// Returns how many full terminal output snapshots this handle has cloned.
+    ///
+    /// This content-free counter supports frontend progress diagnostics and
+    /// guards hidden-agent rendering against transcript-sized clone
+    /// regressions.
+    pub fn output_snapshot_count(&self) -> u64 {
+        self.output_snapshot_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Replaces all output blocks/zones, preserving prompt input and history.
@@ -1091,6 +1267,7 @@ impl TermHandle {
         let mut st = self.lock();
         st.blocks = snapshot.blocks;
         st.block_debug_ids = snapshot.block_debug_ids;
+        st.next_id = st.next_id.max(snapshot.next_id);
         st.history = snapshot.history;
         st.rebuild_history_refs();
         st.above_active = snapshot.above_active;
@@ -1632,6 +1809,7 @@ impl Term {
             sync_condvar,
             redraw: redraw_tx,
             input_tx,
+            output_snapshot_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
 
         handle.redraw.notify();
@@ -1696,6 +1874,7 @@ impl Term {
             sync_condvar,
             redraw: redraw_tx,
             input_tx,
+            output_snapshot_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
 
         handle.redraw.notify();
@@ -3569,6 +3748,11 @@ fn redraw_loop(
             break;
         }
 
+        let prepare_started = std::time::Instant::now();
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            "redraw prepare started"
+        );
         let pass = match prepare_redraw_pass(
             &state,
             &mut history_cache,
@@ -3580,6 +3764,17 @@ fn redraw_loop(
             Some(pass) => pass,
             None => continue,
         };
+        let prepare_elapsed = prepare_started.elapsed();
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            prepare_us = prepare_elapsed.as_micros(),
+            "redraw prepared"
+        );
+        let write_started = std::time::Instant::now();
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            "terminal write started"
+        );
         render_redraw_pass(
             &state,
             &mut writer,
@@ -3588,9 +3783,34 @@ fn redraw_loop(
             &mut terminal_model,
             &pass,
         );
+        let write_elapsed = write_started.elapsed();
 
+        let flush_started = std::time::Instant::now();
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            write_us = write_elapsed.as_micros(),
+            "terminal write finished; flush started"
+        );
         if let Err(e) = writer.flush() {
             tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "render flush error");
+        }
+        let flush_elapsed = flush_started.elapsed();
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            write_us = write_elapsed.as_micros(),
+            flush_us = flush_elapsed.as_micros(),
+            "terminal write and flush finished"
+        );
+        if (Duration::from_millis(500) <= write_elapsed
+            || Duration::from_millis(500) <= flush_elapsed)
+            && admit_stall_warning()
+        {
+            tracing::warn!(
+                target: "tau_cli_term_raw::frontend_progress",
+                write_ms = write_elapsed.as_millis(),
+                flush_ms = flush_elapsed.as_millis(),
+                "terminal output stalled"
+            );
         }
 
         prev_width = pass.width;

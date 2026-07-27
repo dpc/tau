@@ -7,6 +7,7 @@ mod agent_picker_tests;
 mod event_message_tests;
 #[cfg(test)]
 mod recorded_line_routing_tests;
+mod renderer_scheduler;
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -16,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use renderer_scheduler::{LocalRendererSender, RendererCommandScheduler};
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
@@ -114,10 +116,18 @@ impl UiWriter {
     }
 
     fn send_frame(&mut self, message: &HarnessInputMessage) -> io::Result<()> {
+        let write_started = Instant::now();
         self.writer
             .write_message(message)
             .map_err(io::Error::other)?;
+        let flush_started = Instant::now();
         self.writer.flush()?;
+        tracing::trace!(
+            target: "tau_cli::frontend_progress",
+            write_us = flush_started.duration_since(write_started).as_micros(),
+            flush_us = flush_started.elapsed().as_micros(),
+            "terminal UI uplink written and flushed"
+        );
         self.meter.record_uplink_frame(message);
         Ok(())
     }
@@ -131,6 +141,70 @@ impl UiWriter {
 /// `UiPromptSubmitted` mid-byte. Contention is essentially zero —
 /// debounce fires at most once per second per typing burst.
 type WriterHandle = Arc<Mutex<UiWriter>>;
+
+const RENDERER_QUEUE_MAX_ITEMS: usize = 1_024;
+const RENDERER_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+static LAST_QUEUE_STALL_WARNING: std::sync::OnceLock<Mutex<Option<Instant>>> =
+    std::sync::OnceLock::new();
+
+fn admit_queue_stall_warning(now: Instant) -> bool {
+    let mut last = LAST_QUEUE_STALL_WARNING
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect(MUTEX_POISONED);
+    if last.is_some_and(|last| now.duration_since(last) < Duration::from_secs(5)) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// Byte permits for the bounded socket-to-renderer queue.
+struct RendererByteBudget {
+    /// Encoded bytes currently admitted but not dequeued.
+    used: Mutex<usize>,
+    /// Wakes socket admission after the renderer releases bytes.
+    available: Condvar,
+}
+
+impl RendererByteBudget {
+    fn new() -> Self {
+        Self {
+            used: Mutex::new(0),
+            available: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self, bytes: usize) {
+        self.acquire_inner(bytes, None);
+    }
+
+    /// Acquires bytes while notifying a test after observing a full budget.
+    #[cfg(test)]
+    fn acquire_after_wait_observed(&self, bytes: usize, hook: &mut dyn FnMut()) {
+        self.acquire_inner(bytes, Some(hook));
+    }
+
+    /// Implements byte admission with an optional one-shot full-budget hook.
+    fn acquire_inner(&self, bytes: usize, mut wait_observed: Option<&mut dyn FnMut()>) {
+        let mut used = self.used.lock().expect(MUTEX_POISONED);
+        while RENDERER_QUEUE_MAX_BYTES.saturating_sub(*used) < bytes {
+            if let Some(hook) = wait_observed.take() {
+                hook();
+            }
+            used = self.available.wait(used).expect(MUTEX_POISONED);
+        }
+        *used += bytes;
+    }
+
+    fn release(&self, bytes: usize) -> usize {
+        let mut used = self.used.lock().expect(MUTEX_POISONED);
+        *used = used.saturating_sub(bytes);
+        let remaining = *used;
+        self.available.notify_all();
+        remaining
+    }
+}
 
 struct UiConnection {
     read_stream: Box<dyn Read + Send>,
@@ -204,6 +278,18 @@ fn startup_disconnect_or_io_error(
 /// Convenience wrapper around [`send_frame`] for [`Event`] payloads.
 fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
     send_frame(writer, &durable_emit_message(event))
+}
+
+/// Sends the production cancellation event through the direct uplink.
+fn send_cancel_prompt_frame(
+    writer: &WriterHandle,
+    session_id: &str,
+    target_agent_id: Option<tau_proto::AgentId>,
+) -> io::Result<()> {
+    send_event(
+        writer,
+        &crate::ui_events::cancel_prompt(session_id, target_agent_id),
+    )
 }
 
 /// Send the point-to-point connection-control request used by `:detach`.
@@ -314,10 +400,422 @@ fn handle_debug_show_event_stats_command_text(
 mod ui_io_tests {
     use std::collections::BTreeMap;
     use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
 
     use tau_proto::HarnessOutputWriter;
 
     use super::*;
+
+    /// The byte budget blocks admission at its exact cap and resumes after
+    /// dequeue releases bytes.
+    #[test]
+    fn renderer_byte_budget_blocks_and_releases_at_cap() {
+        let budget = Arc::new(RendererByteBudget::new());
+        budget.acquire(RENDERER_QUEUE_MAX_BYTES);
+        let blocked_budget = budget.clone();
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            blocked_budget.acquire(1);
+            admitted_tx.send(()).expect("admission result");
+            blocked_budget.release(1);
+        });
+
+        assert!(admitted_rx.recv_timeout(Duration::from_millis(10)).is_err());
+        assert_eq!(budget.release(RENDERER_QUEUE_MAX_BYTES), 0);
+        admitted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("byte waiter released");
+        waiter.join().expect("byte waiter");
+    }
+
+    /// A disconnect frame must consume the same byte and item permits as a
+    /// delivery, including when it waits behind an exactly saturated budget.
+    #[test]
+    fn renderer_disconnect_waits_at_exact_byte_cap_and_releases_all_permits() {
+        let budget = Arc::new(RendererByteBudget::new());
+        let queued_items = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        budget.acquire(RENDERER_QUEUE_MAX_BYTES);
+        let blocked_budget = budget.clone();
+        let blocked_items = queued_items.clone();
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            blocked_budget.acquire(1);
+            blocked_items.fetch_add(1, Ordering::AcqRel);
+            admitted_tx.send(()).expect("disconnect admitted");
+            blocked_items.fetch_sub(1, Ordering::AcqRel);
+            blocked_budget.release(1);
+        });
+
+        assert!(admitted_rx.recv_timeout(Duration::from_millis(10)).is_err());
+        assert_eq!(budget.release(RENDERER_QUEUE_MAX_BYTES), 0);
+        queued_items.fetch_sub(1, Ordering::AcqRel);
+        admitted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("disconnect admission released");
+        waiter.join().expect("disconnect waiter");
+        assert_eq!(*budget.used.lock().expect(MUTEX_POISONED), 0);
+        assert_eq!(queued_items.load(Ordering::Acquire), 0);
+    }
+
+    /// Production renderer scheduling must drain admitted deliveries and their
+    /// terminal disconnect before local selection and action commands, then
+    /// continue draining local work after the remote producer closes.
+    #[test]
+    fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
+        let (remote_tx, remote_rx) = mpsc::sync_channel(4);
+        let admitted = Arc::new(std::sync::atomic::AtomicU64::new(2));
+        let arbiter = Arc::new(Mutex::new(()));
+        let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
+        remote_tx
+            .send(RendererCmd::Remote {
+                event: Box::new(Event::TermBell(tau_proto::TermBell {})),
+                recorded_at: UnixMicros::new(1),
+                delivery_id: 1,
+                queue_bytes: 1,
+                enqueued_at: Instant::now(),
+            })
+            .expect("remote delivery");
+        remote_tx
+            .send(RendererCmd::RemoteDisconnect {
+                reason: Some("done".to_owned()),
+                delivery_id: 2,
+                queue_bytes: 1,
+                enqueued_at: Instant::now(),
+            })
+            .expect("remote disconnect");
+        local_tx
+            .send(RendererCmd::SwitchAgent {
+                agent_id: "worker".to_owned(),
+            })
+            .expect("local selection");
+        local_tx
+            .send(RendererCmd::ActionInvoked {
+                invocation_id: "action-test".into(),
+                owner_agent_id: Some("worker".to_owned()),
+            })
+            .expect("local action");
+
+        let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
+        assert!(matches!(
+            scheduler.recv_timeout(Duration::from_millis(10)),
+            Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        ));
+        assert!(matches!(
+            scheduler.recv_timeout(Duration::from_millis(10)),
+            Ok(RendererCmd::RemoteDisconnect { delivery_id: 2, .. })
+        ));
+        assert!(matches!(
+            scheduler.recv_timeout(Duration::from_millis(10)),
+            Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id == "worker"
+        ));
+        assert!(matches!(
+            scheduler.recv_timeout(Duration::from_millis(10)),
+            Ok(RendererCmd::ActionInvoked {
+                invocation_id,
+                owner_agent_id: Some(owner),
+            }) if invocation_id.as_ref() == "action-test" && owner == "worker"
+        ));
+        assert!(!scheduler.remote_closed());
+        drop(remote_tx);
+    }
+
+    /// A remote reservation captured by a local watermark must not be
+    /// overtaken even when its channel send completes after the local send.
+    #[test]
+    fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
+        let (remote_tx, remote_rx) = mpsc::sync_channel(2);
+        let admitted = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let arbiter = Arc::new(Mutex::new(()));
+        let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
+        local_tx
+            .send(RendererCmd::SwitchAgent {
+                agent_id: "worker".to_owned(),
+            })
+            .expect("local selection");
+        remote_tx
+            .send(RendererCmd::Remote {
+                event: Box::new(Event::TermBell(tau_proto::TermBell {})),
+                recorded_at: UnixMicros::new(1),
+                delivery_id: 1,
+                queue_bytes: 1,
+                enqueued_at: Instant::now(),
+            })
+            .expect("reserved remote");
+
+        let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
+        let mut next = || scheduler.recv_timeout(Duration::from_millis(10));
+        assert!(matches!(
+            next(),
+            Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        ));
+        assert!(matches!(
+            next(),
+            Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id == "worker"
+        ));
+    }
+
+    /// Local enqueue cannot linearize between the scheduler's local-empty check
+    /// and its remote dequeue because both operations share the admission
+    /// arbiter.
+    #[test]
+    fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
+        let (remote_tx, remote_rx) = mpsc::sync_channel(1);
+        let admitted = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let arbiter = Arc::new(Mutex::new(()));
+        let (local_tx, local_rx) = LocalRendererSender::channel(admitted, arbiter.clone());
+        remote_tx
+            .send(RendererCmd::Remote {
+                event: Box::new(Event::TermBell(tau_proto::TermBell {})),
+                recorded_at: UnixMicros::new(1),
+                delivery_id: 1,
+                queue_bytes: 1,
+                enqueued_at: Instant::now(),
+            })
+            .expect("later remote");
+        let (start_tx, start_rx) = mpsc::channel();
+        let (attempting_tx, attempting_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            start_rx.recv().expect("start local enqueue");
+            attempting_tx.send(()).expect("local enqueue attempting");
+            local_tx
+                .send(RendererCmd::SwitchAgent {
+                    agent_id: "worker".to_owned(),
+                })
+                .expect("local enqueue");
+            done_tx.send(()).expect("local enqueue done");
+        });
+
+        let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
+        let mut after_local_check = || {
+            start_tx.send(()).expect("release local sender");
+            attempting_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("local sender reached arbiter");
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(10)).is_err(),
+                "local enqueue crossed the scheduler arbitration boundary"
+            );
+        };
+        assert!(matches!(
+            scheduler
+                .recv_timeout_after_local_check(Duration::from_secs(1), &mut after_local_check),
+            Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        ));
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("local enqueue completes after remote dequeue");
+        assert!(matches!(
+            scheduler.recv_timeout(Duration::from_secs(1)),
+            Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id == "worker"
+        ));
+        sender.join().expect("local sender");
+    }
+
+    /// An action ownership command must run after its captured older prefix
+    /// but before a result delivery admitted later.
+    #[test]
+    fn renderer_scheduler_places_action_before_later_remote_result() {
+        let (remote_tx, remote_rx) = mpsc::sync_channel(4);
+        let admitted = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let arbiter = Arc::new(Mutex::new(()));
+        let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
+        remote_tx
+            .send(RendererCmd::Remote {
+                event: Box::new(Event::TermBell(tau_proto::TermBell {})),
+                recorded_at: UnixMicros::new(1),
+                delivery_id: 1,
+                queue_bytes: 1,
+                enqueued_at: Instant::now(),
+            })
+            .expect("older remote");
+        local_tx
+            .send(RendererCmd::ActionInvoked {
+                invocation_id: "action-test".into(),
+                owner_agent_id: Some("worker".to_owned()),
+            })
+            .expect("local action");
+        admitted.store(2, Ordering::Release);
+        remote_tx
+            .send(RendererCmd::Remote {
+                event: Box::new(Event::TermBell(tau_proto::TermBell {})),
+                recorded_at: UnixMicros::new(2),
+                delivery_id: 2,
+                queue_bytes: 1,
+                enqueued_at: Instant::now(),
+            })
+            .expect("later result");
+
+        let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
+        let mut next = || scheduler.recv_timeout(Duration::from_millis(10));
+        assert!(matches!(
+            next(),
+            Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        ));
+        assert!(matches!(next(), Ok(RendererCmd::ActionInvoked { .. })));
+        assert!(matches!(
+            next(),
+            Ok(RendererCmd::Remote { delivery_id: 2, .. })
+        ));
+    }
+
+    /// Later remote arrivals must not starve a local command once its finite
+    /// admission watermark has been drained.
+    #[test]
+    fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
+        let (remote_tx, remote_rx) = mpsc::sync_channel(8);
+        let admitted = Arc::new(std::sync::atomic::AtomicU64::new(2));
+        let arbiter = Arc::new(Mutex::new(()));
+        let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
+        local_tx
+            .send(RendererCmd::ClearSelectedAgent)
+            .expect("local selection");
+        for delivery_id in 1..=4 {
+            admitted.store(delivery_id, Ordering::Release);
+            remote_tx
+                .send(RendererCmd::Remote {
+                    event: Box::new(Event::TermBell(tau_proto::TermBell {})),
+                    recorded_at: UnixMicros::new(delivery_id),
+                    delivery_id,
+                    queue_bytes: 1,
+                    enqueued_at: Instant::now(),
+                })
+                .expect("remote delivery");
+        }
+
+        let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
+        let mut next = || scheduler.recv_timeout(Duration::from_millis(10));
+        assert!(matches!(
+            next(),
+            Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        ));
+        assert!(matches!(
+            next(),
+            Ok(RendererCmd::Remote { delivery_id: 2, .. })
+        ));
+        assert!(matches!(next(), Ok(RendererCmd::ClearSelectedAgent)));
+        assert!(matches!(
+            next(),
+            Ok(RendererCmd::Remote { delivery_id: 3, .. })
+        ));
+    }
+
+    /// A saturated remote byte budget must not prevent a watermarked local
+    /// selection from reaching the renderer or a cancellation frame from
+    /// reaching the harness-side reader.
+    #[test]
+    fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
+        let budget = Arc::new(RendererByteBudget::new());
+        budget.acquire(RENDERER_QUEUE_MAX_BYTES);
+        let (remote_tx, remote_rx) = mpsc::sync_channel(1);
+        let admitted = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let arbiter = Arc::new(Mutex::new(()));
+        let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
+        remote_tx
+            .send(RendererCmd::Remote {
+                event: Box::new(Event::TermBell(tau_proto::TermBell {})),
+                recorded_at: UnixMicros::new(1),
+                delivery_id: 1,
+                queue_bytes: RENDERER_QUEUE_MAX_BYTES,
+                enqueued_at: Instant::now(),
+            })
+            .expect("fill real remote queue");
+        let blocked_budget = budget.clone();
+        let blocked_admitted = admitted.clone();
+        let blocked_arbiter = arbiter.clone();
+        let (blocked_tx, blocked_rx) = mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            let mut wait_observed = || blocked_tx.send(()).expect("producer blocked");
+            blocked_budget.acquire_after_wait_observed(1, &mut wait_observed);
+            {
+                let _guard = blocked_arbiter.lock().expect(MUTEX_POISONED);
+                blocked_admitted.fetch_add(1, Ordering::AcqRel);
+            }
+            remote_tx
+                .send(RendererCmd::Remote {
+                    event: Box::new(Event::TermBell(tau_proto::TermBell {})),
+                    recorded_at: UnixMicros::new(2),
+                    delivery_id: 2,
+                    queue_bytes: 1,
+                    enqueued_at: Instant::now(),
+                })
+                .expect("blocked producer admitted");
+        });
+        blocked_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("producer reached byte admission");
+        local_tx
+            .send(RendererCmd::SwitchAgent {
+                agent_id: "worker".to_owned(),
+            })
+            .expect("local selection");
+
+        let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
+        assert!(matches!(
+            scheduler
+                .recv_timeout(Duration::from_millis(10))
+                .expect("admitted remote prefix"),
+            RendererCmd::Remote { delivery_id: 1, .. }
+        ));
+        let selection = scheduler
+            .recv_timeout(Duration::from_millis(10))
+            .expect("selection remains schedulable");
+        let (_term, handle, _input_tx) = tau_cli_term_raw::Term::new_virtual(
+            80,
+            24,
+            "> ",
+            Box::new(std::io::sink()),
+            tau_cli_term::CursorShape::Bar,
+        );
+        let mut renderer = EventRenderer::new(
+            handle,
+            tau_cli_term::CompletionData::new(),
+            crate::tests::cli_test_theme(),
+        );
+        let RendererCmd::SwitchAgent { agent_id } = selection else {
+            panic!("expected selection command");
+        };
+        renderer.switch_agent(agent_id);
+        assert_eq!(
+            renderer
+                .current_agent_state()
+                .lock()
+                .expect(MUTEX_POISONED)
+                .as_deref(),
+            Some("worker")
+        );
+
+        let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+        harness_stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout");
+        let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
+        send_cancel_prompt_frame(
+            &writer,
+            "session",
+            Some(tau_proto::AgentId::parse("worker").expect("agent id")),
+        )
+        .expect("direct cancel uplink");
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
+        let message = reader
+            .read_message()
+            .expect("read cancel frame")
+            .expect("cancel frame");
+        let HarnessInputMessage::Emit(emit) = message else {
+            panic!("expected emitted cancel event");
+        };
+        assert!(matches!(*emit.event, Event::UiCancelPrompt(_)));
+
+        assert_eq!(budget.release(RENDERER_QUEUE_MAX_BYTES), 0);
+        producer.join().expect("blocked producer");
+        assert!(matches!(
+            scheduler
+                .recv_timeout(Duration::from_secs(1))
+                .expect("later remote arrival"),
+            RendererCmd::Remote { delivery_id: 2, .. }
+        ));
+        assert_eq!(budget.release(1), 0);
+    }
 
     /// Downlink deliveries should attribute bytes to the inner event name so
     /// the breakdown points at the event family worth optimizing rather
@@ -1141,13 +1639,22 @@ pub(crate) fn run_chat(
     )?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent subscribe");
 
-    // Background socket reader — decodes events and sends them to
-    // a channel as `RendererCmd::Remote`. The input thread pushes
-    // `RendererCmd::Set` variants (e.g. `:set show-diff true`) into the
-    // same channel so the renderer thread sees a single ordered
-    // stream and never needs to share state with the input thread.
-    let (event_tx, event_rx) = mpsc::channel::<RendererCmd>();
-    let socket_event_tx = event_tx.clone();
+    // The socket reader feeds a bounded remote FIFO. Local renderer commands
+    // use a separate channel, while direct input/cancel uplink bypasses both.
+    // Each local command captures a finite remote admission watermark. The
+    // renderer drains that prefix before the local command, then services later
+    // remote arrivals; socket disconnect stays at the FIFO tail.
+    let remote_admitted = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let renderer_arbiter = Arc::new(Mutex::new(()));
+    let (event_tx, event_rx) =
+        LocalRendererSender::channel(remote_admitted.clone(), renderer_arbiter.clone());
+    let (remote_tx, remote_rx) = mpsc::sync_channel::<RendererCmd>(RENDERER_QUEUE_MAX_ITEMS);
+    let renderer_byte_budget = Arc::new(RendererByteBudget::new());
+    let socket_renderer_byte_budget = renderer_byte_budget.clone();
+    let queued_remote_items = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let socket_queued_remote_items = queued_remote_items.clone();
+    let socket_remote_admitted = remote_admitted.clone();
+    let socket_renderer_arbiter = renderer_arbiter.clone();
     let input_shutdown_handle: Arc<Mutex<Option<tau_cli_term::TermHandle>>> =
         Arc::new(Mutex::new(None));
     let socket_input_shutdown = input_shutdown_handle.clone();
@@ -1157,7 +1664,13 @@ pub(crate) fn run_chat(
     let local_disconnect_started = Arc::new(AtomicBool::new(false));
     let socket_local_disconnect_started = local_disconnect_started.clone();
     let socket_reader = std::thread::spawn(move || {
-        let notify_disconnect = |reason: Option<String>| {
+        let next_delivery_id = std::cell::Cell::new(1_u64);
+        let allocate_delivery_id = || {
+            let delivery_id = next_delivery_id.get();
+            next_delivery_id.set(delivery_id.saturating_add(1));
+            delivery_id
+        };
+        let notify_disconnect = |reason: Option<String>, delivery_id: u64, queue_bytes: usize| {
             socket_remote_disconnected.store(true, Ordering::Release);
             if let Some(handle) = socket_input_shutdown
                 .lock()
@@ -1167,12 +1680,61 @@ pub(crate) fn run_chat(
             {
                 handle.request_input_shutdown();
             }
-            let _ = socket_event_tx.send(RendererCmd::RemoteDisconnect(reason));
+            let enqueue_started = Instant::now();
+            tracing::trace!(
+                target: "tau_cli::frontend_progress",
+                delivery_id,
+                frame_bytes = queue_bytes,
+                "remote disconnect admission started"
+            );
+            socket_renderer_byte_budget.acquire(queue_bytes);
+            let queued_items = socket_queued_remote_items.fetch_add(1, Ordering::AcqRel) + 1;
+            {
+                let _guard = socket_renderer_arbiter.lock().expect(MUTEX_POISONED);
+                socket_remote_admitted.fetch_add(1, Ordering::AcqRel);
+            }
+            let cmd = RendererCmd::RemoteDisconnect {
+                reason,
+                delivery_id,
+                queue_bytes,
+                enqueued_at: Instant::now(),
+            };
+            if remote_tx.send(cmd).is_err() {
+                socket_renderer_byte_budget.release(queue_bytes);
+                socket_queued_remote_items.fetch_sub(1, Ordering::AcqRel);
+            } else {
+                tracing::trace!(
+                    target: "tau_cli::frontend_progress",
+                    delivery_id,
+                    enqueue_wait_us = enqueue_started.elapsed().as_micros(),
+                    frame_bytes = queue_bytes,
+                    queue_items = queued_items,
+                    "remote disconnect enqueued"
+                );
+            }
         };
         let mut reader = PeerInputReader::new(BufReader::new(read_stream));
         loop {
+            let delivery_id = allocate_delivery_id();
+            let read_started = Instant::now();
+            tracing::trace!(
+                target: "tau_cli::frontend_progress",
+                delivery_id,
+                "socket read and decode started"
+            );
             match reader.read_message() {
                 Ok(Some(message)) => {
+                    let read_elapsed = read_started.elapsed();
+                    let queue_bytes = tau_proto::encode_message_to_vec(&message)
+                        .map(|encoded| encoded.len())
+                        .unwrap_or(0);
+                    tracing::trace!(
+                        target: "tau_cli::frontend_progress",
+                        delivery_id,
+                        read_decode_us = read_elapsed.as_micros(),
+                        frame_bytes = queue_bytes,
+                        "socket frame read and decoded"
+                    );
                     socket_ui_io_meter.record_downlink_frame(&message);
                     let cmd = match message {
                         HarnessOutputMessage::Deliver(delivery) => {
@@ -1183,31 +1745,69 @@ pub(crate) fn run_chat(
                             RendererCmd::Remote {
                                 event: Box::new(event),
                                 recorded_at,
+                                delivery_id,
+                                queue_bytes,
+                                enqueued_at: Instant::now(),
                             }
                         }
                         HarnessOutputMessage::Disconnect(d) => {
                             if socket_local_disconnect_started.load(Ordering::Acquire) {
                                 return;
                             }
-                            notify_disconnect(d.reason);
+                            notify_disconnect(d.reason, delivery_id, queue_bytes);
                             return;
                         }
                         _ => continue,
                     };
-                    if socket_event_tx.send(cmd).is_err() {
+                    let enqueue_started = Instant::now();
+                    tracing::trace!(
+                        target: "tau_cli::frontend_progress",
+                        delivery_id,
+                        frame_bytes = queue_bytes,
+                        "renderer event admission started"
+                    );
+                    socket_renderer_byte_budget.acquire(queue_bytes);
+                    let queued_items =
+                        socket_queued_remote_items.fetch_add(1, Ordering::AcqRel) + 1;
+                    {
+                        let _guard = socket_renderer_arbiter.lock().expect(MUTEX_POISONED);
+                        socket_remote_admitted.fetch_add(1, Ordering::AcqRel);
+                    }
+                    if remote_tx.send(cmd).is_err() {
+                        socket_renderer_byte_budget.release(queue_bytes);
+                        socket_queued_remote_items.fetch_sub(1, Ordering::AcqRel);
                         return;
                     }
+                    tracing::trace!(
+                        target: "tau_cli::frontend_progress",
+                        delivery_id,
+                        enqueue_wait_us = enqueue_started.elapsed().as_micros(),
+                        queue_items = queued_items,
+                        queue_bytes = *socket_renderer_byte_budget
+                            .used
+                            .lock()
+                            .expect(MUTEX_POISONED),
+                        "renderer event enqueued"
+                    );
                 }
                 Ok(None) => {
                     if !socket_local_disconnect_started.load(Ordering::Acquire) {
-                        notify_disconnect(Some("harness connection closed".to_owned()));
+                        notify_disconnect(
+                            Some("harness connection closed".to_owned()),
+                            delivery_id,
+                            0,
+                        );
                     }
                     return;
                 }
                 Err(error) => {
                     if !socket_local_disconnect_started.load(Ordering::Acquire) {
                         tracing::warn!(target: "tau_cli::ui", %error, "socket reader exiting");
-                        notify_disconnect(Some(format!("harness connection error: {error}")));
+                        notify_disconnect(
+                            Some(format!("harness connection error: {error}")),
+                            delivery_id,
+                            0,
+                        );
                     }
                     return;
                 }
@@ -1372,14 +1972,65 @@ pub(crate) fn run_chat(
     let renderer_thread = std::thread::spawn(move || {
         let mut renderer = renderer;
         let mut ui_io_tracker = UiIoTracker::new(renderer_ui_io_meter);
+        let mut scheduler = RendererCommandScheduler::new(remote_rx, renderer_rx, renderer_arbiter);
         loop {
-            match renderer_rx.recv_timeout(ui_io_tracker.recv_timeout()) {
+            let cmd =
+                scheduler.recv_timeout(ui_io_tracker.recv_timeout().min(Duration::from_millis(10)));
+            match cmd {
                 Ok(cmd) => {
                     match cmd {
-                        RendererCmd::Remote { event, recorded_at } => {
-                            renderer.handle_recorded_at(&event, recorded_at);
+                        RendererCmd::Remote {
+                            event,
+                            recorded_at,
+                            delivery_id,
+                            queue_bytes,
+                            enqueued_at,
+                        } => {
+                            let queue_items =
+                                queued_remote_items.fetch_sub(1, Ordering::AcqRel) - 1;
+                            let remaining_bytes = renderer_byte_budget.release(queue_bytes);
+                            let queue_age = enqueued_at.elapsed();
+                            tracing::trace!(
+                                target: "tau_cli::frontend_progress",
+                                delivery_id,
+                                queue_age_ms = queue_age.as_millis(),
+                                queue_items,
+                                queue_bytes = remaining_bytes,
+                                "renderer event dequeued"
+                            );
+                            if Duration::from_millis(500) <= queue_age
+                                && admit_queue_stall_warning(Instant::now())
+                            {
+                                tracing::warn!(
+                                    target: "tau_cli::frontend_progress",
+                                    delivery_id,
+                                    queue_age_ms = queue_age.as_millis(),
+                                    queue_items,
+                                    queue_bytes = remaining_bytes,
+                                    "renderer queue stalled"
+                                );
+                            }
+                            renderer.handle_socket_delivery(&event, recorded_at, delivery_id);
                         }
-                        RendererCmd::RemoteDisconnect(reason) => renderer.handle_disconnect(reason),
+                        RendererCmd::RemoteDisconnect {
+                            reason,
+                            delivery_id,
+                            queue_bytes,
+                            enqueued_at,
+                        } => {
+                            let queue_items =
+                                queued_remote_items.fetch_sub(1, Ordering::AcqRel) - 1;
+                            let remaining_bytes = renderer_byte_budget.release(queue_bytes);
+                            tracing::trace!(
+                                target: "tau_cli::frontend_progress",
+                                delivery_id,
+                                queue_age_ms = enqueued_at.elapsed().as_millis(),
+                                queue_items,
+                                queue_bytes = remaining_bytes,
+                                "remote disconnect dequeued"
+                            );
+                            renderer.handle_disconnect(reason);
+                        }
                         RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
                         RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
                         RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
@@ -1393,7 +2044,12 @@ pub(crate) fn run_chat(
                     ui_io_tracker.sample_if_due(&mut renderer);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => ui_io_tracker.sample_now(&mut renderer),
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if scheduler.remote_closed() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
         }
     });
@@ -1542,10 +2198,7 @@ fn finish_daemon_for_exit(exit: InputLoopExit, daemon: DaemonHandle) {
     }
 }
 
-fn tool_timer_loop(
-    state: Arc<(Mutex<ToolTimerState>, Condvar)>,
-    renderer_tx: mpsc::Sender<RendererCmd>,
-) {
+fn tool_timer_loop(state: Arc<(Mutex<ToolTimerState>, Condvar)>, renderer_tx: LocalRendererSender) {
     let (mutex, cv) = &*state;
     let mut guard = locked(mutex);
     loop {
@@ -1574,38 +2227,63 @@ fn tool_timer_loop(
     }
 }
 
-/// Commands the renderer thread drains from a single ordered channel.
-/// The socket reader pushes `Remote(event)`; the input loop pushes
-/// local UI commands like `Set`. Keeping it one channel
-/// removes the need for shared state between the two threads.
+/// Commands drained from separate remote and local renderer channels.
+///
+/// The bounded remote FIFO has precedence over an already-admitted prefix.
+/// Local commands remain independent from socket admission, while prompt and
+/// cancel uplink bypass renderer work entirely.
 enum RendererCmd {
     /// `:set <name> <value>` — validated by the input loop before send.
     Set {
+        /// Registered CLI setting name.
         name: String,
+        /// Validated serialized setting value.
         value: String,
     },
     /// `:agent switch <agent_id>` — switch visible known agent transcript.
     SwitchAgent {
+        /// Stable local agent identity to display.
         agent_id: String,
     },
     /// Return to the start-new-agent prompt state.
     ClearSelectedAgent,
     /// `:theme <name>` — apply a theme to this UI process only.
     SetTheme {
+        /// Fully resolved process-local theme.
         theme: tau_themes::Theme,
     },
     /// Dynamic extension action was invoked from the current viewed transcript.
     ActionInvoked {
+        /// Correlation identity for the later action result.
         invocation_id: tau_proto::ActionInvocationId,
+        /// Transcript that owns the action result.
         owner_agent_id: Option<String>,
     },
+    /// One decoded harness delivery admitted to the bounded remote FIFO.
     Remote {
+        /// Typed payload interpreted by the event renderer.
         event: Box<Event>,
+        /// Harness-provided observation time.
         recorded_at: UnixMicros,
+        /// Process-local content-free stage correlation.
+        delivery_id: u64,
+        /// Encoded frame bytes charged to the queue budget.
+        queue_bytes: usize,
+        /// Monotonic queue admission time.
+        enqueued_at: Instant,
     },
     ToolTimerTick,
-    /// The harness sent a `Disconnect` message over the wire.
-    RemoteDisconnect(Option<String>),
+    /// The harness disconnected after every earlier remote FIFO item.
+    RemoteDisconnect {
+        /// Optional harness-provided disconnect reason.
+        reason: Option<String>,
+        /// Process-local content-free stage correlation.
+        delivery_id: u64,
+        /// Encoded frame bytes charged to the queue budget.
+        queue_bytes: usize,
+        /// Monotonic queue admission time.
+        enqueued_at: Instant,
+    },
 }
 
 struct TerminalInputLoopCtx {
@@ -1622,7 +2300,7 @@ struct TerminalInputLoopCtx {
     prompt_symbol: String,
     agent_in_progress: Arc<std::sync::atomic::AtomicBool>,
     remote_disconnected: Arc<AtomicBool>,
-    renderer_tx: mpsc::Sender<RendererCmd>,
+    renderer_tx: LocalRendererSender,
     active_session_state: Arc<Mutex<String>>,
     editor_context: Arc<Mutex<tau_cli_term::EditorContext>>,
     action_state: ActionCommandState,
@@ -2477,9 +3155,16 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn send_cancel_prompt(&self) {
-        let _ = send_event(
-            self.writer,
-            &crate::ui_events::cancel_prompt(self.session_id, self.selected_side_agent_id()),
+        let target_agent_id = self.selected_side_agent_id();
+        tracing::info!(
+            target: "tau_cli::frontend_progress",
+            target_agent_id = target_agent_id.as_ref().map(ToString::to_string),
+            "cancel input received and target resolved"
+        );
+        let _ = send_cancel_prompt_frame(self.writer, self.session_id, target_agent_id);
+        tracing::trace!(
+            target: "tau_cli::frontend_progress",
+            "cancel uplink finished"
         );
     }
 
@@ -3413,7 +4098,7 @@ fn agent_cycle_action(current: Option<&str>, next: Option<String>) -> AgentCycle
 /// navigation action.
 fn dispatch_agent_cycle(
     routing: &InputRoutingState,
-    renderer_tx: &mpsc::Sender<RendererCmd>,
+    renderer_tx: &LocalRendererSender,
     delta: isize,
 ) -> AgentCycleAction {
     let current = routing.selected_agent_id();
@@ -3865,11 +4550,7 @@ pub(crate) fn is_known_static_command(text: &str) -> bool {
 /// Parse and dispatch `:set <name> <value>`. Validation lives here
 /// (input-loop thread) so the renderer can trust `RendererCmd::Set`
 /// to always be a known name and an allowed value.
-fn handle_set_command(
-    text: &str,
-    renderer_tx: &mpsc::Sender<RendererCmd>,
-    print_local: &impl Fn(&str),
-) {
+fn handle_set_command(text: &str, renderer_tx: &LocalRendererSender, print_local: &impl Fn(&str)) {
     use crate::settings_registry;
 
     let rest = text.strip_prefix(":set").unwrap_or("").trim();

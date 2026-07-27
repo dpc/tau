@@ -128,11 +128,25 @@ presentation are specified by
 [SPEC-tau-cli-agent-message-labels](SPEC-tau-cli-agent-message-labels.md).
 
 Visible transcript state lives in renderer fields; hidden agent and protected
-no-agent transcripts live in `AgentUiState` snapshots. Hidden folding temporarily
-restores the owning snapshot under the terminal-output lock, then restores the
-visible snapshot before publishing editor context or accepting cloned-handle
+no-agent transcripts live in detached `AgentUiState` presentation models. Hidden
+folding mutates only the owning detached model and never swaps or clones the
+selected terminal snapshot. Selection materializes the destination model into
+the terminal once before publishing editor context or accepting cloned-handle
 output. The resulting behavior is specified by
 [SPEC-tau-cli-transcript-context](SPEC-tau-cli-transcript-context.md).
+
+The socket reader admits decoded deliveries to one FIFO bounded at 1,024 items
+and 64 MiB of encoded frames. Full admission backpressures socket reading and
+never drops a decoded delivery. Socket disconnect is the final item in that
+same FIFO, so it cannot overtake prior deliveries. Local selection, settings,
+action ownership, and timer commands use a separate queue. Each local command
+captures the current remote-admission watermark. The renderer drains that
+finite prefix, executes the local command, then resumes later remote arrivals;
+socket facts cannot be overtaken and continuous remote traffic cannot starve
+selection or action ownership. A shared admission arbiter linearizes remote
+reservations, local watermark capture, and the scheduler's nonblocking channel
+selection. Input routing mirrors selection before enqueue, and renderer queue
+pressure never blocks the input thread's direct harness uplink.
 
 External-editor prompt trailers are prompt-surface text. They may quote
 assistant responses and prior prompt text to help compose the next prompt, but
