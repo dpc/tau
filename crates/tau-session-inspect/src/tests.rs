@@ -532,14 +532,13 @@ fn tool_results_preview_includes_every_result_in_round() {
     );
 }
 
-/// Ensures read-only inspection commands do not create state directories merely
-/// to report that no sessions or policy approvals exist.
+/// Ensures read-only session inspection does not create missing state
+/// directories.
 #[test]
 fn missing_inspection_roots_are_reported_without_creating_them() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let state_dir = temp_dir.path().join("missing-state");
     let sessions_dir = state_dir.join("sessions");
-    let policy_path = state_dir.join("policy.cbor");
 
     assert_eq!(
         session_list_lines(&sessions_dir).expect("session list"),
@@ -548,10 +547,6 @@ fn missing_inspection_roots_are_reported_without_creating_them() {
     assert_eq!(
         session_lines(&sessions_dir, "default").expect("session lines"),
         vec!["session default not found"]
-    );
-    assert_eq!(
-        policy_lines(&policy_path).expect("policy lines"),
-        vec!["no policy approvals"]
     );
     assert!(
         !state_dir.exists(),
@@ -568,11 +563,9 @@ fn invalid_inspection_roots_return_errors() {
     std::fs::write(&file_parent, b"file").expect("write marker file");
 
     let sessions_dir = file_parent.join("sessions");
-    let policy_path = file_parent.join("policy.cbor");
 
     assert!(session_list_lines(&sessions_dir).is_err());
     assert!(session_lines(&sessions_dir, "default").is_err());
-    assert!(policy_lines(&policy_path).is_err());
 }
 
 /// Native trace output keeps complete prompt content, emits independently

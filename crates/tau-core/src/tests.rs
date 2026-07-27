@@ -11,11 +11,30 @@ use tau_proto::{
     ToolResultKind, ToolStarted, ToolType,
 };
 
+use crate::memory::MemorySink;
 use crate::{
-    AgentEntry, AgentEventParent, AgentStore, AgentStoreError, EventBus, NodeId,
-    PersistedAgentEvent, PersistedAgentEventSeq, PersistedSessionEvent, PersistedSessionEventSeq,
-    SessionMembership, SessionStore, SessionStoreError, list_session_metas, memory_connection,
+    AgentEntry, AgentEventParent, AgentStore, AgentStoreError, Connection, ConnectionMetadata,
+    ConnectionOrigin, EventBus, MemoryInbox, NodeId, PersistedAgentEvent, PersistedAgentEventSeq,
+    PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership, SessionStore,
+    SessionStoreError, list_session_metas, memory_connection,
 };
+
+/// Creates an in-memory test connection with an explicit transport origin.
+fn test_connection(origin: ConnectionOrigin) -> (Connection, MemoryInbox) {
+    let inbox = MemoryInbox::default();
+    let connection = Connection::new(
+        ConnectionMetadata {
+            id: Default::default(),
+            name: "test".to_owned(),
+            kind: tau_proto::ClientKind::Ui,
+            origin,
+        },
+        Box::new(MemorySink {
+            inbox: inbox.clone(),
+        }),
+    );
+    (connection, inbox)
+}
 
 fn temp_dir(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -111,6 +130,75 @@ fn all_message_facts(agent_id: &str) -> Vec<Event> {
             "sent",
         )),
     ]
+}
+
+/// Socket clients may subscribe to recognized families without any durable
+/// state or externally supplied validation mechanism.
+#[test]
+fn event_bus_accepts_known_socket_subscription() {
+    let mut bus = EventBus::new();
+    let (connection, _) = test_connection(ConnectionOrigin::Socket);
+    let id = bus.connect(connection);
+    let selector = EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE);
+
+    bus.set_subscriptions(id.as_str(), Vec::new(), vec![selector.clone()])
+        .expect("known socket family should be accepted");
+
+    assert_eq!(
+        bus.live_subscriptions(id.as_str()),
+        Some([selector].as_slice())
+    );
+}
+
+/// Unknown families remain unrestricted for non-socket connections because the
+/// retained admissibility rule applies only at the socket boundary.
+#[test]
+fn event_bus_accepts_unknown_non_socket_subscription() {
+    let mut bus = EventBus::new();
+    let (connection, _) = test_connection(ConnectionOrigin::InMemory);
+    let id = bus.connect(connection);
+    let selector = EventSelector::Prefix("unknown.".to_owned());
+
+    bus.set_subscriptions(id.as_str(), Vec::new(), vec![selector.clone()])
+        .expect("non-socket subscription should remain unrestricted");
+
+    assert_eq!(
+        bus.live_subscriptions(id.as_str()),
+        Some([selector].as_slice())
+    );
+}
+
+/// The bus validates the de-duplicated historical/live union before replacing
+/// either selector set, preventing a partial commit when one side is invalid.
+#[test]
+fn event_bus_rejects_invalid_socket_union_before_commit() {
+    let mut bus = EventBus::new();
+    let (connection, _) = test_connection(ConnectionOrigin::Socket);
+    let id = bus.connect(connection);
+    let existing = EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE);
+    bus.set_subscriptions(id.as_str(), vec![existing.clone()], vec![existing.clone()])
+        .expect("initial subscription");
+
+    let error = bus
+        .set_subscriptions(
+            id.as_str(),
+            vec![EventSelector::Prefix("unknown.".to_owned())],
+            vec![EventSelector::Exact(tau_proto::EventName::TOOL_STARTED)],
+        )
+        .expect_err("unknown historical family should reject the combined replacement");
+
+    assert!(matches!(
+        error,
+        crate::RouteError::SubscriptionDenied { .. }
+    ));
+    assert_eq!(
+        bus.historical_subscriptions(id.as_str()),
+        Some([existing.clone()].as_slice())
+    );
+    assert_eq!(
+        bus.live_subscriptions(id.as_str()),
+        Some([existing].as_slice())
+    );
 }
 
 /// Buffered live delivery records the publish-time live selector match so a

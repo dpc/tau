@@ -5,12 +5,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use tau_config::settings::TauDirs;
-use tau_core::{AgentStore, AgentStoreError, PolicyStore, SessionStore};
+use tau_core::{AgentStore, AgentStoreError, SessionStore};
 use tau_harness::{
     HarnessError, InteractionOutcome, ServeOptions, run_daemon_with_echo,
     run_embedded_message_with_echo, run_embedded_message_with_test_provider, send_daemon_message,
 };
-use tau_session_inspect::{InspectError, open_policy_store, open_session_store};
+use tau_session_inspect::{InspectError, open_session_store};
 use tempfile::TempDir;
 
 /// Completed causal quota fixture plus the exact harness-committed event trace.
@@ -195,7 +195,7 @@ pub struct TestRuntime {
     _tempdir: TempDir,
     /// Filesystem path where the spawned test daemon binds its Unix socket.
     pub socket_path: PathBuf,
-    /// Per-state directory containing session subdirs and `policy.cbor`.
+    /// Per-state directory containing session and agent data.
     pub state_dir: PathBuf,
     /// Isolated `$XDG_CONFIG_HOME`/`$XDG_STATE_HOME` layout so tests don't
     /// leak into (or read from) the developer's real `~/.config/tau` and
@@ -277,11 +277,6 @@ impl TestRuntime {
     /// Opens the agent store for transcript assertions.
     pub fn open_agent_store(&self) -> Result<AgentStore, AgentStoreError> {
         AgentStore::open(self.state_dir.join("agents"))
-    }
-
-    /// Opens the policy store for assertions.
-    pub fn open_policy_store(&self) -> Result<PolicyStore, InspectError> {
-        open_policy_store(self.state_dir.join("policy.cbor"))
     }
 }
 

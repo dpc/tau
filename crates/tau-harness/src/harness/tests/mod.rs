@@ -25,7 +25,7 @@ use tau_proto::{
     ToolResult, ToolResultItem, ToolResultStatus, ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
 use tau_session_inspect::{
-    format_session_entry, open_session_store, policy_lines, session_lines, session_list_lines,
+    format_session_entry, open_session_store, session_lines, session_list_lines,
 };
 use tempfile::TempDir;
 

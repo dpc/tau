@@ -113,7 +113,7 @@ pub struct ServeOptions {
     /// data for this harness process.
     ///
     /// Agent transcripts, provider state, credentials, user/cache extension
-    /// data, runtime sockets, and policy/config state keep their normal
+    /// data, runtime sockets, and configuration state keep their normal
     /// persistence behavior.
     #[builder(default = tau_core::SessionPersistenceMode::Durable)]
     pub session_persistence: tau_core::SessionPersistenceMode,

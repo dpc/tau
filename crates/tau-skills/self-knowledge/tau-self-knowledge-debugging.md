@@ -23,7 +23,6 @@ Tau follows the XDG directories:
 - State: `~/.local/state/tau/` on Linux.
   - If no XDG state dir is available, inspection defaults may fall back to `.tau/state`.
   - `cli.json` — persisted CLI runtime toggles such as show-diff, show-thinking, show-tools, turn stats.
-  - `policy.cbor` — persisted socket-client policy approvals.
   - `auth.d/<provider>.json` — per-provider credentials.
   - `auth.json` — legacy whole-file credentials, read for backwards compatibility.
 - Sessions: `~/.local/state/tau/sessions/<session_id>/`

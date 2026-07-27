@@ -53,7 +53,7 @@ session-owned disk artifacts: membership logs, metadata/locks, debug
 This does not make agents ephemeral: the global agent store remains durable, so
 prompts, responses, tool results, metadata, and sub-agent transcripts keep their
 normal persistence. User/cache extension data, provider state, credentials,
-policy/config files, and runtime sockets are also outside the session-ephemeral
+configuration files, and runtime sockets are also outside the session-ephemeral
 boundary.
 
 Agents can separately be staged as ephemeral from the TUI (`:new` then

@@ -130,8 +130,9 @@ prompt templates keep instructions aligned with the tools and extensions that
 are actually available for a turn.
 
 Tool availability is resolved through extension defaults, model compatibility,
-policy rules, and the selected role. Event subscriptions use harness policy and
-approval. The harness injects only each extension's declared Tau secrets;
+policy rules, and the selected role. Socket subscriptions accept only known event
+categories; non-socket subscriptions remain unrestricted. The harness injects only
+each extension's declared Tau secrets;
 configured extensions remain trusted local executables.
 
 Slack, Telegram, and XMPP submit transient `message.*_reported` events through

@@ -4953,15 +4953,6 @@
       "crate": "tau-ext-shell"
     },
     {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "PolicyStore::open",
-      "line": 32,
-      "cyclomatic": 7.0,
-      "coverage": 42.30769230769231,
-      "crap": 16.40913746017296,
-      "crate": "tau-core"
-    },
-    {
       "file": "/build/source/crates/tau-harness-tools/src/lib.rs",
       "function": "parse_discovery_args",
       "line": 1390,
@@ -12025,15 +12016,6 @@
       "coverage": 100.0,
       "crap": 8.0,
       "crate": "tau-provider-codex"
-    },
-    {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "DefaultSubscriptionPolicy::evaluate",
-      "line": 181,
-      "cyclomatic": 8.0,
-      "coverage": 100.0,
-      "crap": 8.0,
-      "crate": "tau-core"
     },
     {
       "file": "/build/source/crates/tau-core/src/session_store.rs",
@@ -19560,15 +19542,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-session-inspect/src/lib.rs",
-      "function": "policy_lines",
-      "line": 177,
-      "cyclomatic": 5.0,
-      "coverage": 92.5925925925926,
-      "crap": 5.010161052685058,
-      "crate": "tau-session-inspect"
-    },
-    {
       "file": "/build/source/crates/tau-harness/src/runtime_dir.rs",
       "function": "probe_current_session",
       "line": 939,
@@ -26110,15 +26083,6 @@
       "coverage": 52.38095238095239,
       "crap": 3.9718172983479105,
       "crate": "tau-e2e-tests"
-    },
-    {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "PolicyStore::record",
-      "line": 72,
-      "cyclomatic": 3.0,
-      "coverage": 52.94117647058824,
-      "crap": 3.9379198046000408,
-      "crate": "tau-core"
     },
     {
       "file": "/build/source/crates/tau-ext-test-dummy/src/lib.rs",
@@ -44207,24 +44171,6 @@
       "line": 286,
       "cyclomatic": 1.0,
       "coverage": null,
-      "crap": 2.0,
-      "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "SubscriptionPolicyError::fmt",
-      "line": 121,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "DefaultSubscriptionPolicy::record_approval",
-      "line": 157,
-      "cyclomatic": 2.0,
-      "coverage": 100.0,
       "crap": 2.0,
       "crate": "tau-core"
     },
@@ -68052,60 +67998,6 @@
       "crate": "tau-vcr"
     },
     {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "PolicyStore::contains",
-      "line": 67,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "PolicyStore::approvals",
-      "line": 93,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "SubscriptionPolicyError::new",
-      "line": 107,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "SubscriptionPolicyError::reason",
-      "line": 115,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "DefaultSubscriptionPolicy::new",
-      "line": 146,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-core/src/policy.rs",
-      "function": "DefaultSubscriptionPolicy::with_store",
-      "line": 151,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-core"
-    },
-    {
       "file": "/build/source/crates/tau-core/src/record_log.rs",
       "function": "File::seek_to_end",
       "line": 52,
@@ -68613,15 +68505,6 @@
       "file": "/build/source/crates/tau-core/src/bus.rs",
       "function": "EventBus::new",
       "line": 109,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-core"
-    },
-    {
-      "file": "/build/source/crates/tau-core/src/bus.rs",
-      "function": "EventBus::with_subscription_policy",
-      "line": 115,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -71439,15 +71322,6 @@
       "file": "/build/source/crates/tau-harness/src/harness.rs",
       "function": "selector_matches_event",
       "line": 24984,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-harness"
-    },
-    {
-      "file": "/build/source/crates/tau-harness/src/dirs.rs",
-      "function": "policy_store_path_from",
-      "line": 6,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -76431,15 +76305,6 @@
       "crate": "tau-session-inspect"
     },
     {
-      "file": "/build/source/crates/tau-session-inspect/src/lib.rs",
-      "function": "open_policy_store",
-      "line": 92,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-session-inspect"
-    },
-    {
       "file": "/build/source/crates/tau-socket/src/lib.rs",
       "function": "SocketIdentity::from_metadata",
       "line": 191,
@@ -76524,15 +76389,6 @@
       "file": "/build/source/crates/tau-test-support/src/lib.rs",
       "function": "TestRuntime::open_agent_store",
       "line": 267,
-      "cyclomatic": 1.0,
-      "coverage": 100.0,
-      "crap": 1.0,
-      "crate": "tau-test-support"
-    },
-    {
-      "file": "/build/source/crates/tau-test-support/src/lib.rs",
-      "function": "TestRuntime::open_policy_store",
-      "line": 272,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,

@@ -623,9 +623,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 };
                 reject_harness_config_overrides(&harness_config_overrides, command_name)?;
             }
-            cli::Command::PolicyShow { .. } => {
-                reject_harness_config_overrides(&harness_config_overrides, "policy-show")?;
-            }
             cli::Command::Init { .. } => {
                 reject_harness_config_overrides(&harness_config_overrides, "init")?;
             }
@@ -837,14 +834,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     format,
                 )?;
                 line_output::stream_stdout(|writer| output.copy_to(writer).map(|_| ()))
-            }
-
-            cli::Command::PolicyShow { state_dir } => {
-                reject_harness_config_overrides(&harness_config_overrides, "policy-show")?;
-                for line in tau_session_inspect::policy_lines(state_dir.join("policy.cbor"))? {
-                    println!("{line}");
-                }
-                Ok(())
             }
 
             cli::Command::Init { force } => {

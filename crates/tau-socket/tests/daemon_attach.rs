@@ -46,6 +46,10 @@ fn socket_transport_supports_later_attached_end_to_end_clients() {
         (8..=12).contains(&entry_count),
         "expected two persisted prompt/tool cycles, got {entry_count} entries"
     );
+    assert!(
+        !runtime.state_dir.join("policy.cbor").exists(),
+        "normal startup and socket attachment must not create legacy policy state"
+    );
 }
 
 /// Ensures a forbidden socket subscription disconnects only the denied client
@@ -53,6 +57,9 @@ fn socket_transport_supports_later_attached_end_to_end_clients() {
 #[test]
 fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
     let runtime = TestRuntime::new().expect("runtime should be created");
+    let legacy_policy_path = runtime.state_dir.join("policy.cbor");
+    let legacy_bytes = b"corrupt legacy policy bytes";
+    std::fs::write(&legacy_policy_path, legacy_bytes).expect("write legacy policy marker");
     let daemon = runtime.spawn_daemon("session-1", Some(2));
     runtime
         .wait_until_ready(Duration::from_secs(2))
@@ -70,9 +77,8 @@ fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
         .expect("hello should send");
     denied_client
         .send(&HarnessInputMessage::Subscribe(Subscribe {
-            // `unknown.` is not an allowed event family — sockets may
-            // only subscribe to the closed-list of well-known categories
-            // declared in `DefaultSubscriptionPolicy::evaluate`.
+            // `unknown.` is not an allowed event family; sockets may only
+            // subscribe to the closed list of well-known categories.
             historical_selectors: Vec::new(),
             live_selectors: vec![EventSelector::Prefix("unknown.".to_owned())],
         }))
@@ -98,10 +104,9 @@ fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
     assert!(!response.is_empty(), "response should not be empty");
     daemon.join().expect("daemon should exit cleanly");
 
-    // Denying a socket subscription must not create extra persisted approvals;
-    // only the valid helper client interaction above should be recorded.
-    let approvals = runtime
-        .open_policy_store()
-        .expect("policy store should reopen");
-    assert_eq!(approvals.approvals().len(), 1);
+    assert_eq!(
+        std::fs::read(&legacy_policy_path).expect("read legacy policy marker"),
+        legacy_bytes,
+        "startup and subscription handling must ignore legacy policy state"
+    );
 }

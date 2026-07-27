@@ -1,6 +1,5 @@
-//! [`EventBus`]: routes protocol events between connections, gates
-//! subscriptions through a [`SubscriptionPolicy`], and tracks per-connection
-//! subscription state.
+//! [`EventBus`]: routes protocol events between connections and tracks
+//! per-connection subscription state.
 
 use std::collections::HashMap;
 
@@ -10,7 +9,6 @@ use crate::connection::{
     Connection, ConnectionMetadata, ConnectionSink, DeliveryFailure, RouteError, RouteReport,
     RoutedFrame, VisibilityFilter,
 };
-use crate::policy::{DefaultSubscriptionPolicy, SubscriptionPolicy};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SubscriptionSet {
@@ -86,21 +84,54 @@ pub(crate) struct ConnectionEntry {
     pub(crate) subscriptions: SubscriptionSet,
 }
 
+/// Validates the event families selected by a socket connection.
+fn validate_socket_subscription(
+    connection: &ConnectionMetadata,
+    selectors: &[EventSelector],
+) -> Result<(), &'static str> {
+    if connection.origin != crate::ConnectionOrigin::Socket {
+        return Ok(());
+    }
+
+    fn category_allowed(category: &tau_proto::EventCategory) -> bool {
+        use tau_proto::EventCategory as C;
+        match category {
+            C::Tool
+            | C::Action
+            | C::Agent
+            | C::Message
+            | C::Extension
+            | C::Provider
+            | C::Session
+            | C::Ui
+            | C::Harness
+            | C::Shell
+            | C::Term => true,
+            C::Other(_) => false,
+        }
+    }
+
+    let all_allowed = selectors.iter().all(|selector| match selector {
+        EventSelector::Exact(name) => category_allowed(name.category()),
+        EventSelector::Prefix(prefix) => {
+            let category = prefix
+                .split_once('.')
+                .map_or(prefix.as_str(), |(value, _)| value);
+            category_allowed(&tau_proto::EventCategory::from_wire(category))
+        }
+    });
+    if all_allowed {
+        Ok(())
+    } else {
+        Err("socket clients may only subscribe to allowed event families")
+    }
+}
+
 /// Internal event bus and subscription registry.
+#[derive(Default)]
 pub struct EventBus {
     next_connection_id: u64,
     connections: HashMap<ConnectionId, ConnectionEntry>,
-    subscription_policy: Box<dyn SubscriptionPolicy>,
-}
-
-impl Default for EventBus {
-    fn default() -> Self {
-        Self {
-            next_connection_id: 0,
-            connections: HashMap::new(),
-            subscription_policy: Box::new(DefaultSubscriptionPolicy::new()),
-        }
-    }
 }
 
 impl EventBus {
@@ -108,16 +139,6 @@ impl EventBus {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Creates an empty event bus with an explicit subscription policy.
-    #[must_use]
-    pub fn with_subscription_policy(policy: Box<dyn SubscriptionPolicy>) -> Self {
-        Self {
-            next_connection_id: 0,
-            connections: HashMap::new(),
-            subscription_policy: policy,
-        }
     }
 
     /// Registers a connection and returns its assigned connection ID.
@@ -173,8 +194,8 @@ impl EventBus {
     /// Replaces the historical and live subscription selectors for one
     /// connection.
     ///
-    /// The bus evaluates the union of both selector sets against the
-    /// subscription policy before committing either set. Historical selectors
+    /// The bus validates the union of both selector sets before committing
+    /// either set. Historical selectors
     /// are used by the harness catch-up/replay path; live selectors are
     /// used for publish-time live routing. If a connection is currently
     /// catch-up blocked and the replacement clears all historical
@@ -194,18 +215,18 @@ impl EventBus {
             .ok_or_else(|| RouteError::UnknownConnection {
                 connection_id: connection_id.into(),
             })?;
-        let mut policy_selectors = historical_selectors.clone();
+        let mut selectors = historical_selectors.clone();
         for selector in &live_selectors {
-            if !policy_selectors.contains(selector) {
-                policy_selectors.push(selector.clone());
+            if !selectors.contains(selector) {
+                selectors.push(selector.clone());
             }
         }
-        self.subscription_policy
-            .evaluate(&metadata, &policy_selectors)
-            .map_err(|error| RouteError::SubscriptionDenied {
+        validate_socket_subscription(&metadata, &selectors).map_err(|reason| {
+            RouteError::SubscriptionDenied {
                 connection_id: connection_id.into(),
-                reason: error.reason().to_owned(),
-            })?;
+                reason: reason.to_owned(),
+            }
+        })?;
         let entry = self.connections.get_mut(connection_id).ok_or_else(|| {
             RouteError::UnknownConnection {
                 connection_id: connection_id.into(),

@@ -1,10 +1,7 @@
-//! Read-only session/policy inspection for CLI sub-commands and scripts.
+//! Read-only session inspection for CLI sub-commands and scripts.
 //!
-//! Operates entirely on `tau-core` types and the on-disk session/policy
-//! format. Intentionally has no dependency on the harness daemon, so
-//! `tau session show` / `tau policy list` / similar commands don't drag
-//! in the agent, extension supervisor, or event-loop graph just to
-//! render an events.jsonl.
+//! Operates entirely on `tau-core` types and on-disk session formats. It has no
+//! dependency on the harness daemon, keeping inspection dependency-light.
 
 mod agent_trace;
 mod lossless_json;
@@ -15,17 +12,15 @@ use std::{fmt, io};
 
 pub use agent_trace::*;
 pub use session_stats::*;
-use tau_core::{AgentEntry, AgentStoreError, PolicyStore, SessionStore, SessionStoreError};
-use tau_proto::{
-    CborValue, ContentPart, ContextItem, EventSelector, ToolCallItem, ToolResultStatus,
-};
+use tau_core::{AgentEntry, AgentStoreError, SessionStore, SessionStoreError};
+use tau_proto::{CborValue, ContentPart, ContextItem, ToolCallItem, ToolResultStatus};
 
 /// Errors from the read-only inspection paths.
 #[derive(Debug)]
 pub enum InspectError {
     /// A filesystem operation failed while reading inspection data.
     Io(io::Error),
-    /// The session or policy store could not be opened or decoded.
+    /// The session store could not be opened or decoded.
     SessionStore(SessionStoreError),
     /// An authoritative agent journal could not be opened or decoded.
     AgentStore(AgentStoreError),
@@ -105,8 +100,7 @@ pub fn default_state_dir() -> PathBuf {
 
 /// Returns the default per-session storage root: `default_state_dir()` joined
 /// with `sessions/`. Session subdirectories live one level deeper to keep the
-/// state-dir top level reserved for tau-wide scalar files (`policy.cbor`,
-/// `cli.json`, …).
+/// state-dir top level reserved for tau-wide scalar files such as `cli.json`.
 #[must_use]
 pub fn default_sessions_dir() -> PathBuf {
     tau_config::settings::sessions_dir_of(&default_state_dir())
@@ -131,14 +125,6 @@ pub fn default_session_id() -> &'static str {
 /// [`session_lines`] or [`session_list_lines`] for read-only command output.
 pub fn open_session_store(path: impl AsRef<Path>) -> Result<SessionStore, InspectError> {
     SessionStore::open(path.as_ref()).map_err(InspectError::from)
-}
-
-/// Opens a policy store at `path` using the core policy-store implementation.
-///
-/// This creates the parent directory when it does not already exist. Prefer
-/// [`policy_lines`] for read-only command output.
-pub fn open_policy_store(path: impl AsRef<Path>) -> Result<PolicyStore, InspectError> {
-    PolicyStore::open(path.as_ref()).map_err(InspectError::from)
 }
 
 /// Returns printable lines describing the currently loaded agents in one
@@ -216,41 +202,6 @@ pub fn session_list_lines(path: impl AsRef<Path>) -> Result<Vec<String>, Inspect
         lines.push("no sessions".to_owned());
     }
     Ok(lines)
-}
-
-/// Returns printable lines summarizing persisted subscription-policy approvals.
-///
-/// A missing policy file or state directory is treated as an empty policy store
-/// without creating it.
-pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError> {
-    let path = path.as_ref();
-    if !path.try_exists()? {
-        return Ok(vec!["no policy approvals".to_owned()]);
-    }
-    let store = open_policy_store(path)?;
-    let mut approvals = store.approvals().to_vec();
-    approvals.sort_by(|a, b| a.connection_name.cmp(&b.connection_name));
-    if approvals.is_empty() {
-        return Ok(vec!["no policy approvals".to_owned()]);
-    }
-    Ok(approvals
-        .into_iter()
-        .map(|a| {
-            let sels = a
-                .selectors
-                .iter()
-                .map(|s| match s {
-                    EventSelector::Exact(n) => n.to_string(),
-                    EventSelector::Prefix(p) => format!("{p}*"),
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "{} [{:?}] -> {sels}",
-                a.connection_name, a.connection_origin
-            )
-        })
-        .collect())
 }
 
 /// Pretty-print one session entry for line-oriented inspection output

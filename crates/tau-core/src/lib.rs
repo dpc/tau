@@ -11,7 +11,6 @@ mod bus;
 mod connection;
 mod journal_sync;
 mod memory;
-mod policy;
 mod record_log;
 mod session;
 mod session_store;
@@ -39,10 +38,6 @@ pub use connection::{
     ConnectionSink, DeliveryFailure, RouteError, RouteReport, RoutedFrame, VisibilityFilter,
 };
 pub use memory::{MemoryInbox, memory_connection};
-pub use policy::{
-    DefaultSubscriptionPolicy, PolicyStore, SubscriptionApproval, SubscriptionPolicy,
-    SubscriptionPolicyError,
-};
 pub use session::{
     AgentEntry, AgentEventParent, AgentEventValidationError, AgentMessageDirection, AgentMeta,
     AgentMetadataEntry, AgentNode, AgentTree, BackgroundToolCallState, BackgroundToolCompletion,

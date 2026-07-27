@@ -1927,7 +1927,7 @@ pub fn state_dir() -> Option<PathBuf> {
 /// session lives in its own directory at
 /// `<state_dir>/sessions/<session_id>/`; grouping them under a
 /// dedicated subdirectory keeps the state dir's top level reserved
-/// for tau-wide scalar state (`policy.cbor`, `cli.json`, …).
+/// for tau-wide scalar state such as `cli.json`.
 #[must_use]
 pub fn sessions_dir_of(state_dir: &Path) -> PathBuf {
     state_dir.join("sessions")

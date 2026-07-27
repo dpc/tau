@@ -15,10 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rand::rngs::StdRng;
 use rand::{RngCore as _, SeedableRng as _};
 use tau_core::{
-    ActionRegistry, AgentStore, Connection, ConnectionMetadata, ConnectionOrigin,
-    DefaultSubscriptionPolicy, EventBus, NodeId, PolicyStore, RouteError, SessionStore,
-    ToolRegistry, ToolRouteError, ToolRouteTarget, repair_tool_arguments, tool_example_hint,
-    validate_tool_arguments,
+    ActionRegistry, AgentStore, Connection, ConnectionMetadata, ConnectionOrigin, EventBus, NodeId,
+    RouteError, SessionStore, ToolRegistry, ToolRouteError, ToolRouteTarget, repair_tool_arguments,
+    tool_example_hint, validate_tool_arguments,
 };
 use tau_proto::{
     ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished,
@@ -67,7 +66,6 @@ use crate::dedup::{
     DEFAULT_THRESHOLD_BYTES, build_pointer_error_message, build_pointer_value,
     encode_error_for_hash, encode_for_hash, hash_truncated,
 };
-use crate::dirs::policy_store_path_from;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSource};
 use crate::error::HarnessError;
 use crate::event::{
@@ -2742,7 +2740,7 @@ struct HarnessBaseParts {
     tx: Sender<HarnessEvent>,
     /// Receiver side of the harness event channel.
     rx: Receiver<HarnessEvent>,
-    /// Event bus configured with the desired subscription policy.
+    /// Event bus for live connections and subscriptions.
     bus: EventBus,
     /// Runtime state directory for this harness.
     state_dir: PathBuf,
@@ -2823,8 +2821,6 @@ struct StartupHarnessParts {
     state_dir: PathBuf,
     /// Filesystem/config directories used by the harness.
     dirs: tau_config::settings::TauDirs,
-    /// Policy store backing event-bus subscription policy.
-    policy_store: PolicyStore,
     /// Session store with the eager session not yet loaded.
     store: SessionStore,
     /// Per-agent transcript store.
@@ -3175,10 +3171,7 @@ impl Harness {
         let state_dir = state_dir.into();
         let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
         let (tx, rx) = mpsc::channel();
-        let bus =
-            EventBus::with_subscription_policy(Box::new(DefaultSubscriptionPolicy::with_store(
-                PolicyStore::open(policy_store_path_from(&state_dir))?,
-            )));
+        let bus = EventBus::new();
         // Lazy: only the eager session's tree is needed up front
         // (loaded below via `store.load_session`); other sessions
         // load on first access. Avoids a startup walk over every
@@ -3598,9 +3591,6 @@ impl Harness {
             project_root,
         } = construction;
         let startup_started_at = Instant::now();
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "opening policy store");
-        let policy_store = PolicyStore::open(policy_store_path_from(&state_dir))?;
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "policy store opened");
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "opening session store");
         let (store, agent_store) =
             Self::open_startup_stores(&state_dir, &sessions_dir, launch.session_persistence)?;
@@ -3623,7 +3613,6 @@ impl Harness {
         let mut harness = Self::assemble_startup_harness(StartupHarnessParts {
             state_dir,
             dirs,
-            policy_store,
             store,
             agent_store,
             eager_session_id: eager_session_id.to_owned(),
@@ -3710,9 +3699,7 @@ impl Harness {
     fn assemble_startup_harness(mut parts: StartupHarnessParts) -> Result<Self, HarnessError> {
         let _ = parts.store.lock_and_load_session(&parts.eager_session_id)?;
         let (tx, rx) = mpsc::channel();
-        let bus = EventBus::with_subscription_policy(Box::new(
-            DefaultSubscriptionPolicy::with_store(parts.policy_store),
-        ));
+        let bus = EventBus::new();
         let custom_prompts = parts
             .harness_settings
             .custom_prompts

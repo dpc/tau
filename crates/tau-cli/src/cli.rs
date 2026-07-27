@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use tau_session_inspect::{
-    default_agents_dir, default_session_id, default_sessions_dir, default_state_dir,
-};
+use tau_session_inspect::{default_agents_dir, default_session_id, default_sessions_dir};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Parser)]
 #[command(
@@ -119,7 +120,7 @@ pub struct RunArgs {
     /// UI log to disk.
     ///
     /// Agent transcripts, provider state, credentials, user/cache extension
-    /// data, runtime sockets, and policy/config state keep their normal
+    /// data, runtime sockets, and configuration state keep their normal
     /// persistence behavior.
     /// Cannot be combined with --resume or --attach.
     #[arg(long)]
@@ -148,13 +149,6 @@ pub enum Command {
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
-    },
-
-    /// Show persisted policy approvals
-    PolicyShow {
-        /// Path to tau state directory (policy.cbor lives inside)
-        #[arg(long, default_value_os_t = default_state_dir())]
-        state_dir: PathBuf,
     },
 
     /// Copy sample config files to ~/.config/tau/

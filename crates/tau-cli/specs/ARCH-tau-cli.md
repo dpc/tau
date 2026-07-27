@@ -182,7 +182,7 @@ boundaries. Their own semantic transcript, metadata, durable session membership,
 ephemeral-agent debug JSONL entries, and prompt-history rows stay memory-only
 while the daemon lives, but durable recipients/parents may persist projected
 messages or results, and provider state, credentials, user/cache extension data,
-policy/config files, runtime sockets, external services, interceptors, and
+configuration files, runtime sockets, external services, interceptors, and
 trusted tools/extensions keep their normal persistence and filesystem access. Do
 not use session or agent ephemerality as a guarantee that prompt contents, tool
 results, or extension-observed data cannot be persisted elsewhere.

@@ -30,7 +30,7 @@ fn format_session_entry_tree_preview_shows_grouped_tool_results() {
 }
 
 #[test]
-fn session_and_policy_lines_are_printable() {
+fn session_lines_are_printable() {
     let td = TempDir::new().expect("tempdir");
     let sock = td.path().join("daemon.sock");
     let sp = td.path().join("state");
@@ -66,12 +66,10 @@ fn session_and_policy_lines_are_printable() {
         sll.iter()
             .any(|l| l.starts_with("s1 (") && l.contains("loaded agent"))
     );
-    let pl = policy_lines(sp.join("policy.cbor")).expect("policy");
-    assert!(pl.iter().any(|l| l.contains("socket-ui")));
 }
 
 #[test]
-fn empty_session_and_policy_views() {
+fn empty_session_views() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
@@ -79,10 +77,6 @@ fn empty_session_and_policy_views() {
     assert_eq!(
         session_list_lines(&sessions_dir).expect("ok"),
         vec!["no sessions"]
-    );
-    assert_eq!(
-        policy_lines(sp.join("policy.cbor")).expect("ok"),
-        vec!["no policy approvals"]
     );
     assert_eq!(
         session_lines(&sessions_dir, "x").expect("ok"),

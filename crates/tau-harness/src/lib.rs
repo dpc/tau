@@ -20,7 +20,6 @@ mod agent;
 mod daemon;
 mod debug_log;
 mod dedup;
-mod dirs;
 mod discovery;
 mod error;
 mod event;
