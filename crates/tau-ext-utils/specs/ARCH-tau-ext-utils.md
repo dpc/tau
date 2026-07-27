@@ -18,8 +18,12 @@ extension reconstructs active timers by folding catch-up input:
    not submit prompts until the owning agent's catch-up has reached its boundary.
 
 Timer wakeups use the narrow `extension.internal_prompt_submit_request`, which
-has no user-message class and is sent explicitly with `Emit.persist=false`. The harness remains the only component that publishes
-`agent.prompt_submitted`; the extension never forges transcript prompt facts.
+has no user-message class, is sent explicitly with `Emit.persist=false`, and
+carries typed `timer` activation provenance. The optional provenance does not
+change configured-extension authority, replay, or recovery; it only lets the
+harness copy an exact content-free classification into
+`agent.activation_queued`. The harness remains the only component that
+publishes `agent.prompt_submitted`; the extension never forges transcript prompt facts.
 See
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
 Periodic timers coalesce downtime into one internal prompt and advance the next

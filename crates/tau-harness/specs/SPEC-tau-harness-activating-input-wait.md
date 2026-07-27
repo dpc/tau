@@ -69,3 +69,12 @@ harness-authored tool output.
 Wait registration is runtime-only harness state: cancellation, target unload,
 session rollover, and shutdown remove it, and cold recovery uses ordinary
 unresolved-tool repair rather than reviving stale scheduling authority.
+
+The harness also writes content-free, best-effort observations for installed
+wait registrations, accepted activation queue items, and wait settlement.
+Random observation IDs link an active or immediate outcome to its exact
+registration, activation, source terminal, and wait terminal where those facts
+survive. Observation append failure never changes registration, wakeup,
+timeout, cancellation, teardown, or continuation. Replay never reinstalls or
+settles a waiter; omitted facts remain explicitly incomplete or unresolved in
+trace projection.

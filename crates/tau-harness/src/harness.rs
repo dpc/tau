@@ -125,6 +125,20 @@ use crate::settings::{
 };
 use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
 
+/// Returns the call identity carried by a canonical final tool terminal.
+fn canonical_tool_terminal_call_id(event: &Event) -> Option<&ToolCallId> {
+    match event {
+        Event::ProviderToolResult(result) if result.kind == ToolResultKind::Final => {
+            Some(&result.call_id)
+        }
+        Event::ProviderToolError(error) => Some(&error.call_id),
+        Event::ToolCancelled(cancelled) => Some(&cancelled.call_id),
+        Event::ToolBackgroundResult(result) => Some(&result.call_id),
+        Event::ToolBackgroundError(error) => Some(&error.call_id),
+        _ => None,
+    }
+}
+
 const RENDERED_PROMPT_PREVIEW_AGENT_ID: &str = "dev-preview-agent";
 use crate::turn::{PromptSubmission, TurnState};
 
@@ -860,6 +874,9 @@ fn sorted_tool_prompt_fragments(
 
 #[derive(Clone, Debug)]
 pub struct AgentToolCall {
+    /// Exact provider declaration that produced this call, when
+    /// provider-declared.
+    pub call_ref: Option<tau_proto::ToolCallRef>,
     /// Provider-supplied tool call id.
     pub id: ToolCallId,
     /// Internal tool name selected by routing.
@@ -1592,6 +1609,7 @@ pub(crate) fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<
         .iter()
         .filter_map(|item| match item {
             ContextItem::ToolCall(call) => Some(AgentToolCall {
+                call_ref: None,
                 id: call.call_id.clone(),
                 name: call.name.clone(),
                 tool_type: call.tool_type,
@@ -2065,6 +2083,20 @@ pub struct Harness {
     /// enrich terminal runtime events before they are folded into transcript
     /// facts.
     pub(crate) pending_tools: std::collections::HashMap<ToolCallId, PendingTool>,
+    /// Preallocated envelope identities for provider declarations awaiting
+    /// commit.
+    pending_declaration_observations: HashMap<AgentPromptId, tau_proto::ObservationId>,
+    /// Preallocated envelope identities for canonical tool terminals awaiting
+    /// journal append.
+    pending_terminal_observations: HashMap<ToolCallId, PendingTerminalObservation>,
+    /// Wait settlements held until their canonical wait terminal commits.
+    pending_wait_settlements:
+        HashMap<ToolCallId, crate::harness::subagents_tool::PendingWaitSettlement>,
+    /// Background completion prompt policy retained until its canonical
+    /// terminal commits.
+    pending_background_completion_modes: HashMap<ToolCallId, BackgroundCompletionPromptMode>,
+    /// First accepted provider cancellation observation for each live target.
+    pending_cancellation_observations: HashMap<ToolCallId, tau_proto::ObservationId>,
     /// Ownerless calls accepted from committed configured-peer requests.
     peer_tool_requests: std::collections::HashSet<ToolCallId>,
     /// `call_id` to loaded-agent runtime correlation for peer requests routed
@@ -2724,6 +2756,15 @@ pub(crate) enum BackgroundCompletionPromptMode {
     DoNotQueue,
 }
 
+/// Candidate canonical terminal identity retained until one terminal commits.
+#[derive(Clone)]
+struct PendingTerminalObservation {
+    /// Preallocated identity that the matching classification references.
+    observation_id: tau_proto::ObservationId,
+    /// Runtime cause whose classification owns this candidate.
+    cause: tau_proto::ToolTerminalCause,
+}
+
 struct CancelTarget {
     call_id: ToolCallId,
     tool_name: ToolName,
@@ -2990,6 +3031,11 @@ impl Harness {
             ui_shell_route_rng: StdRng::from_entropy(),
             tool_agents: HashMap::new(),
             pending_tools: HashMap::new(),
+            pending_declaration_observations: HashMap::new(),
+            pending_terminal_observations: HashMap::new(),
+            pending_wait_settlements: HashMap::new(),
+            pending_background_completion_modes: HashMap::new(),
+            pending_cancellation_observations: HashMap::new(),
             peer_tool_requests: HashSet::new(),
             peer_internal_tool_agents: HashMap::new(),
             completed_tool_calls: HashSet::new(),
@@ -4442,6 +4488,158 @@ impl Harness {
         self.publish_for_agent_from(cid, None, event);
     }
 
+    /// Append a content-free runtime observation without waiting for stable
+    /// storage or routing it through interception and subscriber delivery.
+    ///
+    /// The semantic append still validates and writes one failure-atomic
+    /// journal frame synchronously. The caller must perform the runtime
+    /// action regardless of that append's result; file-data and directory
+    /// synchronization remain asynchronous.
+    pub(crate) fn append_best_effort_observation(
+        &mut self,
+        cid: &AgentId,
+        observation_id: tau_proto::ObservationId,
+        event: Event,
+    ) {
+        let Some(agent) = self.agents.get(cid) else {
+            return;
+        };
+        let Some(agent_id) = agent.agent_id.as_deref() else {
+            return;
+        };
+        let parent = agent
+            .head
+            .map(tau_core::AgentEventParent::Under)
+            .unwrap_or(tau_core::AgentEventParent::Root);
+        if let Err(error) = self.agent_store.append_agent_event_at_with_observation_id(
+            agent_id,
+            None,
+            parent,
+            event,
+            tau_proto::UnixMicros::now(),
+            observation_id,
+        ) {
+            tracing::warn!(
+                target: "tau_harness",
+                %error,
+                "best-effort runtime observation append failed"
+            );
+        }
+    }
+
+    /// Allocate and append the identity of one accepted activating queue item.
+    ///
+    /// Callers queue the runtime item first, then invoke this helper and wake
+    /// waiters regardless of append success.
+    fn observe_activation_queued(
+        &mut self,
+        cid: &AgentId,
+        kind: tau_proto::ActivationKind,
+        source_observation: Option<tau_proto::ObservationId>,
+        source_call: Option<tau_proto::ToolCallRef>,
+    ) -> tau_proto::ObservationId {
+        let observation_id = tau_proto::ObservationId::random();
+        self.append_activation_queued(cid, observation_id, kind, source_observation, source_call);
+        observation_id
+    }
+
+    /// Allocate and append one queued-activation observation for a prompt that
+    /// can drive inference, preserving any identity assigned at an earlier
+    /// acceptance point.
+    pub(crate) fn ensure_prompt_activation_observed(
+        &mut self,
+        cid: &AgentId,
+        prompt: &mut PendingPrompt,
+    ) {
+        if prompt.creates_inference_activation() && prompt.activation_observation.is_none() {
+            prompt.activation_observation =
+                Some(self.observe_activation_queued(cid, prompt.activation_kind(), None, None));
+        }
+    }
+
+    /// Append one activation observation whose identity is already retained by
+    /// the queued runtime item.
+    fn append_activation_queued(
+        &mut self,
+        cid: &AgentId,
+        observation_id: tau_proto::ObservationId,
+        kind: tau_proto::ActivationKind,
+        source_observation: Option<tau_proto::ObservationId>,
+        source_call: Option<tau_proto::ToolCallRef>,
+    ) {
+        self.append_best_effort_observation(
+            cid,
+            observation_id,
+            Event::AgentActivationQueued(tau_proto::AgentActivationQueued {
+                kind,
+                source_observation,
+                source_call,
+            }),
+        );
+    }
+
+    /// Preallocate a canonical terminal identity and submit its classification
+    /// without making either journal append control terminal publication.
+    fn observe_tool_terminal(
+        &mut self,
+        cid: &AgentId,
+        call_id: &ToolCallId,
+        cause: tau_proto::ToolTerminalCause,
+    ) -> Option<tau_proto::ObservationId> {
+        if let Some(terminal) = self
+            .pending_terminal_observations
+            .get(call_id)
+            .filter(|terminal| terminal.cause == cause)
+        {
+            return Some(terminal.observation_id);
+        }
+        let call = self.wait_tool_call_ref(call_id)?;
+        let terminal = tau_proto::ObservationId::random();
+        self.pending_terminal_observations.insert(
+            call_id.clone(),
+            PendingTerminalObservation {
+                observation_id: terminal,
+                cause: cause.clone(),
+            },
+        );
+        self.append_best_effort_observation(
+            cid,
+            tau_proto::ObservationId::random(),
+            Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                call,
+                terminal,
+                cause,
+            }),
+        );
+        Some(terminal)
+    }
+
+    /// Resolve a declared call to its exact persisted declaration occurrence.
+    fn persisted_tool_call_ref(
+        &self,
+        cid: &AgentId,
+        call_id: &ToolCallId,
+    ) -> Option<tau_proto::ToolCallRef> {
+        let agent_id = self.agents.get(cid)?.agent_id.as_deref()?;
+        let events = self.agent_store.agent_events(agent_id).ok()?;
+        events.iter().find_map(|record| {
+            let Event::ProviderResponseFinished(response) = &record.event else {
+                return None;
+            };
+            response
+                .output_items
+                .iter()
+                .position(
+                    |item| matches!(item, ContextItem::ToolCall(call) if &call.call_id == call_id),
+                )
+                .and_then(|item_index| u32::try_from(item_index).ok())
+                .map(|item_index| tau_proto::ToolCallRef {
+                    declaration: record.observation_id,
+                    item_index,
+                })
+        })
+    }
+
     /// Publish one terminal result and return whether postcommit reaction owns
     /// runtime settlement for a durable transcript call.
     fn publish_terminal_tool_result(
@@ -4450,6 +4648,16 @@ impl Harness {
         source: Option<&str>,
         result: ToolResult,
     ) -> bool {
+        if result.kind == ToolResultKind::Final
+            && let Some(cid) = cid
+            && self.tool_terminal_has_open_durable_owner(cid, &result.call_id)
+        {
+            self.observe_tool_terminal(
+                cid,
+                &result.call_id,
+                tau_proto::ToolTerminalCause::Completed,
+            );
+        }
         match cid {
             Some(cid) if self.tool_terminal_has_open_durable_owner(cid, &result.call_id) => {
                 self.publish_for_agent_from(cid, source, Event::ProviderToolResult(result));
@@ -4461,7 +4669,7 @@ impl Harness {
                 self.publish_event(source, Event::ToolResult(ui_result.clone()));
                 self.publish_event(source, Event::ProviderToolResult(result));
                 self.reset_loop_guard_for_progress(cid);
-                self.record_wait_tool_result(ui_result);
+                self.record_wait_tool_result(ui_result, None);
                 false
             }
             None => {
@@ -4469,7 +4677,7 @@ impl Harness {
                 ui_result.provider_content.clear();
                 self.publish_event(source, Event::ToolResult(ui_result.clone()));
                 self.publish_event(source, Event::ProviderToolResult(result));
-                self.record_wait_tool_result(ui_result);
+                self.record_wait_tool_result(ui_result, None);
                 false
             }
         }
@@ -4483,6 +4691,27 @@ impl Harness {
         source: Option<&str>,
         error: ToolError,
     ) -> bool {
+        self.publish_terminal_tool_error_with_cause(
+            cid,
+            source,
+            error,
+            tau_proto::ToolTerminalCause::ToolError,
+        )
+    }
+
+    /// Publish one terminal error with an explicit runtime classification.
+    fn publish_terminal_tool_error_with_cause(
+        &mut self,
+        cid: Option<&AgentId>,
+        source: Option<&str>,
+        error: ToolError,
+        cause: tau_proto::ToolTerminalCause,
+    ) -> bool {
+        if let Some(cid) = cid
+            && self.tool_terminal_has_open_durable_owner(cid, &error.call_id)
+        {
+            self.observe_tool_terminal(cid, &error.call_id, cause);
+        }
         match cid {
             Some(cid) if self.tool_terminal_has_open_durable_owner(cid, &error.call_id) => {
                 self.publish_for_agent_from(cid, source, Event::ProviderToolError(error));
@@ -4492,13 +4721,13 @@ impl Harness {
                 self.publish_event(source, Event::ToolError(error.clone()));
                 self.publish_event(source, Event::ProviderToolError(error.clone()));
                 self.record_tool_failure_loop_signature(cid, &error);
-                self.record_wait_tool_error(error);
+                self.record_wait_tool_error(error, None);
                 false
             }
             None => {
                 self.publish_event(source, Event::ToolError(error.clone()));
                 self.publish_event(source, Event::ProviderToolError(error.clone()));
-                self.record_wait_tool_error(error);
+                self.record_wait_tool_error(error, None);
                 false
             }
         }
@@ -4529,7 +4758,7 @@ impl Harness {
         error: ToolBackgroundError,
     ) {
         self.publish_for_agent_from(cid, source, Event::ToolBackgroundError(error.clone()));
-        self.record_wait_background_error(error);
+        self.record_wait_background_error(error, None);
     }
 
     /// Like [`publish_for_agent`] but lets the caller record source metadata on
@@ -5084,6 +5313,7 @@ impl Harness {
         {
             return;
         }
+        let activation = tau_proto::ObservationId::random();
         if let Some(agent) = self.agents.get_mut(&cid)
             && !agent.pending_message_wakes.iter().any(|wake| {
                 matches!(
@@ -5101,9 +5331,18 @@ impl Harness {
                         durable_event_seq: outcome.seq,
                     },
                     node_id: outcome.folded_node_id,
+                    activation_observation: Some(activation),
+                    source_observation: Some(outcome.observation_id),
                 });
         }
-        self.activate_waits_for(&cid);
+        self.append_activation_queued(
+            &cid,
+            activation,
+            tau_proto::ActivationKind::ExternalMessage,
+            Some(outcome.observation_id),
+            None,
+        );
+        self.activate_waits_for(&cid, activation);
         self.try_advance_queue();
     }
 
@@ -6168,6 +6407,8 @@ impl Harness {
             Event::ProviderToolResult(result) => &result.call_id,
             Event::ProviderToolError(error) => &error.call_id,
             Event::ToolCancelled(cancelled) => &cancelled.call_id,
+            Event::ToolBackgroundResult(result) => &result.call_id,
+            Event::ToolBackgroundError(error) => &error.call_id,
             _ => return,
         };
         match event {
@@ -6183,7 +6424,7 @@ impl Harness {
                 if !newly_backgrounded && !self.tool_turn.is_backgrounded(call_id) {
                     return;
                 }
-                self.record_wait_tool_result(result.clone());
+                self.record_wait_tool_result(result.clone(), None);
                 if newly_backgrounded {
                     self.on_tool_call_foreground_complete(call_id.as_str());
                 }
@@ -6191,12 +6432,44 @@ impl Harness {
             }
             _ => {}
         }
-        if append_outcome.is_none() {
+        let Some(append_outcome) = append_outcome else {
             return;
-        }
+        };
         let Some(cid) = self.tool_agents.get(call_id).cloned() else {
             return;
         };
+        if let Event::ToolBackgroundResult(result) = event {
+            let Some(mode) = self.pending_background_completion_modes.remove(call_id) else {
+                return;
+            };
+            self.finish_tool_call_runtime_state(call_id.as_str());
+            self.record_wait_background_result(result.clone(), Some(append_outcome.observation_id));
+            self.finish_committed_background_completion(&cid, call_id, mode);
+            return;
+        }
+        if let Event::ToolBackgroundError(error) = event {
+            let Some(mode) = self.pending_background_completion_modes.remove(call_id) else {
+                return;
+            };
+            self.finish_tool_call_runtime_state(call_id.as_str());
+            self.record_wait_background_error(error.clone(), Some(append_outcome.observation_id));
+            self.finish_committed_background_completion(&cid, call_id, mode);
+            return;
+        }
+        self.pending_cancellation_observations.remove(call_id);
+        if let Some(settlement) = self.pending_wait_settlements.remove(call_id) {
+            self.append_best_effort_observation(
+                &cid,
+                tau_proto::ObservationId::random(),
+                Event::AgentToolWaitSettled(tau_proto::AgentToolWaitSettled {
+                    wait_observation: settlement.wait_observation,
+                    wait_call: settlement.wait_call,
+                    registration: settlement.registration,
+                    wait_terminal: append_outcome.observation_id,
+                    outcome: settlement.outcome,
+                }),
+            );
+        }
         match event {
             Event::ProviderToolResult(result) => {
                 let mut renderer_result = result.clone();
@@ -6207,15 +6480,18 @@ impl Harness {
                     Event::ToolResult(renderer_result.clone()),
                 );
                 self.reset_loop_guard_for_progress(&cid);
-                self.record_wait_tool_result(renderer_result);
+                self.record_wait_tool_result(renderer_result, Some(append_outcome.observation_id));
             }
             Event::ProviderToolError(error) => {
                 self.publish_for_agent_from(&cid, source, Event::ToolError(error.clone()));
                 self.record_tool_failure_loop_signature(&cid, error);
-                self.record_wait_tool_error(error.clone());
+                self.record_wait_tool_error(error.clone(), Some(append_outcome.observation_id));
             }
             Event::ToolCancelled(_) => {
-                self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]));
+                self.record_wait_tool_cancelled(
+                    &HashSet::from([call_id.clone()]),
+                    Some((call_id, append_outcome.observation_id)),
+                );
             }
             _ => unreachable!("terminal variants handled above"),
         }
@@ -6721,6 +6997,7 @@ impl Harness {
                     originator: PromptOriginator::User,
                 },
                 BackgroundCompletionPromptMode::QueuePassive,
+                tau_proto::ToolTerminalCause::ToolError,
             );
         } else {
             self.finish_prebuilt_internal_tool_error(ToolError {
@@ -6795,6 +7072,7 @@ impl Harness {
             if activation_class == crate::agent::AgentMessageActivationClass::OrdinaryAgentInput {
                 self.promote_lifecycle_notification_turn(&cid);
             }
+            let activation = tau_proto::ObservationId::random();
             if let Some(agent) = self.agents.get_mut(&cid)
                 && !agent.pending_message_wakes.iter().any(|wake| {
                     matches!(
@@ -6815,9 +7093,26 @@ impl Harness {
                             peer_admission_bytes,
                         },
                         node_id: outcome.folded_node_id,
+                        activation_observation: Some(activation),
+                        source_observation: Some(outcome.observation_id),
                     });
             }
-            self.activate_waits_for(&cid);
+            let kind = match activation_class {
+                crate::agent::AgentMessageActivationClass::OrdinaryAgentInput => {
+                    tau_proto::ActivationKind::AgentMessage
+                }
+                crate::agent::AgentMessageActivationClass::IsolatedWatchNotification => {
+                    tau_proto::ActivationKind::WatchNotification
+                }
+            };
+            self.append_activation_queued(
+                &cid,
+                activation,
+                kind,
+                Some(outcome.observation_id),
+                None,
+            );
+            self.activate_waits_for(&cid, activation);
             self.preempt_queued_tool_calls_for_message_received(&cid);
             self.try_advance_queue();
             return;
@@ -6848,6 +7143,8 @@ impl Harness {
                         peer_admission_bytes,
                     },
                     node_id: outcome.folded_node_id,
+                    activation_observation: Some(tau_proto::ObservationId::random()),
+                    source_observation: Some(outcome.observation_id),
                 });
         }
     }
@@ -7160,13 +7457,49 @@ impl Harness {
         else {
             return Ok(None);
         };
-        Ok(Some(self.agent_store.append_agent_event_at(
-            agent_id.as_str(),
-            source,
-            parent,
-            event.clone(),
-            recorded_at,
-        )?))
+        let outcome = if let Event::ProviderResponseFinished(response) = event
+            && let Some(observation_id) = self
+                .pending_declaration_observations
+                .get(&response.agent_prompt_id)
+                .copied()
+        {
+            let outcome = self.agent_store.append_agent_event_at_with_observation_id(
+                agent_id.as_str(),
+                source,
+                parent,
+                event.clone(),
+                recorded_at,
+                observation_id,
+            )?;
+            self.pending_declaration_observations
+                .remove(&response.agent_prompt_id);
+            outcome
+        } else if let Some(call_id) = canonical_tool_terminal_call_id(event)
+            && let Some(observation_id) = self
+                .pending_terminal_observations
+                .get(call_id)
+                .map(|terminal| terminal.observation_id)
+        {
+            let outcome = self.agent_store.append_agent_event_at_with_observation_id(
+                agent_id.as_str(),
+                source,
+                parent,
+                event.clone(),
+                recorded_at,
+                observation_id,
+            )?;
+            self.pending_terminal_observations.remove(call_id);
+            outcome
+        } else {
+            self.agent_store.append_agent_event_at(
+                agent_id.as_str(),
+                source,
+                parent,
+                event.clone(),
+                recorded_at,
+            )?
+        };
+        Ok(Some(outcome))
     }
 
     fn session_restore_event_targets_loaded_agent(&self, event: &Event) -> bool {
@@ -12374,6 +12707,14 @@ impl Harness {
                 cancelled.tool_type = tool.tool_type;
             }
             if self.tool_terminal_has_open_durable_owner(&cid, &call_id) {
+                let cause = self
+                    .pending_cancellation_observations
+                    .get(&call_id)
+                    .copied()
+                    .map_or(tau_proto::ToolTerminalCause::Unknown, |request| {
+                        tau_proto::ToolTerminalCause::Cancellation { request }
+                    });
+                self.observe_tool_terminal(&cid, &call_id, cause);
                 self.publish_for_agent_from(
                     &cid,
                     Some(HARNESS_CONNECTION_ID),
@@ -12381,7 +12722,7 @@ impl Harness {
                 );
             } else {
                 self.publish_event(Some(HARNESS_CONNECTION_ID), Event::ToolCancelled(cancelled));
-                self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]));
+                self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]), None);
                 self.on_tool_call_complete(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
             }
@@ -13381,8 +13722,11 @@ impl Harness {
             ));
             return Ok(());
         };
-        let prompt =
+        let mut prompt =
             PendingPrompt::internal(request.text.clone()).with_ctx_id(request.ctx_id.clone());
+        if request.activation_kind == Some(tau_proto::InternalPromptActivationKind::Timer) {
+            prompt.source = crate::agent::PendingPromptSource::Timer;
+        }
         self.submit_prompt_to_agent(session_id, &agent_id, prompt)?;
         Ok(())
     }
@@ -13710,6 +14054,7 @@ impl Harness {
             }
             .with_ctx_id(req.ctx_id.clone());
             prompt.expand_user_skill_on_dispatch = defer_initial_skill_expansion;
+            self.ensure_prompt_activation_observed(&cid, &mut prompt);
             if self.dispatch_blocked_for(&cid) || !self.session_initialized(&req.session_id) {
                 if let Some(conv) = self.agents.get_mut(&cid) {
                     conv.pending_prompts.push_back(prompt.clone());
@@ -14390,10 +14735,15 @@ impl Harness {
             };
             if self.tool_terminal_has_open_durable_owner(cid, &call_id) {
                 foreground_call_ids.push(call_id);
+                self.observe_tool_terminal(
+                    cid,
+                    &cancelled.call_id,
+                    tau_proto::ToolTerminalCause::LifecycleTeardown,
+                );
                 self.publish_for_agent(cid, Event::ToolCancelled(cancelled));
             } else {
                 self.publish_event(Some(HARNESS_CONNECTION_ID), Event::ToolCancelled(cancelled));
-                self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]));
+                self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]), None);
                 self.finish_tool_call_runtime_state(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
             }
@@ -14462,6 +14812,13 @@ impl Harness {
         // while live-branch turn cancellation keeps a queued internal notice so
         // the placeholder has an observable completion on that branch without
         // immediately auto-advancing the model.
+        if let Some(cid) = self.tool_agents.get(&target.call_id).cloned() {
+            self.observe_tool_terminal(
+                &cid,
+                &target.call_id,
+                tau_proto::ToolTerminalCause::LifecycleTeardown,
+            );
+        }
         let error = ToolError {
             call_id: target.call_id,
             tool_name: target.tool_name,
@@ -14475,6 +14832,7 @@ impl Harness {
             Some(HARNESS_CONNECTION_ID),
             error,
             completion_prompt_mode,
+            tau_proto::ToolTerminalCause::LifecycleTeardown,
         );
     }
 
@@ -14502,10 +14860,27 @@ impl Harness {
     pub(crate) fn publish_tool_cancel_request_for(
         &mut self,
         conversation_id: &AgentId,
+        cancel_call: Option<tau_proto::ToolCallRef>,
         target_call_id: ToolCallId,
     ) -> Result<(), String> {
         if !self.is_running_cancellable_tool_call_for(conversation_id, &target_call_id) {
             return Err("Unknown tool call id".to_owned());
+        }
+        if let (Some(cancel_call), Some(target_call)) =
+            (cancel_call, self.wait_tool_call_ref(&target_call_id))
+        {
+            let request = tau_proto::ObservationId::random();
+            self.pending_cancellation_observations
+                .entry(target_call_id.clone())
+                .or_insert(request);
+            self.append_best_effort_observation(
+                conversation_id,
+                request,
+                Event::AgentToolCancellationRequested(tau_proto::AgentToolCancellationRequested {
+                    cancel_call,
+                    target_call,
+                }),
+            );
         }
         self.publish_event(
             Some(HARNESS_CONNECTION_ID),
@@ -15146,9 +15521,11 @@ impl Harness {
             if self.tool_turn.is_backgrounded(&call_id) {
                 error.message = extension_disconnected_background_tool_call_error_message(&call_id);
                 if self.tool_agents.contains_key(call_id.as_str()) {
-                    self.handle_background_tool_error_without_advancing(
+                    self.handle_background_tool_error_inner(
                         Some(HARNESS_CONNECTION_ID),
                         error,
+                        BackgroundCompletionPromptMode::QueueOnly,
+                        tau_proto::ToolTerminalCause::ProviderDisconnected,
                     );
                 } else {
                     self.publish_terminal_tool_error(None, Some(HARNESS_CONNECTION_ID), error);
@@ -15169,8 +15546,12 @@ impl Harness {
             // have been terminalized.
             let owner = self.tool_agents.get(call_id.as_str()).cloned();
             if let Some(cid) = owner.as_ref() {
-                let journal_backed =
-                    self.publish_terminal_tool_error(Some(cid), Some(HARNESS_CONNECTION_ID), error);
+                let journal_backed = self.publish_terminal_tool_error_with_cause(
+                    Some(cid),
+                    Some(HARNESS_CONNECTION_ID),
+                    error,
+                    tau_proto::ToolTerminalCause::ProviderDisconnected,
+                );
                 if !journal_backed {
                     self.disconnect_terminal_batch_pending.remove(&call_id);
                     self.on_tool_call_complete_inner(call_id.as_str(), false);
@@ -15557,6 +15938,10 @@ impl Harness {
         self.tool_agents.remove(call_id);
         self.pending_tools.remove(call_id);
         self.pending_tool_providers.remove(call_id);
+        self.pending_terminal_observations.remove(call_id);
+        self.pending_wait_settlements.remove(call_id);
+        self.pending_background_completion_modes.remove(call_id);
+        self.pending_cancellation_observations.remove(call_id);
         if let Some(prompt_id) = self.prompt_tool_call_prompts.remove(call_id)
             && !self
                 .prompt_tool_call_prompts
@@ -16656,6 +17041,35 @@ impl Harness {
         }
         self.agent_routes.insert(agent_id.clone(), cid.clone());
         self.agents.insert(cid.clone(), conv);
+        let buffered_activations = self
+            .agents
+            .get(&cid)
+            .into_iter()
+            .flat_map(|agent| agent.pending_message_wakes.iter())
+            .filter_map(|wake| {
+                wake.activation_observation.map(|observation| {
+                    let kind = match wake.source {
+                        crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                            activation_class:
+                                crate::agent::AgentMessageActivationClass::OrdinaryAgentInput,
+                            ..
+                        } => tau_proto::ActivationKind::AgentMessage,
+                        crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                            activation_class:
+                                crate::agent::AgentMessageActivationClass::IsolatedWatchNotification,
+                            ..
+                        } => tau_proto::ActivationKind::WatchNotification,
+                        crate::agent::PendingMessageWakeSource::MessageFact { .. } => {
+                            tau_proto::ActivationKind::ExternalMessage
+                        }
+                    };
+                    (observation, kind, wake.source_observation)
+                })
+            })
+            .collect::<Vec<_>>();
+        for (observation, kind, source_observation) in buffered_activations {
+            self.append_activation_queued(&cid, observation, kind, source_observation, None);
+        }
         self.precommitted_agent_starts.insert(agent_id.clone());
         self.enqueue_publish(
             None,
@@ -17204,6 +17618,7 @@ impl Harness {
             },
         );
         if self.tool_turn.begin_backgrounding(&call.id) {
+            self.observe_tool_backgrounded(&call.id);
             self.publish_internal_background_placeholder(
                 &call.id,
                 tau_proto::CborValue::Map(vec![
@@ -18337,21 +18752,51 @@ impl Harness {
             || !self.extensions_all_ready()
         {
             self.reset_loop_guard_for_progress(&cid);
+            let activation = tau_proto::ObservationId::random();
             if let Some(conv) = self.agents.get_mut(&cid) {
-                conv.pending_prompts.push_back(PendingPrompt::user(text));
+                let mut prompt = PendingPrompt::user(text);
+                prompt.activation_observation = Some(activation);
+                conv.pending_prompts.push_back(prompt);
             }
+            self.append_activation_queued(
+                &cid,
+                activation,
+                tau_proto::ActivationKind::VisibleUser,
+                None,
+                None,
+            );
+            self.activate_waits_for(&cid, activation);
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
         if self.dispatch_blocked_for(&cid) {
             self.reset_loop_guard_for_progress(&cid);
+            let activation = tau_proto::ObservationId::random();
             if let Some(conv) = self.agents.get_mut(&cid) {
-                conv.pending_prompts.push_back(PendingPrompt::user(text));
+                let mut prompt = PendingPrompt::user(text);
+                prompt.activation_observation = Some(activation);
+                conv.pending_prompts.push_back(prompt);
             }
+            self.append_activation_queued(
+                &cid,
+                activation,
+                tau_proto::ActivationKind::VisibleUser,
+                None,
+                None,
+            );
+            self.activate_waits_for(&cid, activation);
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
-        self.dispatch_prompt_for_agent(&cid, PendingPrompt::user(text))?;
+        let activation = self.observe_activation_queued(
+            &cid,
+            tau_proto::ActivationKind::VisibleUser,
+            None,
+            None,
+        );
+        let mut prompt = PendingPrompt::user(text);
+        prompt.activation_observation = Some(activation);
+        self.dispatch_prompt_for_agent(&cid, prompt)?;
         Ok(PromptSubmission::Dispatched)
     }
 
@@ -18388,11 +18833,18 @@ impl Harness {
             || !self.extensions_all_ready()
         {
             let inference_activation = prompt.creates_inference_activation();
+            let activation_kind = prompt.activation_kind();
+            let activation = inference_activation.then(tau_proto::ObservationId::random);
             if !prompt.is_internal() {
                 self.reset_loop_guard_for_progress(&cid);
             }
             if let Some(conv) = self.agents.get_mut(&cid) {
-                conv.pending_prompts.push_back(prompt.clone());
+                let mut queued_prompt = prompt.clone();
+                queued_prompt.activation_observation = activation;
+                conv.pending_prompts.push_back(queued_prompt);
+            }
+            if let Some(activation) = activation {
+                self.append_activation_queued(&cid, activation, activation_kind, None, None);
             }
             self.publish_event(
                 None,
@@ -18402,19 +18854,26 @@ impl Harness {
                     message_class: prompt.message_class,
                 }),
             );
-            if inference_activation {
-                self.activate_waits_for(&cid);
+            if let Some(activation) = activation {
+                self.activate_waits_for(&cid, activation);
             }
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
         if self.dispatch_blocked_for(&cid) {
             let inference_activation = prompt.creates_inference_activation();
+            let activation_kind = prompt.activation_kind();
+            let activation = inference_activation.then(tau_proto::ObservationId::random);
             if !prompt.is_internal() {
                 self.reset_loop_guard_for_progress(&cid);
             }
             if let Some(conv) = self.agents.get_mut(&cid) {
-                conv.pending_prompts.push_back(prompt.clone());
+                let mut queued_prompt = prompt.clone();
+                queued_prompt.activation_observation = activation;
+                conv.pending_prompts.push_back(queued_prompt);
+            }
+            if let Some(activation) = activation {
+                self.append_activation_queued(&cid, activation, activation_kind, None, None);
             }
             self.publish_event(
                 None,
@@ -18424,11 +18883,16 @@ impl Harness {
                     message_class: prompt.message_class,
                 }),
             );
-            if inference_activation {
-                self.activate_waits_for(&cid);
+            if let Some(activation) = activation {
+                self.activate_waits_for(&cid, activation);
             }
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
+        }
+        let mut prompt = prompt;
+        if prompt.creates_inference_activation() {
+            prompt.activation_observation =
+                Some(self.observe_activation_queued(&cid, prompt.activation_kind(), None, None));
         }
         self.dispatch_prompt_for_agent(&cid, prompt)?;
         Ok(PromptSubmission::Dispatched)
@@ -18729,6 +19193,10 @@ impl Harness {
         self.tool_turn.clear();
         self.tool_agents.clear();
         self.pending_tools.clear();
+        self.pending_declaration_observations.clear();
+        self.pending_terminal_observations.clear();
+        self.pending_wait_settlements.clear();
+        self.pending_cancellation_observations.clear();
         self.peer_tool_requests.clear();
         self.peer_internal_tool_agents.clear();
         self.completed_tool_calls.clear();
@@ -19233,7 +19701,15 @@ impl Harness {
 
                     display,
                 };
-                self.publish_terminal_tool_error(Some(&cid), Some(HARNESS_CONNECTION_ID), error);
+                if let Some(call_ref) = self.persisted_tool_call_ref(&cid, &call.call_id) {
+                    self.record_wait_tool_call_ref(call.call_id.clone(), call_ref);
+                }
+                self.publish_terminal_tool_error_with_cause(
+                    Some(&cid),
+                    Some(HARNESS_CONNECTION_ID),
+                    error,
+                    tau_proto::ToolTerminalCause::RestartRepair,
+                );
             }
         }
         count
@@ -19278,14 +19754,18 @@ impl Harness {
     fn seed_restored_wait_background_completions(&mut self, session_id: &SessionId) {
         for cid in self.restored_agent_ids(session_id) {
             for state in self.restored_background_tool_states_for_agent(&cid) {
-                self.tool_agents
-                    .insert(state.placeholder.call_id.clone(), cid.clone());
+                let call_id = state.placeholder.call_id.clone();
+                self.tool_agents.insert(call_id.clone(), cid.clone());
+                if let Some(call_ref) = state.call_ref {
+                    self.record_wait_tool_call_ref(call_id.clone(), call_ref);
+                }
+                let terminal = state.terminal_observation;
                 match state.completion {
                     Some(tau_core::BackgroundToolCompletion::Result(result)) => {
-                        self.record_wait_background_result(result);
+                        self.record_wait_background_result(result, terminal);
                     }
                     Some(tau_core::BackgroundToolCompletion::Error(error)) => {
-                        self.record_wait_background_error(error);
+                        self.record_wait_background_error(error, terminal);
                     }
                     None => {}
                 }
@@ -19318,12 +19798,45 @@ impl Harness {
                 .agent(agent_id)
                 .map(|tree| tree.unresolved_background_tool_calls_from(head, &events))
                 .unwrap_or_default();
+            let call_refs = events
+                .iter()
+                .flat_map(|record| {
+                    let Event::ProviderResponseFinished(response) = &record.event else {
+                        return Vec::new();
+                    };
+                    response
+                        .output_items
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(item_index, item)| {
+                            let ContextItem::ToolCall(call) = item else {
+                                return None;
+                            };
+                            Some((
+                                call.call_id.clone(),
+                                tau_proto::ToolCallRef {
+                                    declaration: record.observation_id,
+                                    item_index: u32::try_from(item_index).ok()?,
+                                },
+                            ))
+                        })
+                        .collect()
+                })
+                .collect::<HashMap<_, _>>();
             for call in calls {
                 if self.is_pending_manual_compaction_call(&call.call_id) {
                     continue;
                 }
                 count += 1;
                 self.tool_agents.insert(call.call_id.clone(), cid.clone());
+                if let Some(call_ref) = call_refs.get(&call.call_id).copied() {
+                    self.record_wait_tool_call_ref(call.call_id.clone(), call_ref);
+                    self.observe_tool_terminal(
+                        &cid,
+                        &call.call_id,
+                        tau_proto::ToolTerminalCause::RestartRepair,
+                    );
+                }
                 let error = ToolBackgroundError {
                     call_id: call.call_id.clone(),
                     tool_name: call.tool_name,
@@ -19334,6 +19847,10 @@ impl Harness {
 
                     display: None,
                 };
+                self.pending_background_completion_modes.insert(
+                    call.call_id.clone(),
+                    BackgroundCompletionPromptMode::DoNotQueue,
+                );
                 self.publish_terminal_background_error(&cid, Some(HARNESS_CONNECTION_ID), error);
             }
         }
@@ -23096,6 +23613,27 @@ impl Harness {
                 is_non_tool_ext_query,
                 tool_calls_with_non_tool_stop,
             );
+            let declaration = tau_proto::ObservationId::random();
+            self.pending_declaration_observations
+                .insert(response.agent_prompt_id.clone(), declaration);
+            let item_indices = response
+                .output_items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| match item {
+                    ContextItem::ToolCall(call) => Some((call.call_id.clone(), index)),
+                    _ => None,
+                })
+                .collect::<HashMap<_, _>>();
+            for entry in &mut normalized_tool_calls.calls {
+                entry.call.call_ref = item_indices
+                    .get(&entry.call.id)
+                    .and_then(|index| u32::try_from(*index).ok())
+                    .map(|item_index| tau_proto::ToolCallRef {
+                        declaration,
+                        item_index,
+                    });
+            }
         }
 
         self.publish_finished_response_for_agent(&cid, source, &response);
@@ -24646,6 +25184,14 @@ impl Harness {
                 break;
             };
             let call_id = invocation.id.clone();
+            if let Some(call) = invocation.call_ref {
+                self.record_wait_tool_call_ref(call_id.clone(), call);
+                self.append_best_effort_observation(
+                    &conversation_id,
+                    tau_proto::ObservationId::random(),
+                    Event::AgentToolDispatchObserved(tau_proto::AgentToolDispatchObserved { call }),
+                );
+            }
             // If dispatch fails synchronously, roll back the in-flight
             // entry so a retry or clean-up is not wedged on a phantom
             // slot.
@@ -24665,10 +25211,32 @@ impl Harness {
             ForegroundAction::None => {}
             ForegroundAction::Background { call_id } => {
                 if self.tool_turn.begin_backgrounding(&call_id) {
+                    self.observe_tool_backgrounded(&call_id);
                     self.publish_synthetic_background_result(&call_id);
                 }
             }
         }
+    }
+
+    /// Observe a live background-transition decision before publishing its
+    /// foreground placeholder.
+    pub(crate) fn observe_tool_backgrounded(&mut self, call_id: &ToolCallId) {
+        let Some(call) = self.wait_tool_call_ref(call_id) else {
+            return;
+        };
+        let Some(owner) = self
+            .tool_agents
+            .get(call_id)
+            .or_else(|| self.peer_internal_tool_agents.get(call_id))
+            .cloned()
+        else {
+            return;
+        };
+        self.append_best_effort_observation(
+            &owner,
+            tau_proto::ObservationId::random(),
+            Event::AgentToolBackgroundedObserved(tau_proto::AgentToolBackgroundedObserved { call }),
+        );
     }
 
     fn publish_synthetic_background_result(&mut self, call_id: &ToolCallId) {
@@ -24751,6 +25319,7 @@ impl Harness {
     fn process_background_deadlines_at(&mut self, now: Instant) {
         for call_id in self.tool_turn.background_due(now) {
             if self.tool_turn.begin_backgrounding(&call_id) {
+                self.observe_tool_backgrounded(&call_id);
                 self.publish_synthetic_background_result(&call_id);
             }
         }
@@ -24804,7 +25373,6 @@ impl Harness {
             result.tool_name = tool.name.clone();
             result.tool_type = tool.tool_type;
         }
-        self.finish_tool_call_runtime_state(call_id.as_str());
         let background = ToolBackgroundResult {
             call_id: result.call_id,
             tool_name: result.tool_name,
@@ -24820,34 +25388,24 @@ impl Harness {
                 Some(source_id),
                 Event::ToolBackgroundResult(background.clone()),
             );
-            self.record_wait_background_result(background);
-            self.tool_turn.mark_complete(&call_id);
-            if let Some(agent) = self.agents.get_mut(&cid) {
-                agent.tools_in_flight = agent.tools_in_flight.saturating_sub(1);
-            }
-            self.emit_agent_stats_updated(&cid);
-            self.clear_tool_call_tracking(call_id.as_str());
+            self.record_wait_background_result(background, None);
+            self.finish_harness_owned_tool_tracking(&call_id);
             return;
         }
+        self.observe_tool_terminal(&cid, &call_id, tau_proto::ToolTerminalCause::Completed);
+        self.pending_background_completion_modes.insert(
+            call_id,
+            if advance_queue {
+                BackgroundCompletionPromptMode::QueueAndAdvance
+            } else {
+                BackgroundCompletionPromptMode::QueueOnly
+            },
+        );
         self.publish_for_agent_from(
             &cid,
             Some(source_id),
-            Event::ToolBackgroundResult(background.clone()),
+            Event::ToolBackgroundResult(background),
         );
-        self.record_wait_background_result(background);
-        self.background_completion_targets
-            .insert(call_id.clone(), cid.clone());
-        self.reset_loop_guard_for_progress(&cid);
-        if advance_queue {
-            self.queue_background_completion_prompt(&cid, &call_id);
-        } else {
-            self.queue_background_completion_prompt_without_advancing(&cid, &call_id);
-        }
-        // Keep the completion prompt queued before draining. If an unblocked
-        // queued call closes the tool round, `maybe_complete_agent_turn` can
-        // fold this background notification into that follow-up prompt.
-        self.drain_pending_tool_invocations_or_report();
-        self.clear_tool_call_tracking(call_id.as_str());
     }
 
     fn handle_background_tool_error(&mut self, source: Option<&str>, error: ToolError) {
@@ -24855,6 +25413,7 @@ impl Harness {
             source,
             error,
             BackgroundCompletionPromptMode::QueueAndAdvance,
+            tau_proto::ToolTerminalCause::ToolError,
         );
     }
 
@@ -24872,6 +25431,13 @@ impl Harness {
     }
 
     fn handle_background_tool_cancelled(&mut self, source_id: &str, cancelled: ToolCancelled) {
+        let cause = self
+            .pending_cancellation_observations
+            .get(&cancelled.call_id)
+            .copied()
+            .map_or(tau_proto::ToolTerminalCause::Unknown, |request| {
+                tau_proto::ToolTerminalCause::Cancellation { request }
+            });
         let error = ToolError {
             call_id: cancelled.call_id,
             tool_name: cancelled.tool_name,
@@ -24881,25 +25447,19 @@ impl Harness {
             display: None,
             originator: PromptOriginator::User,
         };
-        self.handle_background_tool_error(Some(source_id), error);
-    }
-    fn handle_background_tool_error_without_advancing(
-        &mut self,
-        source: Option<&str>,
-        error: ToolError,
-    ) {
         self.handle_background_tool_error_inner(
-            source,
+            Some(source_id),
             error,
-            BackgroundCompletionPromptMode::QueueOnly,
+            BackgroundCompletionPromptMode::QueueAndAdvance,
+            cause,
         );
     }
-
     fn handle_background_tool_error_inner(
         &mut self,
         source: Option<&str>,
         mut error: ToolError,
         completion_prompt_mode: BackgroundCompletionPromptMode,
+        cause: tau_proto::ToolTerminalCause,
     ) {
         let peer_internal = self.peer_internal_tool_agents.contains_key(&error.call_id);
         let Some(cid) = self
@@ -24915,11 +25475,6 @@ impl Harness {
             error.tool_name = tool.name.clone();
             error.tool_type = tool.tool_type;
         }
-        self.tool_turn.mark_complete(&call_id);
-        if let Some(conv) = self.agents.get_mut(&cid) {
-            conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
-        }
-        self.emit_agent_stats_updated(&cid);
         let background = ToolBackgroundError {
             call_id: error.call_id,
             tool_name: error.tool_name,
@@ -24933,30 +25488,40 @@ impl Harness {
             // Settle ownerless runtime/wait state without creating transcript or
             // background-completion-prompt ownership.
             self.publish_event(source, Event::ToolBackgroundError(background.clone()));
-            self.record_wait_background_error(background);
-            self.clear_tool_call_tracking(call_id.as_str());
+            self.record_wait_background_error(background, None);
+            self.finish_harness_owned_tool_tracking(&call_id);
             return;
         }
-        self.publish_terminal_background_error(&cid, source, background);
+        self.observe_tool_terminal(&cid, &call_id, cause);
+        self.pending_background_completion_modes
+            .insert(call_id, completion_prompt_mode);
+        self.publish_for_agent_from(&cid, source, Event::ToolBackgroundError(background));
+    }
+
+    /// Apply dependent runtime effects only after a canonical background
+    /// terminal has committed.
+    fn finish_committed_background_completion(
+        &mut self,
+        cid: &AgentId,
+        call_id: &ToolCallId,
+        completion_prompt_mode: BackgroundCompletionPromptMode,
+    ) {
+        self.background_completion_targets
+            .insert(call_id.clone(), cid.clone());
+        self.reset_loop_guard_for_progress(cid);
         match completion_prompt_mode {
             BackgroundCompletionPromptMode::QueueAndAdvance => {
-                self.background_completion_targets
-                    .insert(call_id.clone(), cid.clone());
-                self.queue_background_completion_prompt(&cid, &call_id);
+                self.queue_background_completion_prompt(cid, call_id);
                 // Keep the completion prompt queued before draining. If an unblocked
                 // queued call closes the tool round, `maybe_complete_agent_turn` can
                 // fold this background notification into that follow-up prompt.
                 self.drain_pending_tool_invocations_or_report();
             }
             BackgroundCompletionPromptMode::QueueOnly => {
-                self.background_completion_targets
-                    .insert(call_id.clone(), cid.clone());
-                self.queue_background_completion_prompt_without_advancing(&cid, &call_id);
+                self.queue_background_completion_prompt_without_advancing(cid, call_id);
             }
             BackgroundCompletionPromptMode::QueuePassive => {
-                self.background_completion_targets
-                    .insert(call_id.clone(), cid.clone());
-                self.queue_passive_background_completion_prompt(&cid, &call_id);
+                self.queue_passive_background_completion_prompt(cid, call_id);
             }
             BackgroundCompletionPromptMode::DoNotQueue => {}
         }
@@ -25009,6 +25574,7 @@ impl Harness {
             return;
         }
         let prompt = background_completion_prompt(call_id);
+        let activation = tau_proto::ObservationId::random();
         let queued = if let Some(conv) = self.agents.get_mut(cid) {
             if conv
                 .pending_prompts
@@ -25017,15 +25583,23 @@ impl Harness {
             {
                 return;
             }
-            let prompt = make_prompt(prompt);
+            let mut prompt = make_prompt(prompt);
             let inference_activation = prompt.creates_inference_activation();
+            prompt.activation_observation = inference_activation.then_some(activation);
             conv.pending_prompts.push_back(prompt);
             inference_activation
         } else {
             false
         };
         if queued {
-            self.activate_waits_for(cid);
+            self.append_activation_queued(
+                cid,
+                activation,
+                tau_proto::ActivationKind::BackgroundCompletion,
+                self.wait_tool_terminal_observation(call_id),
+                self.wait_tool_call_ref(call_id),
+            );
+            self.activate_waits_for(cid, activation);
         }
         if advance_queue {
             self.try_advance_queue();
@@ -25059,6 +25633,10 @@ impl Harness {
     }
 
     fn transfer_background_completion_target_before_teardown(&mut self, cid: &AgentId) {
+        // TODO(89re): Research a durable representation for child background
+        // calls whose runtime completion/wait ownership is reparented here.
+        // Compact projection currently treats resulting cross-journal refs as
+        // unavailable instead of making this runtime policy part of its schema.
         let call_ids = self.background_completion_call_ids_for_teardown(cid);
         if call_ids.is_empty() {
             return;
@@ -25554,9 +26132,18 @@ impl Harness {
 
         conv.loop_guard
             .remember_cycle_pending(cycle_key, LOOP_GUARD_CYCLE_LIMIT);
-        conv.pending_prompts
-            .push_back(PendingPrompt::loop_guard(loop_guard_pivot_prompt(&reason)));
-        self.activate_waits_for(cid);
+        let activation = tau_proto::ObservationId::random();
+        let mut prompt = PendingPrompt::loop_guard(loop_guard_pivot_prompt(&reason));
+        prompt.activation_observation = Some(activation);
+        conv.pending_prompts.push_back(prompt);
+        self.append_activation_queued(
+            cid,
+            activation,
+            tau_proto::ActivationKind::LoopGuard,
+            None,
+            None,
+        );
+        self.activate_waits_for(cid, activation);
     }
 
     fn mark_loop_guard_breakers_dispatched(&mut self, cid: &AgentId) {

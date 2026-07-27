@@ -59,7 +59,8 @@ impl Harness {
         agent_id: &AgentId,
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
-        let prompt = prompt.into();
+        let mut prompt = prompt.into();
+        self.ensure_prompt_activation_observed(agent_id, &mut prompt);
         self.promote_lifecycle_notification_turn(agent_id);
         if !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);

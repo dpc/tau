@@ -495,6 +495,7 @@ fn strict_replay_rejects_partial_frame_before_valid_suffix() {
         journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
     }
     let record = PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
         seq: PersistedAgentEventSeq::new(1),
         source: None,
         event: display_name_event(&agent_id, "suffix"),

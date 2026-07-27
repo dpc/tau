@@ -139,6 +139,7 @@ fn internal_prompt_requests_never_enter_semantic_history() {
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         text: "wake".to_owned(),
         ctx_id: Some("timer:1".to_owned()),
+        activation_kind: None,
     });
     assert!(!event.defaults_to_persist());
     assert!(!should_persist_event(&event, true));

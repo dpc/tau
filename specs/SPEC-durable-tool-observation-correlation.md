@@ -1,0 +1,72 @@
+# SPEC-durable-tool-observation-correlation: Explicit tool and wait causality
+
+## Record justification
+
+This contract spans persisted protocol envelopes and facts, harness runtime
+emission and replay, and offline compact projection, so no one implementation
+area can own it coherently.
+
+## Contract
+
+Every persisted agent occurrence carries one opaque random 128-bit
+`ObservationId`. A `ToolCallRef` identifies one provider-declared call by its
+declaration occurrence and zero-based output-item index. Neither identity encodes
+time, order, an agent, or a journal sequence.
+
+The content-free observation events are
+`agent.tool_dispatch_observed`, `agent.tool_backgrounded_observed`,
+`agent.tool_wait_observed`, `agent.tool_wait_registered`, `agent.activation_queued`,
+`agent.tool_wait_settled`, `agent.tool_cancellation_requested`, and
+`agent.tool_terminal_classified`.
+
+Every provider-declared wait receives a pre-resolution
+`agent.tool_wait_observed` identity. Its typed mode distinguishes a resolved
+exact target, an unresolved exact target, next-background selection,
+activating-input timeout, and invalid arguments. Active registrations and every
+settlement refer back to that observation; immediate settlements retain no
+registration.
+
+They are valid per-agent journal records but replay as fold no-ops. Replay never
+dispatches work, installs or settles a waiter, queues input, consumes output,
+cancels a call, or repeats a continuation.
+
+A canonical final terminal owns its output. Its event-envelope observation ID is
+the output reference. A completion-delivering wait retains only that reference and
+its typed envelope; it never owns or copies the source payload or output counts.
+A terminal classification precedes the canonical terminal, and a wait settlement
+can survive only after that canonical terminal commits.
+
+Wait registration, settlement, activation, cancellation, and terminal causes use
+typed references. Missing crash-tail or selected-cut endpoints stay explicit as
+`source_not_selected`, `unresolved`, or `incomplete`. Consumers must not infer an
+edge from call-ID text, timestamps, prose, or adjacency. Qualified elapsed
+intervals require both explicitly linked endpoints in the same agent journal and a
+nondecreasing producer wall clock.
+
+Selected endpoints in another agent journal use the same non-fatal
+`source_not_selected` or `unresolved` fallback as unavailable endpoints. They
+never transfer terminal status or output ownership and never produce a
+cross-journal interval. This deliberately does not enshrine runtime
+background-call reparenting in the projection schema.
+
+Configured extensions may classify
+`ExtInternalPromptSubmitRequest.activation_kind` as `timer`. Absence and explicit
+`internal_prompt` both mean an ordinary internal prompt. The transient request
+does not become semantic history; its accepted classification is copied into the
+content-free activation observation. Other activation kinds remain harness-owned.
+
+Observation appends validate and write a failure-atomic frame synchronously, but
+their failure never changes the observed runtime action or result. Stable-storage
+sync remains asynchronous under
+[`GATE-asynchronous-journal-durability`](GATE-asynchronous-journal-durability.md).
+
+
+## Projection
+
+The `tau.agent_tools` schema version `0` emits `call`, `activation`, and
+`relationship` records. JSON Lines and strict TOON carry the same semantic record
+set. Lite mode bounds source-owned terminal output to 4 KiB while retaining exact
+complete byte and line counts. Full mode retains complete source output.
+
+The native `tau.agent_trace` JSON Lines occurrence includes its observation ID,
+journal identity, sequence, timestamp, source, parent, and lossless typed event.

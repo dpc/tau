@@ -30,8 +30,8 @@ pub(super) fn assert_snapshot_a(
         != expected
         || snapshot.session_events.len() != 2
         || snapshot.restore_events.len() != 2
-        || snapshot.agent_events[&identities.main].len() != 27
-        || snapshot.agent_events[&identities.worker].len() != 9
+        || snapshot.agent_events[&identities.main].len() != 33
+        || snapshot.agent_events[&identities.worker].len() != 10
     {
         return Err(format!(
             "S8 Boot A durable record counts changed: session={}, restore={}, main={}, worker={}",
@@ -132,23 +132,29 @@ fn assert_exact_event_names(
         E::AGENT_STARTED,
         E::AGENT_INITIALIZATION_CONTEXT_SET,
         E::AGENT_USER_INTERACTION_RECORDED,
+        E::AGENT_ACTIVATION_QUEUED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_OUTER_TURN_STARTED,
         E::AGENT_PROMPT_STARTED,
         E::PROVIDER_RESPONSE_FINISHED,
+        E::AGENT_TOOL_DISPATCH_OBSERVED,
         E::AGENT_MESSAGE_RECEIVED,
+        E::AGENT_TOOL_TERMINAL_CLASSIFIED,
         E::PROVIDER_TOOL_RESULT,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_PROMPT_STARTED,
         E::AGENT_MESSAGE_RECEIVED,
+        E::AGENT_ACTIVATION_QUEUED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_OUTER_TURN_FINISHED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_OUTER_TURN_STARTED,
         E::AGENT_PROMPT_STARTED,
         E::AGENT_MESSAGE_RECEIVED,
+        E::AGENT_ACTIVATION_QUEUED,
         E::AGENT_MESSAGE_RECEIVED,
+        E::AGENT_ACTIVATION_QUEUED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_OUTER_TURN_FINISHED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
@@ -161,6 +167,7 @@ fn assert_exact_event_names(
         E::AGENT_STARTED,
         E::AGENT_INITIALIZATION_CONTEXT_SET,
         E::AGENT_DISPLAY_NAME_SET,
+        E::AGENT_ACTIVATION_QUEUED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_OUTER_TURN_STARTED,
@@ -263,7 +270,7 @@ fn assert_boot_a_agent_payloads(
                     }
             })
         || !matches!(
-            &worker[3].event,
+            &worker[4].event,
             Event::AgentPromptSubmitted(prompt)
                 if prompt.agent_id == identities.worker
                     && prompt.inference_activation
@@ -281,7 +288,7 @@ fn assert_boot_a_agent_payloads(
                     && prompt.ctx_id.is_none()
         )
         || !exact_text_response(
-            &worker[7].event,
+            &worker[8].event,
             &identities.worker,
             "worker boot-a complete",
             false,
@@ -618,6 +625,7 @@ pub(super) fn assert_snapshot_suffix(
     let [
         initialization,
         interaction,
+        activation,
         notice,
         prompt,
         dispatch,
@@ -628,8 +636,12 @@ pub(super) fn assert_snapshot_suffix(
     ] = suffix
     else {
         return Err(format!(
-            "S8 worker durable suffix has {} records instead of nine",
-            suffix.len()
+            "S8 worker durable suffix has {} records instead of ten: {:?}",
+            suffix.len(),
+            suffix
+                .iter()
+                .map(|record| record.event.name())
+                .collect::<Vec<_>>()
         )
         .into());
     };
@@ -642,6 +654,12 @@ pub(super) fn assert_snapshot_suffix(
         &interaction.event,
         Event::AgentUserInteractionRecorded(value) if value.agent_id == identities.worker
     ) || !matches!(
+        &activation.event,
+        Event::AgentActivationQueued(value)
+            if value.kind == tau_proto::ActivationKind::VisibleUser
+                && value.source_observation.is_none()
+                && value.source_call.is_none()
+    ) || !matches!(
         &notice.event,
         Event::AgentPromptSubmitted(value)
             if value.agent_id == identities.worker
@@ -652,7 +670,7 @@ pub(super) fn assert_snapshot_suffix(
                 && value.internal_kind.is_none()
                 && value.originator == tau_proto::PromptOriginator::User
                 && value.display_name.as_deref() == Some("deterministic worker")
-                && value.ctx_id.is_none()
+                    && value.ctx_id.is_none()
     ) || !matches!(
         &prompt.event,
         Event::AgentPromptSubmitted(value)

@@ -809,6 +809,32 @@ fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
     )
 }
 
+/// Converts one durable event into its replay-visible projection.
+///
+/// Runtime observation events pass through unchanged and remain fold no-ops;
+/// this function never recreates their original runtime side effects.
+pub(super) fn project_agent_replay_event(event: Event, is_ui: bool) -> Event {
+    match event {
+        Event::ProviderToolResult(mut result) => {
+            result.provider_content.clear();
+            if is_ui {
+                Event::ToolResult(result)
+            } else {
+                Event::ProviderToolResult(result)
+            }
+        }
+        Event::AgentCompacted(mut compacted) => {
+            tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
+            Event::AgentCompacted(compacted)
+        }
+        Event::ProviderResponseFinished(mut finished) => {
+            tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
+            Event::ProviderResponseFinished(finished)
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,27 +860,5 @@ mod tests {
             });
 
         assert!(should_replay_agent_event_to_late_subscriber(&event));
-    }
-}
-
-pub(super) fn project_agent_replay_event(event: Event, is_ui: bool) -> Event {
-    match event {
-        Event::ProviderToolResult(mut result) => {
-            result.provider_content.clear();
-            if is_ui {
-                Event::ToolResult(result)
-            } else {
-                Event::ProviderToolResult(result)
-            }
-        }
-        Event::AgentCompacted(mut compacted) => {
-            tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
-            Event::AgentCompacted(compacted)
-        }
-        Event::ProviderResponseFinished(mut finished) => {
-            tau_proto::clear_context_items_provider_image_bytes(&mut finished.output_items);
-            Event::ProviderResponseFinished(finished)
-        }
-        other => other,
     }
 }

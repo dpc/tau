@@ -54,6 +54,7 @@ fn activity_counts_serialize_estimated_cost_as_rounded_dollars() {
 
 fn record(seq: u64, event: Event) -> PersistedAgentEvent {
     PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
         seq: PersistedAgentEventSeq::new(seq),
         source: None,
         event,

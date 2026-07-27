@@ -834,6 +834,7 @@ fn agent_checkpoint_rejects_creationless_identity() {
         (
             "creationless",
             vec![PersistedAgentEvent {
+                observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
                 seq: PersistedAgentEventSeq::new(0),
                 source: None,
                 event: agent_prompt("agent-1", "orphan"),
@@ -1090,6 +1091,7 @@ fn agent_store_rejects_duplicate_background_completion_on_replay() {
         append_raw_cbor(
             &events_path,
             &PersistedAgentEvent {
+                observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
                 seq: PersistedAgentEventSeq::new(seq as u64),
                 source: None,
                 event,
@@ -1137,6 +1139,7 @@ fn agent_store_replays_background_completion_for_explicit_parent_branch() {
         append_raw_cbor(
             &events_path,
             &PersistedAgentEvent {
+                observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
                 seq: PersistedAgentEventSeq::new(seq),
                 source: None,
                 event,
@@ -1216,6 +1219,7 @@ fn agent_store_rejects_non_sequential_persisted_sequence_on_load() {
     append_raw_cbor(
         &events_path,
         &PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: PersistedAgentEventSeq::new(1),
             source: None,
             event: agent_prompt("agent-1", "hello"),
@@ -1253,6 +1257,7 @@ fn agent_store_validates_persisted_parent_references_on_load() {
     append_raw_cbor(
         &events_path,
         &PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: PersistedAgentEventSeq::new(0),
             source: None,
             event: agent_prompt("agent-1", "hello"),
@@ -1554,6 +1559,7 @@ fn agent_store_replay_rejects_noncanonical_raw_message_parent() {
     append_raw_cbor(
         &agents_dir.join("agent-1").join("events.cbor"),
         &PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: PersistedAgentEventSeq::new(0),
             source: None,
             event: delivered_message_fact("agent-1", "m1"),
@@ -2413,6 +2419,7 @@ fn agent_store_rejects_invalid_agent_directory_names_on_open() {
     append_raw_cbor(
         &events_path,
         &PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: PersistedAgentEventSeq::new(0),
             source: None,
             event: agent_prompt("agent-1", "hello"),

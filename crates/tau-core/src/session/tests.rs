@@ -9,6 +9,7 @@ fn apply_persisted_test_record(
     let seq = tree.next_event_seq;
     let node = tree
         .apply_persisted_record(&PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq,
             source: None,
             event,
@@ -17,6 +18,75 @@ fn apply_persisted_test_record(
         })
         .expect("test record is contiguous and valid");
     (seq, node)
+}
+
+/// Observation-only events must survive validation without mutating replayed
+/// transcript or runtime state.
+#[test]
+fn content_free_tool_observations_are_valid_replay_no_ops() {
+    use tau_proto::{
+        ActivationKind, AgentActivationQueued, AgentToolBackgroundedObserved,
+        AgentToolCancellationRequested, AgentToolDispatchObserved, AgentToolTerminalClassified,
+        AgentToolWaitObserved, AgentToolWaitRegistered, AgentToolWaitSettled, ObservationId,
+        ToolCallRef, ToolTerminalCause, ToolWaitMode, ToolWaitOutcome, WaitRejectionReason,
+    };
+
+    let agent_id = tau_proto::AgentId::parse("agent_0").expect("agent id");
+    let mut tree = AgentTree::from_events(agent_id, &[]);
+    let id = |byte| ObservationId::from_bytes([byte; 16]);
+    let call = ToolCallRef {
+        declaration: id(1),
+        item_index: 2,
+    };
+    let events = [
+        Event::AgentToolDispatchObserved(AgentToolDispatchObserved { call }),
+        Event::AgentToolBackgroundedObserved(AgentToolBackgroundedObserved { call }),
+        Event::AgentToolWaitObserved(AgentToolWaitObserved {
+            wait_call: call,
+            mode: ToolWaitMode::NextBackground,
+        }),
+        Event::AgentToolWaitRegistered(AgentToolWaitRegistered {
+            wait_observation: id(3),
+            wait_call: call,
+            mode: ToolWaitMode::NextBackground,
+        }),
+        Event::AgentActivationQueued(AgentActivationQueued {
+            kind: ActivationKind::AgentMessage,
+            source_observation: Some(id(3)),
+            source_call: None,
+        }),
+        Event::AgentToolWaitSettled(AgentToolWaitSettled {
+            wait_observation: id(3),
+            wait_call: call,
+            registration: Some(id(4)),
+            wait_terminal: id(5),
+            outcome: ToolWaitOutcome::Rejected {
+                reason: WaitRejectionReason::NoBackgroundCandidate,
+            },
+        }),
+        Event::AgentToolCancellationRequested(AgentToolCancellationRequested {
+            cancel_call: call,
+            target_call: ToolCallRef {
+                declaration: id(6),
+                item_index: 7,
+            },
+        }),
+        Event::AgentToolTerminalClassified(AgentToolTerminalClassified {
+            call,
+            terminal: id(8),
+            cause: ToolTerminalCause::Completed,
+        }),
+    ];
+
+    for event in events {
+        tree.validate_event(&event).expect("observation is valid");
+        let prior_head = tree.head();
+        assert_eq!(
+            apply_persisted_test_record(&mut tree, AgentEventParent::InheritHead, event).1,
+            None
+        );
+        assert_eq!(tree.head(), prior_head);
+    }
 }
 
 /// A crash-cut unmatched start remains durable, while a different harness
@@ -1947,6 +2017,7 @@ fn prompt_started_requires_unique_matching_owner() {
     assert!(tree.prompt_started_can_materialize(&started));
     let source_error = tree
         .apply_persisted_record(&PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: tree.next_event_seq(),
             source: Some("external-author".into()),
             event: Event::AgentPromptStarted(started.clone()),
@@ -1994,6 +2065,7 @@ fn persisted_full_prompt_record_is_explicitly_unsupported() {
 
     let error = tree
         .apply_persisted_record(&PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: PersistedAgentEventSeq::new(0),
             source: None,
             event: Event::AgentPromptCreated(prompt),

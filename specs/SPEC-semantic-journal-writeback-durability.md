@@ -40,3 +40,9 @@ automatically resends uncertain external effects.
 Debug `events.jsonl` remains a separate non-authoritative, bounded,
 nonblocking, droppable diagnostic stream with no sync or shutdown-drain
 guarantee.
+
+The latency and crash-tail choice is governed by
+[`GATE-asynchronous-journal-durability`](GATE-asynchronous-journal-durability.md).
+The content-free tool-correlation records that use this writeback contract are
+specified by
+[`SPEC-durable-tool-observation-correlation`](SPEC-durable-tool-observation-correlation.md).

@@ -225,6 +225,10 @@ pub(crate) struct PendingMessageWake {
     pub(crate) source: PendingMessageWakeSource,
     /// Transcript node once tool-round adjacency permits materialization.
     pub(crate) node_id: Option<NodeId>,
+    /// Exact activation observation allocated when this wake entered the queue.
+    pub(crate) activation_observation: Option<tau_proto::ObservationId>,
+    /// Canonical durable message occurrence that triggered this wake.
+    pub(crate) source_observation: Option<tau_proto::ObservationId>,
 }
 
 /// Per-agent outer-turn state from activating input through terminal response.
@@ -418,6 +422,8 @@ pub(crate) enum PendingPromptSource {
     LoopGuard,
     /// Advisory prompt created by a named context-size alert.
     ContextSizeAlert,
+    /// Internal prompt emitted by a configured timer extension.
+    Timer,
     /// An activating notice for an unsuppressed background completion.
     ActivatingBackgroundCompletion,
     /// A passive background-completion notice that should be folded into the
@@ -445,6 +451,9 @@ pub(crate) struct PendingPrompt {
     /// Resolve a non-literal user skill command against the target agent's
     /// frozen discovery snapshot immediately before durable submission.
     pub(crate) expand_user_skill_on_dispatch: bool,
+    /// Exact activation observation allocated when this prompt entered the
+    /// queue.
+    pub(crate) activation_observation: Option<tau_proto::ObservationId>,
 }
 
 impl From<String> for PendingPrompt {
@@ -475,6 +484,7 @@ impl PendingPrompt {
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
+            activation_observation: None,
         }
     }
 
@@ -502,6 +512,7 @@ impl PendingPrompt {
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
+            activation_observation: None,
         }
     }
 
@@ -521,6 +532,7 @@ impl PendingPrompt {
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
+            activation_observation: None,
         }
     }
 
@@ -534,6 +546,7 @@ impl PendingPrompt {
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
+            activation_observation: None,
         }
     }
 
@@ -553,6 +566,7 @@ impl PendingPrompt {
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
+            activation_observation: None,
         }
     }
 
@@ -615,6 +629,29 @@ impl PendingPrompt {
             PendingPromptSource::PassiveBackgroundCompletion
                 | PendingPromptSource::PassiveRestoreNotice
         )
+    }
+
+    /// Maps this accepted queue item to its content-free activation class.
+    #[must_use]
+    pub(crate) fn activation_kind(&self) -> tau_proto::ActivationKind {
+        match self.source {
+            PendingPromptSource::LoopGuard => tau_proto::ActivationKind::LoopGuard,
+            PendingPromptSource::Timer => tau_proto::ActivationKind::Timer,
+            PendingPromptSource::ActivatingBackgroundCompletion => {
+                tau_proto::ActivationKind::BackgroundCompletion
+            }
+            PendingPromptSource::WatchNotifiedUser => tau_proto::ActivationKind::VisibleUser,
+            PendingPromptSource::General
+                if self.submission_source == tau_proto::PromptSubmissionSource::HumanUi =>
+            {
+                tau_proto::ActivationKind::VisibleUser
+            }
+            PendingPromptSource::General | PendingPromptSource::ContextSizeAlert => {
+                tau_proto::ActivationKind::InternalPrompt
+            }
+            PendingPromptSource::PassiveBackgroundCompletion
+            | PendingPromptSource::PassiveRestoreNotice => tau_proto::ActivationKind::Other,
+        }
     }
 }
 

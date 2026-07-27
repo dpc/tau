@@ -1454,6 +1454,7 @@ fn rewrite_finished_response_tool_call_items_preserves_provider_replay_sidecars(
     };
     let normalized_calls = vec![NormalizedFinishedToolCall {
         call: AgentToolCall {
+            call_ref: None,
             id: "call-normalized".into(),
             name: ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,

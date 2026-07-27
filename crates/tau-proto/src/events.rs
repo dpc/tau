@@ -23,10 +23,10 @@ use crate::{
     ExtensionInstanceId, ExtensionName, ExtensionSessionDiscoverySnapshotDeclared,
     HarnessAgentContextInitialized, HarnessProviderQuotaChanged, HarnessSessionSkillsAvailable,
     InternalPromptKind, MessageDeleted, MessageDelivered, MessageEdited, MessagePhase,
-    MessageReactionAdded, MessageReactionRemoved, MessageSent, ModelId, ModelTag, PromptContext,
-    PromptFragment, PromptSubmissionSource, ProviderQuotaClear, ProviderQuotaPatch,
+    MessageReactionAdded, MessageReactionRemoved, MessageSent, ModelId, ModelTag, ObservationId,
+    PromptContext, PromptFragment, PromptSubmissionSource, ProviderQuotaClear, ProviderQuotaPatch,
     ProviderQuotaReplace, ProviderTokenUsage, ReasoningTextKind, SessionId, ToolCallId,
-    ToolDefinition, ToolGroupName, ToolName, ToolTag,
+    ToolCallRef, ToolDefinition, ToolGroupName, ToolName, ToolTag,
 };
 
 fn default_true() -> bool {
@@ -1974,16 +1974,23 @@ pub struct ExtPromptFragmentPublish {
     pub fragment: PromptFragment,
 }
 
+/// Configured-extension claim for an internal prompt's activation source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalPromptActivationKind {
+    /// Ordinary extension-authored internal prompt.
+    InternalPrompt,
+    /// Wakeup produced by an elapsed timer.
+    Timer,
+}
+
 /// Request from an extension to submit a hidden internal prompt to a loaded
 /// agent.
 ///
 /// Requests default to transient delivery and never enter semantic history. The
 /// harness commits an admitted request before validating its target or
-/// submitting the prompt.
-///
-/// The harness owns validation and transcript publication for this request;
-/// extensions must not publish `agent.prompt_submitted` directly. These prompts
-/// are hidden from ordinary user-facing UI and latest-user-prompt metadata.
+/// submitting the prompt. It owns transcript publication; extensions must not
+/// publish `agent.prompt_submitted` directly.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtInternalPromptSubmitRequest {
     /// Loaded agent that should receive the prompt.
@@ -1993,6 +2000,12 @@ pub struct ExtInternalPromptSubmitRequest {
     /// Optional submitter correlation id copied to the created prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_id: Option<String>,
+    /// Typed activation provenance claimed by the configured extension.
+    ///
+    /// Absence has the same meaning as
+    /// [`InternalPromptActivationKind::InternalPrompt`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_kind: Option<InternalPromptActivationKind>,
 }
 
 /// Recipient of a global agent-to-agent or agent-to-user message.
@@ -4160,6 +4173,237 @@ impl PromptOperation {
     }
 }
 
+/// How one provider-declared wait call blocks.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolWaitMode {
+    /// Wait for one exact declared call.
+    Exact {
+        /// Exact target call.
+        target: ToolCallRef,
+    },
+    /// Exact target syntax was valid but no declared target call resolved.
+    ExactUnresolved,
+    /// Wait for the next retained background completion.
+    NextBackground,
+    /// Wait for activating input up to the effective runtime timeout.
+    ActivatingInput {
+        /// Clamped timeout used by the runtime.
+        effective_timeout_minutes: u16,
+    },
+    /// Wait arguments were malformed and could not produce a runtime mode.
+    InvalidArguments,
+}
+
+/// Content-free observation that the harness dispatched a declared call.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolDispatchObserved {
+    /// Dispatched call.
+    pub call: ToolCallRef,
+}
+
+/// Content-free observation that the harness decided a declared call continues
+/// in the background.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolBackgroundedObserved {
+    /// Call moved to background execution.
+    pub call: ToolCallRef,
+}
+
+/// Content-free observation that the runtime recognized a successfully parsed
+/// wait invocation before resolving it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolWaitObserved {
+    /// Declared wait call.
+    pub wait_call: ToolCallRef,
+    /// Parsed wait mode.
+    pub mode: ToolWaitMode,
+}
+
+/// Content-free observation that the runtime installed a waiter.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolWaitRegistered {
+    /// Observation of the parsed wait invocation.
+    pub wait_observation: ObservationId,
+    /// Declared wait call.
+    pub wait_call: ToolCallRef,
+    /// Installed wait mode.
+    pub mode: ToolWaitMode,
+}
+
+/// Classification of one queued activating input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationKind {
+    /// Visible user input.
+    VisibleUser,
+    /// Inter-agent message.
+    AgentMessage,
+    /// Canonical external message.
+    ExternalMessage,
+    /// Harness-internal prompt.
+    InternalPrompt,
+    /// Timer wakeup.
+    Timer,
+    /// Watched-agent notification.
+    WatchNotification,
+    /// Loop guard wakeup.
+    LoopGuard,
+    /// Background completion notice.
+    BackgroundCompletion,
+    /// Other activating input.
+    Other,
+}
+
+/// Content-free observation that activating input entered an agent queue.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentActivationQueued {
+    /// Activating input class.
+    pub kind: ActivationKind,
+    /// Durable source observation, when one already exists.
+    pub source_observation: Option<ObservationId>,
+    /// Source call, when the activation came from tool work.
+    pub source_call: Option<ToolCallRef>,
+}
+
+/// Phase of a source completion delivered by a wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSourcePhase {
+    /// Source completed before background transition.
+    Foreground,
+    /// Source completed after background transition.
+    Background,
+}
+
+/// Envelope applied by a wait around source-owned output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputEnvelope {
+    /// Wait delivered source output unchanged.
+    Identity,
+    /// Wait added the original-tool-call-id header.
+    OriginalToolCallIdHeader,
+}
+
+/// Structured reason that a wait invocation was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitRejectionReason {
+    /// Arguments were malformed.
+    InvalidArguments,
+    /// Exact target was unknown.
+    UnknownTarget,
+    /// An exact wait was already active.
+    DuplicateExactWait,
+    /// A next-background wait was already active.
+    DuplicateAnyWait,
+    /// An activating-input wait was already active.
+    DuplicateInputWait,
+    /// Target had already returned in the foreground.
+    TargetReturnedForegroundBeforeWait,
+    /// Retained completion was already consumed.
+    ResultAlreadyConsumed,
+    /// No background candidate exists.
+    NoBackgroundCandidate,
+}
+
+/// Explicit runtime outcome of one wait invocation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ToolWaitOutcome {
+    /// A source completion was delivered.
+    CompletionDelivered {
+        /// Source call.
+        source_call: ToolCallRef,
+        /// Canonical source terminal observation.
+        source_terminal: ObservationId,
+        /// Source terminal phase.
+        source_phase: ToolSourcePhase,
+        /// Wait envelope applied around source-owned output.
+        envelope: ToolOutputEnvelope,
+    },
+    /// Unrelated activating input interrupted the wait.
+    InterruptedByActivation {
+        /// Selected activation observation.
+        activation: ObservationId,
+    },
+    /// Activating input satisfied an input wait.
+    InputAvailable {
+        /// Selected activation observation.
+        activation: ObservationId,
+    },
+    /// Runtime deadline elapsed.
+    TimedOut,
+    /// Runtime rejected the invocation.
+    Rejected {
+        /// Structured rejection reason.
+        reason: WaitRejectionReason,
+    },
+    /// Wait call was cancelled.
+    Cancelled,
+    /// Agent lifecycle ended before settlement.
+    LifecycleAborted,
+}
+
+/// Content-free observation linking a wait terminal to runtime settlement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolWaitSettled {
+    /// Observation of the parsed wait invocation.
+    pub wait_observation: ObservationId,
+    /// Declared wait call.
+    pub wait_call: ToolCallRef,
+    /// Registration observation, absent for immediate settlement.
+    pub registration: Option<ObservationId>,
+    /// Canonical wait terminal observation.
+    pub wait_terminal: ObservationId,
+    /// Explicit settlement outcome.
+    pub outcome: ToolWaitOutcome,
+}
+
+/// Content-free observation that an accepted cancel call targeted another call.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolCancellationRequested {
+    /// Accepted cancel call.
+    pub cancel_call: ToolCallRef,
+    /// Target call.
+    pub target_call: ToolCallRef,
+}
+
+/// Explicit cause assigned to a canonical terminal.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ToolTerminalCause {
+    /// Normal completion.
+    Completed,
+    /// Tool-reported error.
+    ToolError,
+    /// Accepted cancellation caused the terminal.
+    Cancellation {
+        /// Cancellation-request observation.
+        request: ObservationId,
+    },
+    /// Provider disconnected.
+    ProviderDisconnected,
+    /// Agent lifecycle teardown.
+    LifecycleTeardown,
+    /// Cold-restart repair.
+    RestartRepair,
+    /// Cause is unavailable.
+    Unknown,
+}
+
+/// Content-free classification of one canonical call terminal.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolTerminalClassified {
+    /// Terminal call.
+    pub call: ToolCallRef,
+    /// Canonical terminal observation.
+    pub terminal: ObservationId,
+    /// Explicit terminal cause.
+    pub cause: ToolTerminalCause,
+}
+
 /// Durable, content-free fact that one provider prompt was materialized.
 ///
 /// This mirrors the routing and provenance metadata from
@@ -5051,6 +5295,22 @@ pub enum Event {
     AgentStandaloneCompactionFailed(AgentStandaloneCompactionFailed),
     #[serde(rename = "agent.inference_dispatch_started")]
     AgentInferenceDispatchStarted(AgentInferenceDispatchStarted),
+    #[serde(rename = "agent.tool_dispatch_observed")]
+    AgentToolDispatchObserved(AgentToolDispatchObserved),
+    #[serde(rename = "agent.tool_backgrounded_observed")]
+    AgentToolBackgroundedObserved(AgentToolBackgroundedObserved),
+    #[serde(rename = "agent.tool_wait_observed")]
+    AgentToolWaitObserved(AgentToolWaitObserved),
+    #[serde(rename = "agent.tool_wait_registered")]
+    AgentToolWaitRegistered(AgentToolWaitRegistered),
+    #[serde(rename = "agent.activation_queued")]
+    AgentActivationQueued(AgentActivationQueued),
+    #[serde(rename = "agent.tool_wait_settled")]
+    AgentToolWaitSettled(AgentToolWaitSettled),
+    #[serde(rename = "agent.tool_cancellation_requested")]
+    AgentToolCancellationRequested(AgentToolCancellationRequested),
+    #[serde(rename = "agent.tool_terminal_classified")]
+    AgentToolTerminalClassified(AgentToolTerminalClassified),
     #[serde(rename = "agent.prompt_created")]
     AgentPromptCreated(AgentPromptCreated),
     #[serde(rename = "agent.prompt_started")]
@@ -5448,6 +5708,14 @@ impl Event {
                 EventName::AGENT_STANDALONE_COMPACTION_FAILED
             }
             Self::AgentInferenceDispatchStarted(_) => EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+            Self::AgentToolDispatchObserved(_) => EventName::AGENT_TOOL_DISPATCH_OBSERVED,
+            Self::AgentToolBackgroundedObserved(_) => EventName::AGENT_TOOL_BACKGROUNDED_OBSERVED,
+            Self::AgentToolWaitObserved(_) => EventName::AGENT_TOOL_WAIT_OBSERVED,
+            Self::AgentToolWaitRegistered(_) => EventName::AGENT_TOOL_WAIT_REGISTERED,
+            Self::AgentActivationQueued(_) => EventName::AGENT_ACTIVATION_QUEUED,
+            Self::AgentToolWaitSettled(_) => EventName::AGENT_TOOL_WAIT_SETTLED,
+            Self::AgentToolCancellationRequested(_) => EventName::AGENT_TOOL_CANCELLATION_REQUESTED,
+            Self::AgentToolTerminalClassified(_) => EventName::AGENT_TOOL_TERMINAL_CLASSIFIED,
             Self::AgentPromptCreated(_) => EventName::AGENT_PROMPT_CREATED,
             Self::AgentPromptStarted(_) => EventName::AGENT_PROMPT_STARTED,
             Self::AgentOuterTurnStarted(_) => EventName::AGENT_OUTER_TURN_STARTED,

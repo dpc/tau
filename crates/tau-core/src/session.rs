@@ -253,6 +253,10 @@ pub struct BackgroundToolCallState {
     pub placeholder: BackgroundToolPlaceholder,
     /// The later real background completion, when one is present.
     pub completion: Option<BackgroundToolCompletion>,
+    /// Exact provider declaration occurrence, when retained in the journal.
+    pub call_ref: Option<tau_proto::ToolCallRef>,
+    /// Canonical persisted completion occurrence, when complete.
+    pub terminal_observation: Option<tau_proto::ObservationId>,
 }
 
 // `NodeId` lives on the wire (tree-folding events carry their own
@@ -878,8 +882,29 @@ impl AgentTree {
         let mut completion_order_seen = HashSet::new();
         let mut states = HashMap::new();
         let mut completions = HashMap::new();
+        let mut call_refs = HashMap::new();
+        let mut terminal_observations = HashMap::new();
         for entry in events {
             match &entry.event {
+                Event::ProviderResponseFinished(response) => {
+                    for (item_index, item) in response.output_items.iter().enumerate() {
+                        let ContextItem::ToolCall(call) = item else {
+                            continue;
+                        };
+                        if !branch_call_ids.contains(&call.call_id) {
+                            continue;
+                        }
+                        if let Ok(item_index) = u32::try_from(item_index) {
+                            call_refs.insert(
+                                call.call_id.clone(),
+                                tau_proto::ToolCallRef {
+                                    declaration: entry.observation_id,
+                                    item_index,
+                                },
+                            );
+                        }
+                    }
+                }
                 Event::ProviderToolResult(result) => {
                     if result.kind != ToolResultKind::BackgroundPlaceholder
                         || !branch_call_ids.contains(&result.call_id)
@@ -900,6 +925,10 @@ impl AgentTree {
                                 originator: result.originator.clone(),
                             },
                             completion: completions.get(&result.call_id).cloned(),
+                            call_ref: call_refs.get(&result.call_id).copied(),
+                            terminal_observation: terminal_observations
+                                .get(&result.call_id)
+                                .copied(),
                         },
                     );
                 }
@@ -908,12 +937,14 @@ impl AgentTree {
                         continue;
                     }
                     let completion = BackgroundToolCompletion::Result(result.clone());
+                    terminal_observations.insert(result.call_id.clone(), entry.observation_id);
                     completions.insert(result.call_id.clone(), completion.clone());
                     if completion_order_seen.insert(result.call_id.clone()) {
                         completion_order.push(result.call_id.clone());
                     }
                     if let Some(state) = states.get_mut(&result.call_id) {
                         state.completion = Some(completion);
+                        state.terminal_observation = Some(entry.observation_id);
                     }
                 }
                 Event::ToolBackgroundError(error) => {
@@ -921,12 +952,14 @@ impl AgentTree {
                         continue;
                     }
                     let completion = BackgroundToolCompletion::Error(error.clone());
+                    terminal_observations.insert(error.call_id.clone(), entry.observation_id);
                     completions.insert(error.call_id.clone(), completion.clone());
                     if completion_order_seen.insert(error.call_id.clone()) {
                         completion_order.push(error.call_id.clone());
                     }
                     if let Some(state) = states.get_mut(&error.call_id) {
                         state.completion = Some(completion);
+                        state.terminal_observation = Some(entry.observation_id);
                     }
                 }
                 _ => {}
@@ -1766,6 +1799,9 @@ impl AgentTree {
         if let Some(result) = self.validate_tool_completion_event(head, event) {
             return result;
         }
+        if Self::is_tool_observation_event(event) {
+            return Ok(());
+        }
         if Self::is_agent_id_mismatch_event(event) {
             return Err(AgentEventValidationError::new(
                 "agent event agent_id did not match target agent",
@@ -2541,6 +2577,24 @@ impl AgentTree {
         }
     }
 
+    /// Returns whether `event` is a content-free tool-correlation observation.
+    ///
+    /// These records deliberately do not affect transcript fold state. The
+    /// containing per-agent journal supplies their agent identity.
+    fn is_tool_observation_event(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::AgentToolDispatchObserved(_)
+                | Event::AgentToolBackgroundedObserved(_)
+                | Event::AgentToolWaitObserved(_)
+                | Event::AgentToolWaitRegistered(_)
+                | Event::AgentActivationQueued(_)
+                | Event::AgentToolWaitSettled(_)
+                | Event::AgentToolCancellationRequested(_)
+                | Event::AgentToolTerminalClassified(_)
+        )
+    }
+
     fn is_agent_id_mismatch_event(event: &Event) -> bool {
         // Keep this list aligned with the historical mismatch diagnostics.
         // Agent metadata events are intentionally excluded: metadata for a
@@ -2976,6 +3030,10 @@ fn provider_image_is_animated(bytes: &[u8], media_type: tau_proto::ImageMediaTyp
 /// `UiNavigateTree` head-bouncing dance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PersistedAgentEvent {
+    /// Opaque random identity used only for explicit observation references.
+    ///
+    /// This identity carries no ordering or causality semantics.
+    pub observation_id: tau_proto::ObservationId,
     /// Sequence within this agent's durable `events.cbor` stream.
     ///
     /// This is persisted to catch reordered, duplicated, or spliced logs during

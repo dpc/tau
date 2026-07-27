@@ -10,6 +10,201 @@ use crate::harness::{
     restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
 };
 
+/// Completed calls must release every process-local correlation before a
+/// provider reuses the same display call ID.
+#[test]
+fn completed_call_clears_all_runtime_observation_correlation_before_id_reuse() {
+    let td = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(td.path()).expect("harness");
+    let call_id = ToolCallId::from("reused-call");
+    let observation = tau_proto::ObservationId::from_bytes([7; 16]);
+    harness.pending_terminal_observations.insert(
+        call_id.clone(),
+        super::super::PendingTerminalObservation {
+            observation_id: observation,
+            cause: tau_proto::ToolTerminalCause::Completed,
+        },
+    );
+    harness
+        .pending_cancellation_observations
+        .insert(call_id.clone(), observation);
+    harness.pending_wait_settlements.insert(
+        call_id.clone(),
+        crate::harness::subagents_tool::PendingWaitSettlement {
+            wait_observation: observation,
+            wait_call: tau_proto::ToolCallRef {
+                declaration: observation,
+                item_index: 0,
+            },
+            registration: None,
+            outcome: tau_proto::ToolWaitOutcome::TimedOut,
+        },
+    );
+
+    harness.clear_tool_call_tracking(call_id.as_str());
+
+    assert!(!harness.pending_terminal_observations.contains_key(&call_id));
+    assert!(
+        !harness
+            .pending_cancellation_observations
+            .contains_key(&call_id)
+    );
+    assert!(!harness.pending_wait_settlements.contains_key(&call_id));
+}
+
+/// Timer-origin internal prompts must retain their approved typed activation
+/// classification without text or extension-name inference.
+#[test]
+fn timer_prompt_source_maps_to_timer_activation_observation() {
+    let mut prompt = crate::agent::PendingPrompt::internal("wake".into());
+    prompt.source = crate::agent::PendingPromptSource::Timer;
+    assert_eq!(prompt.activation_kind(), tau_proto::ActivationKind::Timer);
+}
+
+/// Inference-driving prompts receive one durable activation identity before
+/// submission; passive notices remain deliberately non-activating.
+#[test]
+fn prompt_activation_observation_is_allocated_once_and_skips_passive_notices() {
+    let td = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(td.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut harness);
+    let agent_id = harness.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent id");
+
+    let mut activating = PendingPrompt::internal("activate".into());
+    harness.ensure_prompt_activation_observed(&cid, &mut activating);
+    let activation = activating
+        .activation_observation
+        .expect("activation identity");
+    harness.ensure_prompt_activation_observed(&cid, &mut activating);
+
+    let records = harness
+        .agent_store
+        .agent_events(&agent_id)
+        .expect("agent records");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.observation_id == activation
+                    && matches!(
+                        record.event,
+                        Event::AgentActivationQueued(tau_proto::AgentActivationQueued {
+                            kind: tau_proto::ActivationKind::InternalPrompt,
+                            ..
+                        })
+                    )
+            })
+            .count(),
+        1
+    );
+
+    let mut passive = PendingPrompt::passive_background_completion("passive".into());
+    harness.ensure_prompt_activation_observed(&cid, &mut passive);
+    assert!(passive.activation_observation.is_none());
+}
+
+/// Publish the canonical declaration required before a background terminal can
+/// commit and trigger its dependent runtime effects.
+fn publish_test_tool_declaration(harness: &mut Harness, cid: &AgentId, call_id: &str) {
+    let agent_id = harness.agents[cid]
+        .agent_id
+        .clone()
+        .expect("durable agent id");
+    harness.publish_for_agent(
+        cid,
+        Event::ProviderResponseFinished(ProviderResponseFinished {
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            agent_prompt_id: format!("prompt-{call_id}").into(),
+            agent_id: crate::parse_agent_id(&agent_id),
+            output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: call_id.into(),
+                name: ToolName::new("read"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })],
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+    );
+}
+
+/// Every provider-qualified wait declaration records a typed pre-resolution
+/// observation, including malformed arguments and unresolved exact targets.
+#[test]
+fn wait_observation_classifies_invalid_and_unresolved_exact_arguments() {
+    let td = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(td.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut harness);
+    let agent_id = harness.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent id");
+
+    for (byte, call_id, arguments, expected_mode) in [
+        (
+            31,
+            "invalid-wait",
+            CborValue::Text("not a map".into()),
+            tau_proto::ToolWaitMode::InvalidArguments,
+        ),
+        (
+            32,
+            "unresolved-wait",
+            CborValue::Map(vec![(
+                CborValue::Text("tool_call_id".into()),
+                CborValue::Text("missing-target".into()),
+            )]),
+            tau_proto::ToolWaitMode::ExactUnresolved,
+        ),
+    ] {
+        let call_ref = tau_proto::ToolCallRef {
+            declaration: tau_proto::ObservationId::from_bytes([byte; 16]),
+            item_index: 0,
+        };
+        harness
+            .handle_wait_tool_call(
+                &cid,
+                &AgentToolCall {
+                    call_ref: Some(call_ref),
+                    id: call_id.into(),
+                    name: ToolName::new("wait"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments,
+                },
+                ToolName::new("wait"),
+            )
+            .expect("handle wait");
+        assert!(
+            harness
+                .agent_store
+                .agent_events(&agent_id)
+                .expect("agent records")
+                .iter()
+                .any(|record| matches!(
+                    &record.event,
+                    Event::AgentToolWaitObserved(observed)
+                        if observed.wait_call == call_ref && observed.mode == expected_mode
+                ))
+        );
+    }
+}
+
 fn responses_backend() -> tau_proto::ProviderBackend {
     tau_proto::ProviderBackend {
         kind: tau_proto::ProviderBackendKind::Responses,
@@ -2241,6 +2436,32 @@ fn restored_background_notice(call_id: &str) -> String {
     )
 }
 
+fn persisted_background_terminal(
+    harness: &Harness,
+    cid: &AgentId,
+    call_id: &str,
+) -> tau_proto::ObservationId {
+    let agent_id = harness.agents[cid]
+        .agent_id
+        .as_deref()
+        .expect("durable agent id");
+    harness
+        .agent_store
+        .agent_events(agent_id)
+        .expect("agent events")
+        .into_iter()
+        .find_map(|record| match record.event {
+            Event::ToolBackgroundResult(result) if result.call_id.as_str() == call_id => {
+                Some(record.observation_id)
+            }
+            Event::ToolBackgroundError(error) if error.call_id.as_str() == call_id => {
+                Some(record.observation_id)
+            }
+            _ => None,
+        })
+        .expect("persisted background terminal")
+}
+
 fn seed_background_placeholder(state_dir: &Path, call_id: &str, tool_name: &str) {
     seed_background_placeholder_for_agent(state_dir, "main", call_id, tool_name);
 }
@@ -2687,6 +2908,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     h.execute_agent_tool_call(
         &cid,
         &crate::harness::AgentToolCall {
+            call_ref: None,
             id: "bad-args-repeat".into(),
             name: ToolName::new("strict_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -3391,6 +3613,7 @@ fn loop_guard_repeated_tool_failure_signature_includes_arguments() {
 
     for (idx, path) in ["a.txt", "b.txt"].into_iter().enumerate() {
         let call = crate::harness::AgentToolCall {
+            call_ref: None,
             id: format!("call-{idx}").into(),
             name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
@@ -3426,6 +3649,7 @@ fn loop_guard_production_tool_failure_signature_includes_arguments() {
         h.execute_agent_tool_call(
             &cid,
             &crate::harness::AgentToolCall {
+                call_ref: None,
                 id: format!("distinct-{idx}").into(),
                 name: ToolName::new("missing_tool"),
                 tool_type: tau_proto::ToolType::Function,
@@ -3458,6 +3682,7 @@ fn loop_guard_production_tool_failure_signature_includes_arguments() {
         h.execute_agent_tool_call(
             &cid,
             &crate::harness::AgentToolCall {
+                call_ref: None,
                 id: format!("same-{idx}").into(),
                 name: ToolName::new("missing_tool"),
                 tool_type: tau_proto::ToolType::Function,
@@ -3487,6 +3712,7 @@ fn loop_guard_progress_reset_preserves_in_flight_argument_signatures() {
         h.remember_tool_call_loop_signature(
             &cid,
             &crate::harness::AgentToolCall {
+                call_ref: None,
                 id: format!("call-{idx}").into(),
                 name: ToolName::new("read"),
                 tool_type: tau_proto::ToolType::Function,
@@ -3843,6 +4069,7 @@ fn loop_guard_resets_on_successful_background_tool_result() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
+    publish_test_tool_declaration(&mut h, &cid, "bg-call");
     h.record_tool_failure_loop_signature(
         &cid,
         &loop_guard_tool_error("failed-call", "read", "missing file"),
@@ -3874,7 +4101,12 @@ fn loop_guard_resets_on_successful_background_tool_result() {
 
     let conv = h.agents.get(&cid).expect("agent");
     assert_eq!(conv.loop_guard.consecutive_tool_failures(), 0);
-    assert!(conv.pending_prompts.is_empty());
+    assert!(
+        conv.pending_prompts
+            .iter()
+            .any(PendingPrompt::is_activating_background_completion),
+        "committed background result should queue its completion prompt"
+    );
 }
 
 #[test]
@@ -4033,6 +4265,7 @@ fn current_role_disabled_tool_error_names_role_model_authority() {
     h.execute_agent_tool_call(
         &cid,
         &AgentToolCall {
+            call_ref: None,
             id: "disabled-current-role".into(),
             name: ToolName::new("disabled_tool"),
             tool_type: tau_proto::ToolType::Function,
@@ -4315,6 +4548,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     h.tool_turn.push(
         cid.clone(),
         AgentToolCall {
+            call_ref: None,
             id: "queued-after-disconnect".into(),
             name: ToolName::new("dead_slow"),
             tool_type: tau_proto::ToolType::Function,
@@ -4415,6 +4649,7 @@ fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
     h.tool_turn.push(
         cid,
         AgentToolCall {
+            call_ref: None,
             id: "queued-after-fault".into(),
             name: ToolName::new("live_after_fault"),
             tool_type: tau_proto::ToolType::Function,
@@ -4459,6 +4694,7 @@ pub(super) fn final_tool_result(call_id: &str, tool_name: &str, text: &str) -> T
 
 fn wait_no_args_call(call_id: &str) -> AgentToolCall {
     AgentToolCall {
+        call_ref: None,
         id: call_id.into(),
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
@@ -4468,6 +4704,7 @@ fn wait_no_args_call(call_id: &str) -> AgentToolCall {
 
 fn wait_input_call(call_id: &str) -> AgentToolCall {
     AgentToolCall {
+        call_ref: None,
         id: call_id.into(),
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
@@ -5896,7 +6133,7 @@ fn cancel_request_api_rejects_non_owner_conversation() {
 
     assert!(!h.is_running_cancellable_tool_call_for(&attacker, &target));
     assert_eq!(
-        h.publish_tool_cancel_request_for(&attacker, target.clone())
+        h.publish_tool_cancel_request_for(&attacker, None, target.clone())
             .expect_err("non-owner must not cancel the call"),
         "Unknown tool call id"
     );
@@ -5906,7 +6143,7 @@ fn cancel_request_api_rejects_non_owner_conversation() {
     )));
 
     assert!(h.is_running_cancellable_tool_call_for(&owner, &target));
-    h.publish_tool_cancel_request_for(&owner, target.clone())
+    h.publish_tool_cancel_request_for(&owner, None, target.clone())
         .expect("owner may cancel the call");
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -6054,6 +6291,7 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
     h.selected_model = Some("test/model".into());
 
     let cid = ensure_test_user_agent(&mut h);
+    publish_test_tool_declaration(&mut h, &cid, "live-cancel-bg-call");
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     let call_id: ToolCallId = "live-cancel-bg-call".into();
     h.pending_tools.insert(
@@ -6162,6 +6400,7 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
     h.selected_model = Some("test/model".into());
 
     let cancel_cid = ensure_test_user_agent(&mut h);
+    publish_test_tool_declaration(&mut h, &cancel_cid, "live-cancel-bg-with-other-agent");
     let cancel_agent_id = h.agents[&cancel_cid].agent_id.clone().expect("agent id");
     let other_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
@@ -6645,6 +6884,7 @@ fn cancel_clears_active_wait_state() {
     h.record_wait_tool_request(&target_call_id);
 
     let wait_call = AgentToolCall {
+        call_ref: None,
         id: wait_call_id.clone(),
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
@@ -6696,6 +6936,7 @@ fn cancel_clears_active_wait_state() {
     assert!(h.agents[&cid].pending_cancel.is_none());
 
     let second_wait_call = AgentToolCall {
+        call_ref: None,
         id: "wait-call-2".into(),
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
@@ -10019,6 +10260,19 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
     let mut h =
         quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
             .expect("resume");
+    let cid = ensure_test_user_agent(&mut h);
+    let source_call = h
+        .persisted_tool_call_ref(&cid, &ToolCallId::from("restored-any"))
+        .expect("restored declaration occurrence");
+    let source_terminal = persisted_background_terminal(&h, &cid, "restored-any");
+    assert_eq!(
+        h.wait_tool_call_ref(&ToolCallId::from("restored-any")),
+        Some(source_call)
+    );
+    assert_eq!(
+        h.wait_tool_terminal_observation(&ToolCallId::from("restored-any")),
+        Some(source_terminal)
+    );
     h.submit_user_prompt("s1".into(), "collect restored background".to_owned())
         .expect("submit first resumed prompt");
     let prompt = read_nth_prompt_created(&h, 0);
@@ -10059,6 +10313,75 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
                 && cbor_map_text(&result.result, "output") == Some("restored output")
     )));
 
+    h.shutdown().expect("shutdown");
+}
+
+/// Cold restore preserves exact source declaration and terminal identities.
+#[test]
+fn resumed_completed_background_result_preserves_exact_wait_correlation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    seed_background_placeholder(&sp, "restored-exact", "slow_bg");
+    seed_background_result(&sp, "restored-exact", "slow_bg", "restored output");
+
+    let mut h =
+        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let cid = ensure_test_user_agent(&mut h);
+    let source_call = h
+        .persisted_tool_call_ref(&cid, &ToolCallId::from("restored-exact"))
+        .expect("restored declaration occurrence");
+    let source_terminal = persisted_background_terminal(&h, &cid, "restored-exact");
+    assert_eq!(
+        h.wait_tool_call_ref(&ToolCallId::from("restored-exact")),
+        Some(source_call)
+    );
+    assert_eq!(
+        h.wait_tool_terminal_observation(&ToolCallId::from("restored-exact")),
+        Some(source_terminal)
+    );
+    h.submit_user_prompt("s1".into(), "collect exact restored background".to_owned())
+        .expect("submit resumed prompt");
+    let prompt = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: prompt.agent_prompt_id,
+        agent_id: prompt.agent_id,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "wait-restored-exact".into(),
+            name: ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("tool_call_id".into()),
+                CborValue::Text("restored-exact".into()),
+            )]),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("exact wait on restored completion");
+
+    assert_eq!(
+        h.wait_tool_call_ref(&ToolCallId::from("restored-exact")),
+        Some(source_call)
+    );
+    assert_eq!(
+        h.wait_tool_terminal_observation(&ToolCallId::from("restored-exact")),
+        Some(source_terminal)
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -15473,6 +15796,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
             .insert(call_id.into(), "sp-seeded-tools".into());
     }
     let compact_call = AgentToolCall {
+        call_ref: None,
         id: "call-compact".into(),
         name: ToolName::new("compact"),
         tool_type: tau_proto::ToolType::Function,
@@ -16290,6 +16614,7 @@ fn manual_self_compaction_pre_start_cancel_is_passive() {
             .insert(call_id.into(), "sp-seeded-tools".into());
     }
     let call = AgentToolCall {
+        call_ref: None,
         id: "call-cancel-compact".into(),
         name: ToolName::new("compact"),
         tool_type: tau_proto::ToolType::Function,
@@ -16364,6 +16689,7 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
     h.request_agent_tool_compaction(
         &cid,
         &AgentToolCall {
+            call_ref: None,
             id: "call-replay-compact".into(),
             name: ToolName::new("compact"),
             tool_type: tau_proto::ToolType::Function,
@@ -16904,8 +17230,8 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         .expect("first reopened records");
     assert_eq!(
         first_records.len(),
-        seeded_record_count + 5,
-        "recovery also records refreshed initialization and starts the resumed outer turn"
+        seeded_record_count + 6,
+        "recovery records refreshed initialization, activation observation, and resumed outer turn"
     );
     assert_eq!(
         first_records
@@ -17770,6 +18096,7 @@ fn register_manual_cross_compaction_call(
     h.prompt_tool_call_prompts
         .insert(call_id.into(), "sp-seeded-tools".into());
     AgentToolCall {
+        call_ref: None,
         id: call_id.into(),
         name: ToolName::new("agent_compact"),
         tool_type: tau_proto::ToolType::Function,
@@ -18178,6 +18505,7 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
     h.prompt_tool_call_prompts
         .insert("call-self-blocked".into(), "sp-seeded-tools".into());
     let call = AgentToolCall {
+        call_ref: None,
         id: "call-self-blocked".into(),
         name: ToolName::new("compact"),
         tool_type: tau_proto::ToolType::Function,
@@ -19202,6 +19530,7 @@ fn wait_returns_internal_background_error_after_extension_disconnect() {
     );
 
     let wait_call = AgentToolCall {
+        call_ref: None,
         id: "wait-bg-disconnect".into(),
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
@@ -19299,15 +19628,18 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
 
     h.background_completion_targets
         .insert(call_id.clone(), cid.clone());
-    h.record_wait_background_result(tau_proto::ToolBackgroundResult {
-        call_id: call_id.clone(),
-        tool_name: ToolName::new("slow_any_after"),
-        tool_type: tau_proto::ToolType::Function,
-        result: CborValue::Text("already done".to_owned()),
-        originator: tau_proto::PromptOriginator::User,
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: call_id.clone(),
+            tool_name: ToolName::new("slow_any_after"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("already done".to_owned()),
+            originator: tau_proto::PromptOriginator::User,
 
-        display: None,
-    });
+            display: None,
+        },
+        Some(tau_proto::ObservationId::random()),
+    );
     seed_tools_running(&mut h, &cid, Vec::new());
     h.queue_background_completion_prompt(&cid, &call_id);
     let completion_prompt = background_completion_prompt(&call_id);
@@ -19372,6 +19704,7 @@ fn agent_message_interrupts_recipient_active_wait() {
 
     let wait_call_id: ToolCallId = "wait-msg-interrupt".into();
     let wait_call = AgentToolCall {
+        call_ref: None,
         id: wait_call_id.clone(),
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
@@ -19669,7 +20002,7 @@ fn input_wait_wakes_once_when_activating_prompt_is_queued() {
         Event::AgentPromptSteered(prompt) if prompt.text == "timer fired"
     )));
 
-    h.activate_waits_for(&cid);
+    h.activate_waits_for(&cid, tau_proto::ObservationId::random());
     assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
     h.shutdown().expect("shutdown");
 }
@@ -19713,7 +20046,7 @@ fn input_wait_timeout_completes_once_inside_running_turn() {
                         && display.status_text == "timeout")
     )));
     h.process_runtime_deadlines_at(deadline);
-    h.activate_waits_for(&cid);
+    h.activate_waits_for(&cid, tau_proto::ObservationId::random());
     assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
     h.shutdown().expect("shutdown");
 }
@@ -19956,6 +20289,7 @@ fn runtime_deadline_scheduler_orders_input_and_background_deadlines() {
     let input_deadline = h.next_input_wait_deadline().expect("input deadline");
 
     let background_call = AgentToolCall {
+        call_ref: None,
         id: "background-deadline-first".into(),
         name: ToolName::new("slow"),
         tool_type: tau_proto::ToolType::Function,
@@ -19977,6 +20311,7 @@ fn runtime_deadline_scheduler_orders_input_and_background_deadlines() {
     assert!(h.tool_turn.is_backgrounded(&background_call.id));
 
     let later_background_call = AgentToolCall {
+        call_ref: None,
         id: "background-deadline-after-input".into(),
         name: ToolName::new("slow"),
         tool_type: tau_proto::ToolType::Function,
@@ -20081,7 +20416,7 @@ fn agent_unload_discards_registered_input_wait() {
             .iter()
             .all(|dispatch| dispatch.cid != cid)
     );
-    h.activate_waits_for(&cid);
+    h.activate_waits_for(&cid, tau_proto::ObservationId::random());
     assert_eq!(tool_result_count(&h, call.id.as_str()), 0);
     h.shutdown().expect("shutdown");
 }
@@ -20101,14 +20436,17 @@ fn background_completion_wakes_input_wait_without_consuming_result() {
     let background_id: ToolCallId = "background-for-input".into();
     h.background_completion_targets
         .insert(background_id.clone(), cid.clone());
-    h.record_wait_background_result(tau_proto::ToolBackgroundResult {
-        call_id: background_id.clone(),
-        tool_name: ToolName::new("slow"),
-        tool_type: tau_proto::ToolType::Function,
-        result: CborValue::Text("background payload".to_owned()),
-        display: None,
-        originator: tau_proto::PromptOriginator::User,
-    });
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: background_id.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("background payload".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::random()),
+    );
     h.queue_background_completion_prompt_without_advancing(&cid, &background_id);
     assert_eq!(tool_result_count(&h, input_call.id.as_str()), 1);
 
@@ -20147,30 +20485,37 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
             },
         );
         h.record_wait_tool_request(call_id);
-        h.record_wait_tool_result(ToolResult {
-            call_id: call_id.clone(),
-            tool_name: ToolName::new("slow"),
-            tool_type: tau_proto::ToolType::Function,
-            result: CborValue::Text("running".to_owned()),
-            provider_content: Vec::new(),
-            kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
-            display: None,
-            originator: tau_proto::PromptOriginator::User,
-        });
+        h.record_wait_tool_result(
+            ToolResult {
+                call_id: call_id.clone(),
+                tool_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Text("running".to_owned()),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            },
+            Some(tau_proto::ObservationId::random()),
+        );
     }
     h.background_completion_targets
         .insert(call_b.clone(), cid.clone());
-    h.record_wait_background_result(tau_proto::ToolBackgroundResult {
-        call_id: call_b.clone(),
-        tool_name: ToolName::new("slow"),
-        tool_type: tau_proto::ToolType::Function,
-        result: CborValue::Text("B done".to_owned()),
-        display: None,
-        originator: tau_proto::PromptOriginator::User,
-    });
+    h.record_wait_background_result(
+        tau_proto::ToolBackgroundResult {
+            call_id: call_b.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("B done".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+        Some(tau_proto::ObservationId::random()),
+    );
     h.queue_background_completion_prompt_without_advancing(&cid, &call_b);
 
     let exact = AgentToolCall {
+        call_ref: None,
         id: "wait-exact-a".into(),
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
@@ -20216,18 +20561,22 @@ fn distinct_queued_completion_preempts_wait_with_consumable_candidate() {
         for call_id in [&call_a, &call_b] {
             h.background_completion_targets
                 .insert(call_id.clone(), cid.clone());
-            h.record_wait_background_result(tau_proto::ToolBackgroundResult {
-                call_id: call_id.clone(),
-                tool_name: ToolName::new("slow"),
-                tool_type: tau_proto::ToolType::Function,
-                result: CborValue::Text(format!("{call_id} done")),
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            });
+            h.record_wait_background_result(
+                tau_proto::ToolBackgroundResult {
+                    call_id: call_id.clone(),
+                    tool_name: ToolName::new("slow"),
+                    tool_type: tau_proto::ToolType::Function,
+                    result: CborValue::Text(format!("{call_id} done")),
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                },
+                Some(tau_proto::ObservationId::random()),
+            );
             h.queue_background_completion_prompt_without_advancing(&cid, call_id);
         }
         let wait = if exact {
             AgentToolCall {
+                call_ref: None,
                 id: "wait-completed-exact-a".into(),
                 name: ToolName::new("wait"),
                 tool_type: tau_proto::ToolType::Function,
@@ -20249,6 +20598,7 @@ fn distinct_queued_completion_preempts_wait_with_consumable_candidate() {
                         if text.contains("interrupted because new input is queued"))
         )));
         let consume_a = AgentToolCall {
+            call_ref: None,
             id: format!("consume-a-{exact}").into(),
             name: ToolName::new("wait"),
             tool_type: tau_proto::ToolType::Function,
@@ -20309,6 +20659,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
 
     let wait_call_id: ToolCallId = "wait-cross-msg-interrupt".into();
     let wait_call = AgentToolCall {
+        call_ref: None,
         id: wait_call_id.clone(),
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
@@ -23528,6 +23879,7 @@ fn wait_resolves_on_synthetic_tool_error() {
     h.record_wait_tool_request(&target_call_id);
 
     let wait_call = AgentToolCall {
+        call_ref: None,
         id: "wait-call".into(),
         name: ToolName::new("wait"),
         tool_type: tau_proto::ToolType::Function,
@@ -25929,6 +26281,7 @@ fn rejected_pre_dispatch_tool_attempt_counts_once_in_agent_stats() {
     let cid = ensure_test_user_agent(&mut h);
     let public_id = durable_agent_id_for_conversation(&h, &cid);
     let call = AgentToolCall {
+        call_ref: None,
         id: "bad-call".into(),
         name: ToolName::new("missing_tool"),
         tool_type: tau_proto::ToolType::Function,
@@ -27009,6 +27362,7 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
 /// tests.
 fn message_tool_call(id: &str, recipient_id: &str, message: &str) -> AgentToolCall {
     AgentToolCall {
+        call_ref: None,
         id: id.into(),
         name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
         tool_type: tau_proto::ToolType::Function,
@@ -28147,6 +28501,32 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
         "peer endpoint must retain ordinary tools and loaded-agent lifecycle"
     );
     assert_eq!(durable_agent_message_received_events(&h).len(), 1);
+    let records = h
+        .agent_store
+        .agent_events(&recipient_id)
+        .expect("auto-started agent records");
+    let received_observation = records
+        .iter()
+        .find(|record| matches!(record.event, Event::AgentMessageReceived(_)))
+        .map(|record| record.observation_id)
+        .expect("durable receive observation");
+    let activations = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentActivationQueued(tau_proto::AgentActivationQueued {
+                    kind: tau_proto::ActivationKind::AgentMessage,
+                    source_observation: Some(source),
+                    source_call: None,
+                }) if *source == received_observation
+            )
+        })
+        .count();
+    assert_eq!(
+        activations, 1,
+        "precreation buffering retains one activation linked to its receive"
+    );
 }
 
 /// Multiple usable auto-start grants choose the first configured role without
@@ -28450,6 +28830,8 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
                     peer_admission_bytes: Some(1),
                 },
                 node_id: None,
+                activation_observation: None,
+                source_observation: None,
             });
     }
     let agents_before = h.agents.len();
@@ -28507,6 +28889,8 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
                 peer_admission_bytes: Some(1),
             },
             node_id: None,
+            activation_observation: None,
+            source_observation: None,
         }));
     let recipient = crate::parse_agent_id(&pending_id);
     assert_eq!(
@@ -28530,6 +28914,8 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
                 peer_admission_bytes: Some(64 * 1024),
             },
             node_id: None,
+            activation_observation: None,
+            source_observation: None,
         }));
     assert_eq!(
         h.admit_peer_input(&recipient, 1)
@@ -29099,6 +29485,7 @@ fn terminating_agent_route_rejects_direct_work() {
             message: "must be rejected".to_owned(),
         },
         Some(&tau_core::AgentAppendOutcome {
+            observation_id: tau_proto::ObservationId::from_bytes([1; 16]),
             seq: tau_core::PersistedAgentEventSeq::new(1),
             folded_node_id: None,
         }),
@@ -30355,6 +30742,7 @@ fn extension_internal_prompt_submit_request_routes_as_internal_prompt() {
                 agent_id: agent_id.clone(),
                 text: "timer fired".to_owned(),
                 ctx_id: Some("timer:wake:1".to_owned()),
+                activation_kind: None,
             },
         )),
     )
@@ -30393,6 +30781,7 @@ fn extension_internal_prompt_submit_request_rejects_unknown_agent() {
                 agent_id: tau_proto::AgentId::parse("missing-agent").expect("agent id"),
                 text: "hello".to_owned(),
                 ctx_id: None,
+                activation_kind: None,
             },
         )),
     )
@@ -30440,6 +30829,7 @@ fn queued_extension_internal_prompt_submit_request_preserves_ctx_id_when_steered
                 agent_id: agent_id.clone(),
                 text: "timer fired".to_owned(),
                 ctx_id: Some("timer:wake:1".to_owned()),
+                activation_kind: None,
             },
         )),
     )
@@ -30489,6 +30879,7 @@ fn queued_extension_internal_prompt_submit_requests_preserve_individual_ctx_ids(
                     agent_id: agent_id.clone(),
                     text: text.to_owned(),
                     ctx_id: Some(ctx_id.to_owned()),
+                    activation_kind: None,
                 },
             )),
         )

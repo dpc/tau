@@ -102,6 +102,7 @@ fn wait_args_exact(call_id: &str) -> CborValue {
 
 fn wait_call(target_call_id: &str) -> AgentToolCall {
     AgentToolCall {
+        call_ref: None,
         id: "wait-call".into(),
         name: ToolName::new(WAIT_TOOL_NAME),
         tool_type: ToolType::Function,
@@ -138,6 +139,7 @@ fn wait_spec_documents_optional_non_consuming_input_mode() {
 
 fn message_call(recipient_id: &str, message: &str) -> AgentToolCall {
     AgentToolCall {
+        call_ref: None,
         id: "message-call".into(),
         name: ToolName::new(MESSAGE_TOOL_NAME),
         tool_type: ToolType::Function,
@@ -879,6 +881,7 @@ fn wait_initial_display_uses_tracked_target_tool_name() {
 fn wait_initial_display_shows_normalized_input_timeout() {
     let state = BuiltinState::default();
     let timeout_call = |minutes: i64| AgentToolCall {
+        call_ref: None,
         id: "wait-call".into(),
         name: ToolName::new(WAIT_TOOL_NAME),
         tool_type: ToolType::Function,
@@ -905,6 +908,7 @@ fn wait_initial_display_shows_normalized_input_timeout() {
     assert_eq!(
         state
             .initial_display(&AgentToolCall {
+                call_ref: None,
                 id: "wait-call".into(),
                 name: ToolName::new(WAIT_TOOL_NAME),
                 tool_type: ToolType::Function,

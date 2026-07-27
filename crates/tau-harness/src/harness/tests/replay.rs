@@ -648,6 +648,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
         Some(crate::agent::PendingMessageWake {
             source: crate::agent::PendingMessageWakeSource::MessageFact { .. },
             node_id: None,
+            ..
         })
     ));
     assert_eq!(
@@ -1251,6 +1252,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
     append_persisted_record(
         &state_dir.join("agents").join("agent-1").join("events.cbor"),
         &tau_core::PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: tau_core::PersistedAgentEventSeq::new(3),
             source: None,
             event: Event::MessageDelivered(tau_proto::MessageDelivered::new(
@@ -1517,6 +1519,7 @@ fn restore_rejects_membership_without_committed_agent_creation() {
             append_persisted_record(
                 &events_path,
                 &tau_core::PersistedAgentEvent {
+                    observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
                     seq: tau_core::PersistedAgentEventSeq::new(0),
                     source: None,
                     event: Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {

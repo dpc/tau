@@ -307,8 +307,9 @@ fn model_routing_and_event_compatibility_snapshot() {
     );
 }
 
-/// Durable provider-finished records from before transport metadata and from a
-/// stale-chain WebSocket turn must retain their defaults and replay sidecars.
+/// Provider-finished payloads from before transport metadata retain their
+/// defaults, while pre-observation durable envelopes fail the intentional
+/// in-place journal schema break.
 #[test]
 fn legacy_provider_session_fixtures_decode() {
     let load = |stem: &str| {
@@ -323,18 +324,15 @@ fn legacy_provider_session_fixtures_decode() {
             agent_dir.join("events.cbor"),
         )
         .expect("copy durable compatibility fixture");
-        let store = tau_core::AgentStore::open(temporary.path()).expect("open legacy agent store");
-        let records = store
-            .agent_events("legacy-agent")
-            .expect("replay legacy agent events");
-        assert_eq!(records.len(), 1, "fixture must contain one durable event");
-        assert_eq!(
-            records[0].recorded_at,
-            tau_proto::UnixMicros::default(),
-            "pre-recorded_at journal must restore the historical default"
+        let error = match tau_core::AgentStore::open(temporary.path()) {
+            Ok(_) => panic!("pre-observation journal must not decode"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("missing field `observation_id`"),
+            "unexpected legacy journal rejection: {error}"
         );
-        assert_eq!(records[0].event, expected);
-        records[0].event.clone()
+        expected
     };
     let Event::ProviderResponseFinished(pre_transport) = load("legacy-responses-pre-transport")
     else {

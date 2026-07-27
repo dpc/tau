@@ -1,5 +1,31 @@
 use super::*;
 
+/// The transient internal-prompt request must preserve absent/default
+/// provenance and encode explicit timer provenance canonically.
+#[test]
+fn internal_prompt_activation_kind_is_optional_and_typed() {
+    let base = ExtInternalPromptSubmitRequest {
+        agent_id: AgentId::parse("agent-timer").expect("agent id"),
+        text: "wake".into(),
+        ctx_id: None,
+        activation_kind: None,
+    };
+    let absent = serde_json::to_value(&base).expect("serialize absent provenance");
+    assert!(absent.get("activation_kind").is_none());
+    assert_eq!(
+        serde_json::from_value::<ExtInternalPromptSubmitRequest>(absent)
+            .expect("decode absent provenance")
+            .activation_kind,
+        None
+    );
+    let timer = serde_json::to_value(ExtInternalPromptSubmitRequest {
+        activation_kind: Some(InternalPromptActivationKind::Timer),
+        ..base
+    })
+    .expect("serialize timer provenance");
+    assert_eq!(timer["activation_kind"], "timer");
+}
+
 /// Locks the persisted adjacent-tag shape for both activation authorities so a
 /// serde attribute change cannot silently make existing agent journals
 /// unreadable.
@@ -1270,6 +1296,7 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("agent-1"),
             text: "internal extension prompt".to_owned(),
             ctx_id: Some("ctx-1".to_owned()),
+            activation_kind: None,
         }),
         Event::StartAgentRequest(StartAgentRequest {
             query_id: "query-1".to_owned(),
@@ -3103,6 +3130,7 @@ fn extension_internal_prompt_submit_request_wire_form() {
         agent_id: agent_id("agent-1"),
         text: "timer fired".to_owned(),
         ctx_id: Some("timer:wake:1".to_owned()),
+        activation_kind: None,
     });
     let json = serde_json::to_value(&event).expect("serialize");
     assert_eq!(json["event"], "extension.internal_prompt_submit_request");

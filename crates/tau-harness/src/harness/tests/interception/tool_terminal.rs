@@ -766,6 +766,190 @@ fn backgrounded_terminal_reports_preserve_background_completion_behavior() {
     }
 }
 
+/// A parked canonical background terminal must retain its runtime ownership
+/// and preallocated identity until commit releases dependent completion work.
+#[test]
+fn parked_background_terminal_defers_cleanup_and_completion_prompt() {
+    let call_id = ToolCallId::from("parked-background");
+    let (_tmp, mut harness) = setup_routed_test_tool_call(call_id.as_str(), "owned_tool");
+    let cid = harness.tool_agents[&call_id].clone();
+    assert!(harness.tool_turn.begin_backgrounding(&call_id));
+    assert!(harness.tool_turn.mark_backgrounded(&call_id));
+    intercept_terminal_names(
+        &mut harness,
+        vec![tau_proto::EventName::TOOL_BACKGROUND_RESULT],
+    );
+
+    harness
+        .handle_extension_event(
+            "conn-owner",
+            TestProtocolItem::Event(Event::ToolResultReported(final_tool_result(
+                call_id.as_str(),
+                "owned_tool",
+                "done",
+            ))),
+        )
+        .expect("park background terminal");
+
+    assert!(harness.pending_intercept.is_some());
+    assert!(harness.tool_agents.contains_key(&call_id));
+    assert!(harness.pending_terminal_observations.contains_key(&call_id));
+    assert!(harness.agents[&cid].pending_prompts.is_empty());
+
+    reply(&mut harness, InterceptAction::Pass(None));
+    assert!(harness.pending_intercept.is_none());
+    assert!(!harness.tool_agents.contains_key(&call_id));
+    assert!(!harness.pending_terminal_observations.contains_key(&call_id));
+}
+
+/// A failed canonical background append must leave runtime completion pending
+/// so a later identical provider report can commit and settle it once.
+#[test]
+fn background_terminal_append_failure_remains_retryable() {
+    let call_id = ToolCallId::from("background-store-fault");
+    let (_tmp, mut harness) = setup_routed_test_tool_call(call_id.as_str(), "owned_tool");
+    let cid = harness.tool_agents[&call_id].clone();
+    let tools_in_flight = harness.agents[&cid].tools_in_flight;
+    assert!(harness.tool_turn.begin_backgrounding(&call_id));
+    assert!(harness.tool_turn.mark_backgrounded(&call_id));
+    let agent_id = harness.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
+    let journal = harness
+        .state_dir
+        .join("agents")
+        .join(&agent_id)
+        .join("events.cbor");
+    let backup = journal.with_extension("cbor.background-test-backup");
+    std::fs::rename(&journal, &backup).expect("park journal");
+    std::fs::create_dir(&journal).expect("block journal path");
+    let report =
+        Event::ToolResultReported(final_tool_result(call_id.as_str(), "owned_tool", "done"));
+
+    harness
+        .handle_extension_event("conn-owner", TestProtocolItem::Event(report.clone()))
+        .expect("raw report remains observable");
+    assert!(harness.tool_agents.contains_key(&call_id));
+    assert_eq!(harness.agents[&cid].tools_in_flight, tools_in_flight);
+    assert!(harness.pending_terminal_observations.contains_key(&call_id));
+
+    std::fs::remove_dir(&journal).expect("remove blocker");
+    std::fs::rename(&backup, &journal).expect("restore journal");
+    harness
+        .handle_extension_event("conn-owner", TestProtocolItem::Event(report))
+        .expect("retry report");
+    assert!(!harness.tool_agents.contains_key(&call_id));
+    assert_eq!(harness.agents[&cid].tools_in_flight, tools_in_flight - 1);
+}
+
+/// A competing disconnect terminal after an append failure must supersede the
+/// losing completed classification instead of reusing its identity or cause.
+#[test]
+fn failed_result_then_disconnect_commits_fresh_disconnected_classification() {
+    let call_id = ToolCallId::from("failed-result-disconnect");
+    let (_tmp, mut harness) = setup_routed_test_tool_call(call_id.as_str(), "owned_tool");
+    let cid = harness.tool_agents[&call_id].clone();
+    let agent_id = harness.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
+    let journal = harness
+        .state_dir
+        .join("agents")
+        .join(&agent_id)
+        .join("events.cbor");
+    let backup = journal.with_extension("cbor.competing-test-backup");
+    std::fs::rename(&journal, &backup).expect("park journal");
+    std::fs::create_dir(&journal).expect("block journal path");
+    harness
+        .handle_extension_event(
+            "conn-owner",
+            TestProtocolItem::Event(Event::ToolResultReported(final_tool_result(
+                call_id.as_str(),
+                "owned_tool",
+                "done",
+            ))),
+        )
+        .expect("failed result report remains bounded");
+    let losing = harness.pending_terminal_observations[&call_id].observation_id;
+    std::fs::remove_dir(&journal).expect("remove blocker");
+    std::fs::rename(&backup, &journal).expect("restore journal");
+
+    harness.fail_pending_tool_calls_for_connection("conn-owner");
+
+    let records = harness
+        .agent_store
+        .agent_events(&agent_id)
+        .expect("agent records");
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        Event::AgentToolTerminalClassified(classified)
+            if classified.terminal != losing
+                && classified.cause == tau_proto::ToolTerminalCause::ProviderDisconnected
+    )));
+}
+
+/// A competing cancellation after an append failure must receive a fresh
+/// terminal identity and retain the exact cancellation-request cause.
+#[test]
+fn failed_result_then_cancellation_commits_fresh_cancellation_classification() {
+    let call_id = ToolCallId::from("failed-result-cancel");
+    let (_tmp, mut harness) = setup_routed_test_tool_call(call_id.as_str(), "owned_tool");
+    let cid = harness.tool_agents[&call_id].clone();
+    let agent_id = harness.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
+    let journal = harness
+        .state_dir
+        .join("agents")
+        .join(&agent_id)
+        .join("events.cbor");
+    let backup = journal.with_extension("cbor.cancel-test-backup");
+    std::fs::rename(&journal, &backup).expect("park journal");
+    std::fs::create_dir(&journal).expect("block journal path");
+    harness
+        .handle_extension_event(
+            "conn-owner",
+            TestProtocolItem::Event(Event::ToolResultReported(final_tool_result(
+                call_id.as_str(),
+                "owned_tool",
+                "done",
+            ))),
+        )
+        .expect("failed result report remains bounded");
+    let losing = harness.pending_terminal_observations[&call_id].observation_id;
+    std::fs::remove_dir(&journal).expect("remove blocker");
+    std::fs::rename(&backup, &journal).expect("restore journal");
+    let request = tau_proto::ObservationId::from_bytes([44; 16]);
+    harness
+        .pending_cancellation_observations
+        .insert(call_id.clone(), request);
+
+    harness
+        .handle_extension_event(
+            "conn-owner",
+            TestProtocolItem::Event(Event::ToolCancelledReported(tau_proto::ToolCancelled {
+                call_id: call_id.clone(),
+                tool_name: tau_proto::ToolName::new("owned_tool"),
+                tool_type: tau_proto::ToolType::Function,
+            })),
+        )
+        .expect("cancellation report");
+
+    let records = harness
+        .agent_store
+        .agent_events(&agent_id)
+        .expect("agent records");
+    assert!(records.iter().any(|record| matches!(
+        &record.event,
+        Event::AgentToolTerminalClassified(classified)
+            if classified.terminal != losing
+                && classified.cause == tau_proto::ToolTerminalCause::Cancellation { request }
+    )));
+}
+
 /// A duplicate report remains an observable peer report, but completed-call
 /// tracking prevents a second canonical result/provider projection.
 #[test]

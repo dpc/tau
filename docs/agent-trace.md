@@ -2,7 +2,7 @@
 
 `tau agent trace <agent-id>` projects offline from a validated finite snapshot
 of existing durable agent journals. It defaults to a compact TOON-lite
-virtual-tool overview; use explicit `--format tau-jsonl` for the complete journal
+agent-tool overview; use explicit `--format tau-jsonl` for the complete journal
 artifact. It does not contact or attach to a harness and does not capture transient provider
 HTTP bodies, streaming deltas, or harness phase timing.
 
@@ -57,19 +57,15 @@ operation IDs in the largest included journal; IDs are not independently capped
 beyond the journal record framing limit, so a pathological journal can exhaust
 process memory. No accepted record is truncated.
 
-Compact agent-tool projection also stages payload-bearing arguments, complete
-full output, and at most 4 KiB of lite output per terminal call in an anonymous
-file. Its heap correlation state contains call IDs, timing/order keys, tool names,
-and file offsets. Heap still grows with call
-count plus encoded call-ID and tool-name bytes across the selected workflow, so
-pathological high-cardinality journals can exhaust memory.
-
-TOON materializes one call at a time. An exceptional near-limit argument can
-simultaneously occupy its decoded value, amplified `TaggedCbor`, compact JSON
-bytes, roughly 4/3-size Base64 text, and TOON scalar while the anonymous final
-artifact also grows on disk. A pathological but frame-valid call can exhaust
-memory or temporary storage. Such projection failure occurs before stdout; all
-anonymous files remain delete-on-close.
+Compact agent-tool projection materializes the selected event payloads and its
+complete JSON-like record set in memory before encoding. Lite mode bounds each
+projected terminal output to 4 KiB but does not bound declaration arguments or the
+selected source events retained during correlation. Full mode additionally retains
+complete rendered terminal output. Heap use can therefore grow with both selected
+journal payload bytes and projected record bytes; a pathological frame-valid
+journal can exhaust memory or anonymous temporary storage. Projection still
+finishes before stdout delivery, and the final staged artifact remains
+delete-on-close.
 
 
 ## Native JSON Lines
@@ -78,8 +74,8 @@ anonymous files remain delete-on-close.
 `tau.agent_trace` and its internal schema version is `0`. The first line is a
 header; later lines preserve every journal occurrence grouped lexically by
 agent and ordered by authoritative `seq`. Each occurrence retains agent ID,
-sequence, wall-clock append time, source, branch parent, and complete typed
-event payload.
+sequence, observation ID, wall-clock append time, source, branch parent, and
+complete typed event payload.
 
 The header fields are:
 
@@ -100,6 +96,7 @@ schema_version:            integer, always 0
 record_type:               string, always "event"
 agent_id:                  string
 seq:                       integer, journal-local authoritative order
+observation_id:            string, 32 lowercase hexadecimal digits
 recorded_at_unix_micros:   integer
 source:                    string|null
 parent:                    AgentEventParent JSON
@@ -159,98 +156,94 @@ only its matching call item; response-wide payloads are not repeated per call.
 
 ## Compact agent tool traces
 
-`agent-tools-toon` and `agent-tools-jsonl` emit the same stable compact projection
-optimized for quick logical reconstruction of agent activity. They include only
-virtual tool calls declared in durable provider responses. Extension-originated
-tool requests, assistant prose, prompts, messages, compactions, and low-level
-lifecycle events are omitted. `--mode` selects `lite` (the default) or `full`;
-`--mode full` is invalid with `tau-jsonl` and `otlp-json`.
+`agent-tools-toon` and `agent-tools-jsonl` project only provider-declared calls and explicit observation facts. The in-place `tau.agent_tools` schema remains version `0`; no legacy reader or inference path exists. References outside the selected cut remain unresolved. Duplicate observation IDs and contradictory selected typed references are trace integrity errors.
 
-Each artifact starts with a `tau.agent_tools` schema-version-0 header. JSONL emits
-the header and every call as independently parseable lines. TOON emits one strict
-document whose header fields precede a counted `calls[N]` array. Calls appear by
-projected journal wall-clock across included agents. This is not a causal or
-authoritative cross-agent chronology. Equal timestamps order by agent ID, journal
-sequence, then provider item position. `at_us` is measured from the earliest
-included journal occurrence and `duration_us` from provider declaration to its
-terminal fact. Neither encoding emits an absolute timestamp. A decreasing terminal
-clock leaves `duration_us` absent.
+The header fixes `timing_basis: producer_wall_clock_at_observation` and `causality: explicit_observation_refs_only`. Records use `call`, content-free `activation`, and content-free `relationship` discriminators. `ToolCallRef` (`declaration`, `item_index`) is the call identity; provider `call_id` remains display and routing metadata. Journal order and timestamps never create relationships.
 
-Both variants report `output_bytes` (UTF-8 bytes) and `output_lines` (Rust
-`str::lines` logical lines) for the complete event-native normalized text
-projection. Lite emits at most the first 4 KiB of that projection as `output`
-(or exceptional `output_base64`), without splitting UTF-8, and reports whether
-the emitted text is complete in `output_complete`. Full emits the complete
-projection and sets `output_complete: true`:
-successful CBOR uses `ToolResponse`, errors prepend an `error` header to normalized
-details, and cancellation renders `cancelled: cancelled`.
-Incomplete calls have status `incomplete`, `output_complete: false`, and no
-output or count fields. Other statuses are `ok`, `error`, and `cancelled`.
+Only explicitly linked, nondecreasing endpoint pairs emit qualified intervals: `declaration_to_dispatch_us`, `dispatch_to_backgrounded_us`, `backgrounded_to_terminal_us`, `dispatch_to_terminal_us`, `active_wait_us`, `completion_to_delivery_us`, `activation_to_wait_terminal_us`, and `completion_to_activation_queue_us`. There is no unqualified `duration_us`.
 
-Header fields are `schema: string`, `schema_version: integer`,
-`record_type: "header"`, `root_agent_id: string`,
-`included_agent_ids: string[]`, `output: "bounded"|"full"`, and
-`time_unit: "microseconds"`. Call fields are `record_type: "call"`,
-`at_us: u64`, `agent_id: string`, call identity, `tool: string`,
-optional command, arguments, `status`,
-and optional `duration_us: u64`. Terminal calls add `output_bytes: u64`,
-`output_lines: u64`, output text, and `output_complete: bool`; incomplete calls
-add only `output_complete: false`.
-Arguments use the concise ordinary JSON-shaped value only when every nested value
-is represented faithfully and contains no float. JSONL otherwise places complete
-`TaggedCbor` in `arguments`, including exact float bits. TOON retains the readable
-call envelope and uses `call_id_base64` instead of `call_id` for a control-bearing
-ID. It uses `arguments_json_base64` instead of `arguments` for Base64 compact JSON whenever
-arguments contain tagged-CBOR or unsafe controls. Rare control-bearing commands
-and outputs similarly use `command_base64` and `output_base64` as Base64 UTF-8.
-Consumers decode only that exceptional field. This avoids ambiguous
-nested-object-array framing, numeric normalization, raw terminal controls, and
-Base64 expansion of the rest of the call while remaining lossless. Direct TOON quotes and escapes embedded
-output LF, CR, tab, quote, and backslash characters; multiline output remains
-one structurally framed scalar inside `calls[N]`. Schema version `0` follows the
-same internal compatibility policy as native JSONL.
+Wait relationships report registration as `immediate`, `active`, or `unresolved`, and outcome as `completion_delivered`, `interrupted_by_activation`, `input_available`, `timed_out`, `rejected`, `cancelled`, `lifecycle_aborted`, or `incomplete`. Missing referenced observations remain explicit as `source_not_selected`, `unresolved`, or `incomplete`; the projector never reconstructs them from adjacency, timestamps, IDs, or prose.
 
-Shell tools named `shell`, `shell_command`, or the internal `gpt_shell` surface
-normally expose their `command` argument as a top-level field for immediate
-readability. The complete provider-declared argument value normally remains in
-`arguments`, including the command; exceptional Base64 fields replace either one
-as described above.
+A canonical terminal owns normalized output exactly once. Lite mode emits its exact `output_bytes` and `output_lines` plus bounded output; full mode emits complete `output` (or TOON `output_base64` where required). A completion-delivering wait emits only `output_ref` and `envelope`, never copied payload or counts. JSONL and TOON preserve the same identities, lifecycle, wait outcomes, relationships, and ownership; only payload representation differs.
 
-```console
-$ tau agent trace agent-root --format agent-tools-toon
-schema: tau.agent_tools
-schema_version: 0
-record_type: header
-root_agent_id: agent-root
-included_agent_ids[1]: agent-root
-output: bounded
-time_unit: microseconds
-calls[1]:
-  - record_type: call
-    at_us: 2419
-    agent_id: agent-root
-    call_id: call_1
-    tool: shell_command
-    command: cargo test -p tau-core
-    arguments:
-      command: cargo test -p tau-core
-      workdir: /work
-    status: ok
-    duration_us: 180442
-    output_bytes: 13
-    output_lines: 1
-    output: "tests passed\n"
-    output_complete: true
+JSONL writes one header followed by independently parseable records. TOON writes
+the same header fields, then a strict `records[N]:` counted array in the same
+record order. Optional fields below are absent unless their stated evidence
+survives:
+
+TOON preserves strings directly when its grammar can round-trip them. Otherwise
+it replaces the whole field with standard padded Base64: `call_id_base64`,
+`command_base64`, or `output_base64` decodes to the UTF-8 bytes of the
+corresponding JSONL string. `arguments_json_base64` decodes to the complete
+compact JSON encoding of `arguments`; consumers must Base64-decode and then parse
+that whole JSON value. A record never emits both the direct and Base64 spelling
+of one field. Base64 is a framing adaptation only and does not change semantic
+record parity with JSONL.
+
+```text
+header:
+  schema="tau.agent_tools", schema_version=0, record_type="header",
+  root_agent_id, included_agent_ids[], output="lite"|"full",
+  time_unit="microseconds",
+  timing_basis="producer_wall_clock_at_observation",
+  causality="explicit_observation_refs_only"
+
+call:
+  record_type="call", agent_id, call={declaration,item_index},
+  call_id, tool, arguments, status
+  [command] [terminal] [terminal_resolution] [cause]
+  [output,output_complete] [output_bytes,output_lines]
+  [qualified *_us intervals]
+
+activation:
+  record_type="activation", agent_id, observation_id, kind,
+  source_observation|null, source_call|null, source_resolution|null,
+  [completion_to_activation_queue_us]
+
+relationship/wait_registration:
+  record_type="relationship", relationship="wait_registration",
+  agent_id, observation_id, wait_observation, wait_call, mode, registration="active",
+  outcome="settled"|"incomplete"
+
+relationship/wait_observation:
+  record_type="relationship", relationship="wait_observation",
+  agent_id, observation_id, wait_call, mode
+
+relationship/wait_settlement:
+  record_type="relationship", relationship="wait_settlement",
+  agent_id, observation_id, wait_call, registration, registration_ref|null,
+  wait_observation,
+  wait_terminal, wait_terminal_resolution, outcome,
+  [source_call,source_phase,output_ref,envelope|activation_ref],
+  [source_resolution], [reason],
+  [active_wait_us|completion_to_delivery_us|activation_to_wait_terminal_us]
+
+relationship/cancellation_requested:
+  record_type="relationship", relationship="cancellation_requested",
+  agent_id, observation_id, cancel_call, target_call
 ```
 
-Use `--include-descendants` to obtain one relative journal-wall-clock projection
-for a complete creator-owned workflow.
+Resolution fields use `resolved` when the selected endpoint belongs to the same
+agent journal and `source_not_selected` when it is unavailable to that
+journal-local relationship. The latter includes selected endpoints in another
+agent journal. Such relationships never produce elapsed intervals or transfer
+terminal status/output ownership. Exact-wait targets outside the relationship's
+journal project as `exact_unresolved`.
 
-> **Sensitive data:** Both compact encodings expose unredacted tool names,
-> arguments, commands, and up to 4 KiB of unredacted normalized output per
-> terminal call in lite mode, including bounded rendered error details.
-> `--mode full` exposes complete unredacted output. Treat either artifact as
-> sensitive.
+`ToolCallRef` always serializes as
+`{"declaration":"<32-lowercase-hex>","item_index":<u32>}`. Observation references
+use the same 32-digit encoding. Ordinary JSON-compatible arguments stay ordinary
+JSON; values that JSON cannot preserve use the native tagged-CBOR shapes documented
+above.
+
+For example, a completion-delivering wait links rather than duplicates output:
+
+```json
+{"record_type":"call","agent_id":"agent-a","call":{"declaration":"11111111111111111111111111111111","item_index":0},"call_id":"source","tool":"shell","arguments":{},"status":"ok","terminal":"22222222222222222222222222222222","terminal_resolution":"resolved","cause":{"kind":"completed"},"output":"done","output_complete":true}
+{"record_type":"relationship","relationship":"wait_settlement","agent_id":"agent-a","observation_id":"55555555555555555555555555555555","wait_observation":"77777777777777777777777777777777","wait_call":{"declaration":"33333333333333333333333333333333","item_index":0},"registration":"active","registration_ref":"44444444444444444444444444444444","wait_terminal":"66666666666666666666666666666666","wait_terminal_resolution":"resolved","outcome":"completion_delivered","source_call":{"declaration":"11111111111111111111111111111111","item_index":0},"source_phase":"background","output_ref":"22222222222222222222222222222222","envelope":"original_tool_call_id_header","source_resolution":"resolved"}
+```
+
+Use `--include-descendants` for the selected creator-owned workflow. Both formats expose unredacted tool names, arguments, commands, and owner output, so treat artifacts as sensitive.
 
 
 ## Content-free performance JSON Lines

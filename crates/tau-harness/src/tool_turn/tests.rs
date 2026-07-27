@@ -8,6 +8,7 @@ fn cid(value: &str) -> AgentId {
 
 fn call(id: &str) -> AgentToolCall {
     AgentToolCall {
+        call_ref: None,
         id: id.into(),
         name: ToolName::new("tool"),
         tool_type: ToolType::Function,

@@ -346,6 +346,8 @@ fn parse_agent_id_for_store(agent_id: &str) -> Result<AgentId, AgentStoreError> 
 /// last fold.
 #[derive(Clone, Debug)]
 pub struct AgentAppendOutcome {
+    /// Opaque random identity assigned before append.
+    pub observation_id: tau_proto::ObservationId,
     /// Sequence assigned to the record in this agent's event stream.
     pub seq: PersistedAgentEventSeq,
     /// Last tree node produced by this event, if any. A tool terminal that
@@ -909,6 +911,35 @@ impl AgentStore {
         event: Event,
         recorded_at: UnixMicros,
     ) -> Result<AgentAppendOutcome, AgentStoreError> {
+        self.append_agent_event_at_with_observation_id(
+            agent_id,
+            source,
+            parent,
+            event,
+            recorded_at,
+            tau_proto::ObservationId::random(),
+        )
+    }
+
+    /// Appends an event with an identity allocated by the observation producer.
+    ///
+    /// This supports best-effort observations whose relationships must retain
+    /// the identity even when append fails. The identity carries no
+    /// ordering meaning.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation and append failures as
+    /// [`Self::append_agent_event_at`].
+    pub fn append_agent_event_at_with_observation_id(
+        &mut self,
+        agent_id: &str,
+        source: Option<ConnectionId>,
+        parent: AgentEventParent,
+        event: Event,
+        recorded_at: UnixMicros,
+        observation_id: tau_proto::ObservationId,
+    ) -> Result<AgentAppendOutcome, AgentStoreError> {
         let sid = parse_agent_id_for_store(agent_id)?;
         let persistence = self.agent_persistence(agent_id);
         let journal_path = self.agent_dir(agent_id).join("events.cbor");
@@ -964,6 +995,7 @@ impl AgentStore {
         // on every write.
         let next_seq = tree.next_event_seq();
         let record = PersistedAgentEvent {
+            observation_id,
             seq: next_seq,
             source,
             event: event.clone(),
@@ -1009,6 +1041,7 @@ impl AgentStore {
         }
 
         Ok(AgentAppendOutcome {
+            observation_id: record.observation_id,
             seq: next_seq,
             folded_node_id,
         })
@@ -1077,6 +1110,7 @@ impl AgentStore {
             .or_insert_with(|| AgentTree::from_events(aid.clone(), &[]));
         let seq = tree.next_event_seq();
         let record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::random(),
             seq,
             source,
             event: event.clone(),
@@ -1114,6 +1148,7 @@ impl AgentStore {
             );
         }
         Ok(AgentAppendOutcome {
+            observation_id: record.observation_id,
             seq,
             folded_node_id,
         })
@@ -1142,6 +1177,7 @@ impl AgentStore {
         tree.validate_event_at(parent, event)
             .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         let prospective_record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::random(),
             seq: tree.next_event_seq(),
             source,
             event: event.clone(),

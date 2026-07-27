@@ -664,7 +664,7 @@ fn assert_boot_b_durable_repair(
         }
     }
     let suffix = super::suffix_after_initialization(before, after, &identities.repair)?;
-    let [record] = suffix else {
+    let [classification, record] = suffix else {
         return Err(format!("S7 repair suffix contained {} records", suffix.len()).into());
     };
     if !matches!(
@@ -675,6 +675,14 @@ fn assert_boot_b_durable_repair(
                 && error.message == diagnostic
     ) {
         return Err("S7 repair suffix was not the exact worker-owned provider error".into());
+    }
+    if !matches!(
+        &classification.event,
+        Event::AgentToolTerminalClassified(value)
+            if value.terminal == record.observation_id
+                && value.cause == tau_proto::ToolTerminalCause::RestartRepair
+    ) {
+        return Err("S7 repair suffix lacked the exact restart-repair classification".into());
     }
     Ok(())
 }

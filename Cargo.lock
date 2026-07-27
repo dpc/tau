@@ -4120,6 +4120,7 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "indexmap",
+ "rand 0.8.6",
  "serde",
  "serde_bytes",
  "serde_json",

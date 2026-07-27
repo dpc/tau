@@ -1209,6 +1209,7 @@ fn human_ui_prompt_projects_fieldless_user_envelope_without_changing_canonical_t
     let mut live_tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     live_tree.apply_event(&event);
     let persisted = tau_core::PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
         seq: tau_core::PersistedAgentEventSeq::new(0),
         source: None,
         event: event.clone(),
@@ -1287,6 +1288,7 @@ fn human_ui_steer_projects_complete_expanded_skill_prompt() {
     let tree = tau_core::AgentTree::from_events(
         crate::parse_agent_id("main"),
         &[tau_core::PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: tau_core::PersistedAgentEventSeq::new(0),
             source: None,
             event,
@@ -1344,6 +1346,7 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
     let replay_tree = tau_core::AgentTree::from_events(
         crate::parse_agent_id("main"),
         &[tau_core::PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: tau_core::PersistedAgentEventSeq::new(0),
             source: None,
             event: compacted,
@@ -1432,6 +1435,7 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
     let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
     let events = vec![
         tau_core::PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: tau_core::PersistedAgentEventSeq::new(0),
             source: None,
             event: Event::MessageDelivered(tau_proto::MessageDelivered::new(
@@ -1450,6 +1454,7 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
             recorded_at: tau_proto::UnixMicros::now(),
         },
         tau_core::PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: tau_core::PersistedAgentEventSeq::new(1),
             source: None,
             event: Event::AgentCompacted(tau_proto::AgentCompacted {

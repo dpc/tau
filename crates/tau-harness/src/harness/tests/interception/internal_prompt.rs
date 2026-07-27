@@ -8,6 +8,7 @@ fn request(agent_id: &tau_proto::AgentId, text: &str) -> Event {
         agent_id: agent_id.clone(),
         text: text.to_owned(),
         ctx_id: Some(format!("ctx:{text}")),
+        activation_kind: None,
     })
 }
 

@@ -300,6 +300,7 @@ impl<'a> InternalToolHost<'a> {
     /// the foreground turn after that placeholder commits.
     pub fn background_tool_call(&mut self, call_id: &ToolCallId, result: CborValue) {
         if self.harness.tool_turn.begin_backgrounding(call_id) {
+            self.harness.observe_tool_backgrounded(call_id);
             self.harness
                 .publish_internal_background_placeholder(call_id, result);
         }
@@ -368,6 +369,7 @@ impl<'a> InternalToolHost<'a> {
             .clone();
         let pending = self.harness.pending_tools.get(&started.call_id)?.clone();
         let call = AgentToolCall {
+            call_ref: None,
             id: started.call_id.clone(),
             name: pending.internal_name,
             tool_type: pending.tool_type,
@@ -542,10 +544,11 @@ impl<'a> InternalToolHost<'a> {
     pub fn publish_tool_cancel_request_for(
         &mut self,
         conversation_id: &AgentId,
+        cancel_call: Option<tau_proto::ToolCallRef>,
         target_call_id: ToolCallId,
     ) -> Result<(), String> {
         self.harness
-            .publish_tool_cancel_request_for(conversation_id, target_call_id)
+            .publish_tool_cancel_request_for(conversation_id, cancel_call, target_call_id)
     }
 
     /// Cancel a start-agent request owned by an internal tool handler.

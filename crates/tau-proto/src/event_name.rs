@@ -456,6 +456,30 @@ impl EventName {
         Self::from_static(EventCategory::Agent, "standalone_compaction_failed");
     pub const AGENT_INFERENCE_DISPATCH_STARTED: Self =
         Self::from_static(EventCategory::Agent, "inference_dispatch_started");
+    /// Harness observed a declared call enter runtime dispatch.
+    pub const AGENT_TOOL_DISPATCH_OBSERVED: Self =
+        Self::from_static(EventCategory::Agent, "tool_dispatch_observed");
+    /// Harness observed a declared call move to background execution.
+    pub const AGENT_TOOL_BACKGROUNDED_OBSERVED: Self =
+        Self::from_static(EventCategory::Agent, "tool_backgrounded_observed");
+    /// Harness recognized a successfully parsed declared wait invocation.
+    pub const AGENT_TOOL_WAIT_OBSERVED: Self =
+        Self::from_static(EventCategory::Agent, "tool_wait_observed");
+    /// Harness installed an active waiter.
+    pub const AGENT_TOOL_WAIT_REGISTERED: Self =
+        Self::from_static(EventCategory::Agent, "tool_wait_registered");
+    /// Harness queued activating input.
+    pub const AGENT_ACTIVATION_QUEUED: Self =
+        Self::from_static(EventCategory::Agent, "activation_queued");
+    /// Harness settled a wait invocation.
+    pub const AGENT_TOOL_WAIT_SETTLED: Self =
+        Self::from_static(EventCategory::Agent, "tool_wait_settled");
+    /// Harness accepted a cancellation request for a declared call.
+    pub const AGENT_TOOL_CANCELLATION_REQUESTED: Self =
+        Self::from_static(EventCategory::Agent, "tool_cancellation_requested");
+    /// Harness classified the cause of a canonical tool terminal.
+    pub const AGENT_TOOL_TERMINAL_CLASSIFIED: Self =
+        Self::from_static(EventCategory::Agent, "tool_terminal_classified");
     pub const AGENT_STARTED: Self = Self::from_static(EventCategory::Agent, "started");
     pub const AGENT_USER_INTERACTION_RECORDED: Self =
         Self::from_static(EventCategory::Agent, "user_interaction_recorded");

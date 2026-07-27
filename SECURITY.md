@@ -710,14 +710,12 @@ included journal; IDs have no separate cap beyond the record framing limit.
 A pathological journal can therefore exhaust exporter process memory. The
 exporter never truncates accepted records.
 
-Compact projections stage payload-bearing arguments, complete full output, and
-at most 4 KiB of lite output per terminal call in anonymous files. Heap
-still grows with call count and encoded call-ID/tool-name bytes across the
-selected workflow. TOON materializes one call at a time from staging. It directly
-encodes safe readable calls, escapes multiline text, and Base64-frames only the
-exceptional call ID, arguments, command, or output field whenever tagged-CBOR, exact
-floats, or unsafe controls cannot round-trip directly. TOON must never print
-payload C0/C1 controls raw.
+Compact projections materialize selected source events and projected records in
+memory. Lite bounds each terminal output projection to 4 KiB, but declaration
+arguments and retained selected events remain bounded only by journal framing.
+Full mode retains complete rendered output. Heap can therefore grow with selected
+journal payload bytes and projected record bytes. TOON escapes multiline strings
+and must never print payload C0/C1 controls raw.
 
 The performance projection emits no prompt, tool, response, or error bodies, but
 its agent/prompt/model IDs, descendant membership, timing, token/cache counts,
@@ -729,12 +727,9 @@ agent/prompt/model identifier bytes. Changes must recheck zero and decreasing wa
 terminals, checked aggregate overflow, zero/fractional cache-ratio boundaries,
 and structural output-field privacy.
 
-For one exceptional near-limit argument, per-call materialization can
-simultaneously retain the decoded value, amplified `TaggedCbor`, compact JSON
-bytes, roughly 4/3-size Base64 text, and TOON scalar while the anonymous final
-artifact grows on temporary storage. A pathological frame-valid call can exhaust
-memory or disk. Projection failure remains before stdout, and anonymous files are
-delete-on-close.
+One pathological frame-valid selected journal can exhaust memory or temporary
+storage. Projection failure remains before stdout, and the final anonymous file
+remains delete-on-close.
 
 Changes to compact projection must re-check zero/many-call framing, arbitrary
 strings and controls, strict TOON semantic round trips, exact tagged-CBOR and

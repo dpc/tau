@@ -5,7 +5,9 @@
 //! Cross-session delivery and sender authentication follow
 //! `SPEC-tau-harness-peer-routing`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+mod wait_tracker;
+
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
@@ -14,8 +16,15 @@ use std::time::{Duration, Instant};
 use tau_proto::{
     AgentContextKey, AgentContextValue, AgentId, AgentMessageReceived, AgentMessageSent,
     AgentWatchUpdateCause, AgentWatchesUpdated, CborValue, Event, ToolBackgroundError,
-    ToolBackgroundResult, ToolCallId, ToolError, ToolName, ToolResult, ToolResultKind, ToolType,
-    ToolUseState, ToolUseStatus,
+    ToolBackgroundResult, ToolCallId, ToolCallRef, ToolError, ToolName, ToolResult, ToolResultKind,
+    ToolType,
+};
+pub(crate) use wait_tracker::PendingWaitSettlement;
+use wait_tracker::{
+    WaitReply, WaitReplyKind, WaitRequest, WaitTarget, WaitTracker,
+    normalized_wait_timeout_minutes_inner, parse_wait_args, wait_error_reply,
+    wait_input_available_reply, wait_interrupted_any_reply, wait_interrupted_reply,
+    wait_timeout_args,
 };
 
 use crate::error::HarnessError;
@@ -68,6 +77,16 @@ fn provider_status_update_is_stale(
 
 /// Model-visible name of the harness-owned wait tool.
 pub(crate) const WAIT_TOOL_NAME: &str = "wait";
+
+/// Returns the normalized effective input-wait timeout in minutes.
+///
+/// An absent `timeout_minutes` selects background-completion waiting and
+/// returns `None`. A positive integer selects activating-input waiting and is
+/// clamped to 60 minutes. Zero, negative, non-integer, unknown, or conflicting
+/// arguments return an error rather than choosing a wait mode implicitly.
+pub fn normalized_wait_timeout_minutes(arguments: &CborValue) -> Result<Option<u64>, String> {
+    normalized_wait_timeout_minutes_inner(arguments)
+}
 #[cfg(test)]
 pub(crate) const MESSAGE_TOOL_NAME: &str = "message";
 #[derive(Default)]
@@ -262,6 +281,7 @@ impl Harness {
         }
     }
 
+    /// Reset retained wait correlation before dispatching a reused call ID.
     pub(crate) fn record_wait_tool_request(&mut self, call_id: &ToolCallId) {
         if let Some(tool) = self.pending_tools.get(call_id) {
             let Some(owner) = self.wait_owner_for_call(call_id) else {
@@ -275,50 +295,94 @@ impl Harness {
         }
     }
 
+    /// Retain the exact provider declaration before runtime dispatch.
+    pub(crate) fn record_wait_tool_call_ref(&mut self, call_id: ToolCallId, call_ref: ToolCallRef) {
+        self.subagents
+            .wait_tracker
+            .reset_call_ref(call_id, call_ref);
+    }
+
+    /// Returns the exact provider declaration for a tracked runtime call.
+    pub(crate) fn wait_tool_call_ref(&self, call_id: &ToolCallId) -> Option<ToolCallRef> {
+        self.subagents.wait_tracker.call_ref(call_id)
+    }
+
+    /// Returns the canonical terminal retained for a completed waitable call.
+    pub(crate) fn wait_tool_terminal_observation(
+        &self,
+        call_id: &ToolCallId,
+    ) -> Option<tau_proto::ObservationId> {
+        self.subagents.wait_tracker.terminal_observation(call_id)
+    }
+
     /// Reports whether the wait projection tracks one pending tool call.
     #[cfg(test)]
     pub(crate) fn wait_tracks_call_for_test(&self, call_id: &ToolCallId) -> bool {
-        self.subagents.wait_tracker.calls.contains_key(call_id)
+        self.subagents.wait_tracker.tracks_call(call_id)
     }
 
-    pub(crate) fn record_wait_tool_result(&mut self, result: ToolResult) {
+    /// Record one tool result with its canonical terminal observation, when
+    /// any.
+    pub(crate) fn record_wait_tool_result(
+        &mut self,
+        result: ToolResult,
+        terminal: Option<tau_proto::ObservationId>,
+    ) {
         let Some(owner) = self.wait_owner_for_call(&result.call_id) else {
             return;
         };
         let replies = self
             .subagents
             .wait_tracker
-            .record_tool_result(result, owner);
+            .record_tool_result(result, owner, terminal);
         self.publish_wait_replies(replies);
     }
 
-    pub(crate) fn record_wait_tool_error(&mut self, error: ToolError) {
+    /// Record one tool error with its canonical terminal observation, when any.
+    pub(crate) fn record_wait_tool_error(
+        &mut self,
+        error: ToolError,
+        terminal: Option<tau_proto::ObservationId>,
+    ) {
         let Some(owner) = self.wait_owner_for_call(&error.call_id) else {
             return;
         };
-        let replies = self.subagents.wait_tracker.record_tool_error(error, owner);
+        let replies = self
+            .subagents
+            .wait_tracker
+            .record_tool_error(error, owner, terminal);
         self.publish_wait_replies(replies);
     }
 
-    pub(crate) fn record_wait_background_result(&mut self, result: ToolBackgroundResult) {
+    /// Record one background result with its canonical terminal observation.
+    pub(crate) fn record_wait_background_result(
+        &mut self,
+        result: ToolBackgroundResult,
+        terminal: Option<tau_proto::ObservationId>,
+    ) {
         let Some(owner) = self.wait_owner_for_call(&result.call_id) else {
             return;
         };
         let replies = self
             .subagents
             .wait_tracker
-            .record_background_result(result, owner);
+            .record_background_result(result, owner, terminal);
         self.publish_wait_replies(replies);
     }
 
-    pub(crate) fn record_wait_background_error(&mut self, error: ToolBackgroundError) {
+    /// Record one background error with its canonical terminal observation.
+    pub(crate) fn record_wait_background_error(
+        &mut self,
+        error: ToolBackgroundError,
+        terminal: Option<tau_proto::ObservationId>,
+    ) {
         let Some(owner) = self.wait_owner_for_call(&error.call_id) else {
             return;
         };
         let replies = self
             .subagents
             .wait_tracker
-            .record_background_error(error, owner);
+            .record_background_error(error, owner, terminal);
         self.publish_wait_replies(replies);
     }
 
@@ -356,7 +420,7 @@ impl Harness {
     }
 
     /// Settle runtime accounting and clear one harness-owned internal call.
-    fn finish_harness_owned_tool_tracking(&mut self, call_id: &ToolCallId) {
+    pub(crate) fn finish_harness_owned_tool_tracking(&mut self, call_id: &ToolCallId) {
         if let Some(cid) = self.peer_internal_tool_agents.get(call_id).cloned() {
             self.tool_turn.mark_complete(call_id);
             if let Some(agent) = self.agents.get_mut(&cid) {
@@ -386,8 +450,15 @@ impl Harness {
 
     /// Complete waits owned by `owner` after inference-activating input has
     /// been accepted and queued for that same agent.
-    pub(crate) fn activate_waits_for(&mut self, owner: &AgentId) {
-        let replies = self.subagents.wait_tracker.activate_waits_for(owner);
+    pub(crate) fn activate_waits_for(
+        &mut self,
+        owner: &AgentId,
+        activation: tau_proto::ObservationId,
+    ) {
+        let replies = self
+            .subagents
+            .wait_tracker
+            .activate_waits_for(owner, activation);
         self.publish_wait_replies(replies);
     }
 
@@ -409,11 +480,9 @@ impl Harness {
     }
 
     #[cfg(test)]
+    /// Reports whether one agent owns an installed input waiter.
     pub(crate) fn input_wait_pending_for(&self, owner: &AgentId) -> bool {
-        self.subagents
-            .wait_tracker
-            .input_waiters
-            .contains_key(owner)
+        self.subagents.wait_tracker.input_wait_pending_for(owner)
     }
 
     #[cfg(test)]
@@ -423,8 +492,16 @@ impl Harness {
         self.subagents.wait_tracker.is_backgrounded(call_id)
     }
 
-    pub(crate) fn record_wait_tool_cancelled(&mut self, call_ids: &HashSet<ToolCallId>) {
-        let cancelled = self.subagents.wait_tracker.record_tool_cancelled(call_ids);
+    /// Record cancellation and optionally correlate one canonical terminal.
+    pub(crate) fn record_wait_tool_cancelled(
+        &mut self,
+        call_ids: &HashSet<ToolCallId>,
+        terminal: Option<(&ToolCallId, tau_proto::ObservationId)>,
+    ) {
+        let cancelled = self
+            .subagents
+            .wait_tracker
+            .record_tool_cancelled(call_ids, terminal);
         for call_id in cancelled.unsuppress_call_ids {
             self.unsuppress_background_completion_prompt(call_id);
         }
@@ -432,6 +509,29 @@ impl Harness {
             self.suppress_background_completion_prompt(call_id);
         }
         self.publish_wait_replies(cancelled.replies);
+        if let Some((terminal_call_id, wait_terminal)) = terminal {
+            for wait in cancelled
+                .cancelled_waits
+                .into_iter()
+                .filter(|wait| &wait.call_id == terminal_call_id)
+            {
+                if let (Some(wait_call), Some(wait_observation)) =
+                    (wait.call_ref, wait.wait_observation)
+                {
+                    self.append_best_effort_observation(
+                        &wait.owner,
+                        tau_proto::ObservationId::random(),
+                        Event::AgentToolWaitSettled(tau_proto::AgentToolWaitSettled {
+                            wait_observation,
+                            wait_call,
+                            registration: wait.registration,
+                            wait_terminal,
+                            outcome: tau_proto::ToolWaitOutcome::Cancelled,
+                        }),
+                    );
+                }
+            }
+        }
     }
 
     /// Handle the harness-owned `message` tool call inline.
@@ -1691,8 +1791,39 @@ impl Harness {
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
+        if let Some(call_ref) = call.call_ref {
+            self.subagents
+                .wait_tracker
+                .retain_call_ref(call_id.clone(), call_ref);
+        }
         self.ensure_harness_owned_tool_tracking(agent_id, call, &visible_tool_name);
         let parsed = parse_wait_args(&call.arguments);
+        let wait_observation = call.call_ref.map(|_| tau_proto::ObservationId::random());
+        let observed_mode = match &parsed {
+            Ok(WaitTarget::Exact(target)) => self
+                .subagents
+                .wait_tracker
+                .call_ref(target)
+                .map_or(tau_proto::ToolWaitMode::ExactUnresolved, |target| {
+                    tau_proto::ToolWaitMode::Exact { target }
+                }),
+            Ok(WaitTarget::AnyBackground) => tau_proto::ToolWaitMode::NextBackground,
+            Ok(WaitTarget::AnyInput(timeout)) => tau_proto::ToolWaitMode::ActivatingInput {
+                effective_timeout_minutes: u16::try_from(timeout.as_secs() / 60)
+                    .unwrap_or(u16::MAX),
+            },
+            Err(_) => tau_proto::ToolWaitMode::InvalidArguments,
+        };
+        if let (Some(observation_id), Some(wait_call)) = (wait_observation, call.call_ref) {
+            self.append_best_effort_observation(
+                agent_id,
+                observation_id,
+                Event::AgentToolWaitObserved(tau_proto::AgentToolWaitObserved {
+                    wait_call,
+                    mode: observed_mode,
+                }),
+            );
+        }
         let consumable_completion = match &parsed {
             Ok(WaitTarget::Exact(target)) => self
                 .subagents
@@ -1706,7 +1837,39 @@ impl Harness {
             Ok(WaitTarget::AnyInput(_)) | Err(_) => None,
         };
         if self.has_pending_wait_preempting_prompt(agent_id, consumable_completion.as_ref()) {
-            let reply = match parsed {
+            let activation =
+                self.pending_wait_preempting_activation(agent_id, consumable_completion.as_ref());
+            let wait = WaitRequest {
+                call_id: call_id.clone(),
+                tool_name: visible_tool_name.clone(),
+                owner: agent_id.clone(),
+                display_args: String::new(),
+                call_ref: call.call_ref,
+                wait_observation,
+                registration: None,
+            };
+            let settlement_outcome = activation.map(|activation| match &parsed {
+                Ok(WaitTarget::AnyInput(_)) => {
+                    tau_proto::ToolWaitOutcome::InputAvailable { activation }
+                }
+                Ok(WaitTarget::Exact(target))
+                    if !self
+                        .subagents
+                        .wait_tracker
+                        .call_is_owned_by(target, agent_id) =>
+                {
+                    tau_proto::ToolWaitOutcome::Rejected {
+                        reason: tau_proto::WaitRejectionReason::UnknownTarget,
+                    }
+                }
+                Ok(WaitTarget::Exact(_)) | Ok(WaitTarget::AnyBackground) => {
+                    tau_proto::ToolWaitOutcome::InterruptedByActivation { activation }
+                }
+                Err(_) => tau_proto::ToolWaitOutcome::Rejected {
+                    reason: tau_proto::WaitRejectionReason::InvalidArguments,
+                },
+            });
+            let mut reply = match parsed {
                 Ok(WaitTarget::Exact(target)) => {
                     if !self
                         .subagents
@@ -1720,12 +1883,7 @@ impl Harness {
                             None,
                         )
                     } else {
-                        let source_tool_name = self
-                            .subagents
-                            .wait_tracker
-                            .call_tool_names
-                            .get(&target)
-                            .cloned();
+                        let source_tool_name = self.subagents.wait_tracker.call_tool_name(&target);
                         wait_interrupted_reply(
                             call_id,
                             visible_tool_name,
@@ -1744,6 +1902,9 @@ impl Harness {
                 ),
                 Err(message) => wait_error_reply(call_id, visible_tool_name, message, None),
             };
+            if let Some(outcome) = settlement_outcome {
+                reply = reply.with_settlement(&wait, outcome);
+            }
             self.publish_wait_replies(vec![reply]);
             return Ok(());
         }
@@ -1752,7 +1913,15 @@ impl Harness {
             call_id,
             visible_tool_name,
             &call.arguments,
+            wait_observation,
         );
+        if let Some((observation_id, registration)) = start.registration.clone() {
+            self.append_best_effort_observation(
+                agent_id,
+                observation_id,
+                Event::AgentToolWaitRegistered(registration),
+            );
+        }
         if let Some(target) = start.suppress_call_id {
             self.suppress_background_completion_prompt(target);
         }
@@ -1783,6 +1952,29 @@ impl Harness {
                             }))
                 })
         })
+    }
+
+    fn pending_wait_preempting_activation(
+        &self,
+        agent_id: &AgentId,
+        consumable_completion: Option<&ToolCallId>,
+    ) -> Option<tau_proto::ObservationId> {
+        let agent = self.agents.get(agent_id)?;
+        agent
+            .pending_message_wakes
+            .iter()
+            .find_map(|wake| wake.activation_observation)
+            .or_else(|| {
+                agent.pending_prompts.iter().find_map(|prompt| {
+                    (prompt.creates_inference_activation()
+                        && (!prompt.is_activating_background_completion()
+                            || consumable_completion.is_none_or(|call_id| {
+                                prompt.text != crate::harness::background_completion_prompt(call_id)
+                            })))
+                    .then_some(prompt.activation_observation)
+                    .flatten()
+                })
+            })
     }
 
     pub(crate) fn ensure_harness_owned_tool_tracking(
@@ -1959,6 +2151,18 @@ impl Harness {
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&cid, &wait_call_id);
             let ownerless = transcript_owner.is_none();
+            let cause = match &reply.kind {
+                WaitReplyKind::Result { .. } => tau_proto::ToolTerminalCause::Completed,
+                WaitReplyKind::Error { .. } => tau_proto::ToolTerminalCause::ToolError,
+            };
+            let wait_terminal = transcript_owner
+                .and_then(|owner| self.observe_tool_terminal(owner, &wait_call_id, cause));
+            if wait_terminal.is_some()
+                && let Some(settlement) = reply.settlement
+            {
+                self.pending_wait_settlements
+                    .insert(wait_call_id.clone(), settlement);
+            }
             match reply.kind {
                 WaitReplyKind::Result { result, display } => {
                     self.publish_terminal_tool_result(
@@ -2363,1130 +2567,6 @@ fn parse_message_args(arguments: &CborValue) -> Result<MessageArgs, String> {
         recipient_id,
         message,
     })
-}
-
-const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "original_tool_call_id";
-const NO_BACKGROUND_WAIT_CANDIDATES: &str = "no background tool calls are running or completed in this conversation; use `wait({\"timeout_minutes\": N})` with a positive integer N to wait for new activating input";
-const MAX_INPUT_WAIT_MINUTES: i128 = 60;
-
-fn wait_timeout_args(timeout: Duration) -> String {
-    format!("{}m", timeout.as_secs() / 60)
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum WaitTarget {
-    Exact(ToolCallId),
-    AnyBackground,
-    AnyInput(Duration),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum WaitCallState {
-    Pending,
-    Backgrounded,
-    NormalReturned,
-    BackgroundResult(ToolBackgroundResult),
-    BackgroundError(ToolBackgroundError),
-    Consumed,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct WaitRequest {
-    call_id: ToolCallId,
-    tool_name: ToolName,
-    owner: AgentId,
-    /// Empty for exact/bare waits; normalized and bounded `Nm` for input waits.
-    display_args: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct InputWaitRequest {
-    request: WaitRequest,
-    deadline: Instant,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum WaitReplyKind {
-    Result {
-        result: CborValue,
-        display: Option<ToolUseState>,
-    },
-    Error {
-        message: String,
-        details: Option<CborValue>,
-        display: Option<ToolUseState>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct WaitReply {
-    wait_call_id: ToolCallId,
-    wait_tool_name: ToolName,
-    kind: WaitReplyKind,
-    suppress_call_id: Option<ToolCallId>,
-    unsuppress_call_id: Option<ToolCallId>,
-}
-
-#[derive(Clone, Debug, PartialEq, Default)]
-struct WaitStart {
-    reply: Option<WaitReply>,
-    suppress_call_id: Option<ToolCallId>,
-}
-
-#[derive(Clone, Debug, PartialEq, Default)]
-struct WaitCancel {
-    replies: Vec<WaitReply>,
-    unsuppress_call_ids: Vec<ToolCallId>,
-    suppress_call_ids: Vec<ToolCallId>,
-}
-
-#[derive(Default)]
-struct WaitTracker {
-    calls: HashMap<ToolCallId, WaitCallState>,
-    waiters: HashMap<ToolCallId, WaitRequest>,
-    any_waiters: HashMap<AgentId, WaitRequest>,
-    input_waiters: HashMap<AgentId, InputWaitRequest>,
-    call_owners: HashMap<ToolCallId, AgentId>,
-    call_tool_names: HashMap<ToolCallId, ToolName>,
-    completion_order: VecDeque<ToolCallId>,
-}
-
-impl WaitTracker {
-    fn record_tool_invoke(&mut self, call_id: ToolCallId, tool_name: ToolName, owner: AgentId) {
-        if tool_name.as_str() != WAIT_TOOL_NAME {
-            self.call_tool_names
-                .insert(call_id.clone(), tool_name.clone());
-            self.call_owners.insert(call_id.clone(), owner);
-            self.calls.entry(call_id).or_insert(WaitCallState::Pending);
-        }
-    }
-
-    fn handle_wait_invoke(
-        &mut self,
-        owner: &AgentId,
-        call_id: ToolCallId,
-        tool_name: ToolName,
-        arguments: &CborValue,
-    ) -> WaitStart {
-        self.handle_wait_invoke_at(owner, call_id, tool_name, arguments, Instant::now())
-    }
-
-    fn handle_wait_invoke_at(
-        &mut self,
-        owner: &AgentId,
-        call_id: ToolCallId,
-        tool_name: ToolName,
-        arguments: &CborValue,
-        now: Instant,
-    ) -> WaitStart {
-        let target = match parse_wait_args(arguments) {
-            Ok(target) => target,
-            Err(message) => {
-                return WaitStart::reply(wait_error_reply(
-                    call_id,
-                    tool_name,
-                    message,
-                    Some(arguments.clone()),
-                ));
-            }
-        };
-        let display_args = match &target {
-            WaitTarget::AnyInput(timeout) => wait_timeout_args(*timeout),
-            _ => String::new(),
-        };
-        let wait = WaitRequest {
-            call_id,
-            tool_name,
-            owner: owner.clone(),
-            display_args,
-        };
-        match target {
-            WaitTarget::Exact(target) => self.start_exact_wait(target, wait),
-            WaitTarget::AnyBackground => self.start_any_wait(owner.clone(), wait),
-            WaitTarget::AnyInput(timeout) => {
-                self.start_input_wait(owner.clone(), wait, now + timeout)
-            }
-        }
-    }
-
-    fn start_exact_wait(&mut self, target: ToolCallId, wait: WaitRequest) -> WaitStart {
-        if !self.call_is_owned_by(&target, &wait.owner) {
-            return WaitStart::reply(wait_error_reply(
-                wait.call_id,
-                wait.tool_name,
-                format!("unknown tool call: `{target}`"),
-                None,
-            ));
-        }
-        if self.waiters.contains_key(&target) {
-            return WaitStart::reply(wait_error_reply(
-                wait.call_id,
-                wait.tool_name,
-                "existing wait for this tool already in progress".to_owned(),
-                None,
-            ));
-        }
-        let state = self.calls.remove(&target);
-        match state {
-            Some(WaitCallState::Pending) => {
-                self.calls.insert(target.clone(), WaitCallState::Pending);
-                self.waiters.insert(target, wait);
-                WaitStart::default()
-            }
-            Some(WaitCallState::Backgrounded) => {
-                self.calls
-                    .insert(target.clone(), WaitCallState::Backgrounded);
-                self.waiters.insert(target.clone(), wait);
-                WaitStart::suppress(target)
-            }
-            Some(WaitCallState::NormalReturned) => {
-                self.calls.insert(target.clone(), WaitCallState::Consumed);
-                let source_tool_name = self.call_tool_names.get(&target).cloned();
-                WaitStart::reply(
-                    wait_error_reply(
-                        wait.call_id,
-                        wait.tool_name,
-                        format!("Tool call {target} returned normally, not backgrounded"),
-                        None,
-                    )
-                    .with_source_display(source_tool_name, None),
-                )
-            }
-            Some(WaitCallState::BackgroundResult(result)) => {
-                self.calls.insert(target.clone(), WaitCallState::Consumed);
-                self.remove_completed(&target);
-                let source_tool_name = Some(result.tool_name.clone());
-                WaitStart::reply_with_suppress(
-                    wait_result_reply(
-                        wait.call_id,
-                        wait.tool_name,
-                        source_tool_name,
-                        result.result,
-                        result.display,
-                    ),
-                    target,
-                )
-            }
-            Some(WaitCallState::BackgroundError(error)) => {
-                self.calls.insert(target.clone(), WaitCallState::Consumed);
-                self.remove_completed(&target);
-                let source_tool_name = Some(error.tool_name.clone());
-                WaitStart::reply_with_suppress(
-                    wait_error_reply(wait.call_id, wait.tool_name, error.message, error.details)
-                        .with_source_display(source_tool_name, error.display),
-                    target,
-                )
-            }
-            Some(WaitCallState::Consumed) => {
-                let source_tool_name = self.call_tool_names.get(&target).cloned();
-                WaitStart::reply(
-                    wait_error_reply(
-                        wait.call_id,
-                        wait.tool_name,
-                        format!("result for tool call `{target}` already consumed"),
-                        None,
-                    )
-                    .with_source_display(source_tool_name, None),
-                )
-            }
-            None => WaitStart::reply(wait_error_reply(
-                wait.call_id,
-                wait.tool_name,
-                format!("unknown tool call: `{target}`"),
-                None,
-            )),
-        }
-    }
-
-    fn call_is_owned_by(&self, call_id: &ToolCallId, owner: &AgentId) -> bool {
-        self.call_owners.get(call_id) == Some(owner)
-    }
-
-    fn completed_call_is_owned_by(&self, call_id: &ToolCallId, owner: &AgentId) -> bool {
-        self.call_is_owned_by(call_id, owner) && self.is_completed(call_id)
-    }
-
-    fn start_any_wait(&mut self, owner: AgentId, wait: WaitRequest) -> WaitStart {
-        if self.any_waiters.contains_key(&owner) {
-            return WaitStart::reply(wait_error_reply(
-                wait.call_id,
-                wait.tool_name,
-                "existing wait for a background tool call in this conversation already in progress"
-                    .to_owned(),
-                None,
-            ));
-        }
-        if let Some(target) = self.oldest_completed_for_owner(&owner) {
-            return self.consume_completed_for_any(target, wait);
-        }
-        if self.has_running_background_for_owner(&owner) {
-            self.any_waiters.insert(owner, wait);
-            return WaitStart::default();
-        }
-        WaitStart::reply(wait_error_reply(
-            wait.call_id,
-            wait.tool_name,
-            NO_BACKGROUND_WAIT_CANDIDATES.to_owned(),
-            None,
-        ))
-    }
-
-    fn start_input_wait(
-        &mut self,
-        owner: AgentId,
-        wait: WaitRequest,
-        deadline: Instant,
-    ) -> WaitStart {
-        if self.input_waiters.contains_key(&owner) {
-            let mut reply = wait_error_reply(
-                wait.call_id,
-                wait.tool_name,
-                "existing input wait for this agent already in progress".to_owned(),
-                None,
-            );
-            if let WaitReplyKind::Error { display, .. } = &mut reply.kind {
-                *display = Some(ToolUseState {
-                    args: wait.display_args,
-                    status: ToolUseStatus::Error,
-                    status_text: "existing input wait for this agent already in progress"
-                        .to_owned(),
-                    ..Default::default()
-                });
-            }
-            return WaitStart::reply(reply);
-        }
-        self.input_waiters.insert(
-            owner,
-            InputWaitRequest {
-                request: wait,
-                deadline,
-            },
-        );
-        WaitStart::default()
-    }
-
-    fn next_input_wait_deadline(&self) -> Option<Instant> {
-        self.input_waiters.values().map(|wait| wait.deadline).min()
-    }
-
-    fn expire_input_waits(&mut self, now: Instant) -> Vec<WaitReply> {
-        let due: Vec<AgentId> = self
-            .input_waiters
-            .iter()
-            .filter(|(_, wait)| wait.deadline <= now)
-            .map(|(owner, _)| owner.clone())
-            .collect();
-        due.into_iter()
-            .filter_map(|owner| self.input_waiters.remove(&owner))
-            .map(|wait| {
-                wait_timed_out_reply(
-                    wait.request.call_id,
-                    wait.request.tool_name,
-                    wait.request.display_args,
-                )
-            })
-            .collect()
-    }
-
-    fn consume_completed_for_any(&mut self, target: ToolCallId, wait: WaitRequest) -> WaitStart {
-        let Some(state) = self.calls.remove(&target) else {
-            return WaitStart::reply(wait_error_reply(
-                wait.call_id,
-                wait.tool_name,
-                format!("unknown tool call: `{target}`"),
-                None,
-            ));
-        };
-        self.calls.insert(target.clone(), WaitCallState::Consumed);
-        self.remove_completed(&target);
-        match state {
-            WaitCallState::BackgroundResult(result) => {
-                let source_tool_name = Some(result.tool_name.clone());
-                WaitStart::reply_with_suppress(
-                    wait_result_reply(
-                        wait.call_id,
-                        wait.tool_name,
-                        source_tool_name,
-                        result_with_original_tool_call_id(&target, result.result),
-                        result.display,
-                    ),
-                    target,
-                )
-            }
-            WaitCallState::BackgroundError(error) => {
-                let source_tool_name = Some(error.tool_name.clone());
-                WaitStart::reply_with_suppress(
-                    wait_error_reply(
-                        wait.call_id,
-                        wait.tool_name,
-                        error.message,
-                        details_with_original_tool_call_id(&target, error.details),
-                    )
-                    .with_source_display(source_tool_name, error.display),
-                    target,
-                )
-            }
-            other => {
-                self.calls.insert(target.clone(), other);
-                let source_tool_name = self.call_tool_names.get(&target).cloned();
-                WaitStart::reply(
-                    wait_error_reply(
-                        wait.call_id,
-                        wait.tool_name,
-                        format!("tool call `{target}` has no completed background result"),
-                        None,
-                    )
-                    .with_source_display(source_tool_name, None),
-                )
-            }
-        }
-    }
-
-    fn record_tool_result(&mut self, result: ToolResult, owner: AgentId) -> Vec<WaitReply> {
-        if result.tool_name.as_str() == WAIT_TOOL_NAME {
-            return Vec::new();
-        }
-        let call_id = result.call_id.clone();
-        self.call_tool_names
-            .insert(call_id.clone(), result.tool_name.clone());
-        self.call_owners.insert(call_id.clone(), owner);
-        if self.is_consumed(&call_id) || self.is_backgrounded(&call_id) {
-            return Vec::new();
-        }
-        if result.kind == ToolResultKind::BackgroundPlaceholder {
-            self.calls.insert(call_id, WaitCallState::Backgrounded);
-            return Vec::new();
-        }
-        if let Some(wait) = self.waiters.remove(&call_id) {
-            self.calls.insert(call_id, WaitCallState::Consumed);
-            let source_tool_name = Some(result.tool_name.clone());
-            return vec![wait_result_reply(
-                wait.call_id,
-                wait.tool_name,
-                source_tool_name,
-                result.result,
-                result.display,
-            )];
-        }
-        self.calls.insert(call_id, WaitCallState::NormalReturned);
-        Vec::new()
-    }
-
-    fn record_tool_error(&mut self, error: ToolError, owner: AgentId) -> Vec<WaitReply> {
-        if error.tool_name.as_str() == WAIT_TOOL_NAME {
-            return Vec::new();
-        }
-        let call_id = error.call_id.clone();
-        self.call_tool_names
-            .insert(call_id.clone(), error.tool_name.clone());
-        self.call_owners.insert(call_id.clone(), owner);
-        if self.is_consumed(&call_id) {
-            return Vec::new();
-        }
-        if let Some(wait) = self.waiters.remove(&call_id) {
-            self.calls.insert(call_id, WaitCallState::Consumed);
-            let source_tool_name = Some(error.tool_name.clone());
-            return vec![
-                wait_error_reply(wait.call_id, wait.tool_name, error.message, error.details)
-                    .with_source_display(source_tool_name, error.display),
-            ];
-        }
-        self.calls.insert(call_id, WaitCallState::NormalReturned);
-        Vec::new()
-    }
-
-    fn record_background_result(
-        &mut self,
-        result: ToolBackgroundResult,
-        owner: AgentId,
-    ) -> Vec<WaitReply> {
-        if result.tool_name.as_str() == WAIT_TOOL_NAME {
-            return Vec::new();
-        }
-        let call_id = result.call_id.clone();
-        self.call_tool_names
-            .insert(call_id.clone(), result.tool_name.clone());
-        self.call_owners.insert(call_id.clone(), owner.clone());
-        if self.is_consumed(&call_id) {
-            return Vec::new();
-        }
-        if let Some(wait) = self.waiters.remove(&call_id) {
-            self.calls.insert(call_id.clone(), WaitCallState::Consumed);
-            self.remove_completed(&call_id);
-            let source_tool_name = Some(result.tool_name.clone());
-            let mut replies = vec![
-                wait_result_reply(
-                    wait.call_id,
-                    wait.tool_name,
-                    source_tool_name,
-                    result.result,
-                    result.display,
-                )
-                .with_suppress(call_id.clone()),
-            ];
-            replies.extend(self.finish_any_waiter_if_no_candidates(&owner));
-            return replies;
-        }
-        if let Some(wait) = self.any_waiters.remove(&owner) {
-            self.calls.insert(call_id.clone(), WaitCallState::Consumed);
-            self.remove_completed(&call_id);
-            return vec![
-                wait_result_reply(
-                    wait.call_id,
-                    wait.tool_name,
-                    Some(result.tool_name.clone()),
-                    result_with_original_tool_call_id(&call_id, result.result),
-                    result.display,
-                )
-                .with_suppress(call_id),
-            ];
-        }
-        self.calls
-            .insert(call_id.clone(), WaitCallState::BackgroundResult(result));
-        self.push_completed(call_id);
-        Vec::new()
-    }
-
-    fn record_background_error(
-        &mut self,
-        error: ToolBackgroundError,
-        owner: AgentId,
-    ) -> Vec<WaitReply> {
-        if error.tool_name.as_str() == WAIT_TOOL_NAME {
-            return Vec::new();
-        }
-        let call_id = error.call_id.clone();
-        self.call_tool_names
-            .insert(call_id.clone(), error.tool_name.clone());
-        self.call_owners.insert(call_id.clone(), owner.clone());
-        if self.is_consumed(&call_id) {
-            return Vec::new();
-        }
-        if let Some(wait) = self.waiters.remove(&call_id) {
-            self.calls.insert(call_id.clone(), WaitCallState::Consumed);
-            self.remove_completed(&call_id);
-            let source_tool_name = Some(error.tool_name.clone());
-            let mut replies = vec![
-                wait_error_reply(wait.call_id, wait.tool_name, error.message, error.details)
-                    .with_source_display(source_tool_name, error.display)
-                    .with_suppress(call_id.clone()),
-            ];
-            replies.extend(self.finish_any_waiter_if_no_candidates(&owner));
-            return replies;
-        }
-        if let Some(wait) = self.any_waiters.remove(&owner) {
-            self.calls.insert(call_id.clone(), WaitCallState::Consumed);
-            self.remove_completed(&call_id);
-            let source_tool_name = Some(error.tool_name.clone());
-            return vec![
-                wait_error_reply(
-                    wait.call_id,
-                    wait.tool_name,
-                    error.message,
-                    details_with_original_tool_call_id(&call_id, error.details),
-                )
-                .with_source_display(source_tool_name, error.display)
-                .with_suppress(call_id),
-            ];
-        }
-        self.calls
-            .insert(call_id.clone(), WaitCallState::BackgroundError(error));
-        self.push_completed(call_id);
-        Vec::new()
-    }
-
-    fn record_tool_cancelled(&mut self, call_ids: &HashSet<ToolCallId>) -> WaitCancel {
-        if call_ids.is_empty() {
-            return WaitCancel::default();
-        }
-
-        let cancelled_owners: HashSet<AgentId> = call_ids
-            .iter()
-            .filter_map(|call_id| self.call_owners.get(call_id).cloned())
-            .collect();
-        let mut exact_consumed_cancelled = HashSet::new();
-        self.input_waiters
-            .retain(|_, wait| !call_ids.contains(&wait.request.call_id));
-        let mut cancelled = WaitCancel::default();
-        let waiters = std::mem::take(&mut self.waiters);
-        for (target, wait) in waiters {
-            let target_cancelled = call_ids.contains(&target);
-            let wait_cancelled = call_ids.contains(&wait.call_id);
-            let target_was_backgrounded = self.is_backgrounded(&target);
-
-            if wait_cancelled {
-                if target_was_backgrounded {
-                    cancelled.unsuppress_call_ids.push(target.clone());
-                }
-                continue;
-            }
-            if target_cancelled {
-                let source_tool_name = self.call_tool_names.get(&target).cloned();
-                let mut reply = wait_error_reply(
-                    wait.call_id,
-                    wait.tool_name,
-                    format!("Tool call `{target}` was cancelled"),
-                    None,
-                )
-                .with_source_display(source_tool_name, None);
-                if target_was_backgrounded {
-                    reply = reply.with_unsuppress(target.clone());
-                }
-                exact_consumed_cancelled.insert(target.clone());
-                cancelled.replies.push(reply);
-            } else {
-                self.waiters.insert(target, wait);
-            }
-        }
-
-        for call_id in call_ids {
-            if exact_consumed_cancelled.contains(call_id) {
-                self.calls.insert(call_id.clone(), WaitCallState::Consumed);
-                self.remove_completed(call_id);
-            } else if self.is_backgrounded(call_id) {
-                self.calls.insert(
-                    call_id.clone(),
-                    WaitCallState::BackgroundError(ToolBackgroundError {
-                        call_id: call_id.clone(),
-                        tool_name: self
-                            .call_tool_names
-                            .get(call_id)
-                            .cloned()
-                            .unwrap_or_else(|| ToolName::new("cancelled")),
-                        tool_type: ToolType::Function,
-                        message: "Tool call canceled".to_owned(),
-                        details: None,
-                        originator: tau_proto::PromptOriginator::User,
-
-                        display: None,
-                    }),
-                );
-                self.push_completed(call_id.clone());
-            } else {
-                self.calls.insert(call_id.clone(), WaitCallState::Consumed);
-                self.remove_completed(call_id);
-            }
-        }
-
-        let any_waiters = std::mem::take(&mut self.any_waiters);
-        for (owner, wait) in any_waiters {
-            if call_ids.contains(&wait.call_id) {
-                continue;
-            }
-            if let Some(target) = self.oldest_completed_for_owner(&owner) {
-                let start = self.consume_completed_for_any(target, wait);
-                if let Some(call_id) = start.suppress_call_id {
-                    cancelled.suppress_call_ids.push(call_id);
-                }
-                cancelled.replies.extend(start.reply);
-            } else if self.has_running_background_for_owner(&owner) {
-                self.any_waiters.insert(owner, wait);
-            } else if cancelled_owners.contains(&owner) {
-                let source_tool_name = call_ids.iter().find_map(|call_id| {
-                    if self.call_owners.get(call_id) == Some(&owner) {
-                        self.call_tool_names.get(call_id).cloned()
-                    } else {
-                        None
-                    }
-                });
-                cancelled.replies.push(
-                    wait_error_reply(
-                        wait.call_id,
-                        wait.tool_name,
-                        "background tool call in this conversation was cancelled".to_owned(),
-                        None,
-                    )
-                    .with_source_display(source_tool_name, None),
-                );
-            } else {
-                self.any_waiters.insert(owner, wait);
-            }
-        }
-
-        cancelled
-    }
-
-    fn interrupt_active_waits_for(&mut self, owner: &AgentId) -> Vec<WaitReply> {
-        let targets: Vec<ToolCallId> = self
-            .waiters
-            .keys()
-            .filter(|target| {
-                self.waiters
-                    .get(*target)
-                    .is_some_and(|wait| &wait.owner == owner)
-            })
-            .cloned()
-            .collect();
-        let mut replies: Vec<WaitReply> = targets
-            .into_iter()
-            .filter_map(|target| {
-                self.waiters
-                    .remove(&target)
-                    .map(|wait| self.interrupted_exact_wait_reply(target, wait))
-            })
-            .collect();
-        if let Some(wait) = self.any_waiters.remove(owner) {
-            replies.push(wait_interrupted_any_reply(wait.call_id, wait.tool_name));
-        }
-        replies
-    }
-
-    fn activate_waits_for(&mut self, owner: &AgentId) -> Vec<WaitReply> {
-        let mut replies = self.interrupt_active_waits_for(owner);
-        if let Some(wait) = self.input_waiters.remove(owner) {
-            replies.push(wait_input_available_reply(
-                wait.request.call_id,
-                wait.request.tool_name,
-                wait.request.display_args,
-            ));
-        }
-        replies
-    }
-
-    fn discard_input_wait_for(&mut self, owner: &AgentId) {
-        self.input_waiters.remove(owner);
-    }
-
-    fn interrupted_exact_wait_reply(&self, target: ToolCallId, wait: WaitRequest) -> WaitReply {
-        let source_tool_name = self.call_tool_names.get(&target).cloned();
-        let mut reply =
-            wait_interrupted_reply(wait.call_id, wait.tool_name, source_tool_name, &target);
-        if self.is_backgrounded(&target) {
-            reply = reply.with_unsuppress(target);
-        }
-        reply
-    }
-
-    fn transfer_call_owner(&mut self, call_id: &ToolCallId, source: &AgentId, target: &AgentId) {
-        if !self.calls.contains_key(call_id) {
-            return;
-        }
-        match self.call_owners.get(call_id) {
-            Some(owner) if owner != source => {}
-            _ => {
-                self.call_owners.insert(call_id.clone(), target.clone());
-            }
-        }
-    }
-
-    fn discard_call_owner(&mut self, call_id: &ToolCallId, source: &AgentId) {
-        if self.call_owners.get(call_id) == Some(source) {
-            self.call_owners.remove(call_id);
-            self.call_tool_names.remove(call_id);
-        }
-        if self.calls.get(call_id) == Some(&WaitCallState::Backgrounded) {
-            self.calls.remove(call_id);
-        }
-        self.completion_order
-            .retain(|completed| completed != call_id);
-    }
-
-    fn finish_any_waiter_if_no_candidates(&mut self, owner: &AgentId) -> Vec<WaitReply> {
-        if self.oldest_completed_for_owner(owner).is_some()
-            || self.has_running_background_for_owner(owner)
-        {
-            return Vec::new();
-        }
-        let Some(wait) = self.any_waiters.remove(owner) else {
-            return Vec::new();
-        };
-        vec![wait_error_reply(
-            wait.call_id,
-            wait.tool_name,
-            NO_BACKGROUND_WAIT_CANDIDATES.to_owned(),
-            None,
-        )]
-    }
-
-    fn oldest_completed_for_owner(&self, owner: &AgentId) -> Option<ToolCallId> {
-        self.completion_order.iter().find_map(|call_id| {
-            (self.call_owners.get(call_id) == Some(owner) && self.is_completed(call_id))
-                .then_some(call_id.clone())
-        })
-    }
-
-    fn has_running_background_for_owner(&self, owner: &AgentId) -> bool {
-        self.calls.iter().any(|(call_id, state)| {
-            matches!(state, WaitCallState::Backgrounded)
-                && self.call_owners.get(call_id) == Some(owner)
-        })
-    }
-
-    fn push_completed(&mut self, call_id: ToolCallId) {
-        if self
-            .completion_order
-            .iter()
-            .all(|existing| existing != &call_id)
-        {
-            self.completion_order.push_back(call_id);
-        }
-    }
-
-    fn remove_completed(&mut self, call_id: &ToolCallId) {
-        self.completion_order.retain(|existing| existing != call_id);
-    }
-
-    fn is_backgrounded(&self, call_id: &ToolCallId) -> bool {
-        self.calls
-            .get(call_id)
-            .is_some_and(|state| matches!(state, WaitCallState::Backgrounded))
-    }
-
-    fn is_completed(&self, call_id: &ToolCallId) -> bool {
-        self.calls.get(call_id).is_some_and(|state| {
-            matches!(
-                state,
-                WaitCallState::BackgroundResult(_) | WaitCallState::BackgroundError(_)
-            )
-        })
-    }
-
-    fn is_consumed(&self, call_id: &ToolCallId) -> bool {
-        self.calls
-            .get(call_id)
-            .is_some_and(|state| matches!(state, WaitCallState::Consumed))
-    }
-}
-
-impl WaitReply {
-    fn with_source_display(
-        mut self,
-        source_tool_name: Option<ToolName>,
-        display: Option<ToolUseState>,
-    ) -> Self {
-        if let WaitReplyKind::Error {
-            message,
-            display: dst,
-            ..
-        } = &mut self.kind
-        {
-            *dst = Some(wait_display_from_source(
-                source_tool_name,
-                display,
-                ToolUseStatus::Error,
-                wait_error_status_text(message),
-            ));
-        }
-        self
-    }
-
-    fn with_suppress(mut self, call_id: ToolCallId) -> Self {
-        self.suppress_call_id = Some(call_id);
-        self
-    }
-
-    fn with_unsuppress(mut self, call_id: ToolCallId) -> Self {
-        self.unsuppress_call_id = Some(call_id);
-        self
-    }
-}
-
-impl WaitStart {
-    fn reply(reply: WaitReply) -> Self {
-        Self {
-            reply: Some(reply),
-            suppress_call_id: None,
-        }
-    }
-
-    fn suppress(call_id: ToolCallId) -> Self {
-        Self {
-            reply: None,
-            suppress_call_id: Some(call_id),
-        }
-    }
-
-    fn reply_with_suppress(reply: WaitReply, call_id: ToolCallId) -> Self {
-        Self {
-            reply: Some(reply),
-            suppress_call_id: Some(call_id),
-        }
-    }
-}
-
-fn wait_result_reply(
-    wait_call_id: ToolCallId,
-    wait_tool_name: ToolName,
-    source_tool_name: Option<ToolName>,
-    result: CborValue,
-    display: Option<ToolUseState>,
-) -> WaitReply {
-    WaitReply {
-        wait_call_id,
-        wait_tool_name,
-        kind: WaitReplyKind::Result {
-            result,
-            display: Some(wait_display_from_source(
-                source_tool_name,
-                display,
-                ToolUseStatus::Success,
-                "ok".to_owned(),
-            )),
-        },
-        suppress_call_id: None,
-        unsuppress_call_id: None,
-    }
-}
-
-fn wait_display_from_source(
-    source_tool_name: Option<ToolName>,
-    display: Option<ToolUseState>,
-    default_status: ToolUseStatus,
-    default_status_text: String,
-) -> ToolUseState {
-    // The waited tool's descriptor describes the payload returned to the model.
-    // Rendering that descriptor under the `wait` tool makes the UI surface
-    // arbitrary command/path labels when the source tool happened to provide
-    // them. Keep the source tool name plus completion severity for the `wait`
-    // call itself.
-    let (display_args, status, status_text) = display
-        .map(|display| (display.args, display.status, display.status_text))
-        .unwrap_or((String::new(), default_status, default_status_text));
-    ToolUseState {
-        args: source_tool_name
-            .map(|tool_name| tool_name.to_string())
-            .unwrap_or(display_args),
-        status,
-        status_text: wait_display_status_text(status, status_text),
-        ..Default::default()
-    }
-}
-
-fn wait_display_status_text(status: ToolUseStatus, status_text: String) -> String {
-    if !status_text.trim().is_empty() {
-        return status_text;
-    }
-    match status {
-        ToolUseStatus::Success => "ok".to_owned(),
-        ToolUseStatus::Warning => "warning".to_owned(),
-        ToolUseStatus::Error => "err".to_owned(),
-        ToolUseStatus::InProgress => tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
-    }
-}
-
-fn wait_error_status_text(message: &str) -> String {
-    message
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("err")
-        .to_owned()
-}
-
-fn wait_error_reply(
-    wait_call_id: ToolCallId,
-    wait_tool_name: ToolName,
-    message: String,
-    details: Option<CborValue>,
-) -> WaitReply {
-    WaitReply {
-        wait_call_id,
-        wait_tool_name,
-        kind: WaitReplyKind::Error {
-            message,
-            details,
-            display: None,
-        },
-        suppress_call_id: None,
-        unsuppress_call_id: None,
-    }
-}
-
-fn wait_interrupted_reply(
-    wait_call_id: ToolCallId,
-    wait_tool_name: ToolName,
-    source_tool_name: Option<ToolName>,
-    target_call_id: &ToolCallId,
-) -> WaitReply {
-    wait_result_reply(
-        wait_call_id,
-        wait_tool_name,
-        source_tool_name,
-        CborValue::Text(format!(
-            "{}: true\n\nWaiting for tool call `{target_call_id}` was interrupted because new input is queued. Try again later.",
-            tau_proto::TAU_INTERNAL_HEADER_NAME
-        )),
-        None,
-    )
-}
-
-fn wait_interrupted_any_reply(wait_call_id: ToolCallId, wait_tool_name: ToolName) -> WaitReply {
-    wait_result_reply(
-        wait_call_id,
-        wait_tool_name,
-        None,
-        CborValue::Text(format!(
-            "{}: true\n\nWaiting for a background tool call in this conversation was interrupted because new input is queued. Try again later.",
-            tau_proto::TAU_INTERNAL_HEADER_NAME
-        )),
-        None,
-    )
-}
-
-fn result_with_original_tool_call_id(
-    original_call_id: &ToolCallId,
-    result: CborValue,
-) -> CborValue {
-    let header = original_tool_call_id_entry(original_call_id);
-    match result {
-        CborValue::Map(mut entries) => {
-            entries.insert(0, header);
-            CborValue::Map(entries)
-        }
-        other => CborValue::Map(vec![header, (CborValue::Text("output".to_owned()), other)]),
-    }
-}
-
-fn details_with_original_tool_call_id(
-    original_call_id: &ToolCallId,
-    details: Option<CborValue>,
-) -> Option<CborValue> {
-    let header = original_tool_call_id_entry(original_call_id);
-    Some(match details {
-        Some(CborValue::Map(mut entries)) => {
-            entries.insert(0, header);
-            CborValue::Map(entries)
-        }
-        Some(other) => CborValue::Map(vec![header, (CborValue::Text("details".to_owned()), other)]),
-        None => CborValue::Map(vec![header]),
-    })
-}
-
-fn original_tool_call_id_entry(original_call_id: &ToolCallId) -> (CborValue, CborValue) {
-    (
-        CborValue::Text(ORIGINAL_TOOL_CALL_ID_HEADER.to_owned()),
-        CborValue::Text(original_call_id.to_string()),
-    )
-}
-
-fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, String> {
-    let CborValue::Map(entries) = arguments else {
-        return Err("arguments must be an object".to_owned());
-    };
-    let mut tool_call_id_value = None;
-    let mut timeout_minutes_value = None;
-    let mut legacy_any_input = false;
-    let mut tool_call_id_count = 0_u8;
-    let mut timeout_minutes_count = 0_u8;
-    for (k, v) in entries {
-        let CborValue::Text(name) = k else { continue };
-        match name.as_str() {
-            "tool_call_id" => {
-                tool_call_id_count = tool_call_id_count.saturating_add(1);
-                tool_call_id_value.get_or_insert(v);
-            }
-            "timeout_minutes" => {
-                timeout_minutes_count = timeout_minutes_count.saturating_add(1);
-                timeout_minutes_value.get_or_insert(v);
-            }
-            "any_input" => legacy_any_input = true,
-            _ => {}
-        }
-    }
-    if legacy_any_input {
-        return Err(
-            "`any_input` is no longer supported; use `timeout_minutes` with a positive integer"
-                .to_owned(),
-        );
-    }
-    if tool_call_id_value.is_some() && timeout_minutes_value.is_some() {
-        return Err("`tool_call_id` and `timeout_minutes` are mutually exclusive".to_owned());
-    }
-    if tool_call_id_count > 1 {
-        return Err("`tool_call_id` must not be repeated".to_owned());
-    }
-    if timeout_minutes_count > 1 {
-        return Err("`timeout_minutes` must not be repeated".to_owned());
-    }
-    if let Some(value) = tool_call_id_value {
-        return match value {
-            CborValue::Text(text) if text.trim().is_empty() => {
-                Err("`tool_call_id` must not be empty".to_owned())
-            }
-            CborValue::Text(text) => Ok(WaitTarget::Exact(text.trim().to_owned().into())),
-            _ => Err("`tool_call_id` must be a string".to_owned()),
-        };
-    }
-    match timeout_minutes_value {
-        Some(CborValue::Integer(value)) => {
-            let minutes: i128 = (*value).into();
-            if minutes < 1 {
-                return Err("`timeout_minutes` must be at least 1".to_owned());
-            }
-            let effective_minutes = minutes.min(MAX_INPUT_WAIT_MINUTES) as u64;
-            Ok(WaitTarget::AnyInput(Duration::from_secs(
-                effective_minutes * 60,
-            )))
-        }
-        Some(_) => Err("`timeout_minutes` must be an integer".to_owned()),
-        None => Ok(WaitTarget::AnyBackground),
-    }
-}
-
-/// Validates wait arguments and returns the effective activating-input timeout
-/// in minutes when that mode was selected.
-///
-/// # Errors
-///
-/// Returns the same validation error used by wait invocation when arguments are
-/// malformed, conflicting, repeated, or otherwise unsupported.
-pub fn normalized_wait_timeout_minutes(arguments: &CborValue) -> Result<Option<u64>, String> {
-    match parse_wait_args(arguments)? {
-        WaitTarget::AnyInput(timeout) => Ok(Some(timeout.as_secs() / 60)),
-        _ => Ok(None),
-    }
-}
-
-fn wait_input_available_reply(
-    call_id: ToolCallId,
-    tool_name: ToolName,
-    display_args: String,
-) -> WaitReply {
-    wait_result_reply(
-        call_id,
-        tool_name,
-        None,
-        CborValue::Map(vec![(
-            CborValue::Text("input_available".to_owned()),
-            CborValue::Bool(true),
-        )]),
-        Some(ToolUseState {
-            args: display_args,
-            status: ToolUseStatus::Success,
-            status_text: "ok".to_owned(),
-            ..Default::default()
-        }),
-    )
-}
-
-fn wait_timed_out_reply(
-    call_id: ToolCallId,
-    tool_name: ToolName,
-    display_args: String,
-) -> WaitReply {
-    WaitReply {
-        wait_call_id: call_id,
-        wait_tool_name: tool_name,
-        kind: WaitReplyKind::Result {
-            result: CborValue::Map(vec![(
-                CborValue::Text("timed_out".to_owned()),
-                CborValue::Bool(true),
-            )]),
-            display: Some(wait_display_from_source(
-                None,
-                Some(ToolUseState {
-                    args: display_args,
-                    status: ToolUseStatus::Warning,
-                    status_text: "timeout".to_owned(),
-                    ..Default::default()
-                }),
-                ToolUseStatus::Warning,
-                "timeout".to_owned(),
-            )),
-        },
-        suppress_call_id: None,
-        unsuppress_call_id: None,
-    }
 }
 
 #[cfg(test)]

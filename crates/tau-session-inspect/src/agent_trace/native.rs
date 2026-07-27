@@ -40,6 +40,8 @@ struct Occurrence<'a> {
     agent_id: &'a AgentId,
     /// Journal-local authoritative order.
     seq: tau_core::PersistedAgentEventSeq,
+    /// Stable identity of this durable occurrence.
+    observation_id: tau_proto::ObservationId,
     /// Durable wall-clock append timestamp.
     recorded_at_unix_micros: tau_proto::UnixMicros,
     /// Publishing connection, when known.
@@ -90,6 +92,7 @@ pub(super) fn occurrence_json(
         record_type: "event",
         agent_id,
         seq: record.seq,
+        observation_id: record.observation_id,
         recorded_at_unix_micros: record.recorded_at,
         source: &record.source,
         parent: &record.parent,

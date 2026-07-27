@@ -1,236 +1,28 @@
-//! Strict TOON serialization and field-level lossless framing.
+//! TOON serialization for the compact explicit-observation projection.
 
 use base64::Engine as _;
 use serde::Serialize;
-use tau_core::AgentJournalSnapshot;
-use tau_proto::{AgentId, ToolCallId, ToolName};
 
-use super::super::AgentTraceMode;
 use super::{
-    CallRecord, Header, OutputProjection, PayloadStore, Status, collect_calls, json_error,
-    sort_calls, trace_origin,
+    ActivationRecord, CallLifecycleRecord, CallOutputRecord, CallRecord, CallStatus, Header,
+    IncompleteCallStatus, LocalResolution, Record, RelationshipRecord, UnavailableResolution,
 };
 use crate::InspectError;
 
-/// Readable TOON envelope with exceptional payloads framed independently.
-#[derive(Serialize)]
-pub(super) struct ToonCallRecord<'a> {
-    /// Discriminator for a call item.
-    record_type: &'static str,
-    /// Trace-relative start time.
-    at_us: u64,
-    /// Owning agent.
-    agent_id: &'a AgentId,
-    /// Logical call identifier framing.
-    #[serde(flatten)]
-    call_id: ToonCallId<'a>,
-    /// Model-visible tool name.
-    tool: &'a ToolName,
-    /// Optional command framing.
-    #[serde(flatten)]
-    command: ToonCommand<'a>,
-    /// Argument framing.
-    #[serde(flatten)]
-    arguments: ToonArguments<'a>,
-    /// Terminal state.
-    status: Status,
-    /// Relative terminal duration.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    duration_us: Option<u64>,
-    /// Mode-specific output framing.
-    #[serde(flatten)]
-    output: ToonOutput<'a>,
-}
-
-/// Mutually exclusive TOON call-ID fields.
-#[derive(Serialize)]
-#[serde(untagged)]
-enum ToonCallId<'a> {
-    /// Direct safe call ID.
-    Direct {
-        /// Provider-assigned logical call identifier.
-        call_id: &'a ToolCallId,
-    },
-    /// Base64 UTF-8 call ID containing unsafe controls.
-    Base64 {
-        /// Base64-encoded UTF-8 call identifier.
-        call_id_base64: String,
-    },
-}
-
-/// Mutually exclusive optional TOON command fields.
-#[derive(Serialize)]
-#[serde(untagged)]
-enum ToonCommand<'a> {
-    /// No shell command.
-    Absent {},
-    /// Direct safe command.
-    Direct {
-        /// Direct shell command.
-        command: &'a str,
-    },
-    /// Base64 UTF-8 command containing unsafe controls.
-    Base64 {
-        /// Base64-encoded UTF-8 shell command.
-        command_base64: String,
-    },
-}
-
-/// Mutually exclusive TOON argument fields.
-#[derive(Serialize)]
-#[serde(untagged)]
-enum ToonArguments<'a> {
-    /// Direct ordinary safe arguments.
-    Direct {
-        /// Complete ordinary argument value.
-        arguments: &'a serde_json::Value,
-    },
-    /// Base64 compact JSON for tagged-CBOR or control-bearing arguments.
-    JsonBase64 {
-        /// Base64-encoded compact JSON argument value.
-        arguments_json_base64: String,
-    },
-}
-
-/// Mutually exclusive TOON output fields.
-#[derive(Serialize)]
-#[serde(untagged)]
-enum ToonOutput<'a> {
-    /// Incomplete call without terminal output or metrics.
-    Absent {
-        /// Incomplete calls cannot contain complete terminal output.
-        output_complete: bool,
-    },
-    /// Direct safe terminal output with exact complete-output metrics.
-    Direct {
-        /// Complete rendered projection's UTF-8 byte count.
-        output_bytes: usize,
-        /// Complete rendered projection's logical-line count.
-        output_lines: usize,
-        /// Complete or bounded normalized output.
-        output: &'a str,
-        /// Whether `output` contains the complete rendered projection.
-        output_complete: bool,
-    },
-    /// Base64 UTF-8 terminal output containing unsafe controls.
-    Base64 {
-        /// Complete rendered projection's UTF-8 byte count.
-        output_bytes: usize,
-        /// Complete rendered projection's logical-line count.
-        output_lines: usize,
-        /// Base64-encoded complete or bounded normalized output.
-        output_base64: String,
-        /// Whether decoded output contains the complete rendered projection.
-        output_complete: bool,
-    },
-}
-impl<'a> CallRecord<'a> {
-    /// Preserves the readable call envelope while independently framing
-    /// payloads that direct TOON cannot represent safely and exactly.
-    pub(super) fn toon_projection(&'a self) -> Result<ToonCallRecord<'a>, InspectError> {
-        let CallRecord {
-            record_type,
-            at_us,
-            agent_id,
-            call_id,
-            tool,
-            command,
-            arguments,
-            status,
-            duration_us,
-            output,
-        } = self;
-        let call_id = if call_id.as_str().chars().any(is_unsafe_toon_char) {
-            ToonCallId::Base64 {
-                call_id_base64: base64::engine::general_purpose::STANDARD
-                    .encode(call_id.as_str().as_bytes()),
-            }
-        } else {
-            ToonCallId::Direct { call_id }
-        };
-        let command = match command.as_deref() {
-            None => ToonCommand::Absent {},
-            Some(command) if command.chars().any(is_unsafe_toon_char) => ToonCommand::Base64 {
-                command_base64: base64::engine::general_purpose::STANDARD
-                    .encode(command.as_bytes()),
-            },
-            Some(command) => ToonCommand::Direct { command },
-        };
-        let arguments_value = arguments.value();
-        let arguments = if arguments.is_tagged() || contains_unsafe_toon_string(arguments_value) {
-            ToonArguments::JsonBase64 {
-                arguments_json_base64: base64::engine::general_purpose::STANDARD
-                    .encode(serde_json::to_vec(arguments_value).map_err(json_error)?),
-            }
-        } else {
-            ToonArguments::Direct {
-                arguments: arguments_value,
-            }
-        };
-        let output = match output {
-            OutputProjection::Present {
-                output_bytes,
-                output_lines,
-                output,
-                output_complete,
-            } if output.chars().any(is_unsafe_toon_char) => ToonOutput::Base64 {
-                output_bytes: *output_bytes,
-                output_lines: *output_lines,
-                output_base64: base64::engine::general_purpose::STANDARD.encode(output.as_bytes()),
-                output_complete: *output_complete,
-            },
-            OutputProjection::Present {
-                output_bytes,
-                output_lines,
-                output,
-                output_complete,
-            } => ToonOutput::Direct {
-                output_bytes: *output_bytes,
-                output_lines: *output_lines,
-                output,
-                output_complete: *output_complete,
-            },
-            OutputProjection::Absent { output_complete } => ToonOutput::Absent {
-                output_complete: *output_complete,
-            },
-        };
-        Ok(ToonCallRecord {
-            record_type,
-            at_us: *at_us,
-            agent_id,
-            call_id,
-            tool,
-            command,
-            arguments,
-            status: *status,
-            duration_us: *duration_us,
-            output,
-        })
-    }
-}
-
-/// Writes one strict TOON document with a counted `calls` array.
+/// Writes one TOON document containing the same semantic records as JSONL.
 pub(super) fn write(
-    root_agent_id: &AgentId,
-    snapshot: &AgentJournalSnapshot,
-    mode: AgentTraceMode,
+    header: &Header<'_>,
+    records: Vec<Record>,
     output: &mut impl std::io::Write,
 ) -> Result<(), InspectError> {
-    let origin = trace_origin(snapshot)?;
-    let header = Header::new(root_agent_id, snapshot, mode);
     writeln!(
         output,
         "{}",
-        serde_toon::to_string(&header).map_err(toon_error)?
+        serde_toon::to_string(header).map_err(toon_error)?
     )?;
-
-    let mut payloads = PayloadStore::new()?;
-    let mut calls = collect_calls(snapshot, mode, &mut payloads)?;
-    sort_calls(&mut calls);
-    writeln!(output, "calls[{}]:", calls.len())?;
-    for call in &calls {
-        let record = call.project(origin, &mut payloads)?;
-        let encoded = serde_toon::to_string(&record.toon_projection()?).map_err(toon_error)?;
+    writeln!(output, "records[{}]:", records.len())?;
+    for record in records {
+        let encoded = serde_toon::to_string(&ToonRecord::from(record)).map_err(toon_error)?;
         for (index, line) in encoded.lines().enumerate() {
             writeln!(
                 output,
@@ -243,7 +35,347 @@ pub(super) fn write(
     Ok(())
 }
 
-/// Returns whether direct TOON would emit a payload control byte raw.
+/// Typed TOON record set with explicit direct/Base64 payload variants.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ToonRecord {
+    /// A provider-declared tool call with TOON-safe content fields.
+    Call(ToonCallRecord),
+    /// A content-free activation record shared with JSONL.
+    Activation(ActivationRecord),
+    /// A content-free relationship record shared with JSONL.
+    Relationship(RelationshipRecord),
+}
+
+impl From<Record> for ToonRecord {
+    fn from(record: Record) -> Self {
+        match record {
+            Record::Call(call) => Self::Call(call.into()),
+            Record::Activation(activation) => Self::Activation(activation),
+            Record::Relationship(relationship) => Self::Relationship(relationship),
+        }
+    }
+}
+
+/// Call record adapted structurally for TOON-safe payload framing.
+#[derive(Serialize)]
+struct ToonCallRecord {
+    /// Fixed `call` discriminator.
+    record_type: &'static str,
+    /// Journal-local agent owner.
+    agent_id: tau_proto::AgentId,
+    /// Exact provider declaration occurrence.
+    call: tau_proto::ToolCallRef,
+    /// Direct or Base64 display call ID.
+    #[serde(flatten)]
+    call_id: ToonCallId,
+    /// Provider-declared tool name.
+    tool: tau_proto::ToolName,
+    /// Direct JSON or whole-JSON Base64 arguments.
+    #[serde(flatten)]
+    arguments: ToonArguments,
+    /// Optional direct or Base64 command.
+    #[serde(flatten)]
+    command: ToonCommand,
+    /// Qualified declaration-to-dispatch interval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declaration_to_dispatch_us: Option<u64>,
+    /// Qualified dispatch-to-background interval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dispatch_to_backgrounded_us: Option<u64>,
+    /// Semantic lifecycle and output variant.
+    #[serde(flatten)]
+    lifecycle: ToonCallLifecycle,
+}
+
+impl From<CallRecord> for ToonCallRecord {
+    fn from(call: CallRecord) -> Self {
+        let CallRecord {
+            record_type,
+            agent_id,
+            call,
+            call_id,
+            tool,
+            arguments,
+            command,
+            declaration_to_dispatch_us,
+            dispatch_to_backgrounded_us,
+            lifecycle,
+        } = call;
+        Self {
+            record_type,
+            agent_id,
+            call,
+            call_id: ToonCallId::new(call_id),
+            tool,
+            arguments: ToonArguments::new(arguments),
+            command: ToonCommand::new(command),
+            declaration_to_dispatch_us,
+            dispatch_to_backgrounded_us,
+            lifecycle: lifecycle.into(),
+        }
+    }
+}
+
+/// TOON-safe representation of the provider display call ID.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ToonCallId {
+    /// Grammar-safe value under its canonical key.
+    Direct {
+        /// Provider display call ID.
+        call_id: String,
+    },
+    /// Whole UTF-8 value encoded as standard padded Base64.
+    Base64 {
+        /// Base64-encoded provider display call ID.
+        call_id_base64: String,
+    },
+}
+
+impl ToonCallId {
+    fn new(value: String) -> Self {
+        if contains_unsafe_string(&value) {
+            Self::Base64 {
+                call_id_base64: encode_bytes(value.as_bytes()),
+            }
+        } else {
+            Self::Direct { call_id: value }
+        }
+    }
+}
+
+/// TOON-safe representation of an optional extracted command.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ToonCommand {
+    /// No extracted command.
+    None {},
+    /// Grammar-safe command.
+    Direct {
+        /// Extracted command.
+        command: String,
+    },
+    /// Whole UTF-8 command encoded as standard padded Base64.
+    Base64 {
+        /// Base64-encoded extracted command.
+        command_base64: String,
+    },
+}
+
+impl ToonCommand {
+    fn new(value: Option<String>) -> Self {
+        match value {
+            None => Self::None {},
+            Some(value) if contains_unsafe_string(&value) => Self::Base64 {
+                command_base64: encode_bytes(value.as_bytes()),
+            },
+            Some(command) => Self::Direct { command },
+        }
+    }
+}
+
+/// TOON-safe representation of the complete argument value.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ToonArguments {
+    /// Arguments whose strings are all grammar-safe.
+    Direct {
+        /// Complete JSON/tagged-CBOR argument value.
+        arguments: serde_json::Value,
+    },
+    /// Complete compact JSON argument value encoded as Base64.
+    Base64 {
+        /// Base64-encoded compact JSON argument value.
+        arguments_json_base64: String,
+    },
+}
+
+impl ToonArguments {
+    fn new(arguments: serde_json::Value) -> Self {
+        if arguments.get("type").is_some() || contains_unsafe_toon_string(&arguments) {
+            Self::Base64 {
+                arguments_json_base64: encode_bytes(
+                    &serde_json::to_vec(&arguments)
+                        .expect("serde_json::Value serialization is infallible"),
+                ),
+            }
+        } else {
+            Self::Direct { arguments }
+        }
+    }
+}
+
+/// Semantic call lifecycle adapted only where output strings need framing.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ToonCallLifecycle {
+    /// No selected canonical terminal.
+    Incomplete {
+        /// Fixed incomplete status.
+        status: IncompleteCallStatus,
+    },
+    /// Terminal reference exists but is unavailable to this journal.
+    Unresolved {
+        /// Fixed incomplete status.
+        status: IncompleteCallStatus,
+        /// Referenced terminal identity.
+        terminal: tau_proto::ObservationId,
+        /// Producer-classified cause.
+        cause: tau_proto::ToolTerminalCause,
+        /// Fixed unavailable marker.
+        terminal_resolution: UnavailableResolution,
+    },
+    /// Fully selected local canonical terminal.
+    Resolved {
+        /// Terminal status.
+        status: CallStatus,
+        /// Canonical terminal identity.
+        terminal: tau_proto::ObservationId,
+        /// Producer-classified cause.
+        cause: tau_proto::ToolTerminalCause,
+        /// Fixed local marker.
+        terminal_resolution: LocalResolution,
+        /// Qualified dispatch-to-terminal interval.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dispatch_to_terminal_us: Option<u64>,
+        /// Qualified background-to-terminal interval.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        backgrounded_to_terminal_us: Option<u64>,
+        /// Mode-specific record-owned output.
+        #[serde(flatten)]
+        output: ToonCallOutput,
+    },
+}
+
+impl From<CallLifecycleRecord> for ToonCallLifecycle {
+    fn from(lifecycle: CallLifecycleRecord) -> Self {
+        match lifecycle {
+            CallLifecycleRecord::Incomplete { status } => Self::Incomplete { status },
+            CallLifecycleRecord::Unresolved {
+                status,
+                terminal,
+                cause,
+                terminal_resolution,
+            } => Self::Unresolved {
+                status,
+                terminal,
+                cause,
+                terminal_resolution,
+            },
+            CallLifecycleRecord::Resolved {
+                status,
+                terminal,
+                cause,
+                terminal_resolution,
+                dispatch_to_terminal_us,
+                backgrounded_to_terminal_us,
+                output,
+            } => Self::Resolved {
+                status,
+                terminal,
+                cause,
+                terminal_resolution,
+                dispatch_to_terminal_us,
+                backgrounded_to_terminal_us,
+                output: output.into(),
+            },
+        }
+    }
+}
+
+/// Mode-specific output ownership and clipping metadata.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ToonCallOutput {
+    /// No record-owned projected output.
+    None {},
+    /// Bounded output with complete counts.
+    Lite {
+        /// Complete byte count.
+        output_bytes: usize,
+        /// Complete line count.
+        output_lines: usize,
+        /// Direct or Base64 bounded output.
+        #[serde(flatten)]
+        output: ToonOutput,
+        /// Whether bounded output is complete.
+        output_complete: bool,
+    },
+    /// Complete output.
+    Full {
+        /// Direct or Base64 complete output.
+        #[serde(flatten)]
+        output: ToonOutput,
+        /// Fixed `true` completeness marker.
+        output_complete: super::CompleteOutput,
+    },
+}
+
+impl From<CallOutputRecord> for ToonCallOutput {
+    fn from(output: CallOutputRecord) -> Self {
+        match output {
+            CallOutputRecord::None {} => Self::None {},
+            CallOutputRecord::Lite {
+                output_bytes,
+                output_lines,
+                output,
+                output_complete,
+            } => Self::Lite {
+                output_bytes,
+                output_lines,
+                output: ToonOutput::new(output),
+                output_complete,
+            },
+            CallOutputRecord::Full {
+                output,
+                output_complete,
+            } => Self::Full {
+                output: ToonOutput::new(output),
+                output_complete,
+            },
+        }
+    }
+}
+
+/// Direct or whole-field Base64 terminal output.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ToonOutput {
+    /// Grammar-safe output.
+    Direct {
+        /// Rendered terminal output.
+        output: String,
+    },
+    /// Whole UTF-8 output encoded as standard padded Base64.
+    Base64 {
+        /// Base64-encoded rendered terminal output.
+        output_base64: String,
+    },
+}
+
+impl ToonOutput {
+    fn new(output: String) -> Self {
+        if contains_unsafe_string(&output) {
+            Self::Base64 {
+                output_base64: encode_bytes(output.as_bytes()),
+            }
+        } else {
+            Self::Direct { output }
+        }
+    }
+}
+
+fn contains_unsafe_string(value: &str) -> bool {
+    value.chars().any(is_unsafe_toon_char)
+}
+
+fn encode_bytes(value: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(value)
+}
+
+/// Returns whether a JSON payload contains a string that TOON cannot emit
+/// safely and round-trip exactly.
 fn contains_unsafe_toon_string(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::String(value) => value.chars().any(is_unsafe_toon_char),
@@ -257,13 +389,12 @@ fn contains_unsafe_toon_string(value: &serde_json::Value) -> bool {
     }
 }
 
-/// TOON safely escapes these three controls; every other C0/C1 control requires
-/// Base64 field framing.
+/// TOON escapes line-layout controls but requires Base64 framing for every
+/// other C0/C1 control.
 fn is_unsafe_toon_char(character: char) -> bool {
     character.is_control() && !matches!(character, '\n' | '\r' | '\t')
 }
 
-/// Wraps TOON serialization failures as trace projection errors.
 fn toon_error(error: serde_toon::Error) -> InspectError {
     InspectError::Trace(crate::AgentTraceError::Projection(format!(
         "failed to serialize compact agent tool TOON: {error}"

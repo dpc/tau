@@ -107,5 +107,14 @@ ephemeral agents do not leak into durable debug JSONL. Replay consumes only the
 existing canonical semantic facts and never reruns report validation,
 canonicalization, cleanup, waits, or background notifications.
 
+Canonical provider and background terminals carry independently allocated
+observation IDs. The harness writes a content-free, best-effort terminal
+classification that references the exact terminal and records completed,
+tool-error, cancellation-request, provider-disconnect, lifecycle-teardown,
+restart-repair, or unknown cause. A cancellation request that loses a race to a
+natural completion does not classify that completion as cancellation. These
+observations never gate terminal publication or runtime cleanup; missing
+observations produce incomplete trace evidence rather than inferred cause.
+
 This implements the terminal tool rows of
 [SPEC-peer-event-publication](SPEC-peer-event-publication.md).

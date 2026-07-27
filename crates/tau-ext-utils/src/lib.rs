@@ -214,6 +214,7 @@ impl FireRecord {
                 agent_id: self.agent_id,
                 text: self.prompt,
                 ctx_id: Some(self.ctx_id),
+                activation_kind: Some(tau_proto::InternalPromptActivationKind::Timer),
             },
         ))
     }
@@ -966,9 +967,11 @@ mod tests {
                     && matches!(
                         emit.event.as_ref(),
                         Event::ExtInternalPromptSubmitRequest(request)
-                            if request.text == "wake now"
-                                && request.ctx_id.as_deref() == Some("timer:wake:1")
-                    )
+                             if request.text == "wake now"
+                                 && request.ctx_id.as_deref() == Some("timer:wake:1")
+                                 && request.activation_kind
+                                     == Some(tau_proto::InternalPromptActivationKind::Timer)
+                     )
         ));
     }
 

@@ -17,6 +17,7 @@ fn correlate(records: &[PersistedAgentEvent]) -> BTreeMap<OperationKey, Operatio
 
 fn record(seq: u64, time: u64, event: Event) -> PersistedAgentEvent {
     PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
         seq: PersistedAgentEventSeq::new(seq),
         source: None,
         event,

@@ -567,7 +567,11 @@ transient runtime observations and never enter semantic replay. See
   exact live publisher generation and target agent and, when accepted, publishes an internal
   `agent.prompt_submitted` fact; queued prompts folded into an in-flight turn
   preserve the request `ctx_id` on `agent.prompt_steered`. It has no user-message
-  class. `tau-ext-utils` uses it for timer wakeups. External user messages instead
+  class. Optional typed provenance is absent/`internal_prompt` for ordinary
+  internal prompts and `timer` for timer wakeups; it grants no additional
+  authority and is copied only into content-free `agent.activation_queued`
+  classification. The request remains transient, and replay/recovery never
+  resubmits it. `tau-ext-utils` uses explicit `timer` provenance. External user messages instead
   enter through bridge `message.delivered_reported` events and the resulting
   canonical `message.delivered` facts.
   See [`SPEC-internal-prompt-submit-requests`](../specs/SPEC-internal-prompt-submit-requests.md).
@@ -793,6 +797,17 @@ terminal silently no-op. See
   nodes represented by that immutable prompt snapshot. A checkpoint without a
   matching durable terminal provider response restores as dispatch-uncertain;
   it is not automatically resent.
+- **`agent.tool_dispatch_observed`**, **`agent.tool_backgrounded_observed`**,
+  **`agent.tool_wait_observed`**, **`agent.tool_wait_registered`**, **`agent.activation_queued`**,
+  **`agent.tool_wait_settled`**, **`agent.tool_cancellation_requested`**, and
+  **`agent.tool_terminal_classified`** — Content-free, best-effort runtime
+  observations linked by opaque random observation IDs and exact declaration
+  references. They synchronously validate and submit one best-effort journal
+  frame, but do not wait for stable-storage synchronization or acknowledgement,
+  traverse interception, deliver to subscribers, or make runtime outcomes
+  depend on append success. Replay is observation-only. A crash, append failure, or selected
+  snapshot may leave references unresolved or calls incomplete; consumers must
+  not reconstruct missing edges from payload prose, time, or journal adjacency.
 
 ## Provider repetition stop reason
 

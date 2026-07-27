@@ -1349,7 +1349,7 @@ impl BuiltinTools {
                 is_owned_completed_call,
             )?;
             drop(state);
-            host.publish_tool_cancel_request_for(conversation_id, target)?;
+            host.publish_tool_cancel_request_for(conversation_id, call.call_ref, target)?;
             Ok(())
         });
         match result {

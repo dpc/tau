@@ -68,6 +68,13 @@ Prompt lifecycle deliberately separates the durable, content-free
 contract is governed by
 [SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
 
+Transient `extension.internal_prompt_submit_request` carries optional
+`internal_prompt` or `timer` activation provenance. Absence preserves ordinary
+internal-prompt behavior. The field adds no publisher authority; the harness
+copies only the classification into its content-free queued-activation fact.
+See
+[SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
+
 Bounded provider quota reports are transient provider observations.
 
 Provider execution also separates five Provider-authored `_reported` observations from
@@ -121,7 +128,8 @@ harness-authored `provider.models_updated` snapshots derived downstream from
 provider `provider.models_declared` events.
 The protocol has no extension user-message prompt request; the only extension prompt
 request is the narrow `extension.internal_prompt_submit_request` control path
-with `agent_id`, `text`, and optional `ctx_id`. It defaults to `persist=false`; its
+with `agent_id`, `text`, optional `ctx_id`, and optional typed `activation_kind`
+(`internal_prompt` or `timer`). It defaults to `persist=false`; its
 commit-before-effects contract is
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
 `agent.start_request` is another `persist=false`-by-default configured-extension

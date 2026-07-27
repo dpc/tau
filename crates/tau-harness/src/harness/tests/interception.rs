@@ -5707,6 +5707,7 @@ fn rollover_commits_deferred_peer_observations_without_semantic_effects() {
             agent_id,
             text: "stale internal prompt".to_owned(),
             ctx_id: Some("stale-context".to_owned()),
+            activation_kind: None,
         }),
         Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
         Event::ExtensionSessionContextProviderRegister(
