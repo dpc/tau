@@ -96,24 +96,32 @@ enum ToonArguments<'a> {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum ToonOutput<'a> {
-    /// Incomplete full-mode call without output.
-    Absent {},
-    /// Lite output counters.
-    Counts {
-        /// Rendered UTF-8 byte count.
-        output_bytes: usize,
-        /// Rendered logical-line count.
-        output_lines: usize,
+    /// Incomplete call without terminal output or metrics.
+    Absent {
+        /// Incomplete calls cannot contain complete terminal output.
+        output_complete: bool,
     },
-    /// Direct safe full output.
+    /// Direct safe terminal output with exact complete-output metrics.
     Direct {
-        /// Complete normalized output.
+        /// Complete rendered projection's UTF-8 byte count.
+        output_bytes: usize,
+        /// Complete rendered projection's logical-line count.
+        output_lines: usize,
+        /// Complete or bounded normalized output.
         output: &'a str,
+        /// Whether `output` contains the complete rendered projection.
+        output_complete: bool,
     },
-    /// Base64 UTF-8 full output containing unsafe controls.
+    /// Base64 UTF-8 terminal output containing unsafe controls.
     Base64 {
-        /// Base64-encoded UTF-8 normalized output.
+        /// Complete rendered projection's UTF-8 byte count.
+        output_bytes: usize,
+        /// Complete rendered projection's logical-line count.
+        output_lines: usize,
+        /// Base64-encoded complete or bounded normalized output.
         output_base64: String,
+        /// Whether decoded output contains the complete rendered projection.
+        output_complete: bool,
     },
 }
 impl<'a> CallRecord<'a> {
@@ -160,21 +168,31 @@ impl<'a> CallRecord<'a> {
             }
         };
         let output = match output {
-            OutputProjection::Counts {
+            OutputProjection::Present {
                 output_bytes,
                 output_lines,
-            } => ToonOutput::Counts {
+                output,
+                output_complete,
+            } if output.chars().any(is_unsafe_toon_char) => ToonOutput::Base64 {
                 output_bytes: *output_bytes,
                 output_lines: *output_lines,
+                output_base64: base64::engine::general_purpose::STANDARD.encode(output.as_bytes()),
+                output_complete: *output_complete,
             },
-            OutputProjection::Full { output } if output.chars().any(is_unsafe_toon_char) => {
-                ToonOutput::Base64 {
-                    output_base64: base64::engine::general_purpose::STANDARD
-                        .encode(output.as_bytes()),
-                }
-            }
-            OutputProjection::Full { output } => ToonOutput::Direct { output },
-            OutputProjection::Absent {} => ToonOutput::Absent {},
+            OutputProjection::Present {
+                output_bytes,
+                output_lines,
+                output,
+                output_complete,
+            } => ToonOutput::Direct {
+                output_bytes: *output_bytes,
+                output_lines: *output_lines,
+                output,
+                output_complete: *output_complete,
+            },
+            OutputProjection::Absent { output_complete } => ToonOutput::Absent {
+                output_complete: *output_complete,
+            },
         };
         Ok(ToonCallRecord {
             record_type,
@@ -211,7 +229,7 @@ pub(super) fn write(
     sort_calls(&mut calls);
     writeln!(output, "calls[{}]:", calls.len())?;
     for call in &calls {
-        let record = call.project(origin, mode, &mut payloads)?;
+        let record = call.project(origin, &mut payloads)?;
         let encoded = serde_toon::to_string(&record.toon_projection()?).map_err(toon_error)?;
         for (index, line) in encoded.lines().enumerate() {
             writeln!(

@@ -63,15 +63,17 @@ key binding.
 
 `tau agent trace <agent-id>` operates offline and projects from a stable,
 validated snapshot of existing durable agent journals. It defaults to the compact
-`agent-tools-toon` encoding in lite mode, which is an overview rather than complete
-forensic evidence. Explicit `tau-jsonl` is the complete native
+`agent-tools-toon` encoding in lite mode, which keeps exact output sizes and at
+most 4 KiB of output context per terminal call rather than complete forensic
+evidence. Explicit `tau-jsonl` is the complete native
 artifact and preserves every persisted event and its journal-local ordering.
 `otlp-json` is a lossy OpenTelemetry/OpenInference visualization adapter: it
 derives spans only from durable IDs and journal wall-clock timestamps, while
 retaining every raw journal occurrence as a span event.
 `agent-tools-toon` and `agent-tools-jsonl` provide compact, trace-relative
 encodings over only model-visible tool calls. `--mode lite` is the default and
-reports output byte/line counts; `--mode full` includes rendered output.
+reports complete-output byte/line counts, bounded rendered output, and explicit
+output completeness; `--mode full` includes complete rendered output.
 `agent-performance-jsonl` is always content-free and reports response-local
 token/cache/cost evidence plus qualified journal recorded-at wall intervals and
 per-agent summaries. `--mode full` is invalid for this format.

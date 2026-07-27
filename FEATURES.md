@@ -237,7 +237,8 @@ Complete offline durable-agent exports are available through
 for snapshot guarantees, the canonical native JSONL schema, and the lossy OTLP
 visualization adapter. `agent-tools-toon` and `agent-tools-jsonl` provide dense,
 trace-relative views containing only model-visible tool calls, with independently
-selected lite/full output detail. Agent trace defaults to TOON lite.
+selected lite/full output detail. Lite retains exact complete-output metrics and
+at most 4 KiB of diagnostic output per terminal call. Agent trace defaults to TOON lite.
 `agent-performance-jsonl` instead emits content-free provider-prompt accounting,
 fixed-point cache ratios, missing-evidence coverage, and explicitly qualified
 journal recorded-at wall-clock intervals with one summary per included agent.

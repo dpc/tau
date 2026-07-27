@@ -1032,9 +1032,9 @@ fn otlp_multi_tool_response_projects_each_call_once() {
 
 /// The lite agent-tools format keeps only model-visible calls, exposes shell
 /// commands directly, uses trace-relative timing, and replaces output with
-/// exact byte and logical-line counts.
+/// exact byte and logical-line counts plus bounded diagnostic context.
 #[test]
-fn agent_tools_lite_is_compact_relative_and_output_free() {
+fn agent_tools_lite_is_compact_relative_and_output_bounded() {
     let temp = tempfile::tempdir().expect("tempdir");
     create_trace_agent(
         temp.path(),
@@ -1059,7 +1059,7 @@ fn agent_tools_lite_is_compact_relative_and_output_free() {
 
     assert_eq!(lines.len(), 3, "header plus two reused model-visible calls");
     assert_eq!(lines[0]["schema"], "tau.agent_tools");
-    assert_eq!(lines[0]["output"], "counts");
+    assert_eq!(lines[0]["output"], "bounded");
     assert_eq!(lines[1]["at_us"], 10);
     assert_eq!(lines[1]["duration_us"], 10);
     assert_eq!(lines[1]["tool"], "shell_command");
@@ -1074,12 +1074,15 @@ fn agent_tools_lite_is_compact_relative_and_output_free() {
     assert_eq!(lines[1]["status"], "ok");
     assert_eq!(lines[1]["output_bytes"], 8);
     assert_eq!(lines[1]["output_lines"], 2);
-    assert!(lines[1].get("output").is_none());
+    assert_eq!(lines[1]["output"], "one\ntwo\n");
+    assert_eq!(lines[1]["output_complete"], true);
     assert!(!output.contains("ignored prose"));
     assert_eq!(lines[2]["at_us"], 30);
     assert_eq!(lines[2]["status"], "error");
     assert_eq!(lines[2]["output_bytes"], 28);
     assert_eq!(lines[2]["output_lines"], 3);
+    assert_eq!(lines[2]["output"], "error: second failed\n\ndetail");
+    assert_eq!(lines[2]["output_complete"], true);
 }
 
 /// Performance export keeps exact accounting, qualifies journal-wall intervals,
@@ -1378,8 +1381,9 @@ fn agent_performance_rejects_duplicate_terminal() {
     );
 }
 
-/// The full agent-tools format retains the same flat call shape while replacing
-/// lite counters with the complete provider-facing tool output.
+/// The full agent-tools format retains the same flat call shape and complete
+/// metrics while replacing bounded context with complete provider-facing
+/// output.
 #[test]
 fn agent_tools_full_includes_rendered_output() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1406,8 +1410,9 @@ fn agent_tools_full_includes_rendered_output() {
 
     assert_eq!(lines[0]["output"], "full");
     assert_eq!(lines[1]["output"], "one\ntwo\n");
-    assert!(lines[1].get("output_bytes").is_none());
-    assert!(lines[1].get("output_lines").is_none());
+    assert_eq!(lines[1]["output_bytes"], 8);
+    assert_eq!(lines[1]["output_lines"], 2);
+    assert_eq!(lines[1]["output_complete"], true);
     assert_eq!(lines[2]["output"], "error: second failed\n\ndetail");
 
     let toon = export_trace(
@@ -1536,7 +1541,7 @@ fn agent_tools_toon_frames_multiline_and_lossless_arguments() {
     )
     .expect("lite TOON");
     let decoded: serde_json::Value = serde_toon::from_str(&lite).expect("strict TOON round trip");
-    assert_eq!(decoded["output"], "counts");
+    assert_eq!(decoded["output"], "bounded");
     let call = &decoded["calls"][0];
     let arguments: serde_json::Value = serde_json::from_slice(
         &base64::engine::general_purpose::STANDARD
@@ -1551,7 +1556,8 @@ fn agent_tools_toon_frames_multiline_and_lossless_arguments() {
     assert_eq!(arguments, jsonl_call["arguments"]);
     assert_eq!(call["output_bytes"], 13);
     assert_eq!(call["output_lines"], 2);
-    assert!(call.get("output").is_none());
+    assert_eq!(call["output"], "first\nsecond\n");
+    assert_eq!(call["output_complete"], true);
 }
 
 /// A background placeholder keeps the model-visible call open until the real
@@ -1585,6 +1591,175 @@ fn agent_tools_background_placeholder_waits_for_real_result() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0]["status"], "ok");
     assert_eq!(calls[0]["output"], "result-call-background");
+}
+
+/// Oversized foreground and background terminals must expose identical complete
+/// metrics across JSONL/TOON while lite output remains a UTF-8-safe 4 KiB
+/// prefix.
+#[test]
+fn agent_tools_oversized_terminal_matrix_preserves_metrics_and_bounds_context() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    create_trace_agent(
+        temp.path(),
+        "agent-root",
+        tau_proto::AgentCreator::User,
+        None,
+        1,
+    );
+    let agent_id = AgentId::parse("agent-root").expect("agent id");
+    let oversized = format!("{}\né-tail", "x".repeat(4_095));
+    let shell_result = CborValue::Map(vec![
+        (
+            CborValue::Text("output".into()),
+            CborValue::Text(oversized.clone()),
+        ),
+        (
+            CborValue::Text("status".into()),
+            CborValue::Integer(1.into()),
+        ),
+        (
+            CborValue::Text("termination_reason".into()),
+            CborValue::Text("exit".into()),
+        ),
+    ]);
+    let shell_rendered = tau_proto::ToolResponse::from_cbor(&shell_result).render();
+    let mut store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
+    let mut call_event =
+        provider_tool_call_event(&agent_id, "prompt-terminals", "call-shell-exit-1");
+    let Event::ProviderResponseFinished(finished) = &mut call_event else {
+        unreachable!("tool call helper")
+    };
+    let ContextItem::ToolCall(shell_call) = &mut finished.output_items[0] else {
+        unreachable!("tool call item")
+    };
+    shell_call.name = tau_proto::ToolName::new("shell_command");
+    finished
+        .output_items
+        .push(ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-background-large".into(),
+            name: tau_proto::ToolName::new("background_test"),
+            tool_type: ToolType::Function,
+            arguments: CborValue::Null,
+            raw_arguments_json: None,
+            responses_envelope: None,
+        }));
+    store
+        .append_agent_event(agent_id.as_str(), None, call_event)
+        .expect("provider calls");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::ProviderToolResult(tau_proto::ToolResult {
+                call_id: "call-shell-exit-1".into(),
+                tool_name: tau_proto::ToolName::new("shell_command"),
+                tool_type: ToolType::Function,
+                result: shell_result,
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::Final,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect("shell terminal");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::ProviderToolResult(tau_proto::ToolResult {
+                call_id: "call-background-large".into(),
+                tool_name: tau_proto::ToolName::new("background_test"),
+                tool_type: ToolType::Function,
+                result: CborValue::Text("placeholder".into()),
+                provider_content: Vec::new(),
+                kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect("background placeholder");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+                call_id: "call-background-large".into(),
+                tool_name: tau_proto::ToolName::new("background_test"),
+                tool_type: ToolType::Function,
+                result: CborValue::Text(oversized.clone()),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect("background terminal");
+    drop(store);
+
+    let export = |format| {
+        export_trace(
+            temp.path(),
+            &agent_id,
+            DescendantSelection::RootOnly,
+            format,
+        )
+        .expect("compact trace")
+    };
+    let json_calls = |text: &str| {
+        text.lines()
+            .skip(1)
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON call"))
+            .collect::<Vec<_>>()
+    };
+    let lite_json = export(AgentTraceFormat::AgentToolsJsonl(AgentTraceMode::Lite));
+    let full_json = export(AgentTraceFormat::AgentToolsJsonl(AgentTraceMode::Full));
+    let lite_json = json_calls(&lite_json);
+    let full_json = json_calls(&full_json);
+    let lite_toon: serde_json::Value = serde_toon::from_str(&export(
+        AgentTraceFormat::AgentToolsToon(AgentTraceMode::Lite),
+    ))
+    .expect("lite TOON");
+    let full_toon: serde_json::Value = serde_toon::from_str(&export(
+        AgentTraceFormat::AgentToolsToon(AgentTraceMode::Full),
+    ))
+    .expect("full TOON");
+
+    for (index, rendered) in [shell_rendered.as_str(), oversized.as_str()]
+        .into_iter()
+        .enumerate()
+    {
+        let expected = &full_json[index]["output"];
+        let expected_bytes = rendered.len();
+        let expected_lines = rendered.lines().count();
+        assert_eq!(lite_json[index]["status"], "ok");
+        assert_eq!(lite_json[index]["output_bytes"], expected_bytes);
+        assert_eq!(lite_json[index]["output_lines"], expected_lines);
+        assert!(
+            lite_json[index]["output"]
+                .as_str()
+                .expect("lite output")
+                .len()
+                <= 4_096
+        );
+        assert!(rendered.starts_with(lite_json[index]["output"].as_str().expect("lite output")));
+        assert_eq!(lite_json[index]["output_complete"], false);
+        assert_eq!(full_json[index]["output"], rendered);
+        assert_eq!(full_json[index]["output_bytes"], expected_bytes);
+        assert_eq!(full_json[index]["output_lines"], expected_lines);
+        assert_eq!(full_json[index]["output_complete"], true);
+        assert_eq!(lite_toon["calls"][index]["output_bytes"], expected_bytes);
+        assert_eq!(lite_toon["calls"][index]["output_lines"], expected_lines);
+        assert_eq!(
+            lite_toon["calls"][index]["output"],
+            lite_json[index]["output"]
+        );
+        assert_eq!(lite_toon["calls"][index]["output_complete"], false);
+        assert_eq!(full_toon["calls"][index]["output"], *expected);
+        assert_eq!(full_toon["calls"][index]["output_bytes"], expected_bytes);
+        assert_eq!(full_toon["calls"][index]["output_lines"], expected_lines);
+        assert_eq!(full_toon["calls"][index]["output_complete"], true);
+    }
+    assert_eq!(lite_json[0]["status"], "ok");
+    assert!(shell_rendered.contains("status: 1"));
+    assert!(shell_rendered.contains("termination_reason: exit"));
 }
 
 /// Two unresolved background generations cannot be correlated by call ID alone,
@@ -1888,7 +2063,7 @@ fn agent_tools_stable_records_cover_non_success_branches() {
             "time_unit": "microseconds",
         })
     };
-    assert_eq!(lite[0], header("counts"));
+    assert_eq!(lite[0], header("bounded"));
     assert_eq!(full[0], header("full"));
     assert_eq!(
         lite[1],
@@ -1897,6 +2072,7 @@ fn agent_tools_stable_records_cover_non_success_branches() {
             "call_id": "call-cancelled", "tool": "background_test",
             "arguments": null, "status": "cancelled", "duration_us": 1,
             "output_bytes": 22, "output_lines": 2,
+            "output": "cancelled: cancelled\n\n", "output_complete": true,
         })
     );
     assert_eq!(
@@ -1905,15 +2081,19 @@ fn agent_tools_stable_records_cover_non_success_branches() {
             "record_type": "call", "at_us": 9, "agent_id": "agent-root",
             "call_id": "call-cancelled", "tool": "background_test",
             "arguments": null, "status": "cancelled", "duration_us": 1,
+            "output_bytes": 22, "output_lines": 2,
             "output": "cancelled: cancelled\n\n",
+            "output_complete": true,
         })
     );
     assert_eq!(lite[2]["call_id"], "call-incomplete");
     assert_eq!(lite[2]["status"], "incomplete");
-    assert_eq!(lite[2]["output_bytes"], 0);
-    assert_eq!(lite[2]["output_lines"], 0);
+    assert!(lite[2].get("output_bytes").is_none());
+    assert!(lite[2].get("output_lines").is_none());
+    assert_eq!(lite[2]["output_complete"], false);
     assert_eq!(full[2]["call_id"], "call-incomplete");
     assert_eq!(full[2]["status"], "incomplete");
+    assert_eq!(full[2]["output_complete"], false);
     assert!(full[2].get("duration_us").is_none());
     assert!(full[2].get("output").is_none());
     assert_eq!(lite[3]["call_id"], "call-decreasing");

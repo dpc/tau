@@ -488,8 +488,9 @@ contains only compact offsets and identifiers. The accepted heap model is
 proportional to unique typed operation ID count and bytes rather than journal
 payload bytes; output is never truncated.
 Compact agent-tool coverage additionally checks relative timing, model-visible
-call filtering, shell command projection, lite counts, full output, call-ID
+call filtering, shell command projection, shared complete-output metrics, bounded
+lite output, full output, call-ID
 reuse, background completion, ambiguous background generations, and faithful
 tagged-CBOR fallback. TOON coverage round-trips the strict counted-call document
-and protects multiline full-output escaping. Payload-bearing state uses compact
+and protects multiline output escaping. Payload-bearing state uses compact
 anonymous-file offsets by construction.

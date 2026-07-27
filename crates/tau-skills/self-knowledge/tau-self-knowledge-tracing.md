@@ -41,12 +41,15 @@ Important call fields are:
   it and parse the result as JSON. Rare control-bearing command/output text uses
   `command_base64`/`output_base64` while the call envelope stays readable.
 - `status`: `ok`, `error`, `cancelled`, or `incomplete`.
-- Lite mode emits `output_bytes` and `output_lines`; full mode normally emits
-  `output`, with `output_base64` for control-bearing text.
+- Terminal calls always emit `output_bytes` and `output_lines` for their complete
+  rendered projection. Lite includes at most its first 4 KiB; full includes all
+  of it. `output_complete` distinguishes complete from clipped lite output.
+  Control-bearing text uses `output_base64`. Incomplete calls omit output and
+  counts and set `output_complete: false`.
 
 Calls are projected by journal wall clock with deterministic ties. Cross-agent
-order is not causal. TOON full output escapes embedded newlines as `\n` inside a
-quoted scalar, so each call stays structurally framed in the counted array.
+order is not causal. TOON direct output escapes embedded newlines as `\n` inside
+a quoted scalar, so each call stays structurally framed in the counted array.
 
 Use JSON Lines when shell pipelines need targeted selection:
 

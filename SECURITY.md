@@ -673,8 +673,9 @@ prompts, reasoning, images, tool arguments and results, messages, model
 parameters, usage, and cost data. Treat native, OTLP, compact JSONL, and compact
 TOON output as sensitive as the original state directory; redirect or transmit
 it only to trusted destinations. Compact lite mode exposes tool names, arguments,
-commands, statuses, and output sizes; full mode additionally exposes complete
-normalized output and rendered error details.
+commands, statuses, output sizes, and up to 4 KiB of unredacted normalized output
+per terminal call, including bounded rendered error details. Full mode exposes
+complete normalized output and rendered error details.
 
 The exporter opens only existing state and never repairs or writes it. Only
 writer-lock contention selects checkpoint mode. Inactive journals acquire their
@@ -709,8 +710,8 @@ included journal; IDs have no separate cap beyond the record framing limit.
 A pathological journal can therefore exhaust exporter process memory. The
 exporter never truncates accepted records.
 
-Compact projections stage payload-bearing arguments and full output in anonymous
-files; lite output bodies are transient while their counts are computed. Heap
+Compact projections stage payload-bearing arguments, complete full output, and
+at most 4 KiB of lite output per terminal call in anonymous files. Heap
 still grows with call count and encoded call-ID/tool-name bytes across the
 selected workflow. TOON materializes one call at a time from staging. It directly
 encodes safe readable calls, escapes multiline text, and Base64-frames only the

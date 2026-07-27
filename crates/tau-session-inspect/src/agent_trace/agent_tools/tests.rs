@@ -4,6 +4,63 @@ use base64::Engine as _;
 
 use super::*;
 
+/// Lite output must remain within its byte budget without corrupting a
+/// multibyte character at the boundary and must report clipping explicitly.
+#[test]
+fn lite_output_bounds_utf8_context() {
+    let output = format!("{}érest", "a".repeat(LITE_OUTPUT_BYTES - 1));
+
+    let (context, complete) = lite_output(&output);
+
+    assert_eq!(context.len(), LITE_OUTPUT_BYTES - 1);
+    assert!(context.chars().all(|character| character == 'a'));
+    assert!(!complete);
+    assert_eq!(output.len(), LITE_OUTPUT_BYTES + 5);
+    assert_eq!(output.lines().count(), 1);
+}
+
+/// Exceptional TOON framing must Base64-encode only the already-bounded lite
+/// context while metrics continue to describe the complete rendered projection.
+#[test]
+fn toon_base64_frames_bounded_lite_output_after_clipping() {
+    let output = format!("\u{1b}{}", "x".repeat(LITE_OUTPUT_BYTES + 8));
+    let (context, complete) = lite_output(&output);
+    let agent_id = AgentId::parse("agent-safe").expect("agent id");
+    let call_id = ToolCallId::from("call-output-control");
+    let tool = ToolName::new("background_test");
+    let record = CallRecord {
+        record_type: "call",
+        at_us: 1,
+        agent_id: &agent_id,
+        call_id: &call_id,
+        tool: &tool,
+        command: None,
+        arguments: ArgumentsProjection::Ordinary(serde_json::Value::Null),
+        status: Status::Ok,
+        duration_us: Some(2),
+        output: OutputProjection::Present {
+            output_bytes: output.len(),
+            output_lines: output.lines().count(),
+            output: context.to_owned(),
+            output_complete: complete,
+        },
+    };
+
+    let encoded = serde_toon::to_string(&record.toon_projection().expect("TOON projection"))
+        .expect("TOON encode");
+    let decoded: serde_json::Value = serde_toon::from_str(&encoded).expect("TOON decode");
+    let bounded = base64::engine::general_purpose::STANDARD
+        .decode(decoded["output_base64"].as_str().expect("Base64 output"))
+        .expect("decode Base64 output");
+
+    assert_eq!(decoded["output_bytes"], output.len());
+    assert_eq!(decoded["output_lines"], 1);
+    assert_eq!(bounded, context.as_bytes());
+    assert_eq!(bounded.len(), LITE_OUTPUT_BYTES);
+    assert_eq!(decoded["output_complete"], false);
+    assert!(decoded.get("output").is_none());
+}
+
 /// A nested non-JSON value forces one complete tagged-CBOR projection,
 /// preserving non-finite floats, duplicate keys, bytes, and tags.
 #[test]
@@ -70,8 +127,11 @@ fn toon_control_payload_uses_lossless_field_base64() {
         ),
         status: Status::Ok,
         duration_us: Some(2),
-        output: OutputProjection::Full {
+        output: OutputProjection::Present {
+            output_bytes: 8,
+            output_lines: 1,
             output: "body\u{c}\u{7f}".into(),
+            output_complete: true,
         },
     };
 
@@ -154,9 +214,8 @@ fn toon_direct_payload_round_trips_safe_sensitive_strings() {
         arguments: ArgumentsProjection::Ordinary(arguments.clone()),
         status: Status::Incomplete,
         duration_us: None,
-        output: OutputProjection::Counts {
-            output_bytes: 0,
-            output_lines: 0,
+        output: OutputProjection::Absent {
+            output_complete: false,
         },
     };
 

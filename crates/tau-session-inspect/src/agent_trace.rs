@@ -41,10 +41,10 @@ pub enum AgentTraceFormat {
 /// Output detail retained by compact agent-tool trace formats.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AgentTraceMode {
-    /// Omit output bodies and emit byte and line counts.
+    /// Emit complete-output metrics and at most 4 KiB of output context.
     #[default]
     Lite,
-    /// Emit complete normalized output bodies.
+    /// Emit complete-output metrics and complete normalized output.
     Full,
 }
 
@@ -52,7 +52,7 @@ impl AgentTraceMode {
     /// Returns the stable compact-schema detail label.
     const fn label(self) -> &'static str {
         match self {
-            Self::Lite => "counts",
+            Self::Lite => "bounded",
             Self::Full => "full",
         }
     }

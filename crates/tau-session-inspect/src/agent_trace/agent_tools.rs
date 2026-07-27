@@ -17,6 +17,8 @@ use tau_proto::{AgentId, CborValue, ContextItem, Event, ToolCallId, ToolName, Un
 use crate::InspectError;
 
 const SCHEMA: &str = "tau.agent_tools";
+/// Maximum event-native output context retained by one lite call.
+const LITE_OUTPUT_BYTES: usize = 4 * 1024;
 
 /// First-line metadata for a compact tool trace.
 #[derive(Serialize)]
@@ -31,7 +33,7 @@ struct Header<'a> {
     root_agent_id: &'a AgentId,
     /// Deterministically selected journal identities.
     included_agent_ids: Vec<&'a AgentId>,
-    /// Whether call records contain output text or counts.
+    /// Whether call records contain bounded or complete output text.
     output: &'static str,
     /// Unit used by all relative timing fields.
     time_unit: &'static str,
@@ -74,20 +76,22 @@ enum Status {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum OutputProjection {
-    /// Lite output counters.
-    Counts {
-        /// Rendered UTF-8 byte count.
+    /// A terminal call's rendered output and exact metrics.
+    Present {
+        /// Complete rendered projection's UTF-8 byte count.
         output_bytes: usize,
-        /// Rendered logical-line count.
+        /// Complete rendered projection's logical-line count.
         output_lines: usize,
-    },
-    /// Complete full output.
-    Full {
-        /// Provider-facing rendered text.
+        /// Complete or bounded provider-facing rendered text.
         output: String,
+        /// Whether `output` contains the complete rendered projection.
+        output_complete: bool,
     },
-    /// An incomplete call in full mode has no output field.
-    Absent {},
+    /// A call without a durable terminal has no output or metrics.
+    Absent {
+        /// Incomplete calls cannot contain complete terminal output.
+        output_complete: bool,
+    },
 }
 
 /// One model-visible tool call and its eventual durable outcome.
@@ -209,12 +213,17 @@ struct Terminal {
     output: TerminalOutput,
 }
 
-/// Terminal output retained without lite payload bodies.
-enum TerminalOutput {
-    /// Lite output statistics.
-    Counts { bytes: usize, lines: usize },
-    /// Full output text location.
-    Full(Endpoint),
+/// Rendered output statistics and staged complete or bounded text.
+#[derive(Clone, Copy)]
+struct TerminalOutput {
+    /// Complete rendered projection's byte count.
+    bytes: usize,
+    /// Complete rendered projection's line count.
+    lines: usize,
+    /// Staged complete or bounded rendered text.
+    output: Endpoint,
+    /// Whether staged text contains the complete rendered projection.
+    complete: bool,
 }
 
 /// Writes one selected compact JSON Lines projection.
@@ -233,7 +242,7 @@ pub(super) fn write_jsonl(
     let mut calls = collect_calls(snapshot, mode, &mut payloads)?;
     sort_calls(&mut calls);
     for call in &calls {
-        let record = call.project(origin, mode, &mut payloads)?;
+        let record = call.project(origin, &mut payloads)?;
         serde_json::to_writer(&mut *output, &record).map_err(json_error)?;
         writeln!(output)?;
     }
@@ -273,7 +282,6 @@ impl Call {
     fn project<'a>(
         &'a self,
         origin: UnixMicros,
-        mode: super::AgentTraceMode,
         payloads: &mut PayloadStore,
     ) -> Result<CallRecord<'a>, InspectError> {
         let arguments =
@@ -284,14 +292,17 @@ impl Call {
             .transpose()?;
         let (status, duration_us, output) = match &self.terminal {
             Some(terminal) => {
-                let output = match terminal.output {
-                    TerminalOutput::Counts { bytes, lines } => OutputProjection::Counts {
-                        output_bytes: bytes,
-                        output_lines: lines,
-                    },
-                    TerminalOutput::Full(endpoint) => OutputProjection::Full {
-                        output: payloads.load(endpoint)?,
-                    },
+                let TerminalOutput {
+                    bytes,
+                    lines,
+                    output,
+                    complete,
+                } = terminal.output;
+                let output = OutputProjection::Present {
+                    output_bytes: bytes,
+                    output_lines: lines,
+                    output: payloads.load(output)?,
+                    output_complete: complete,
                 };
                 (
                     terminal.status,
@@ -302,12 +313,8 @@ impl Call {
             None => (
                 Status::Incomplete,
                 None,
-                match mode {
-                    super::AgentTraceMode::Lite => OutputProjection::Counts {
-                        output_bytes: 0,
-                        output_lines: 0,
-                    },
-                    super::AgentTraceMode::Full => OutputProjection::Absent {},
+                OutputProjection::Absent {
+                    output_complete: false,
                 },
             ),
         };
@@ -452,15 +459,32 @@ fn apply_terminal(
     let Some(index) = index else {
         return Ok(());
     };
-    let output = match mode {
-        super::AgentTraceMode::Lite => TerminalOutput::Counts {
-            bytes: rendered.len(),
-            lines: rendered.lines().count(),
-        },
-        super::AgentTraceMode::Full => TerminalOutput::Full(payloads.append(&rendered)?),
+    let bytes = rendered.len();
+    let lines = rendered.lines().count();
+    let (projected, complete) = match mode {
+        super::AgentTraceMode::Lite => lite_output(&rendered),
+        super::AgentTraceMode::Full => (rendered.as_str(), true),
+    };
+    let output = TerminalOutput {
+        bytes,
+        lines,
+        output: payloads.append(&projected)?,
+        complete,
     };
     calls[index].terminal = Some(Terminal { at, status, output });
     Ok(())
+}
+
+/// Returns the first 4 KiB of rendered output without splitting UTF-8.
+fn lite_output(output: &str) -> (&str, bool) {
+    if output.len() <= LITE_OUTPUT_BYTES {
+        return (output, true);
+    }
+    let mut end = LITE_OUTPUT_BYTES;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&output[..end], false)
 }
 
 /// Renders an error exactly like provider replay: an `error` header followed by

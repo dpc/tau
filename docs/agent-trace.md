@@ -57,10 +57,10 @@ operation IDs in the largest included journal; IDs are not independently capped
 beyond the journal record framing limit, so a pathological journal can exhaust
 process memory. No accepted record is truncated.
 
-Compact agent-tool projection also stages payload-bearing arguments and full
-outputs in an anonymous file. Its heap correlation state contains call IDs,
-timing/order keys, tool names, and file offsets. Lite computes output counts while
-reading terminals and does not retain their bodies. Heap still grows with call
+Compact agent-tool projection also stages payload-bearing arguments, complete
+full output, and at most 4 KiB of lite output per terminal call in an anonymous
+file. Its heap correlation state contains call IDs, timing/order keys, tool names,
+and file offsets. Heap still grows with call
 count plus encoded call-ID and tool-name bytes across the selected workflow, so
 pathological high-cardinality journals can exhaust memory.
 
@@ -176,23 +176,26 @@ included journal occurrence and `duration_us` from provider declaration to its
 terminal fact. Neither encoding emits an absolute timestamp. A decreasing terminal
 clock leaves `duration_us` absent.
 
-The lite variant omits output bodies and reports `output_bytes` (UTF-8 bytes) and
-`output_lines` (Rust `str::lines` logical lines). The full variant emits an
-event-native normalized text projection as `output` (or exceptional
-`output_base64`) and omits those counters:
+Both variants report `output_bytes` (UTF-8 bytes) and `output_lines` (Rust
+`str::lines` logical lines) for the complete event-native normalized text
+projection. Lite emits at most the first 4 KiB of that projection as `output`
+(or exceptional `output_base64`), without splitting UTF-8, and reports whether
+the emitted text is complete in `output_complete`. Full emits the complete
+projection and sets `output_complete: true`:
 successful CBOR uses `ToolResponse`, errors prepend an `error` header to normalized
 details, and cancellation renders `cancelled: cancelled`.
-Incomplete calls have status `incomplete`; their lite counts are zero and their
-full output field is absent. Other statuses are `ok`, `error`, and `cancelled`.
+Incomplete calls have status `incomplete`, `output_complete: false`, and no
+output or count fields. Other statuses are `ok`, `error`, and `cancelled`.
 
 Header fields are `schema: string`, `schema_version: integer`,
 `record_type: "header"`, `root_agent_id: string`,
-`included_agent_ids: string[]`, `output: "counts"|"full"`, and
+`included_agent_ids: string[]`, `output: "bounded"|"full"`, and
 `time_unit: "microseconds"`. Call fields are `record_type: "call"`,
 `at_us: u64`, `agent_id: string`, call identity, `tool: string`,
 optional command, arguments, `status`,
-and optional `duration_us: u64`. Lite always adds `output_bytes: u64` and
-`output_lines: u64`; full adds output only for completed calls.
+and optional `duration_us: u64`. Terminal calls add `output_bytes: u64`,
+`output_lines: u64`, output text, and `output_complete: bool`; incomplete calls
+add only `output_complete: false`.
 Arguments use the concise ordinary JSON-shaped value only when every nested value
 is represented faithfully and contains no float. JSONL otherwise places complete
 `TaggedCbor` in `arguments`, including exact float bits. TOON retains the readable
@@ -203,7 +206,7 @@ and outputs similarly use `command_base64` and `output_base64` as Base64 UTF-8.
 Consumers decode only that exceptional field. This avoids ambiguous
 nested-object-array framing, numeric normalization, raw terminal controls, and
 Base64 expansion of the rest of the call while remaining lossless. Direct TOON quotes and escapes embedded
-full-output LF, CR, tab, quote, and backslash characters; multiline output remains
+output LF, CR, tab, quote, and backslash characters; multiline output remains
 one structurally framed scalar inside `calls[N]`. Schema version `0` follows the
 same internal compatibility policy as native JSONL.
 
@@ -220,7 +223,7 @@ schema_version: 0
 record_type: header
 root_agent_id: agent-root
 included_agent_ids[1]: agent-root
-output: counts
+output: bounded
 time_unit: microseconds
 calls[1]:
   - record_type: call
@@ -234,16 +237,19 @@ calls[1]:
       workdir: /work
     status: ok
     duration_us: 180442
-    output_bytes: 1372
-    output_lines: 24
+    output_bytes: 13
+    output_lines: 1
+    output: "tests passed\n"
+    output_complete: true
 ```
 
 Use `--include-descendants` to obtain one relative journal-wall-clock projection
 for a complete creator-owned workflow.
 
 > **Sensitive data:** Both compact encodings expose unredacted tool names,
-> arguments, and commands. `--mode full` additionally exposes complete
-> unredacted output, including rendered error details. Treat either artifact as
+> arguments, commands, and up to 4 KiB of unredacted normalized output per
+> terminal call in lite mode, including bounded rendered error details.
+> `--mode full` exposes complete unredacted output. Treat either artifact as
 > sensitive.
 
 

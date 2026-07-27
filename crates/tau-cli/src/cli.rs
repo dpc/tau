@@ -291,10 +291,10 @@ pub enum AgentTraceFormat {
 /// Output detail for compact agent-tool trace formats.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum AgentTraceMode {
-    /// Omit output bodies and report byte/line counts.
+    /// Report complete-output metrics and at most 4 KiB of output context.
     #[default]
     Lite,
-    /// Include complete normalized output bodies.
+    /// Report complete-output metrics and complete normalized output.
     Full,
 }
 

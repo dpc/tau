@@ -354,6 +354,8 @@ fn agent_trace_help_shows_compact_toon_lite_defaults() {
     assert!(help.contains("Project a validated durable agent snapshot"));
     assert!(help.contains("[default: agent-tools-toon]"));
     assert!(help.contains("[default: lite]"));
+    assert!(help.contains("at most 4 KiB of output context"));
+    assert!(help.contains("complete-output metrics and complete normalized output"));
 }
 
 /// Agent trace accepts the lossy OTLP adapter, descendant workflow inclusion,
