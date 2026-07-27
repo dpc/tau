@@ -17226,9 +17226,6 @@ impl Harness {
                 ]),
             );
         }
-        self.emit_info(&format!(
-            "Agent {caller_public_id} accepted compaction request for {target_public_id} ({request_id})"
-        ));
         if !self_request {
             self.start_accepted_manual_compaction(&target_cid, &request_id);
         }
@@ -17358,9 +17355,6 @@ impl Harness {
         if let Some(target) = self.agents.get_mut(target_cid) {
             target.next_prompt_index = target.next_prompt_index.saturating_add(1);
         }
-        self.emit_info(&format!(
-            "Starting compaction request {request_id} for {target_public_id} ({transaction_id})"
-        ));
         self.accepted_manual_compaction_tools.remove(request_id);
         self.pending_manual_compaction_tools.insert(
             transaction_id.clone(),

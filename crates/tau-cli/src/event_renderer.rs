@@ -4103,6 +4103,8 @@ impl EventRenderer {
             Event::ShellCommandFinished(finished) => finished.target_agent_id.is_some(),
             Event::UiCancelPrompt(cancel) => cancel.target_agent_id.is_some(),
             Event::UiRecallQueuedPrompt(recall) => recall.target_agent_id.is_some(),
+            Event::AgentManualCompactionRequested(_)
+            | Event::AgentStandaloneCompactionStarted(_) => true,
             _ => false,
         }
     }
@@ -4494,6 +4496,12 @@ impl EventRenderer {
             }
             Event::AgentCompactionTriggered(triggered) => {
                 EventAgentIdResolution::Agent(triggered.agent_id.to_string())
+            }
+            Event::AgentManualCompactionRequested(requested) => {
+                EventAgentIdResolution::Agent(requested.target_agent_id.to_string())
+            }
+            Event::AgentStandaloneCompactionStarted(started) => {
+                EventAgentIdResolution::Agent(started.agent_id.to_string())
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
                 EventAgentIdResolution::Agent(changed.agent_id.to_string())
@@ -6932,6 +6940,45 @@ impl EventRenderer {
                 if info.visible_at(self.notice_level) {
                     self.handle
                         .print_output("harness-notice", render_harness_notice(&self.theme, info));
+                }
+                true
+            }
+            Event::AgentManualCompactionRequested(requested) => {
+                let notice = tau_proto::HarnessNotice::new(
+                    tau_proto::notice_kind::HARNESS_NOTICE,
+                    format!(
+                        "Agent {} accepted compaction request for {} ({})",
+                        requested.caller_agent_id, requested.target_agent_id, requested.request_id
+                    ),
+                    tau_proto::NoticeLevel::Info,
+                );
+                if notice.visible_at(self.notice_level) {
+                    self.handle.print_output(
+                        "manual-compaction-requested",
+                        render_harness_notice(&self.theme, &notice),
+                    );
+                }
+                true
+            }
+            Event::AgentStandaloneCompactionStarted(started) => {
+                let tau_proto::StandaloneCompactionTrigger::ManualAgentTool { request_id, .. } =
+                    &started.trigger
+                else {
+                    return true;
+                };
+                let notice = tau_proto::HarnessNotice::new(
+                    tau_proto::notice_kind::HARNESS_NOTICE,
+                    format!(
+                        "Starting compaction request {request_id} for {} ({})",
+                        started.agent_id, started.transaction_id
+                    ),
+                    tau_proto::NoticeLevel::Info,
+                );
+                if notice.visible_at(self.notice_level) {
+                    self.handle.print_output(
+                        "manual-compaction-started",
+                        render_harness_notice(&self.theme, &notice),
+                    );
                 }
                 true
             }

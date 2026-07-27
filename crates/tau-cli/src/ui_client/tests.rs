@@ -15,6 +15,23 @@ fn chat_subscription_uses_prompt_started_not_prompt_created() {
     assert!(!selectors.contains(&EventSelector::Prefix("agent.".to_owned())));
 }
 
+/// Manual-compaction lifecycle facts must reach the interactive renderer
+/// through both live delivery and durable historical catch-up.
+#[test]
+fn chat_subscription_includes_manual_compaction_lifecycle() {
+    let HarnessInputMessage::Subscribe(subscription) = chat_subscribe_message() else {
+        panic!("chat subscription must produce Subscribe")
+    };
+    for event in [
+        EventName::AGENT_MANUAL_COMPACTION_REQUESTED,
+        EventName::AGENT_STANDALONE_COMPACTION_STARTED,
+    ] {
+        let selector = EventSelector::Exact(event);
+        assert!(subscription.historical_selectors.contains(&selector));
+        assert!(subscription.live_selectors.contains(&selector));
+    }
+}
+
 /// Ensures the chat UI subscription stays as an explicit event allow-list so
 /// newly-added protocol events do not silently expand UI traffic or replay
 /// catch-up.

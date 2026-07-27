@@ -18617,8 +18617,8 @@ fn manual_compaction_accepts_later_inference_generation() {
     h.shutdown().expect("shutdown");
 }
 
-/// Successful manual-compaction acceptance and start are ordinary informational
-/// notices, while a later transaction failure still completes through the
+/// Successful manual-compaction acceptance and start remain target-owned typed
+/// facts, while a later transaction failure still completes through the
 /// canonical background-error path.
 #[test]
 fn manual_compaction_lifecycle_distinguishes_status_from_failure() {
@@ -18632,26 +18632,22 @@ fn manual_compaction_lifecycle_distinguishes_status_from_failure() {
     );
 
     let events = event_log_events(&h);
-    let lifecycle = events
-        .iter()
-        .filter_map(|event| match event {
-            Event::HarnessNotice(notice)
-                if notice.message.contains("accepted compaction request")
-                    || notice.message.contains("Starting compaction request") =>
-            {
-                Some(notice)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(lifecycle.len(), 2, "{lifecycle:?}");
-    assert!(lifecycle.iter().all(|notice| {
-        notice.kind == tau_proto::notice_kind::HARNESS_NOTICE
-            && notice.level == tau_proto::NoticeLevel::Info
-            && !notice.always_show
-            && notice.message.contains("unrelated-target")
-            && notice.message.contains("cr-")
-    }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentManualCompactionRequested(requested)
+            if requested.target_agent_id == target_id
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(started)
+            if started.agent_id == target_id
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::HarnessNotice(notice)
+            if notice.message.contains("accepted compaction request")
+                || notice.message.contains("Starting compaction request")
+    )));
 
     let started = events
         .into_iter()

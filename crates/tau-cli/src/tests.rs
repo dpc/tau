@@ -6,14 +6,14 @@ use clap::{CommandFactory as _, Parser};
 use tau_cli_term::TermHandle;
 use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
-    AgentCompactionTriggered, AgentPromptCreated, AgentPromptQueued, AgentPromptSteered,
-    AgentPromptSubmitted, AgentPromptTerminated, AgentPromptTerminationReason, CborValue,
-    ContentPart, ContextItem, ContextRole, Effort, Event, ExtensionReady,
-    HarnessContextUsageChanged, HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable,
-    MessageItem, OpaqueProviderItem, ProviderResponseFinished, ProviderResponseUpdated,
-    ProviderStopReason, ServiceTier, SessionStartReason, SessionStarted, ThinkingSummary,
-    ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted,
-    UiRoleUpdateAction, Verbosity,
+    AgentCompactionTriggered, AgentManualCompactionRequested, AgentPromptCreated,
+    AgentPromptQueued, AgentPromptSteered, AgentPromptSubmitted, AgentPromptTerminated,
+    AgentPromptTerminationReason, AgentStandaloneCompactionStarted, CborValue, ContentPart,
+    ContextItem, ContextRole, Effort, Event, ExtensionReady, HarnessContextUsageChanged,
+    HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable, MessageItem, OpaqueProviderItem,
+    ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, ServiceTier,
+    SessionStartReason, SessionStarted, ThinkingSummary, ToolBackgroundResult, ToolCallItem,
+    ToolCancelled, ToolError, ToolResult, UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
 };
 
 use super::agent_navigation::AgentNavigationState;
@@ -2019,6 +2019,69 @@ fn compaction_lifecycle_notice_uses_info_style() {
     );
 
     assert_eq!(lifecycle.content.spans()[0].style.fg, Some(Color::Blue));
+}
+
+/// Manual-compaction lifecycle status belongs only to the target transcript,
+/// including when the target is a descendant of the currently selected agent.
+#[test]
+fn manual_compaction_lifecycle_status_follows_target_agent_selection() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::AgentManualCompactionRequested(
+        AgentManualCompactionRequested {
+            request_id: tau_proto::CompactionRequestId::parse("cr-48-0").expect("request id"),
+            caller_agent_id: agent_id("manager"),
+            target_agent_id: agent_id("reviewer-KH50"),
+            initiating_agent_prompt_id: "ap-manager-48".into(),
+            initiating_tool_call_id: "call-48".into(),
+            initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+            visible_tool_name: tau_proto::ToolName::new("agent_compact"),
+            requested_target_head: tau_proto::AgentHead::Root,
+            target_generation: 0,
+            model: "test/model".parse().expect("model id"),
+            resume_inference: false,
+        },
+    ));
+    renderer.handle(&Event::AgentStandaloneCompactionStarted(
+        AgentStandaloneCompactionStarted {
+            agent_id: agent_id("reviewer-KH50"),
+            transaction_id: tau_proto::CompactionTransactionId::parse("ct-48")
+                .expect("transaction id"),
+            compact_prompt_id: "ap-reviewer-KH50-48".into(),
+            cut: tau_proto::AgentHead::Root,
+            resume_through: None,
+            model: "test/model".parse().expect("model id"),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: tau_proto::PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+                request_id: tau_proto::CompactionRequestId::parse("cr-48-0").expect("request id"),
+                caller_agent_id: agent_id("manager"),
+                initiating_tool_call_id: "call-48".into(),
+            },
+        },
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "compaction request cr-48-0"));
+
+    renderer.switch_agent("unrelated".to_owned());
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "compaction request cr-48-0"));
+
+    renderer.switch_agent("reviewer-KH50".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(
+        100,
+        "Agent manager accepted compaction request for reviewer-KH50 (cr-48-0)"
+    ));
+    assert!(vt.screen_contains(
+        100,
+        "Starting compaction request cr-48-0 for reviewer-KH50 (ct-48)"
+    ));
 }
 
 #[test]
