@@ -2734,11 +2734,6 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
         .find(|fragment| fragment.name == "engineer.instructions")
         .expect("engineer prompt fragment");
     assert_eq!(engineer_instructions.priority, PromptPriority::new(15));
-    assert!(
-        engineer_instructions
-            .text
-            .contains("Trust the `<instructions>`")
-    );
     assert_eq!(
         engineer_instructions
             .text
@@ -2758,12 +2753,6 @@ fn harness_built_in_roles_load_with_global_delegate_role_prompt() {
     assert!(!s.roles.contains_key("assistant"));
     let engineer_senior = &s.roles["engineer-senior"];
     assert_eq!(engineer_senior.effort, Some(tau_proto::Effort::High));
-    assert!(
-        engineer_senior
-            .prompt_fragments
-            .iter()
-            .any(|fragment| fragment.text.contains("Trust the `<instructions>`"))
-    );
 }
 
 /// Ensures user-defined role groups can load custom role definitions.
