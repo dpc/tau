@@ -21358,6 +21358,7 @@ impl Harness {
                 conv.display_name = display_name;
             }
         }
+        self.publish_delegate_roles_context();
         self.enqueue_publish(
             None,
             started,

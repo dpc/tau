@@ -754,6 +754,37 @@ fn built_in_prompts_place_external_message_boundaries_between_tools_and_skills()
     }
 }
 
+/// The final tool instruction and skills heading must remain separate Markdown
+/// blocks even when no payload-boundary section appears between them.
+#[test]
+fn built_in_prompt_separates_final_tool_instruction_from_skills() {
+    let skills = std::collections::HashMap::from([(
+        tau_proto::SkillName::from("test-skill"),
+        discovered_skill("test skill description", true),
+    )]);
+    let tool_fragments = [ToolPromptFragment::new(
+        tau_proto::ToolName::new("timer"),
+        tau_proto::PromptFragment::new(
+            "timer.instructions",
+            tau_proto::PromptPriority::new(10),
+            "Do not use timers to poll tools.",
+        ),
+    )];
+    let prompt = build_system_prompt_with_tool_template_context(
+        built_in_system_prompt_templates()
+            .get(BUILT_IN_SYSTEM_TEMPLATE_NAME)
+            .expect("built-in template exists"),
+        &skills,
+        &[],
+        &tool_fragments,
+        serde_json::json!({}),
+        RolePromptTemplateContext::for_role("engineer"),
+        PromptCapabilities::default(),
+    );
+
+    assert!(prompt.contains("Do not use timers to poll tools.\n\n## Skills and skill system"));
+}
+
 /// Tool-scoped fragments render in a dedicated section near tool-use
 /// instructions, separate from ordinary role/extension prompt fragments.
 #[test]

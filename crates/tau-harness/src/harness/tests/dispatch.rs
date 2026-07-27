@@ -263,6 +263,26 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
     h.shutdown().expect("shutdown");
 }
 
+/// A first user prompt mints its durable agent identity lazily, so the delegate
+/// role context must be published before that prompt is rendered.
+#[test]
+fn first_effective_prompt_with_agent_start_lists_delegate_roles() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
+
+    h.submit_user_prompt("s1".into(), "hello".to_owned())
+        .expect("submit first user prompt");
+
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert!(prompt.system_prompt.contains("## Available sub-task roles"));
+    assert!(prompt.system_prompt.contains(
+        "* `engineer` - \"Capable individual contributor. Good default for most tasks.\""
+    ));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// A malformed selected template blocks before the durable dispatch checkpoint,
 /// publishes a mandatory replayable diagnostic, and remains retryable after the
 /// template is repaired.
