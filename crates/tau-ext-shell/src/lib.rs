@@ -36,6 +36,7 @@ mod isolation;
 mod pty_stdio;
 mod runtime;
 mod scheduler;
+mod shell_output_spool;
 mod shell_process;
 mod tools;
 mod truncate;
@@ -247,7 +248,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         model_visible_name: None,
         description: Some(
             "Reads a file. Defaults to reading the whole file in one call — \
-             output is capped at 2000 lines / 50 KB. Truncated output keeps \
+             output is capped at 2000 lines / 10 KiB. Truncated output keeps \
              the first 1000 and last 1000 lines separated by a literal `...` line. \
              Files over 10 MiB are rejected by an input safety cap before output truncation. \
              Prefer one full read. Pass inclusive `start_line`/`end_line` only to \
@@ -259,8 +260,8 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
              CRLF, CR, and missing final line endings are marked after the number, e.g. \
              `2(crlf)`, `3(cr)`, or `4(no_nl)`. Invalid UTF-8 is shown with \
              Unicode replacement characters and an `invalid-utf8` line flag. Lines that would exceed \
-             the 50 KB output budget are marker-only, e.g. `1(truncated)`. Truncated results include `truncated: true`, `total_lines`, \
-             and `total_bytes`; `valid_utf8: false` is included only when applicable."
+             the 10 KiB visible output budget are marker-only, e.g. `1(truncated)`. Truncated results include `truncated: true`, `total_lines`, \
+             and `total_bytes`, plus a private path to bounded saved output (or `saved_output_unavailable: true` when private storage fails); `valid_utf8: false` is included only when applicable."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -491,7 +492,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "Search file contents for a pattern using ripgrep. Patterns are literal by default; \
              regex metacharacters like `|` require `regex: true`. Returns matching lines \
              with file paths and line numbers. Respects .gitignore. Output is truncated at \
-             `limit` matches or 50KB. Long lines are truncated to 500 chars."
+             `limit` matches or 10 KiB of visible output. Visible-cap truncation provides a private saved-output path, or explicit unavailable metadata when storage fails; limit-only and per-line truncation retain native metadata. Long lines are truncated to 500 chars."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -552,7 +553,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         description: Some(
             "Search for files by glob pattern. Returns only file paths (directories are \
              never included, even with '**/*') relative to the search directory. Respects \
-             .gitignore. Output is truncated at `limit` results or 50KB. Use the ls tool \
+             .gitignore. Output is truncated at `limit` results or 10 KiB of visible output. Visible-cap truncation provides a private saved-output path, or explicit unavailable metadata when storage fails; limit-only truncation retains native metadata. Use the ls tool \
              if you want to see directory entries."
                 .to_owned(),
         ),
@@ -598,7 +599,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
             "List directory contents. Returns entries sorted alphabetically, with '/' suffix \
              for directories. Includes dotfiles. Output lines are prefixed with 1-based \
              entry numbers plus flags such as `escaped`, `invalid-utf8`, or `truncated`; \
-             output is capped at `limit` entries, 2000 lines, or 50KB with standard truncation headers. \
+             output is capped at `limit` entries, 2000 lines, or 10 KiB of visible output with saved-output metadata and standard truncation headers. \
              When `limit_reached` is true, entries are a bounded filesystem-order sample sorted \
              for display, not a complete alphabetic prefix."
                 .to_owned(),
@@ -668,14 +669,14 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
              are inferred read-write only while the agent holds a matching `dir_lock`; otherwise \
              they are read-only. When directory locking is disabled, shell commands run read-write. \
              Non-zero exits and timeouts are returned as structured command results with output details. \
-             Output is capped at 2000 lines / \
-             50 KB; truncated output keeps the first 1000 and last 1000 lines \
+             Model-visible output is capped at 2000 lines / \
+             10 KiB; truncated output keeps the first 1000 and last 1000 lines \
              separated by a literal `...` line. Output lines are prefixed with `out ` \
              for stdout or `err ` for stderr; missing trailing newlines are marked, e.g. \
              `out(no_nl)`; CRLF and CR line endings are marked as `out(crlf)` \
              or `out(cr)`. Invalid UTF-8 is shown with Unicode replacement characters and \
-             an `invalid-utf8` line flag. Lines that would exceed the 50 KB output budget \
-             are marker-only, e.g. `err(truncated)`. Truncated results include `truncated: true`, `total_lines`, and `total_bytes`. \
+             an `invalid-utf8` line flag. Lines that would exceed the 10 KiB output budget \
+             are marker-only, e.g. `err(truncated)`. Truncated results include complete totals, a warning, and normally an exact temporary path to up to 16 MiB of rendered output; output beyond that saved cap is explicitly marked incomplete, while platforms or filesystems that cannot enforce private storage report `saved_output_unavailable: true`. \
              Commands taking longer than 5 seconds include duration metadata. Prefer dedicated \
              tools like `read`, `grep`, and `find` when they fit."
                 .to_owned(),
@@ -720,7 +721,8 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
         description: Some(
-            "Run a shell command. Output is capped at 2000 lines / 50 KB; \
+            "Run a shell command. Model-visible output is capped at 2000 lines / 10 KiB; \
+             truncated results normally provide an exact temporary path to up to 16 MiB of rendered output and mark an incomplete saved artifact honestly; private-storage failures instead report `saved_output_unavailable: true`. \
              Output lines are prefixed with `out ` for stdout or `err ` for stderr; missing \
              trailing newlines are marked with `(no_nl)`. For file changes, prefer apply_patch."
                 .to_owned(),
@@ -1820,6 +1822,18 @@ fn dispatch_tool_invoke(
         WorkdirSnapshot::Invalid => unreachable!("non-workdir calls reject invalid state"),
         WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
     };
+    if matches!(
+        invoke.tool_name.as_str(),
+        READ_TOOL_NAME
+            | EDIT_TOOL_NAME
+            | GREP_TOOL_NAME
+            | FIND_TOOL_NAME
+            | LS_TOOL_NAME
+            | SHELL_TOOL_NAME
+            | GPT_SHELL_TOOL_NAME
+    ) {
+        crate::shell_output_spool::note_call();
+    }
     let vcr_config = tau_vcr::VcrConfig::from_env();
     let world = match crate::tools::world::ShellWorld::for_tool_in_dir(
         invoke.tool_name.as_str(),

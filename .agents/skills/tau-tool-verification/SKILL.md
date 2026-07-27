@@ -121,9 +121,25 @@ These total headers are omitted when output is not truncated, except `read` may 
 
 When output is truncated due to line number limit, first and last 1000 lines
 should be shown with `...` line separating them, instead of usual line prefix.
-If a single line would exceed the byte budget (currently 50 KB for
-`read`/`shell`), show only the line prefix plus `(truncated)` rather than
+If a single line would exceed the 10 KiB visible byte budget for ext-shell
+`read`, search/list/edit recovery, or shell output, show only the native prefix
+plus `(truncated)` rather than
 partial content.
+
+Shared-visible-cap-truncated ext-shell output, including `read`, `grep`, `find`, `ls`, edit
+recovery, model shell, and user shell surfaces, must preserve native rendering
+and include complete
+`total_lines` and `total_bytes`, a compact warning to prefer narrower commands
+or filters, and normally an exact temporary artifact path. Artifacts up to the 16 MiB
+saved cap use `full_output_path`. Output beyond the saved cap must instead use
+`saved_output_path`, `saved_output_truncated: true`, and `saved_output_bytes`;
+it must never call that partial artifact full output. Verify the exact file is
+readable while its random parent directory is private and not listable. Verify
+privacy/filesystem failures instead emit `saved_output_unavailable: true`, then
+verify ordinary cleanup only after both 32 later relevant calls and roughly 15
+minutes, plus independent graceful shutdown and safe crash cleanup.
+Caller-requested result limits and grep'"'"'s per-line shortening retain their
+native limit metadata and do not by themselves imply a saved artifact.
 
 
 ### Tool descriptions

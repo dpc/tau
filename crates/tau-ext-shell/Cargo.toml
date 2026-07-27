@@ -23,6 +23,7 @@ echo-agent = []
 
 [dependencies]
 base64.workspace = true
+blake3.workspace = true
 ciborium.workspace = true
 dirs.workspace = true
 fs2.workspace = true
@@ -38,6 +39,7 @@ tau-client.workspace = true
 tau-proto.workspace = true
 tau-skills.workspace = true
 tau-vcr.workspace = true
+tempfile.workspace = true
 tracing.workspace = true
 
 [target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
@@ -45,4 +47,3 @@ rustix-openpty.workspace = true
 
 [dev-dependencies]
 tau-core.workspace = true
-tempfile.workspace = true

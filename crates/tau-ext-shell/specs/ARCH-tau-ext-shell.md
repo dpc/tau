@@ -83,6 +83,26 @@ capture and closed stdin.
 See
 [SPEC-tau-ext-shell-process-lifecycle](SPEC-tau-ext-shell-process-lifecycle.md).
 
+All ext-shell surfaces that historically shared the 50 KiB bound now use a
+10 KiB visible bound, including `read`, `grep`, `find`, `ls`, edit recovery
+context, model `shell` / `shell_command`, and user `!` / `!!`. Each preserves
+its native rendering and metadata. When that cap truncates output, ext-shell
+saves at most 16 MiB of the same ordered native rendering in a private
+temporary artifact. Complete saved artifacts use `full_output_path`; artifacts
+that hit the saved cap use `saved_output_path` plus explicit incomplete
+metadata. Ordinary expiration requires both 32 later relevant ext-shell calls
+and 15 minutes, with cleanup triggered by a relevant call. Graceful shutdown
+remains unconditional. Startup-call cleanup independently removes provably dead
+crash leftovers older than 15 minutes.
+On Unix, each artifact directory is mode `0300`, each file is mode `0600`, and
+an owner lock prevents crash cleanup from touching a live process's artifacts.
+Platforms where ext-shell cannot enforce equivalent privacy report
+`saved_output_unavailable: true` instead of publishing a path.
+Model-shell VCR recordings keep the bounded saved rendering in a sibling
+`<call-id>.shell-output` side artifact rather than embedding an ephemeral path
+or up to 16 MiB in the size-limited YAML cassette. Replay creates a fresh
+ephemeral artifact from that owned side file.
+
 At the shared spawn boundary for both model and user shell commands, ext-shell
 applies ordinary `shell.extra_env`, then normally protects `PAGER`, `GIT_PAGER`,
 `GH_PAGER`, `JJ_PAGER`, and `SYSTEMD_PAGER` with `cat`. It preserves `TERM`.

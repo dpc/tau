@@ -239,6 +239,8 @@ fn ls_limit_bounds_world_directory_collection() {
     assert_eq!(cbor_map_int(&output.result, "total_lines"), None);
 }
 
+/// Ensures byte-truncated listings expose exact totals and a readable complete
+/// native rendering through the saved-output path.
 #[test]
 fn ls_byte_budget_truncation_reports_standard_total_headers() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
@@ -264,9 +266,17 @@ fn ls_byte_budget_truncation_reports_standard_total_headers() {
     assert!(text.len() <= MAX_OUTPUT_BYTES);
     assert_eq!(cbor_map_bool(&output.result, "truncated"), Some(true));
     assert_eq!(cbor_map_int(&output.result, "total_lines"), Some(700));
-    assert!(50 * 1024 < cbor_map_int(&output.result, "total_bytes").expect("total bytes"));
+    assert!(
+        (MAX_OUTPUT_BYTES as i64)
+            < cbor_map_int(&output.result, "total_bytes").expect("total bytes")
+    );
+    let path = cbor_map_text(&output.result, "full_output_path").expect("saved path");
+    let saved = std::fs::read_to_string(path).expect("saved listing");
+    assert!(MAX_OUTPUT_BYTES < saved.len());
 }
 
+/// Ensures line-count truncation retains native head/separator/tail context and
+/// reports complete totals.
 #[test]
 fn ls_line_count_truncation_keeps_head_tail_separator_and_totals() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
@@ -291,5 +301,5 @@ fn ls_line_count_truncation_keeps_head_tail_separator_and_totals() {
     assert!(text.contains("\n...\n"));
     assert_eq!(cbor_map_bool(&output.result, "truncated"), Some(true));
     assert_eq!(cbor_map_int(&output.result, "total_lines"), Some(2001));
-    assert_eq!(text.lines().count(), 2001);
+    assert!(text.lines().count() <= 2001);
 }

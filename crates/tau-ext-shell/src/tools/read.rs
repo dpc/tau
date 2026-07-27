@@ -7,11 +7,11 @@ use tau_proto::{CborValue, nearest_name_suggestion};
 use crate::argument::{argument_text, optional_argument_int_strict};
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
 use crate::tools::world::{MAX_SAFE_FILE_READ_BYTES, ShellWorld};
-use crate::truncate::{MAX_OUTPUT_BYTES, truncate_line_oriented};
+use crate::truncate::truncate_line_oriented;
 
 const MAX_READ_RANGES_PER_CALL: usize = 100;
 const MAX_READ_FILE_BYTES: usize = MAX_SAFE_FILE_READ_BYTES;
-const MAX_READ_RANGE_RENDERED_BYTES: usize = MAX_OUTPUT_BYTES * 40;
+const MAX_READ_RANGE_RENDERED_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PATH_SUGGESTION_SIBLINGS: usize = 64;
 
 pub(crate) fn read_file(
@@ -67,6 +67,9 @@ pub(crate) fn read_file(
             CborValue::Text("total_bytes".to_owned()),
             CborValue::Integer((file_bytes as i64).into()),
         ));
+    }
+    if truncated.was_truncated {
+        crate::shell_output_spool::append_metadata(&mut entries, &sliced.content);
     }
     let mut display = ok_display(display_args);
     display.stats = text_stats(&truncated.content);

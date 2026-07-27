@@ -96,6 +96,7 @@ impl ShellRuntime {
     pub(super) fn final_shutdown(&mut self) {
         self.shutdown();
         drop(self.scheduler.take());
+        crate::shell_output_spool::shutdown();
     }
 
     pub(super) fn apply_config(

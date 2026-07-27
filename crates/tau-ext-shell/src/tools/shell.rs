@@ -12,14 +12,19 @@ use crate::Output;
 use crate::argument::{argument_text, optional_argument_int_strict, optional_argument_text};
 use crate::config::ShellConfig;
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
+use crate::shell_output_spool::{MAX_SAVED_OUTPUT_BYTES, SavedArtifact};
 use crate::shell_process::{ShellProcess, ShellStderr, ShellStdout};
 use crate::tools::world::{ShellWorld, WorldShellOutcome};
-use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_line_oriented_lines};
+use crate::truncate::{
+    MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_line_oriented_lines_with_byte_limit,
+};
 
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
 pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
 const VCR_REPLAY_SPEEDUP: u64 = 100;
-const MAX_CAPTURED_LINE_BYTES: usize = MAX_OUTPUT_BYTES;
+const MAX_CAPTURED_LINE_BYTES: usize = MAX_SAVED_OUTPUT_BYTES - 128;
+const MAX_USER_STDERR_CHUNKS: usize = 4096;
+pub(crate) const MAX_MODEL_SHELL_OUTPUT_BYTES: usize = 10 * 1024;
 const USER_OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
 /// Filesystem access mode ext-shell infers for a shell command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +179,7 @@ pub(crate) fn run_command_cancellable_for_tool(
             result: output.result.clone(),
             display: Box::new(output.display.clone()),
             elapsed_ms,
+            saved_output: None,
         },
         CommandOutcome::Cancelled => WorldShellOutcome::Cancelled,
     };
@@ -247,6 +253,7 @@ pub(crate) fn run_command_live_for_surface(
                     output: String::new(),
                     truncated: false,
                     valid_utf8: true,
+                    saved_output: None,
                 }))
         })?;
 
@@ -274,6 +281,15 @@ pub(crate) fn run_command_live_for_surface(
     let output_trunc = wait.output.truncate();
     let combined = output_trunc.content.clone();
 
+    let saved_output = output_trunc.was_truncated.then(|| {
+        match crate::shell_output_spool::save(
+            &wait.output.saved_output,
+            wait.output.saved_output_incomplete,
+        ) {
+            Ok(saved) => SavedArtifact::Available(saved),
+            Err(_) => SavedArtifact::Unavailable,
+        }
+    });
     let result = command_details_value(CommandDetails {
         status: status_code,
         signal,
@@ -289,6 +305,7 @@ pub(crate) fn run_command_live_for_surface(
         output: output_trunc.content,
         truncated: output_trunc.was_truncated,
         valid_utf8: !wait.had_invalid_utf8,
+        saved_output,
     });
 
     let mut display = if success {
@@ -358,6 +375,7 @@ fn replay_shell_outcome(
             result,
             display,
             elapsed_ms,
+            saved_output: _,
         } => {
             if cancel_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
                 return Err(ToolFailure::new(format!(
@@ -425,8 +443,8 @@ fn parse_timeout_secs(arguments: &CborValue) -> Result<u64, String> {
 
 /// Run a user-initiated `!`/`!!` shell command, streaming stdout and
 /// stderr back as `ShellCommandProgress` chunks while they arrive and
-/// emitting `ShellCommandFinished` with the full (truncated-tail)
-/// output when the child exits.
+/// emitting `ShellCommandFinished` with bounded native output and saved-output
+/// recovery metadata when the child exits.
 pub(crate) fn dispatch_user_shell_command(
     cmd: tau_proto::UiShellCommand,
     shell_config: ShellConfig,
@@ -434,6 +452,7 @@ pub(crate) fn dispatch_user_shell_command(
     cancel_rx: mpsc::Receiver<()>,
     cwd: PathBuf,
 ) {
+    crate::shell_output_spool::note_call();
     let cwd = cwd.display().to_string();
     let child = match shell_config.spawn_isolated(&cmd.command, Some(&cwd), false, false) {
         Ok(child) => child,
@@ -488,16 +507,30 @@ fn send_user_shell_finished(
     ));
 }
 
+/// Bounded capture state for one user-shell output stream.
 #[derive(Default)]
 struct UserStreamCapture {
+    /// Visible prefix retained for final context.
     captured: String,
+    /// Whether visible capture omitted later bytes.
     clipped: bool,
-    progress_bytes: usize,
-    progress_clipped: bool,
+    /// Complete decoded byte count observed on this stream.
+    total_bytes: usize,
+    /// Complete newline count observed on this stream.
+    newline_count: usize,
+    /// Whether the latest observed byte was a newline.
+    ends_with_newline: bool,
 }
 
 impl UserStreamCapture {
     fn push_chunk(&mut self, chunk: &str) {
+        self.total_bytes = self.total_bytes.saturating_add(chunk.len());
+        self.newline_count = self
+            .newline_count
+            .saturating_add(chunk.bytes().filter(|byte| *byte == b'\n').count());
+        if let Some(last) = chunk.as_bytes().last() {
+            self.ends_with_newline = *last == b'\n';
+        }
         if self.captured.len() < MAX_OUTPUT_BYTES {
             let remaining = MAX_OUTPUT_BYTES - self.captured.len();
             let mut end = remaining.min(chunk.len());
@@ -510,23 +543,213 @@ impl UserStreamCapture {
             self.clipped = true;
         }
     }
+}
 
-    fn progress_chunk(&mut self, chunk: &str) -> Option<String> {
-        if self.progress_clipped {
+/// One ordered, aggregate-bounded retained user-shell artifact.
+///
+/// `bytes` is one fixed 16 MiB arena. Valid UTF-8 stdout occupies
+/// `0..stdout_len`. Valid UTF-8 stderr chunks occupy disjoint ranges allocated
+/// backward from `stderr_cursor`; `stderr_chunks` records those ranges in
+/// arrival order. The native rendering is stdout, an optional newline, the
+/// stderr label, then chunks in descriptor order. All lengths are character
+/// boundaries and stdout growth evicts whole latest stderr chunks, so capture
+/// remains a prefix without moving retained bytes. Descriptor count is at most
+/// `MAX_USER_STDERR_CHUNKS`; range lengths sum to `stderr_bytes`, every range
+/// begins at or above `stderr_cursor`, and no range overlaps stdout.
+/// `stdout_len <= stderr_cursor <= bytes.len()`; the cursor equals the lowest
+/// range start when stderr is nonempty and `bytes.len()` otherwise.
+struct UserSavedCapture {
+    /// Fixed-size arena containing stdout and stderr regions.
+    bytes: Vec<u8>,
+    /// End of the stdout prefix at the arena front.
+    stdout_len: usize,
+    /// Lowest arena offset occupied by reverse-allocated stderr.
+    stderr_cursor: usize,
+    /// Stderr chunk ranges in native arrival order.
+    stderr_chunks: Vec<std::ops::Range<usize>>,
+    /// Total retained stderr content bytes.
+    stderr_bytes: usize,
+    /// Whether stdout has omitted a byte and must stop accepting suffixes.
+    stdout_incomplete: bool,
+    /// Whether stderr has omitted a byte and must stop accepting suffixes.
+    stderr_incomplete: bool,
+    /// Whether either native section omitted bytes.
+    incomplete: bool,
+}
+
+impl Default for UserSavedCapture {
+    fn default() -> Self {
+        Self {
+            bytes: vec![0; MAX_SAVED_OUTPUT_BYTES],
+            stdout_len: 0,
+            stderr_cursor: MAX_SAVED_OUTPUT_BYTES,
+            stderr_chunks: Vec::with_capacity(MAX_USER_STDERR_CHUNKS),
+            stderr_bytes: 0,
+            stdout_incomplete: false,
+            stderr_incomplete: false,
+            incomplete: false,
+        }
+    }
+}
+
+impl UserSavedCapture {
+    const STDERR_LABEL: &'static str = "[stderr]\n";
+
+    fn framing_len(&self) -> usize {
+        if self.stderr_bytes == 0 {
+            0
+        } else {
+            Self::STDERR_LABEL.len() + usize::from(self.stdout_len != 0)
+        }
+    }
+
+    fn push(&mut self, stream: tau_proto::ShellStream, chunk: &str) {
+        match stream {
+            tau_proto::ShellStream::Stdout => {
+                if self.stdout_incomplete {
+                    return;
+                }
+                let mut accepted = chunk.len().min(
+                    MAX_SAVED_OUTPUT_BYTES
+                        .saturating_sub(self.stdout_len)
+                        .saturating_sub(self.framing_len()),
+                );
+                while !chunk.is_char_boundary(accepted) {
+                    accepted -= 1;
+                }
+                while self.stderr_cursor
+                    < self
+                        .stdout_len
+                        .saturating_add(accepted)
+                        .saturating_add(self.framing_len())
+                {
+                    let Some(range) = self.stderr_chunks.pop() else {
+                        break;
+                    };
+                    self.stderr_cursor = range.end;
+                    self.stderr_bytes -= range.len();
+                    self.stderr_incomplete = true;
+                    self.incomplete = true;
+                }
+                let available = self
+                    .stderr_cursor
+                    .saturating_sub(self.stdout_len)
+                    .saturating_sub(self.framing_len());
+                accepted = accepted.min(available);
+                while !chunk.is_char_boundary(accepted) {
+                    accepted -= 1;
+                }
+                if accepted < chunk.len() {
+                    self.stderr_chunks.clear();
+                    self.stderr_cursor = MAX_SAVED_OUTPUT_BYTES;
+                    self.stderr_bytes = 0;
+                    self.stderr_incomplete = true;
+                }
+                self.incomplete |= accepted < chunk.len();
+                self.stdout_incomplete |= accepted < chunk.len();
+                let new_stdout_len = self.stdout_len + accepted;
+                self.bytes[self.stdout_len..new_stdout_len]
+                    .copy_from_slice(&chunk.as_bytes()[..accepted]);
+                self.stdout_len = new_stdout_len;
+            }
+            tau_proto::ShellStream::Stderr => {
+                if self.stderr_incomplete {
+                    return;
+                }
+                if MAX_USER_STDERR_CHUNKS <= self.stderr_chunks.len() {
+                    self.stderr_incomplete = true;
+                    self.incomplete = true;
+                    return;
+                }
+                let overhead = Self::STDERR_LABEL.len() + usize::from(0 < self.stdout_len);
+                let remaining = self
+                    .stderr_cursor
+                    .saturating_sub(self.stdout_len)
+                    .saturating_sub(overhead);
+                let mut accepted = remaining.min(chunk.len());
+                while !chunk.is_char_boundary(accepted) {
+                    accepted -= 1;
+                }
+                if accepted != 0 {
+                    self.stderr_cursor -= accepted;
+                    self.bytes[self.stderr_cursor..self.stderr_cursor + accepted]
+                        .copy_from_slice(&chunk.as_bytes()[..accepted]);
+                    self.stderr_chunks
+                        .push(self.stderr_cursor..self.stderr_cursor + accepted);
+                    self.stderr_bytes += accepted;
+                }
+                self.stderr_incomplete |= accepted < chunk.len();
+                self.incomplete |= accepted < chunk.len();
+            }
+        }
+    }
+
+    fn stdout(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.stdout_len])
+            .expect("saved user stdout remains UTF-8")
+    }
+
+    fn stderr_parts(&self) -> impl Iterator<Item = &str> {
+        self.stderr_chunks.iter().map(|range| {
+            std::str::from_utf8(&self.bytes[range.clone()])
+                .expect("saved user stderr remains UTF-8")
+        })
+    }
+
+    fn rendering_parts(&self) -> Vec<&str> {
+        let mut parts = Vec::with_capacity(self.stderr_chunks.len() + 3);
+        parts.push(self.stdout());
+        if self.stderr_bytes != 0 {
+            if self.stdout_len != 0 {
+                parts.push("\n");
+            }
+            parts.push(Self::STDERR_LABEL);
+            parts.extend(self.stderr_parts());
+        }
+        parts
+    }
+}
+
+/// Shared saved-output capture and live-progress state for a user shell.
+#[derive(Default)]
+struct UserCaptureState {
+    /// Ordered retained artifact capture state.
+    saved: UserSavedCapture,
+    /// Live progress budget.
+    progress: UserProgressBudget,
+}
+
+/// Shared live-progress budget across user-shell stdout and stderr.
+#[derive(Default)]
+struct UserProgressBudget {
+    /// Bytes forwarded across both streams.
+    bytes: usize,
+    /// Whether the shared budget has emitted its truncation marker.
+    clipped: bool,
+}
+
+impl UserProgressBudget {
+    fn chunk(&mut self, chunk: &str) -> Option<String> {
+        if self.clipped {
             return None;
         }
-        if self.progress_bytes < MAX_OUTPUT_BYTES {
-            let remaining = MAX_OUTPUT_BYTES - self.progress_bytes;
+        let content_limit = MAX_OUTPUT_BYTES.saturating_sub(USER_OUTPUT_TRUNCATED_MARKER.len());
+        if self.bytes < content_limit {
+            let remaining = content_limit - self.bytes;
             let mut end = remaining.min(chunk.len());
             while !chunk.is_char_boundary(end) {
                 end -= 1;
             }
-            self.progress_bytes += end;
+            self.bytes += end;
             if end == chunk.len() {
                 return Some(chunk.to_owned());
             }
+            self.bytes = MAX_OUTPUT_BYTES;
+            self.clipped = true;
+            return Some(format!("{}{USER_OUTPUT_TRUNCATED_MARKER}", &chunk[..end]));
         }
-        self.progress_clipped = true;
+        self.clipped = true;
+        self.bytes = MAX_OUTPUT_BYTES;
         Some(USER_OUTPUT_TRUNCATED_MARKER.to_owned())
     }
 }
@@ -534,8 +757,34 @@ impl UserStreamCapture {
 fn merged_user_shell_output(
     stdout: UserStreamCapture,
     stderr: UserStreamCapture,
+    saved: UserSavedCapture,
     status_note: Option<String>,
 ) -> String {
+    let total_bytes = stdout
+        .total_bytes
+        .saturating_add(stderr.total_bytes)
+        .saturating_add(usize::from(
+            0 < stdout.total_bytes && 0 < stderr.total_bytes,
+        ))
+        .saturating_add(if 0 < stderr.total_bytes {
+            "[stderr]\n".len()
+        } else {
+            0
+        });
+    let total_lines = stdout
+        .newline_count
+        .saturating_add(stderr.newline_count)
+        .saturating_add(usize::from(
+            0 < stdout.total_bytes && !stdout.ends_with_newline,
+        ))
+        .saturating_add(usize::from(
+            0 < stderr.total_bytes && !stderr.ends_with_newline,
+        ))
+        .saturating_add(usize::from(0 < stderr.total_bytes))
+        .saturating_add(usize::from(
+            0 < stdout.total_bytes && stdout.ends_with_newline && 0 < stderr.total_bytes,
+        ));
+    let stream_clipped = stdout.clipped || stderr.clipped;
     let mut merged = stdout.captured;
     if !stderr.captured.is_empty() {
         if !merged.is_empty() {
@@ -544,7 +793,7 @@ fn merged_user_shell_output(
         merged.push_str("[stderr]\n");
         merged.push_str(&stderr.captured);
     }
-    if stdout.clipped || stderr.clipped {
+    if stream_clipped {
         append_guaranteed_output_truncated_marker(&mut merged);
     }
     if let Some(note) = status_note {
@@ -553,7 +802,48 @@ fn merged_user_shell_output(
         }
         merged.push_str(&note);
     }
-    crate::truncate::truncate_tail(&merged).content
+    let clipped = stream_clipped
+        || MAX_OUTPUT_BYTES < merged.len()
+        || MAX_OUTPUT_LINES < merged.lines().count();
+    let mut footer = String::new();
+    if clipped {
+        footer.push_str("\n\n[tau-output-metadata]\ntruncated: true");
+        footer.push_str(&format!(
+            "\ntotal_lines: {total_lines}\ntotal_bytes: {total_bytes}\ntruncation_warning: fetching excessive output is inefficient; prefer narrower commands or filters"
+        ));
+        let parts = saved.rendering_parts();
+        match crate::shell_output_spool::save_parts(&parts, saved.incomplete) {
+            Ok(saved) => {
+                let label = if saved.incomplete {
+                    "saved_output_path"
+                } else {
+                    "full_output_path"
+                };
+                let mut artifact_fields = format!("\n{label}: {}", saved.path.display());
+                if saved.incomplete {
+                    artifact_fields.push_str(&format!(
+                        "\nsaved_output_truncated: true\nsaved_output_bytes: {}",
+                        saved.saved_bytes
+                    ));
+                }
+                if footer.len().saturating_add(artifact_fields.len()) <= MAX_OUTPUT_BYTES {
+                    footer.push_str(&artifact_fields);
+                } else {
+                    footer.push_str("\nsaved_output_unavailable: true");
+                }
+            }
+            Err(_) => footer.push_str("\nsaved_output_unavailable: true"),
+        }
+    }
+    let content_budget = MAX_OUTPUT_BYTES.saturating_sub(footer.len());
+    let visible = crate::truncate::truncate_line_oriented_lines_with_byte_limit(
+        merged.lines(),
+        merged.lines().count(),
+        merged.len(),
+        content_budget,
+    )
+    .content;
+    format!("{visible}{footer}")
 }
 
 #[cfg(unix)]
@@ -580,6 +870,7 @@ fn read_available_user_shell<R: std::io::Read>(
     command_id: &tau_proto::ShellCommandId,
     target_agent_id: &Option<tau_proto::AgentId>,
     capture: &mut UserStreamCapture,
+    capture_state: &mut UserCaptureState,
     tx: &Output,
 ) {
     let Some(pipe_ref) = pipe.as_mut() else {
@@ -597,7 +888,8 @@ fn read_available_user_shell<R: std::io::Read>(
             Ok(n) => {
                 let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
                 capture.push_chunk(&chunk);
-                if let Some(chunk) = capture.progress_chunk(&chunk) {
+                capture_state.saved.push(stream, &chunk);
+                if let Some(chunk) = capture_state.progress.chunk(&chunk) {
                     let _ = tx.send(HarnessInputMessage::emit(
                         Event::ShellCommandProgressReported(tau_proto::ShellCommandProgress {
                             command_id: command_id.clone(),
@@ -874,6 +1166,7 @@ fn dispatch_user_shell_command_unix(
 
     let mut stdout = UserStreamCapture::default();
     let mut stderr = UserStreamCapture::default();
+    let mut capture_state = UserCaptureState::default();
     let mut status = None;
     let mut wait_failed = false;
     let mut timed_out = false;
@@ -887,6 +1180,7 @@ fn dispatch_user_shell_command_unix(
             &cmd.command_id,
             &cmd.target_agent_id,
             &mut stdout,
+            &mut capture_state,
             tx,
         );
         read_available_user_shell(
@@ -895,6 +1189,7 @@ fn dispatch_user_shell_command_unix(
             &cmd.command_id,
             &cmd.target_agent_id,
             &mut stderr,
+            &mut capture_state,
             tx,
         );
         if collect_user_shell_status(&event_rx, &mut status, &mut wait_failed, &mut cancelled) {
@@ -957,6 +1252,7 @@ fn dispatch_user_shell_command_unix(
             &cmd.command_id,
             &cmd.target_agent_id,
             &mut stdout,
+            &mut capture_state,
             tx,
         );
         read_available_user_shell(
@@ -965,6 +1261,7 @@ fn dispatch_user_shell_command_unix(
             &cmd.command_id,
             &cmd.target_agent_id,
             &mut stderr,
+            &mut capture_state,
             tx,
         );
         let _ = collect_user_shell_status(&event_rx, &mut status, &mut wait_failed, &mut cancelled);
@@ -998,7 +1295,7 @@ fn dispatch_user_shell_command_unix(
     } else {
         None
     };
-    let output = merged_user_shell_output(stdout, stderr, status_note);
+    let output = merged_user_shell_output(stdout, stderr, capture_state.saved, status_note);
     send_user_shell_finished(cmd, output, exit_code, timed_out || cancelled, tx);
 }
 
@@ -1019,6 +1316,8 @@ fn dispatch_user_shell_command_blocking(
         target_agent_id: Option<tau_proto::AgentId>,
         tx: Output,
         capture: std::sync::Arc<std::sync::Mutex<UserStreamCapture>>,
+        progress: std::sync::Arc<std::sync::Mutex<UserProgressBudget>>,
+        saved_capture: std::sync::Arc<std::sync::Mutex<UserSavedCapture>>,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         progress_gate: std::sync::Arc<std::sync::Mutex<()>>,
         done_tx: mpsc::Sender<()>,
@@ -1033,16 +1332,23 @@ fn dispatch_user_shell_command_blocking(
                         if stop.load(std::sync::atomic::Ordering::SeqCst) {
                             break;
                         }
-                        let progress_chunk = {
+                        {
                             let mut capture =
                                 capture.lock().unwrap_or_else(|error| error.into_inner());
-                            capture.push_chunk(&chunk);
-                            capture.progress_chunk(&chunk)
-                        };
-                        if let Some(chunk) = progress_chunk {
-                            let _progress_guard = progress_gate
+                            let mut saved_capture = saved_capture
                                 .lock()
                                 .unwrap_or_else(|error| error.into_inner());
+                            capture.push_chunk(&chunk);
+                            saved_capture.push(stream, &chunk);
+                        }
+                        let _progress_guard = progress_gate
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        let progress_chunk = progress
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .chunk(&chunk);
+                        if let Some(chunk) = progress_chunk {
                             if stop.load(std::sync::atomic::Ordering::SeqCst) {
                                 break;
                             }
@@ -1070,6 +1376,8 @@ fn dispatch_user_shell_command_blocking(
     let stderr = std::sync::Arc::new(std::sync::Mutex::new(UserStreamCapture::default()));
     let stop_pipe_readers = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let progress_gate = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(UserProgressBudget::default()));
+    let saved_capture = std::sync::Arc::new(std::sync::Mutex::new(UserSavedCapture::default()));
     let (pipe_done_tx, pipe_done_rx) = mpsc::channel();
     if let Some(p) = stdout_pipe {
         pump(
@@ -1079,6 +1387,8 @@ fn dispatch_user_shell_command_blocking(
             cmd.target_agent_id.clone(),
             tx.clone(),
             std::sync::Arc::clone(&stdout),
+            std::sync::Arc::clone(&progress),
+            std::sync::Arc::clone(&saved_capture),
             std::sync::Arc::clone(&stop_pipe_readers),
             std::sync::Arc::clone(&progress_gate),
             pipe_done_tx.clone(),
@@ -1094,6 +1404,8 @@ fn dispatch_user_shell_command_blocking(
             cmd.target_agent_id.clone(),
             tx.clone(),
             std::sync::Arc::clone(&stderr),
+            std::sync::Arc::clone(&progress),
+            std::sync::Arc::clone(&saved_capture),
             std::sync::Arc::clone(&stop_pipe_readers),
             std::sync::Arc::clone(&progress_gate),
             pipe_done_tx,
@@ -1156,7 +1468,12 @@ fn dispatch_user_shell_command_blocking(
 
     let stdout = std::mem::take(&mut *stdout.lock().unwrap_or_else(|error| error.into_inner()));
     let stderr = std::mem::take(&mut *stderr.lock().unwrap_or_else(|error| error.into_inner()));
-    let output = merged_user_shell_output(stdout, stderr, status_note);
+    let saved = std::mem::take(
+        &mut *saved_capture
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    );
+    let output = merged_user_shell_output(stdout, stderr, saved, status_note);
     send_user_shell_finished(cmd, output, exit_code, cancelled, tx);
 }
 
@@ -2059,6 +2376,7 @@ enum OutputContent {
         invalid_utf8: bool,
         ending: Option<LineEndingKind>,
         original_text_bytes: usize,
+        retained_prefix: String,
     },
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -2070,13 +2388,24 @@ enum LineEndingKind {
 
 #[derive(Default)]
 struct CapturedOutput {
+    /// Incremental stdout decoder.
     stdout: StreamDecoder,
+    /// Incremental stderr decoder.
     stderr: StreamDecoder,
+    /// Leading lines retained for model rendering.
     head_lines: Vec<OutputLine>,
+    /// Trailing lines retained for model rendering.
     tail_lines: Vec<OutputLine>,
+    /// Complete rendered line count.
     total_lines: usize,
+    /// Complete rendered byte count.
     total_bytes: usize,
+    /// Whether a line exceeded the saved-output bound.
     saw_truncated_line: bool,
+    /// Ordered rendering retained for the artifact.
+    saved_output: String,
+    /// Whether the artifact rendering is incomplete.
+    saved_output_incomplete: bool,
 }
 
 impl CapturedOutput {
@@ -2091,12 +2420,86 @@ impl CapturedOutput {
     }
 
     fn push_line(&mut self, stream: OutputStream, content: OutputContent) {
+        let mut line = OutputLine { stream, content };
+        let full_line = render_saved_output_line(&line);
+        let formatted_len = match &line.content {
+            OutputContent::Truncated {
+                invalid_utf8,
+                ending,
+                original_text_bytes,
+                ..
+            } => {
+                let mut markers = Vec::new();
+                if *invalid_utf8 {
+                    markers.push("invalid-utf8");
+                }
+                if let Some(marker) = line_ending_marker(*ending) {
+                    markers.push(marker);
+                }
+                format_output_line(
+                    stream.prefix(),
+                    (!markers.is_empty()).then(|| markers.join(",")).as_deref(),
+                    "",
+                )
+                .len()
+                .saturating_add(*original_text_bytes)
+            }
+            _ => full_line.len(),
+        };
         let separator_bytes = usize::from(self.total_lines != 0);
-        self.total_bytes += separator_bytes + formatted_output_line_len(stream, &content);
-        if matches!(content, OutputContent::Truncated { .. }) {
+        self.total_bytes += separator_bytes + formatted_len;
+        let source_line_truncated = matches!(line.content, OutputContent::Truncated { .. });
+        if source_line_truncated {
             self.saw_truncated_line = true;
         }
-        let line = OutputLine { stream, content };
+        if !self.saved_output_incomplete {
+            let separator_bytes = usize::from(!self.saved_output.is_empty());
+            let remaining = MAX_SAVED_OUTPUT_BYTES.saturating_sub(self.saved_output.len());
+            if separator_bytes.saturating_add(full_line.len()) <= remaining {
+                if separator_bytes != 0 {
+                    self.saved_output.push('\n');
+                }
+                self.saved_output.push_str(&full_line);
+            } else {
+                self.saved_output_incomplete = true;
+                const MARKER: &str = "...(saved output truncated)";
+                let marker_bytes = separator_bytes.saturating_add(MARKER.len());
+                if marker_bytes <= remaining {
+                    if separator_bytes != 0 {
+                        self.saved_output.push('\n');
+                    }
+                    self.saved_output.push_str(MARKER);
+                }
+            }
+        }
+        if source_line_truncated {
+            self.saved_output_incomplete = true;
+        }
+        if MAX_MODEL_SHELL_OUTPUT_BYTES < formatted_len {
+            let content = std::mem::replace(
+                &mut line.content,
+                OutputContent::Text {
+                    text: String::new(),
+                    ending: None,
+                },
+            );
+            let (invalid_utf8, ending, original_text_bytes) = match content {
+                OutputContent::Text { text, ending } => (false, ending, text.len()),
+                OutputContent::InvalidUtf8 { text, ending } => (true, ending, text.len()),
+                OutputContent::Truncated {
+                    invalid_utf8,
+                    ending,
+                    original_text_bytes,
+                    ..
+                } => (invalid_utf8, ending, original_text_bytes),
+            };
+            line.content = OutputContent::Truncated {
+                invalid_utf8,
+                ending,
+                original_text_bytes,
+                retained_prefix: String::new(),
+            };
+        }
         if self.total_lines < MAX_OUTPUT_LINES / 2 {
             self.head_lines.push(line);
         } else {
@@ -2125,14 +2528,15 @@ impl CapturedOutput {
             .collect::<Vec<_>>();
         rendered.extend(self.tail_lines.iter().map(render_output_line));
         let rendered_refs = rendered.iter().map(String::as_str).collect::<Vec<_>>();
-        truncate_line_oriented_lines(
+        truncate_line_oriented_lines_with_byte_limit(
             rendered_refs.iter().copied(),
             self.total_lines,
             if self.saw_truncated_line {
-                self.total_bytes.max(MAX_OUTPUT_BYTES + 1)
+                self.total_bytes.max(MAX_MODEL_SHELL_OUTPUT_BYTES + 1)
             } else {
                 self.total_bytes
             },
+            MAX_MODEL_SHELL_OUTPUT_BYTES,
         )
     }
 }
@@ -2184,6 +2588,10 @@ impl StreamDecoder {
                         self.pending_line_invalid = true;
                         if !self.pending_line_truncated {
                             self.push_char('\u{fffd}');
+                        } else {
+                            self.pending_line_original_bytes = self
+                                .pending_line_original_bytes
+                                .saturating_add('\u{fffd}'.len_utf8());
                         }
                         remaining = &remaining[valid_up_to + error_len..];
                     } else {
@@ -2225,7 +2633,6 @@ impl StreamDecoder {
             return;
         }
         if MAX_CAPTURED_LINE_BYTES < next_len {
-            self.pending_line.clear();
             self.pending_line_truncated = true;
             return;
         }
@@ -2240,6 +2647,10 @@ impl StreamDecoder {
             self.pending_line_invalid = true;
             if !self.pending_line_truncated {
                 self.push_char('\u{fffd}');
+            } else {
+                self.pending_line_original_bytes = self
+                    .pending_line_original_bytes
+                    .saturating_add('\u{fffd}'.len_utf8());
             }
         }
         self.flush_pending_cr_as_cr(&mut lines);
@@ -2261,11 +2672,11 @@ impl StreamDecoder {
         let original_text_bytes = std::mem::take(&mut self.pending_line_original_bytes);
         if std::mem::take(&mut self.pending_line_truncated) {
             let invalid_utf8 = std::mem::take(&mut self.pending_line_invalid);
-            self.pending_line.clear();
             return OutputContent::Truncated {
                 invalid_utf8,
                 ending,
                 original_text_bytes,
+                retained_prefix: std::mem::take(&mut self.pending_line),
             };
         }
         if std::mem::take(&mut self.pending_line_invalid) {
@@ -2313,6 +2724,17 @@ fn render_output_line(line: &OutputLine) -> String {
     }
 }
 
+fn render_saved_output_line(line: &OutputLine) -> String {
+    let mut rendered = render_output_line(line);
+    if let OutputContent::Truncated {
+        retained_prefix, ..
+    } = &line.content
+    {
+        rendered.push_str(retained_prefix);
+    }
+    rendered
+}
+
 fn line_ending_marker(ending: Option<LineEndingKind>) -> Option<&'static str> {
     match ending {
         Some(LineEndingKind::Lf) => None,
@@ -2327,21 +2749,6 @@ fn format_output_line(prefix: &str, marker: Option<&str>, content: &str) -> Stri
         Some(marker) => format!("{prefix}({marker}) {content}"),
         None => format!("{prefix} {content}"),
     }
-}
-
-fn formatted_output_line_len(stream: OutputStream, content: &OutputContent) -> usize {
-    if let OutputContent::Truncated {
-        original_text_bytes,
-        ..
-    } = content
-    {
-        return stream.prefix().len() + 1 + original_text_bytes;
-    }
-    render_output_line(&OutputLine {
-        stream,
-        content: content.clone(),
-    })
-    .len()
 }
 
 fn command_display(command: &str) -> (String, Option<ToolUsePayload>) {
@@ -2371,16 +2778,28 @@ fn shorten_command_line(line: &str) -> String {
 }
 
 pub(crate) struct CommandDetails {
+    /// Process exit status, when available.
     pub(crate) status: Option<i32>,
+    /// Terminating signal, when available.
     pub(crate) signal: Option<i32>,
+    /// Whether the deadline terminated the command.
     pub(crate) timed_out: bool,
+    /// Approximate duration for slow commands.
     pub(crate) duration_seconds: Option<u64>,
+    /// Machine-readable process termination classification.
     pub(crate) termination_reason: &'static str,
+    /// Complete line count when model output was truncated.
     pub(crate) total_lines: Option<usize>,
+    /// Complete byte count when model output was truncated.
     pub(crate) total_bytes: Option<usize>,
+    /// Bounded model-visible ordered rendering.
     pub(crate) output: String,
+    /// Whether model-visible rendering was truncated.
     pub(crate) truncated: bool,
+    /// Whether all captured bytes were valid UTF-8.
     pub(crate) valid_utf8: bool,
+    /// Ephemeral artifact metadata for truncated output.
+    pub(crate) saved_output: Option<SavedArtifact>,
 }
 
 pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
@@ -2395,6 +2814,7 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
         output,
         truncated,
         valid_utf8,
+        saved_output,
     } = details;
     let mut entries = vec![(
         CborValue::Text("output".to_owned()),
@@ -2433,6 +2853,49 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
             entries.push((
                 CborValue::Text("total_bytes".to_owned()),
                 CborValue::Integer((total_bytes as i64).into()),
+            ));
+        }
+        entries.push((
+            CborValue::Text("truncation_warning".to_owned()),
+            CborValue::Text(
+                "Fetching excessive output is inefficient; prefer narrower commands or filters."
+                    .to_owned(),
+            ),
+        ));
+        match &saved_output {
+            Some(SavedArtifact::Available(saved_output)) => entries.push((
+                CborValue::Text(
+                    if saved_output.incomplete {
+                        "saved_output_path"
+                    } else {
+                        "full_output_path"
+                    }
+                    .to_owned(),
+                ),
+                CborValue::Text(
+                    saved_output
+                        .path
+                        .to_str()
+                        .expect("spool accepts only safe UTF-8 paths")
+                        .to_owned(),
+                ),
+            )),
+            Some(SavedArtifact::Unavailable) => entries.push((
+                CborValue::Text("saved_output_unavailable".to_owned()),
+                CborValue::Bool(true),
+            )),
+            None => {}
+        }
+        if let Some(SavedArtifact::Available(saved_output)) = &saved_output
+            && saved_output.incomplete
+        {
+            entries.push((
+                CborValue::Text("saved_output_truncated".to_owned()),
+                CborValue::Bool(true),
+            ));
+            entries.push((
+                CborValue::Text("saved_output_bytes".to_owned()),
+                CborValue::Integer((saved_output.saved_bytes as i64).into()),
             ));
         }
     }
@@ -2562,19 +3025,223 @@ mod tests {
         assert!(truncated.content.len() <= MAX_OUTPUT_BYTES);
     }
 
-    /// Ensures user shell progress streaming is independently bounded while
-    /// output capture can keep draining the child pipes for final truncation.
+    /// Ensures user shell progress streaming shares one bounded budget while
+    /// output capture can keep draining both child pipes.
     #[test]
     fn user_shell_progress_stream_is_bounded() {
-        let mut capture = UserStreamCapture::default();
-        let first = capture
-            .progress_chunk(&"x".repeat(MAX_OUTPUT_BYTES - 1))
+        let mut progress = UserProgressBudget::default();
+        let content_limit = MAX_OUTPUT_BYTES - USER_OUTPUT_TRUNCATED_MARKER.len();
+        let first = progress
+            .chunk(&"x".repeat(content_limit - 1))
             .expect("first progress chunk");
-        let marker = capture.progress_chunk("abcdef").expect("truncation marker");
+        let marker = progress.chunk("abcdef").expect("truncation marker");
 
-        assert_eq!(first.len(), MAX_OUTPUT_BYTES - 1);
-        assert_eq!(marker, USER_OUTPUT_TRUNCATED_MARKER);
-        assert!(capture.progress_chunk("more").is_none());
+        assert_eq!(first.len(), content_limit - 1);
+        assert_eq!(marker, format!("a{USER_OUTPUT_TRUNCATED_MARKER}"));
+        assert_eq!(first.len() + marker.len(), MAX_OUTPUT_BYTES);
+        assert!(progress.chunk("more").is_none());
+    }
+
+    /// Ensures merged stdout/stderr, metadata, and saved rendering share the
+    /// final 10 KiB/16 MiB bounds rather than multiplying them per stream.
+    #[test]
+    fn merged_user_shell_output_uses_shared_budgets() {
+        let mut stdout = UserStreamCapture::default();
+        let mut stderr = UserStreamCapture::default();
+        let mut saved = UserSavedCapture::default();
+        let stdout_chunk = "o".repeat(6 * 1024);
+        let stderr_chunk = "e".repeat(6 * 1024);
+        stdout.push_chunk(&stdout_chunk);
+        saved.push(tau_proto::ShellStream::Stdout, &stdout_chunk);
+        stderr.push_chunk(&stderr_chunk);
+        saved.push(tau_proto::ShellStream::Stderr, &stderr_chunk);
+
+        let output = merged_user_shell_output(stdout, stderr, saved, None);
+        assert!(output.len() <= MAX_OUTPUT_BYTES);
+        assert!(output.contains("[tau-output-metadata]"));
+        assert!(output.contains("total_bytes: 12298"));
+        let path = output
+            .lines()
+            .find_map(|line| line.strip_prefix("full_output_path: "))
+            .expect("saved output path");
+        let saved = std::fs::read_to_string(path).expect("saved merged output");
+        assert!(saved.starts_with('o'));
+        assert!(saved.contains("[stderr]\n"));
+        assert!(saved.ends_with('e'));
+    }
+
+    /// Ensures one stream can use the full shared 16 MiB saved budget rather
+    /// than an artificial per-stream partition.
+    #[test]
+    fn merged_user_shell_output_keeps_large_single_stream_complete() {
+        let chunk = "x".repeat(12 * 1024 * 1024);
+        let mut stdout = UserStreamCapture::default();
+        let mut saved = UserSavedCapture::default();
+        stdout.push_chunk(&chunk);
+        saved.push(tau_proto::ShellStream::Stdout, &chunk);
+
+        let output = merged_user_shell_output(stdout, UserStreamCapture::default(), saved, None);
+        assert!(output.len() <= MAX_OUTPUT_BYTES);
+        let path = output
+            .lines()
+            .find_map(|line| line.strip_prefix("full_output_path: "))
+            .expect("complete saved output path");
+        assert_eq!(
+            std::fs::metadata(path).expect("saved metadata").len(),
+            chunk.len() as u64
+        );
+    }
+
+    /// Ensures native user-shell totals include the blank separator created
+    /// when newline-terminated stdout precedes stderr.
+    #[test]
+    fn merged_user_shell_output_counts_trailing_newline_separator() {
+        let stdout_chunk = "o\n".repeat(6_000);
+        let stderr_chunk = "e";
+        let mut stdout = UserStreamCapture::default();
+        let mut stderr = UserStreamCapture::default();
+        let mut saved = UserSavedCapture::default();
+        stdout.push_chunk(&stdout_chunk);
+        saved.push(tau_proto::ShellStream::Stdout, &stdout_chunk);
+        stderr.push_chunk(stderr_chunk);
+        saved.push(tau_proto::ShellStream::Stderr, stderr_chunk);
+
+        let output = merged_user_shell_output(stdout, stderr, saved, None);
+        assert!(output.contains("total_lines: 6003"));
+        assert!(output.contains("total_bytes: 12011"));
+        assert!(output.len() <= MAX_OUTPUT_BYTES);
+    }
+
+    /// Ensures output beyond the shared 16 MiB retained budget exposes honest
+    /// partial-artifact metadata within the final visible cap.
+    #[test]
+    fn merged_user_shell_output_reports_partial_saved_artifact() {
+        let chunk = "x".repeat(MAX_SAVED_OUTPUT_BYTES + 1);
+        let mut stdout = UserStreamCapture::default();
+        let mut saved = UserSavedCapture::default();
+        stdout.push_chunk(&chunk);
+        saved.push(tau_proto::ShellStream::Stdout, &chunk);
+
+        let output = merged_user_shell_output(stdout, UserStreamCapture::default(), saved, None);
+        assert!(output.contains("saved_output_path: "));
+        assert!(output.contains("saved_output_truncated: true"));
+        assert!(output.contains(&format!("saved_output_bytes: {MAX_SAVED_OUTPUT_BYTES}")));
+        assert!(output.len() <= MAX_OUTPUT_BYTES);
+    }
+
+    /// Ensures the fixed Vec arena preserves distinct native-order UTF-8
+    /// sections and never changes capacity during stderr reclamation.
+    #[test]
+    fn user_saved_capture_bounds_capacity_after_stderr_reclaim() {
+        let stderr_first = "é".repeat(1024 * 1024);
+        let stderr_second = "z".repeat(2 * 1024 * 1024);
+        let stdout_chunk = "o".repeat(12 * 1024 * 1024);
+        let mut saved = UserSavedCapture::default();
+        let fixed_capacity = saved.bytes.capacity();
+        saved.push(tau_proto::ShellStream::Stderr, &stderr_first);
+        saved.push(tau_proto::ShellStream::Stderr, &stderr_second);
+        saved.push(tau_proto::ShellStream::Stdout, &stdout_chunk);
+
+        assert_eq!(saved.bytes.capacity(), fixed_capacity);
+        assert_eq!(saved.stdout(), stdout_chunk);
+        let rendering = saved.rendering_parts().concat();
+        let expected = format!(
+            "{stdout_chunk}\n{}{stderr_first}",
+            UserSavedCapture::STDERR_LABEL
+        );
+        assert_eq!(rendering, expected);
+        let stderr = saved.stderr_parts().collect::<String>();
+        assert_eq!(stderr, stderr_first);
+        assert!(
+            stdout_chunk.len() + 1 + UserSavedCapture::STDERR_LABEL.len() + stderr.len()
+                <= MAX_SAVED_OUTPUT_BYTES
+        );
+        assert!(std::str::from_utf8(&saved.bytes).is_ok());
+        assert_eq!(saved.stdout_len, stdout_chunk.len());
+        assert_eq!(saved.stderr_bytes, stderr.len());
+        assert_eq!(saved.stderr_cursor, saved.stderr_chunks[0].start);
+        assert_eq!(
+            saved
+                .stderr_chunks
+                .iter()
+                .map(std::ops::Range::len)
+                .sum::<usize>(),
+            saved.stderr_bytes
+        );
+        assert!(saved.stdout_len <= saved.stderr_cursor);
+        assert!(saved.stderr_incomplete);
+        assert!(saved.incomplete);
+    }
+
+    /// Ensures UTF-8 backoff that omits stdout also removes later stderr so the
+    /// retained artifact remains a native-order prefix without holes.
+    #[test]
+    fn user_saved_capture_drops_stderr_after_stdout_utf8_backoff() {
+        let mut saved = UserSavedCapture::default();
+        saved.push(tau_proto::ShellStream::Stderr, "S");
+        saved.push(
+            tau_proto::ShellStream::Stdout,
+            &"x".repeat(MAX_SAVED_OUTPUT_BYTES - 12),
+        );
+        saved.push(tau_proto::ShellStream::Stdout, "€");
+
+        assert_eq!(saved.stderr_bytes, 0);
+        assert!(saved.stderr_parts().next().is_none());
+        assert!(saved.incomplete);
+        assert!(saved.stdout_incomplete);
+        assert_eq!(
+            saved.rendering_parts().concat(),
+            "x".repeat(MAX_SAVED_OUTPUT_BYTES - 12)
+        );
+        assert_eq!(saved.stderr_cursor, saved.bytes.len());
+    }
+
+    /// Ensures byte-at-a-time stderr cannot create unbounded descriptors or
+    /// final write parts outside the fixed arena budget.
+    #[test]
+    fn user_saved_capture_bounds_stderr_descriptors() {
+        let mut saved = UserSavedCapture::default();
+        for _ in 0..=MAX_USER_STDERR_CHUNKS {
+            saved.push(tau_proto::ShellStream::Stderr, "x");
+        }
+
+        assert_eq!(saved.stderr_chunks.len(), MAX_USER_STDERR_CHUNKS);
+        assert!(saved.stderr_incomplete);
+        assert!(saved.incomplete);
+        assert_eq!(saved.rendering_parts().len(), MAX_USER_STDERR_CHUNKS + 2);
+        assert_eq!(
+            saved.rendering_parts().concat(),
+            format!(
+                "{}{}",
+                UserSavedCapture::STDERR_LABEL,
+                "x".repeat(MAX_USER_STDERR_CHUNKS)
+            )
+        );
+        assert_eq!(
+            saved.stderr_cursor,
+            saved.stderr_chunks.last().expect("range").start
+        );
+        assert_eq!(
+            saved
+                .stderr_chunks
+                .iter()
+                .map(std::ops::Range::len)
+                .sum::<usize>(),
+            saved.stderr_bytes
+        );
+    }
+
+    /// Ensures multiple retained stderr descriptors render in arrival order.
+    #[test]
+    fn user_saved_capture_preserves_stderr_descriptor_order() {
+        let mut saved = UserSavedCapture::default();
+        saved.push(tau_proto::ShellStream::Stderr, "first-");
+        saved.push(tau_proto::ShellStream::Stderr, "second");
+
+        assert_eq!(
+            saved.rendering_parts().concat(),
+            format!("{}first-second", UserSavedCapture::STDERR_LABEL)
+        );
     }
 
     fn record_cancelled_shell(
@@ -2702,6 +3369,7 @@ mod tests {
             )]),
             display: Box::new(ok_display("recorded")),
             elapsed_ms: 5_000,
+            saved_output: None,
         });
         world.finish().expect("finish recording");
 
@@ -2815,8 +3483,120 @@ mod tests {
 
         assert!(error.message.contains("expected shell cancellation"));
     }
-    /// Ensures a command that emits one huge line without a newline is captured
-    /// as a truncated marker instead of retaining the whole line in memory.
+
+    /// Ensures VCR stores truncated shell rendering in its bounded side
+    /// artifact and replay creates a fresh ephemeral path instead of
+    /// persisting one.
+    #[test]
+    fn shell_vcr_regenerates_saved_output_from_side_artifact() {
+        let cassette_dir = tempfile::TempDir::new().expect("cassette dir");
+        let source_dir = tempfile::TempDir::new().expect("source dir");
+        let source_path = source_dir.path().join("output");
+        let saved = "out x\n".repeat(2_000);
+        std::fs::write(&source_path, &saved).expect("write source");
+        let args = CborValue::Map(vec![(
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("printf replay".to_owned()),
+        )]);
+        let mut world = ShellWorld::for_tool(
+            "shell",
+            "saved_vcr",
+            &args,
+            Some(tau_vcr::VcrConfig::new(
+                tau_vcr::VcrMode::RecordIfMissing,
+                cassette_dir.path(),
+            )),
+        )
+        .expect("record world");
+        world.record_shell_outcome(WorldShellOutcome::Finished {
+            result: CborValue::Map(vec![
+                (
+                    CborValue::Text("output".to_owned()),
+                    CborValue::Text("out x".to_owned()),
+                ),
+                (
+                    CborValue::Text("truncated".to_owned()),
+                    CborValue::Bool(true),
+                ),
+                (
+                    CborValue::Text("saved_output_path".to_owned()),
+                    CborValue::Text(source_path.to_string_lossy().into_owned()),
+                ),
+                (
+                    CborValue::Text("saved_output_truncated".to_owned()),
+                    CborValue::Bool(true),
+                ),
+                (
+                    CborValue::Text("saved_output_bytes".to_owned()),
+                    CborValue::Integer((saved.len() as i64).into()),
+                ),
+            ]),
+            display: Box::new(ok_display("recorded")),
+            elapsed_ms: 1,
+            saved_output: None,
+        });
+        world.finish().expect("finish recording");
+        let yaml =
+            std::fs::read_to_string(cassette_dir.path().join("saved_vcr.yaml")).expect("yaml");
+        assert!(!yaml.contains(source_path.to_string_lossy().as_ref()));
+        assert!(!yaml.contains(&saved));
+        assert_eq!(
+            std::fs::read(cassette_dir.path().join("saved_vcr.shell-output"))
+                .expect("side artifact"),
+            saved.as_bytes()
+        );
+
+        let mut replay = ShellWorld::for_tool(
+            "shell",
+            "saved_vcr",
+            &args,
+            Some(tau_vcr::VcrConfig::new(
+                tau_vcr::VcrMode::ReplayOnly,
+                cassette_dir.path(),
+            )),
+        )
+        .expect("replay world");
+        let WorldShellOutcome::Finished { result, .. } = replay
+            .replay_shell_outcome()
+            .expect("replay")
+            .expect("outcome")
+        else {
+            panic!("finished outcome");
+        };
+        let CborValue::Map(entries) = result else {
+            panic!("result map");
+        };
+        let replay_path = entries
+            .iter()
+            .find_map(|(key, value)| match (key, value) {
+                (CborValue::Text(key), CborValue::Text(path)) if key == "saved_output_path" => {
+                    Some(path)
+                }
+                _ => None,
+            })
+            .expect("fresh output path");
+        assert!(entries.iter().any(|(key, value)| matches!(
+            (key, value),
+            (CborValue::Text(key), CborValue::Bool(true))
+                if key == "saved_output_truncated"
+        )));
+        assert!(entries.iter().any(|(key, value)| {
+            matches!(
+                (key, value),
+                (CborValue::Text(key), CborValue::Integer(bytes))
+                    if key == "saved_output_bytes"
+                        && i128::from(*bytes) == saved.len() as i128
+            )
+        }));
+        assert_ne!(replay_path, &source_path.to_string_lossy());
+        assert_eq!(
+            std::fs::read_to_string(replay_path).expect("fresh artifact"),
+            saved
+        );
+    }
+
+    /// Ensures a line beyond the saved hard cap becomes an honestly incomplete
+    /// saved artifact and a marker-only model-visible line.
     #[test]
     fn captured_output_bounds_no_newline_lines() {
         let mut output = CapturedOutput::default();
@@ -2829,6 +3609,36 @@ mod tests {
         let truncated = output.truncate();
         assert_eq!(truncated.content, "out(no_nl,truncated) ");
         assert!(truncated.was_truncated);
-        assert!(MAX_OUTPUT_BYTES < truncated.total_bytes);
+        assert!(MAX_MODEL_SHELL_OUTPUT_BYTES < truncated.total_bytes);
+        assert!(output.saved_output_incomplete);
+        assert!(output.saved_output.len() <= MAX_SAVED_OUTPUT_BYTES);
+        assert!(output.saved_output.starts_with("out(no_nl,truncated) xxx"));
+    }
+
+    /// Ensures many complete prefixed lines stop the saved rendering at its
+    /// hard cap and later lines cannot grow the retained buffer.
+    #[test]
+    fn captured_output_stops_saved_rendering_after_hard_cap() {
+        let mut output = CapturedOutput::default();
+        let line = OutputContent::Text {
+            text: "é".repeat(4096),
+            ending: Some(LineEndingKind::Lf),
+        };
+        while !output.saved_output_incomplete {
+            output.push_line(OutputStream::Stdout, line.clone());
+        }
+        let capped_len = output.saved_output.len();
+        output.push_line(OutputStream::Stderr, line);
+
+        assert!(output.saved_output_incomplete);
+        assert!(capped_len <= MAX_SAVED_OUTPUT_BYTES);
+        assert_eq!(output.saved_output.len(), capped_len);
+        assert!(
+            output
+                .saved_output
+                .lines()
+                .all(|line| { line == "...(saved output truncated)" || line.starts_with("out ") })
+        );
+        assert!(std::str::from_utf8(output.saved_output.as_bytes()).is_ok());
     }
 }

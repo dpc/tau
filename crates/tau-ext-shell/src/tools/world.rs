@@ -28,8 +28,12 @@ enum WorldMode {
         store: tau_vcr::VcrStore,
         key: String,
         cassette: WorldCassette,
+        /// Saved rendering held until paired cassette/side publication.
+        side_output: Option<Vec<u8>>,
     },
     Replay {
+        /// Store owning the cassette and its bounded side artifact.
+        store: tau_vcr::VcrStore,
         key: String,
         cassette: WorldCassette,
         next_op: usize,
@@ -76,6 +80,7 @@ impl ShellWorld {
             validate_cassette(&key, &cassette, &request)?;
             return Ok(Self {
                 mode: WorldMode::Replay {
+                    store,
                     key,
                     cassette,
                     next_op: 0,
@@ -95,6 +100,7 @@ impl ShellWorld {
                     request,
                     ops: Vec::new(),
                 },
+                side_output: None,
             },
             cwd,
         })
@@ -111,11 +117,26 @@ impl ShellWorld {
                 store,
                 key,
                 cassette,
-            } => store.put(&key, &cassette).map_err(vcr_failure),
+                side_output,
+            } => match side_output {
+                Some(side) => store
+                    .put_with_side(
+                        &key,
+                        &tau_vcr::ArtifactKind::new("shell-output")
+                            .expect("static artifact kind is valid"),
+                        &cassette,
+                        &side,
+                        crate::shell_output_spool::MAX_SAVED_OUTPUT_BYTES as u64,
+                    )
+                    .map_err(vcr_failure),
+                None => store.put(&key, &cassette).map_err(vcr_failure),
+            },
             WorldMode::Replay {
+                store: _,
                 key,
                 cassette,
                 next_op,
+                ..
             } => {
                 if next_op == cassette.ops.len() {
                     Ok(())
@@ -144,6 +165,7 @@ impl ShellWorld {
                 key,
                 cassette,
                 next_op,
+                ..
             } => {
                 let op = next_replay_op(key, cassette, next_op, "is_dir", path)?;
                 let WorldOp::IsDir {
@@ -180,6 +202,7 @@ impl ShellWorld {
                 key,
                 cassette,
                 next_op,
+                ..
             } => {
                 let op = next_replay_op(key, cassette, next_op, "read_dir", path)?;
                 let WorldOp::ReadDir {
@@ -222,6 +245,7 @@ impl ShellWorld {
                 key,
                 cassette,
                 next_op,
+                ..
             } => {
                 let op = next_replay_op(key, cassette, next_op, "read_file", path)?;
                 let WorldOp::ReadFile {
@@ -260,6 +284,7 @@ impl ShellWorld {
                 key,
                 cassette,
                 next_op,
+                ..
             } => {
                 let op = next_replay_op(key, cassette, next_op, "write_file", path)?;
                 let WorldOp::WriteFile {
@@ -307,6 +332,7 @@ impl ShellWorld {
                 key,
                 cassette,
                 next_op,
+                ..
             } => {
                 let op = next_replay_op(key, cassette, next_op, "path_exists", path)?;
                 let WorldOp::PathExists {
@@ -337,6 +363,7 @@ impl ShellWorld {
                 key,
                 cassette,
                 next_op,
+                ..
             } => {
                 let op = next_replay_op(key, cassette, next_op, "create_dir_all", path)?;
                 let WorldOp::CreateDirAll {
@@ -376,6 +403,7 @@ impl ShellWorld {
                 key,
                 cassette,
                 next_op,
+                ..
             } => {
                 let op = next_replay_op(key, cassette, next_op, "remove_file", path)?;
                 let WorldOp::RemoveFile {
@@ -396,9 +424,11 @@ impl ShellWorld {
         match &mut self.mode {
             WorldMode::Real | WorldMode::Recording { .. } => Ok(None),
             WorldMode::Replay {
+                store,
                 key,
                 cassette,
                 next_op,
+                ..
             } => {
                 let Some(op) = cassette.ops.get(*next_op) else {
                     return Err(ToolFailure::new(format!(
@@ -411,14 +441,23 @@ impl ShellWorld {
                         "vcr replay for {key} expected shell outcome but found different op"
                     )));
                 };
-                Ok(Some(outcome.clone()))
+                let mut outcome = outcome.clone();
+                outcome.refresh_ephemeral_shell_artifact(store, key);
+                Ok(Some(outcome))
             }
         }
     }
 
     pub(crate) fn record_shell_outcome(&mut self, outcome: WorldShellOutcome) {
-        if let WorldMode::Recording { cassette, .. } = &mut self.mode {
-            cassette.ops.push(WorldOp::Shell { outcome });
+        if let WorldMode::Recording {
+            cassette,
+            side_output,
+            ..
+        } = &mut self.mode
+        {
+            let (recorded, side) = outcome.for_recording();
+            *side_output = side;
+            cassette.ops.push(WorldOp::Shell { outcome: recorded });
         }
     }
 }
@@ -485,8 +524,200 @@ pub(crate) enum WorldShellOutcome {
         result: CborValue,
         display: Box<ToolUseState>,
         elapsed_ms: u64,
+        /// Bounded artifact regeneration data kept out of provider-visible
+        /// CBOR.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        saved_output: Option<RecordedSavedOutput>,
     },
     Cancelled,
+}
+
+/// Bounded rendering used to regenerate an ephemeral artifact during replay.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct RecordedSavedOutput {
+    /// Exact VCR-owned side-artifact length.
+    bytes: u64,
+    /// BLAKE3 digest of the side artifact.
+    digest: [u8; 32],
+    /// Whether the live saved rendering hit its hard cap.
+    incomplete: bool,
+}
+
+impl WorldShellOutcome {
+    fn for_recording(mut self) -> (Self, Option<Vec<u8>>) {
+        let Self::Finished {
+            result,
+            saved_output,
+            ..
+        } = &mut self
+        else {
+            return (self, None);
+        };
+        let path = take_text_field(result, "full_output_path")
+            .map(|path| (path, false))
+            .or_else(|| take_text_field(result, "saved_output_path").map(|path| (path, true)));
+        remove_field(result, "saved_output_truncated");
+        remove_field(result, "saved_output_bytes");
+        let side = path.and_then(|(path, incomplete)| {
+            let content = std::fs::read(path).ok()?;
+            *saved_output = Some(RecordedSavedOutput {
+                bytes: content.len() as u64,
+                digest: *blake3::hash(&content).as_bytes(),
+                incomplete,
+            });
+            Some(content)
+        });
+        (self, side)
+    }
+
+    fn refresh_ephemeral_shell_artifact(&mut self, store: &tau_vcr::VcrStore, key: &str) {
+        let Self::Finished {
+            result,
+            saved_output,
+            ..
+        } = self
+        else {
+            return;
+        };
+        remove_field(result, "full_output_path");
+        remove_field(result, "saved_output_path");
+        remove_field(result, "saved_output_truncated");
+        remove_field(result, "saved_output_bytes");
+        remove_field(result, "saved_output_unavailable");
+        enforce_current_shell_output_cap(result);
+        let artifact_required = has_field(result, "truncated");
+        if artifact_required && !has_field(result, "truncation_warning") {
+            insert_text_field(
+                result,
+                "truncation_warning",
+                "Fetching excessive output is inefficient; prefer narrower commands or filters."
+                    .to_owned(),
+            );
+        }
+        if let Some(saved) = saved_output
+            && let Ok(content) = store.get_side(
+                key,
+                &tau_vcr::ArtifactKind::new("shell-output").expect("static artifact kind is valid"),
+                crate::shell_output_spool::MAX_SAVED_OUTPUT_BYTES as u64,
+            )
+            && content.len() as u64 == saved.bytes
+            && blake3::hash(&content).as_bytes() == &saved.digest
+            && let Ok(content) = String::from_utf8(content)
+            && let Ok(artifact) = crate::shell_output_spool::save(&content, saved.incomplete)
+        {
+            insert_text_field(
+                result,
+                if artifact.incomplete {
+                    "saved_output_path"
+                } else {
+                    "full_output_path"
+                },
+                artifact
+                    .path
+                    .to_str()
+                    .expect("spool accepts only safe UTF-8 paths")
+                    .to_owned(),
+            );
+            if artifact.incomplete {
+                insert_bool_field(result, "saved_output_truncated", true);
+                insert_integer_field(result, "saved_output_bytes", artifact.saved_bytes as i64);
+            }
+        } else if artifact_required {
+            insert_bool_field(result, "saved_output_unavailable", true);
+        }
+    }
+}
+
+fn enforce_current_shell_output_cap(result: &mut CborValue) {
+    let Some(output) = text_field(result, "output") else {
+        return;
+    };
+    if output.len() <= crate::tools::shell::MAX_MODEL_SHELL_OUTPUT_BYTES {
+        return;
+    }
+    let truncated = crate::truncate::truncate_line_oriented_lines_with_byte_limit(
+        output.lines(),
+        output.lines().count(),
+        output.len(),
+        crate::tools::shell::MAX_MODEL_SHELL_OUTPUT_BYTES,
+    );
+    replace_text_field(result, "output", truncated.content);
+    remove_field(result, "truncated");
+    insert_bool_field(result, "truncated", true);
+    if !has_field(result, "total_lines") {
+        insert_integer_field(result, "total_lines", truncated.total_lines as i64);
+    }
+    if !has_field(result, "total_bytes") {
+        insert_integer_field(result, "total_bytes", truncated.total_bytes as i64);
+    }
+}
+
+fn has_field(value: &CborValue, key: &str) -> bool {
+    matches!(value, CborValue::Map(entries) if entries.iter().any(
+        |(name, _)| matches!(name, CborValue::Text(name) if name == key)
+    ))
+}
+
+fn text_field<'a>(value: &'a CborValue, key: &str) -> Option<&'a str> {
+    let CborValue::Map(entries) = value else {
+        return None;
+    };
+    entries
+        .iter()
+        .find_map(|(name, value)| match (name, value) {
+            (CborValue::Text(name), CborValue::Text(text)) if name == key => Some(text.as_str()),
+            _ => None,
+        })
+}
+
+fn replace_text_field(value: &mut CborValue, key: &str, replacement: String) {
+    if let CborValue::Map(entries) = value
+        && let Some((_, CborValue::Text(text))) = entries
+            .iter_mut()
+            .find(|(name, _)| matches!(name, CborValue::Text(name) if name == key))
+    {
+        *text = replacement;
+    }
+}
+
+fn remove_field(value: &mut CborValue, key: &str) {
+    if let CborValue::Map(entries) = value {
+        entries.retain(|(name, _)| name.as_text() != Some(key));
+    }
+}
+
+fn take_text_field(value: &mut CborValue, key: &str) -> Option<String> {
+    let CborValue::Map(entries) = value else {
+        return None;
+    };
+    let index = entries
+        .iter()
+        .position(|(name, _)| name.as_text() == Some(key))?;
+    match entries.remove(index).1 {
+        CborValue::Text(text) => Some(text),
+        _ => None,
+    }
+}
+
+fn insert_text_field(value: &mut CborValue, key: &str, text: String) {
+    if let CborValue::Map(entries) = value {
+        entries.push((CborValue::Text(key.to_owned()), CborValue::Text(text)));
+    }
+}
+
+fn insert_bool_field(value: &mut CborValue, key: &str, flag: bool) {
+    if let CborValue::Map(entries) = value {
+        entries.push((CborValue::Text(key.to_owned()), CborValue::Bool(flag)));
+    }
+}
+
+fn insert_integer_field(value: &mut CborValue, key: &str, integer: i64) {
+    if let CborValue::Map(entries) = value {
+        entries.push((
+            CborValue::Text(key.to_owned()),
+            CborValue::Integer(integer.into()),
+        ));
+    }
 }
 
 fn atomic_write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {

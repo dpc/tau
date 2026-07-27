@@ -3609,8 +3609,11 @@ pub struct ShellCommandFinished {
     /// explicit target; the harness uses its default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<AgentId>,
-    /// Interleaved stdout + stderr (truncated), the same shape the
-    /// `shell` tool returns.
+    /// Native user-shell stdout followed by an optional `[stderr]` section.
+    /// When the 10 KiB visible bound truncates it, the final suffix is a
+    /// `[tau-output-metadata]` block containing `truncated`, complete
+    /// `total_lines`/`total_bytes`, a warning, and exactly one full, partial,
+    /// or unavailable saved-output field set.
     pub output: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,

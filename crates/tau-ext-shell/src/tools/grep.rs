@@ -510,13 +510,16 @@ fn render_grep_output(
         };
     }
 
-    let mut output_text = result_lines.join("\n");
+    let total_output_lines = result_lines.len();
+    let full_output_text = result_lines.join("\n");
 
     // Apply byte-level truncation to the assembled output.
-    let byte_truncated = truncate_head(&output_text);
-    if byte_truncated.was_truncated {
-        output_text = byte_truncated.content;
-    }
+    let byte_truncated = truncate_head(&full_output_text);
+    let mut output_text = if byte_truncated.was_truncated {
+        byte_truncated.content
+    } else {
+        full_output_text.clone()
+    };
 
     // Build notices.
     let mut notices = Vec::new();
@@ -524,7 +527,7 @@ fn render_grep_output(
         notices.push(limit_reached_notice(limit));
     }
     if byte_truncated.was_truncated {
-        notices.push("50KB output limit reached.".to_owned());
+        notices.push("10 KiB visible output limit reached.".to_owned());
     }
     if lines_truncated {
         notices.push(format!(
@@ -537,8 +540,26 @@ fn render_grep_output(
     let mut display = crate::display::ok_display(display_args);
     display.stats = text_stats(&output_text);
     display.stats.matches = Some(match_count as u64);
+    let mut result = grep_result_map(status, match_count, output_text);
+    if byte_truncated.was_truncated
+        && let CborValue::Map(entries) = &mut result
+    {
+        entries.push((
+            CborValue::Text("truncated".to_owned()),
+            CborValue::Bool(true),
+        ));
+        entries.push((
+            CborValue::Text("total_lines".to_owned()),
+            CborValue::Integer((total_output_lines as i64).into()),
+        ));
+        entries.push((
+            CborValue::Text("total_bytes".to_owned()),
+            CborValue::Integer((full_output_text.len() as i64).into()),
+        ));
+        crate::shell_output_spool::append_metadata(entries, &full_output_text);
+    }
     ToolOutput {
-        result: grep_result_map(status, match_count, output_text),
+        result,
         provider_content: Vec::new(),
         display,
     }
@@ -1127,11 +1148,11 @@ mod tests {
         assert!(line.len() <= GREP_MAX_LINE_LENGTH);
     }
 
-    /// Ensures grep notices are included without exceeding the documented 50KB
-    /// output budget.
+    /// Ensures grep notices are included without exceeding the documented 10
+    /// KiB output budget.
     #[test]
     fn grep_notices_stay_within_output_cap() {
-        let notice = "50KB output limit reached.".to_owned();
+        let notice = "10 KiB visible output limit reached.".to_owned();
         let suffix_len = format!("\n\n[{notice}]").len();
         let output = append_notices_within_cap(
             format!("{}étail", "x".repeat(MAX_OUTPUT_BYTES - suffix_len - 1)),

@@ -429,6 +429,7 @@ fn context_line_mismatch_failure(
             CborValue::Text("truncated".to_owned()),
             CborValue::Bool(true),
         ));
+        crate::shell_output_spool::append_metadata(&mut details, &rendered.content);
     }
     if truncated.was_truncated || truncated.content.is_empty() {
         details.push((

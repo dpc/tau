@@ -226,7 +226,226 @@ pub struct VcrStore {
     dir: PathBuf,
 }
 
+/// Validated semantic name for one cassette-owned side artifact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactKind(
+    /// Validated filename suffix without a leading dot.
+    String,
+);
+
+impl ArtifactKind {
+    /// Validates an ASCII alphanumeric/hyphen artifact kind.
+    pub fn new(value: impl Into<String>) -> Result<Self, VcrError> {
+        let value = value.into();
+        if value.is_empty()
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(VcrError::InvalidArtifactKind(value));
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl VcrStore {
+    /// Publishes a cassette together with one private bounded side artifact.
+    ///
+    /// The filename is derived only from the validated cassette key and
+    /// [`ArtifactKind`]. A private per-key advisory lock serializes paired
+    /// publication and permits safe recovery of interrupted side-without-
+    /// cassette states. The side is published exclusively before the cassette;
+    /// cassette failure triggers best-effort side removal.
+    pub fn put_with_side<T>(
+        &self,
+        key: &str,
+        artifact_kind: &ArtifactKind,
+        value: &T,
+        side: &[u8],
+        max_side_bytes: u64,
+    ) -> Result<(), VcrError>
+    where
+        T: Serialize,
+    {
+        let cassette_path = self.path(key)?;
+        let side_path = self.side_path(key, artifact_kind)?;
+        self.ensure_private_dir(&cassette_path)?;
+        let _lock = self.lock_key(key)?;
+        self.remove_interrupted_stages(&cassette_path, Some(&side_path))?;
+        // A process that died after publishing the side but before publishing
+        // the cassette leaves a reclaimable orphan. The per-key advisory lock
+        // proves no live cooperating publisher owns that transition.
+        if !cassette_path.exists() && side_path.exists() {
+            let metadata =
+                std::fs::symlink_metadata(&side_path).map_err(|source| VcrError::Read {
+                    path: side_path.clone(),
+                    source,
+                })?;
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(VcrError::UnsafePath { path: side_path });
+            }
+            std::fs::remove_file(&side_path).map_err(|source| VcrError::Write {
+                path: side_path.clone(),
+                source,
+            })?;
+        }
+        if max_side_bytes < u64::try_from(side.len()).unwrap_or(u64::MAX) {
+            return Err(VcrError::TooLarge {
+                path: side_path,
+                bytes: u64::try_from(side.len()).unwrap_or(u64::MAX),
+                limit: max_side_bytes,
+            });
+        }
+        write_bytes_exclusive(&side_path, side)?;
+        if let Err(error) = write_yaml_exclusive(&cassette_path, value) {
+            let _ = std::fs::remove_file(&side_path);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn lock_key(&self, key: &str) -> Result<std::fs::File, VcrError> {
+        let lock_path = self.dir.join(format!("{key}.bundle.lock"));
+        let mut lock_options = OpenOptions::new();
+        lock_options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            lock_options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let lock = lock_options
+            .open(&lock_path)
+            .map_err(|source| VcrError::Write {
+                path: lock_path.clone(),
+                source,
+            })?;
+        let lock_metadata = lock.metadata().map_err(|source| VcrError::Read {
+            path: lock_path.clone(),
+            source,
+        })?;
+        if !lock_metadata.is_file() {
+            return Err(VcrError::UnsafePath { path: lock_path });
+        }
+        fs2::FileExt::lock_exclusive(&lock).map_err(|source| VcrError::Write {
+            path: lock_path,
+            source,
+        })?;
+        Ok(lock)
+    }
+
+    /// Reads the key-and-kind-derived private side artifact with the same
+    /// confinement, no-follow, regular-file, and size rules as cassette reads.
+    pub fn get_side(
+        &self,
+        key: &str,
+        artifact_kind: &ArtifactKind,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, VcrError> {
+        let path = self.side_path(key, artifact_kind)?;
+        #[cfg(not(unix))]
+        return Err(VcrError::UnsafePath { path });
+        reject_symlink_components(&self.dir)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(&path).map_err(|source| VcrError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let metadata = file.metadata().map_err(|source| VcrError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        if !metadata.is_file() {
+            return Err(VcrError::UnsafePath { path });
+        }
+        if max_bytes < metadata.len() {
+            return Err(VcrError::TooLarge {
+                path,
+                bytes: metadata.len(),
+                limit: max_bytes,
+            });
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+        file.take(max_bytes + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|source| VcrError::Read {
+                path: path.clone(),
+                source,
+            })?;
+        if max_bytes < u64::try_from(bytes.len()).unwrap_or(u64::MAX) {
+            return Err(VcrError::TooLarge {
+                path,
+                bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                limit: max_bytes,
+            });
+        }
+        Ok(bytes)
+    }
+
+    fn side_path(&self, key: &str, artifact_kind: &ArtifactKind) -> Result<PathBuf, VcrError> {
+        self.path(key)?;
+        Ok(self.dir.join(format!("{key}.{}", artifact_kind.as_str())))
+    }
+
+    fn ensure_private_dir(&self, path: &Path) -> Result<(), VcrError> {
+        #[cfg(not(unix))]
+        return Err(VcrError::UnsafePath {
+            path: path.to_path_buf(),
+        });
+        if let Some(parent) = path.parent() {
+            reject_symlink_components(parent)?;
+            let existed = parent.exists();
+            std::fs::create_dir_all(parent).map_err(|source| VcrError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+            reject_symlink_components(parent)?;
+            #[cfg(unix)]
+            if !existed {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                    |source| VcrError::CreateDir {
+                        path: parent.to_path_buf(),
+                        source,
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_interrupted_stages(
+        &self,
+        cassette_path: &Path,
+        side_path: Option<&Path>,
+    ) -> Result<(), VcrError> {
+        for path in std::iter::once(stage_path(cassette_path)).chain(side_path.map(stage_path)) {
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    std::fs::remove_file(&path)
+                        .map_err(|source| VcrError::Write { path, source })?;
+                }
+                Ok(_) => return Err(VcrError::UnsafePath { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(VcrError::Read { path, source });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a cassette store rooted at `dir`.
     #[must_use]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
@@ -328,29 +547,34 @@ impl VcrStore {
         T: Serialize,
     {
         let path = self.path(key)?;
-        #[cfg(not(unix))]
-        return Err(VcrError::UnsafePath { path });
-        if let Some(parent) = path.parent() {
-            reject_symlink_components(parent)?;
-            let existed = parent.exists();
-            std::fs::create_dir_all(parent).map_err(|source| VcrError::CreateDir {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-            reject_symlink_components(parent)?;
-            #[cfg(unix)]
-            if !existed {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
-                    |source| VcrError::CreateDir {
-                        path: parent.to_path_buf(),
-                        source,
-                    },
-                )?;
-            }
-        }
+        self.ensure_private_dir(&path)?;
+        let _lock = self.lock_key(key)?;
+        self.remove_interrupted_stages(&path, None)?;
         write_yaml_exclusive(&path, value)
     }
+}
+
+fn write_bytes_exclusive(path: &Path, bytes: &[u8]) -> Result<(), VcrError> {
+    let temporary = stage_path(path);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::hard_link(&temporary, path)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result.map_err(|source| VcrError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn reject_symlink_components(path: &Path) -> Result<(), VcrError> {
@@ -391,6 +615,8 @@ pub enum VcrError {
     InvalidMode(String),
     /// Cassette key contained unsupported characters.
     InvalidKey(String),
+    /// Side-artifact kind contained unsupported characters.
+    InvalidArtifactKind(String),
     /// Requested cassette was not found.
     Missing {
         /// Logical cassette key.
@@ -478,6 +704,9 @@ impl fmt::Display for VcrError {
                 f,
                 "invalid cassette key `{key}`; expected only a-z, A-Z, 0-9, -, or _"
             ),
+            Self::InvalidArtifactKind(kind) => {
+                write!(f, "invalid VCR side-artifact kind `{kind}`")
+            }
             Self::Missing { key } => write!(f, "missing cassette `{key}`"),
             Self::CreateDir { path, source } => {
                 write!(
@@ -539,6 +768,7 @@ impl std::error::Error for VcrError {
             Self::Parse { source, .. } | Self::Serialize { source, .. } => Some(source),
             Self::InvalidMode(_)
             | Self::InvalidKey(_)
+            | Self::InvalidArtifactKind(_)
             | Self::Missing { .. }
             | Self::TooLarge { .. }
             | Self::UnsafePath { .. }
@@ -581,15 +811,7 @@ where
             limit: MAX_CASSETTE_BYTES,
         });
     }
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("cassette");
-    let temporary = path.with_file_name(format!(
-        ".{file_name}.tmp-{}-{}",
-        std::process::id(),
-        unique_write_nonce()
-    ));
+    let temporary = stage_path(path);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -619,11 +841,12 @@ where
     "<redacted payload>".to_owned()
 }
 
-fn unique_write_nonce() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
+fn stage_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cassette");
+    path.with_file_name(format!(".{file_name}.stage"))
 }
 
 #[cfg(test)]

@@ -86,6 +86,7 @@ pub(crate) fn run_ls(
         .collect::<Vec<_>>();
     let displayed_line_count = limited_lines.len();
     let displayed_bytes = line_oriented_len(limited_lines.iter().copied());
+    let full_output_text = limited_lines.join("\n");
     let limit_reached = observed_entries > displayed_line_count;
     let truncated =
         truncate_line_oriented_lines(limited_lines, displayed_line_count, displayed_bytes);
@@ -114,7 +115,8 @@ pub(crate) fn run_ls(
                 CborValue::Text("limit_reached".to_owned()),
                 CborValue::Bool(true),
             ));
-        } else {
+        }
+        if truncated.was_truncated {
             result_entries.push((
                 CborValue::Text("total_lines".to_owned()),
                 CborValue::Integer((displayed_line_count as i64).into()),
@@ -123,6 +125,9 @@ pub(crate) fn run_ls(
                 CborValue::Text("total_bytes".to_owned()),
                 CborValue::Integer((displayed_bytes as i64).into()),
             ));
+        }
+        if truncated.was_truncated {
+            crate::shell_output_spool::append_metadata(&mut result_entries, &full_output_text);
         }
     }
     Ok(ToolOutput {

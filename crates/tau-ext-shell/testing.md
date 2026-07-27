@@ -42,6 +42,18 @@ Process tests cover Linux/Android TTY-backed output descriptors, persistent
 stdin EOF/readiness, separated stdout/stderr capture, foreground exit, timeout,
 cancellation, signals, bounded output, truncation, and descendants retaining PTY
 user endpoints. Unix-only helpers are gated and may skip when unavailable.
+
+Saved-output regressions cover representative native read/list/model-shell and
+user-shell renderings under the shared 10 KiB visible cap, the 16 MiB hard cap,
+honest complete/incomplete metadata, exact-path privacy,
+ordinary expiration only after both 32 later relevant calls and 15 minutes,
+and unconditional graceful shutdown. Remaining manual verification should
+exercise startup cleanup of locked/dead crash leftovers without
+deleting live owners, the explicit saved-output-unavailable fallback, and
+caller-local grep/find/edit-recovery rendering.
+Model-shell VCR coverage verifies that recordings own a bounded sibling `shell-output`
+artifact and replay regenerates a fresh ephemeral path with complete or
+incomplete metadata rather than persisting a stale path.
 Repository-owned pager fixtures cover protected environment precedence, preserved
 `TERM`, protected `JJ_PAGER`, deliberately ordinary `MANPAGER` / `BAT_PAGER`,
 the explicit opt-out, post-EOF pager stalls, timeout, and model/user surface

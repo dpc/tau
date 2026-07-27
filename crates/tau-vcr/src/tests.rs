@@ -217,3 +217,121 @@ fn escaped_byte_helpers_round_trip_mixed_utf8_and_invalid_bytes() {
     assert_eq!(encoded, "snowman: ☃ bad: \\uDCF0( slash: \\\\");
     assert_eq!(decode_escaped_bytes(&encoded).expect("decode"), bytes);
 }
+
+/// Bundled side artifacts round-trip within their independent bound and publish
+/// the cassette and private side exactly once.
+#[test]
+fn bundled_side_artifact_round_trips_and_is_exclusive() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let store = VcrStore::new(tempdir.path());
+    let cassette = json!({"value": true});
+    store
+        .put_with_side(
+            "call",
+            &ArtifactKind::new("shell-output").expect("kind"),
+            &cassette,
+            b"payload",
+            16,
+        )
+        .expect("publish bundle");
+    assert_eq!(
+        store
+            .get_side(
+                "call",
+                &ArtifactKind::new("shell-output").expect("kind"),
+                16
+            )
+            .expect("read side"),
+        b"payload"
+    );
+    assert!(
+        store
+            .put_with_side(
+                "call",
+                &ArtifactKind::new("shell-output").expect("kind"),
+                &cassette,
+                b"other",
+                16
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .get_side("call", &ArtifactKind::new("shell-output").expect("kind"), 3)
+            .is_err()
+    );
+}
+
+/// Unix side reads reject a symlink instead of following it outside the VCR
+/// root.
+#[cfg(unix)]
+#[test]
+fn bundled_side_artifact_rejects_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let outside = TempDir::new().expect("outside");
+    std::fs::write(outside.path().join("payload"), b"secret").expect("outside file");
+    symlink(
+        outside.path().join("payload"),
+        tempdir.path().join("call.shell-output"),
+    )
+    .expect("symlink");
+    let store = VcrStore::new(tempdir.path());
+    assert!(matches!(
+        store.get_side(
+            "call",
+            &ArtifactKind::new("shell-output").expect("kind"),
+            16
+        ),
+        Err(VcrError::UnsafePath { .. }) | Err(VcrError::Read { .. })
+    ));
+}
+
+/// Oversized sides publish neither side nor cassette.
+#[test]
+fn bundled_side_artifact_rejects_oversize_before_publication() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let store = VcrStore::new(tempdir.path());
+    let kind = ArtifactKind::new("shell-output").expect("kind");
+    assert!(
+        store
+            .put_with_side("call", &kind, &json!({}), b"too large", 3)
+            .is_err()
+    );
+    assert!(!tempdir.path().join("call.yaml").exists());
+    assert!(!tempdir.path().join("call.shell-output").exists());
+}
+
+/// Cassette publication failure removes the side published by that bundle.
+#[test]
+fn bundled_side_artifact_cleans_side_when_cassette_publication_fails() {
+    let tempdir = TempDir::new().expect("tempdir");
+    std::fs::write(tempdir.path().join("call.yaml"), b"existing").expect("existing cassette");
+    let store = VcrStore::new(tempdir.path());
+    let kind = ArtifactKind::new("shell-output").expect("kind");
+    assert!(
+        store
+            .put_with_side("call", &kind, &json!({}), b"payload", 16)
+            .is_err()
+    );
+    assert!(!tempdir.path().join("call.shell-output").exists());
+}
+
+/// A complete side orphan left before cassette publication is reclaimed under
+/// the per-key lock so a retry can publish a consistent bundle.
+#[test]
+fn bundled_side_artifact_reclaims_crash_orphan() {
+    let tempdir = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(tempdir.path()).expect("dir");
+    std::fs::write(tempdir.path().join("call.shell-output"), b"orphan").expect("orphan");
+    let store = VcrStore::new(tempdir.path());
+    let kind = ArtifactKind::new("shell-output").expect("kind");
+    store
+        .put_with_side("call", &kind, &json!({}), b"replacement", 16)
+        .expect("retry bundle");
+    assert_eq!(
+        store.get_side("call", &kind, 16).expect("side"),
+        b"replacement"
+    );
+}

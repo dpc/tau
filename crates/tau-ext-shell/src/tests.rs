@@ -6567,11 +6567,10 @@ fn shell_tool_omits_truncation_marker_without_truncation() {
     );
 }
 
+/// Ensures shell truncation publishes complete totals and a readable,
+/// privately contained complete saved rendering.
 #[test]
 fn shell_tool_reports_truncation_marker_and_original_totals() {
-    // Regression coverage for shell truncation: agents need an explicit stderr
-    // warning plus original stream totals, while legacy line/byte counts remain
-    // stats for the returned (truncated and warning-prefixed) content.
     let line_count = MAX_OUTPUT_LINES + 1;
     let command = format!(
         "i=0; while [ \"$i\" -lt {line_count} ]; do printf 'x\\n'; printf 'e\\n' >&2; i=$((i + 1)); done"
@@ -6602,6 +6601,29 @@ fn shell_tool_reports_truncation_marker_and_original_totals() {
     );
     assert!(cbor_int_field(&output.result, "total_bytes").is_some());
     assert_eq!(cbor_bool_field(&output.result, "truncated"), Some(true));
+    assert!(cbor_map_text(&output.result, "truncation_warning").is_some());
+    let path = std::path::PathBuf::from(
+        cbor_map_text(&output.result, "full_output_path").expect("full output path"),
+    );
+    let saved =
+        std::fs::read_to_string(&path).expect("saved output remains readable by exact path");
+    assert!(saved.len() > combined.len());
+    assert!(saved.starts_with("out x") || saved.starts_with("err e"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let directory_mode = path
+            .parent()
+            .expect("parent")
+            .metadata()
+            .expect("directory metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = path.metadata().expect("file metadata").permissions().mode() & 0o777;
+        assert_eq!(directory_mode, 0o300);
+        assert_eq!(file_mode, 0o600);
+    }
 }
 
 #[test]
@@ -7175,6 +7197,8 @@ fn truncate_head_short_input_unchanged() {
     assert_eq!(result.content, input);
 }
 
+/// Ensures line-count truncation retains bounded native head/tail context and
+/// explicit truncation state.
 #[test]
 fn truncate_head_limits_by_lines() {
     let lines: Vec<String> = (1..=MAX_OUTPUT_LINES + 500)
@@ -7190,7 +7214,22 @@ fn truncate_head_limits_by_lines() {
             .content
             .contains(&format!("line {}", MAX_OUTPUT_LINES + 500))
     );
-    assert_eq!(result.content.lines().count(), MAX_OUTPUT_LINES + 1);
+    assert!(result.content.lines().count() <= MAX_OUTPUT_LINES + 1);
+}
+
+/// Ensures combined line/byte truncation keeps a marker for a huge multibyte
+/// head, the literal separator, and a distinctive tail record.
+#[test]
+fn truncate_head_keeps_multibyte_head_separator_and_tail() {
+    let mut lines = vec![format!("1 {}", "€".repeat(MAX_OUTPUT_BYTES))];
+    lines.extend((2..=MAX_OUTPUT_LINES).map(|line| format!("{line} x")));
+    lines.push("2501 distinctive-tail".to_owned());
+
+    let result = truncate_head(&lines.join("\n"));
+    assert!(result.content.starts_with("1(truncated)"));
+    assert!(result.content.contains("\n...\n"));
+    assert!(result.content.ends_with("2501 distinctive-tail"));
+    assert!(result.content.len() <= MAX_OUTPUT_BYTES);
 }
 
 #[test]
@@ -7356,6 +7395,7 @@ fn command_details_value_records_combined_output_stats() {
         output: "out hi\nerr oops".to_owned(),
         truncated: false,
         valid_utf8: true,
+        saved_output: None,
     });
     assert_eq!(cbor_map_text(&details, "output"), Some("out hi\nerr oops"));
     assert!(cbor_map_field(&details, "total_lines").is_none());
@@ -7380,6 +7420,7 @@ fn command_details_value_records_slow_command_exec_time() {
         output: String::new(),
         truncated: false,
         valid_utf8: true,
+        saved_output: None,
     });
 
     assert_eq!(cbor_int_field(&details, "duration_seconds"), Some(6));
@@ -7967,6 +8008,8 @@ fn read_file_rejects_invalid_line_arguments() {
     );
 }
 
+/// Ensures a large read stays visibly bounded while exposing the exact complete
+/// line-numbered rendering through its private saved path.
 #[test]
 fn read_file_truncates_large_output() {
     let td = TempDir::new().expect("tempdir");
@@ -7981,13 +8024,18 @@ fn read_file_truncates_large_output() {
     let result = read_file(&args).expect("read").result;
     let content = cbor_map_text(&result, "line-numbered content").expect("content field");
     assert!(content.contains("line 1\n"));
-    assert!(content.contains("\n...\n"));
-    assert!(content.contains("line 3000"));
+    assert!(content.len() <= MAX_OUTPUT_BYTES);
+    let saved_path =
+        cbor_map_text(&result, "full_output_path").expect("complete saved output path");
+    let saved = std::fs::read_to_string(saved_path).expect("saved read output");
+    assert!(saved.contains("line 3000"));
     assert!(cbor_map_field(&result, "start_line").is_none());
     assert!(cbor_map_field(&result, "end_line").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(3000));
 }
 
+/// Ensures truncated sliced reads retain source numbering in both visible and
+/// complete saved rendering.
 #[test]
 fn read_file_truncation_notice_uses_source_line_numbers() {
     let td = TempDir::new().expect("tempdir");
@@ -8009,8 +8057,11 @@ fn read_file_truncation_notice_uses_source_line_numbers() {
     let content = cbor_map_text(&result, "line-numbered content").expect("content field");
 
     assert!(content.contains("100 line 100"));
-    assert!(content.contains("\n...\n"));
-    assert!(content.contains("line 2105"));
+    assert!(content.len() <= MAX_OUTPUT_BYTES);
+    let saved_path =
+        cbor_map_text(&result, "full_output_path").expect("complete saved output path");
+    let saved = std::fs::read_to_string(saved_path).expect("saved sliced output");
+    assert!(saved.contains("line 2105"));
     assert!(cbor_map_field(&result, "start_line").is_none());
     assert!(cbor_map_field(&result, "end_line").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(2105));

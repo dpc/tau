@@ -198,18 +198,20 @@ fn render_find_output(request: FindRequest, matches: Vec<String>) -> ToolOutput 
     let observed_matches = matches.len();
     let displayed: Vec<String> = matches.into_iter().take(request.limit).collect();
     let limit_reached = observed_matches > displayed.len();
-    let mut output_text = displayed.join("\n");
-    let truncated = truncate_line_oriented(&output_text);
-    if truncated.was_truncated {
-        output_text = truncated.content;
-    }
+    let full_output_text = displayed.join("\n");
+    let truncated = truncate_line_oriented(&full_output_text);
+    let mut output_text = if truncated.was_truncated {
+        truncated.content
+    } else {
+        full_output_text.clone()
+    };
 
     let mut notices = Vec::new();
     if limit_reached {
         notices.push(limit_reached_notice(request.limit));
     }
     if truncated.was_truncated {
-        notices.push("50KB/2000 line output limit reached.".to_owned());
+        notices.push("10 KiB/2000 line visible output limit reached.".to_owned());
     }
 
     output_text = append_notices_within_cap(output_text, &notices);
@@ -226,6 +228,21 @@ fn render_find_output(request: FindRequest, matches: Vec<String>) -> ToolOutput 
             CborValue::Text(output_text),
         ),
     ];
+    if truncated.was_truncated {
+        result_entries.push((
+            CborValue::Text("truncated".to_owned()),
+            CborValue::Bool(true),
+        ));
+        result_entries.push((
+            CborValue::Text("total_lines".to_owned()),
+            CborValue::Integer((displayed.len() as i64).into()),
+        ));
+        result_entries.push((
+            CborValue::Text("total_bytes".to_owned()),
+            CborValue::Integer((full_output_text.len() as i64).into()),
+        ));
+        crate::shell_output_spool::append_metadata(&mut result_entries, &full_output_text);
+    }
     if limit_reached {
         result_entries.push((
             CborValue::Text("limit_reached".to_owned()),
@@ -538,11 +555,11 @@ mod tests {
 
         assert_eq!(output, "line\\nbreak.txt");
     }
-    /// Ensures find notices are included without exceeding the documented 50KB
-    /// output budget.
+    /// Ensures find notices are included without exceeding the documented 10
+    /// KiB output budget.
     #[test]
     fn find_notices_stay_within_output_cap() {
-        let notice = "50KB/2000 line output limit reached.".to_owned();
+        let notice = "10 KiB/2000 line visible output limit reached.".to_owned();
         let suffix_len = format!("\n\n[{notice}]").len();
         let output = append_notices_within_cap(
             format!("{}étail", "x".repeat(MAX_OUTPUT_BYTES - suffix_len - 1)),

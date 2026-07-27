@@ -3942,6 +3942,7 @@ name = "tau-ext-shell"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "blake3",
  "ciborium",
  "dirs",
  "fs2",
@@ -4271,6 +4272,7 @@ dependencies = [
 name = "tau-vcr"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "libc",
  "serde",
  "serde_json",
