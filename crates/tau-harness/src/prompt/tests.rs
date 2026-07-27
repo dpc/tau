@@ -397,6 +397,31 @@ fn build_system_prompt_renders_role_prompt_handlebars_context() {
     assert!(!prompt.contains("{{role.name}}"));
 }
 
+/// Prompt fragments and their enclosing full system template must receive the
+/// configured group independently from the role name.
+#[test]
+fn prompt_and_system_templates_expose_configured_role_group() {
+    let skills = std::collections::HashMap::new();
+    let fragments = vec![tau_proto::PromptFragment::new(
+        "review.instructions",
+        tau_proto::PromptPriority::new(100),
+        "FRAGMENT {{role.group}}/{{role.name}}",
+    )];
+
+    let prompt = build_system_prompt_with_template_context(
+        "SYSTEM {{role.group}}/{{role.name}} {{#each prompt_fragments}}{{content}}{{/each}}",
+        &skills,
+        &fragments,
+        serde_json::json!({}),
+        RolePromptTemplateContext::for_role("security-reviewer").with_role_group("reviewers"),
+    );
+
+    assert_eq!(
+        prompt,
+        "SYSTEM reviewers/security-reviewer FRAGMENT reviewers/security-reviewer"
+    );
+}
+
 /// Templates can branch on cwd values derived from shell-published agent
 /// context, keeping the shell extension as the single cwd source of truth.
 #[test]

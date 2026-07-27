@@ -64,6 +64,8 @@ impl ToolPromptFragment {
 pub(crate) struct RolePromptTemplateContext<'a> {
     /// Name of the role whose prompt is being rendered.
     pub(crate) role_name: &'a str,
+    /// Stable configured role-group name containing the rendered role.
+    pub(crate) role_group: &'a str,
     /// Durable agent id whose prompt is being rendered, when the render targets
     /// a concrete agent instead of a role-only preview.
     pub(crate) agent_id: Option<&'a tau_proto::AgentId>,
@@ -148,6 +150,7 @@ impl<'a> RolePromptTemplateContext<'a> {
     pub(crate) fn for_role(role_name: &'a str) -> Self {
         Self {
             role_name,
+            role_group: role_name,
             agent_id: None,
             exact_sentinel_boundary_rule: None,
         }
@@ -157,9 +160,16 @@ impl<'a> RolePromptTemplateContext<'a> {
     pub(crate) fn for_agent(role_name: &'a str, agent_id: &'a tau_proto::AgentId) -> Self {
         Self {
             role_name,
+            role_group: role_name,
             agent_id: Some(agent_id),
             exact_sentinel_boundary_rule: None,
         }
+    }
+
+    /// Supply the configured group containing this role.
+    pub(crate) fn with_role_group(mut self, role_group: &'a str) -> Self {
+        self.role_group = role_group;
+        self
     }
 
     /// Supply the explicit conditional exact-sentinel provenance input.
@@ -299,6 +309,7 @@ fn prompt_template_data(
     serde_json::json!({
         "role": {
             "name": context.role_name,
+            "group": context.role_group,
         },
         "agent_id": context.agent_id.map(ToString::to_string),
         "skills": prompt_template_skills(skills),

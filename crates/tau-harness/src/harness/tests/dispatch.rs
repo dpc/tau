@@ -165,6 +165,38 @@ fn prompt_override_template_can_place_agent_id_without_default_duplication() {
     h.shutdown().expect("shutdown");
 }
 
+/// Production prompt assembly must resolve the configured role-group key before
+/// rendering both role fragments and their enclosing custom system template.
+#[test]
+fn configured_role_group_reaches_fragment_and_system_template_contexts() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let role_name = "security-reviewer";
+    h.available_role_groups = vec![tau_proto::HarnessRoleGroup {
+        name: "reviewers".to_owned(),
+        roles: vec![role_name.to_owned()],
+    }];
+    let role = h.available_roles.entry(role_name.to_owned()).or_default();
+    role.prompt_override = Some("role-group-test".to_owned());
+    role.prompt_fragments
+        .push(tau_config::settings::RolePromptFragment {
+            name: "role-group-fragment".to_owned(),
+            priority: tau_proto::PromptPriority::new(100),
+            text: tau_proto::PromptContent::new("FRAGMENT {{role.group}}/{{role.name}}"),
+        });
+    h.system_prompt_templates.insert(
+        "role-group-test".to_owned(),
+        "SYSTEM {{role.group}}/{{role.name}} {{#each prompt_fragments}}{{content}}{{/each}}"
+            .to_owned(),
+    );
+
+    assert_eq!(
+        h.build_system_prompt_for_role(role_name),
+        "SYSTEM reviewers/security-reviewer FRAGMENT reviewers/security-reviewer"
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// The built-in delegate-role prompt fragment follows the prompt-owned
 /// `agent_start` capability, so every role that can delegate sees the available
 /// role catalog while roles that cannot delegate keep their previous prompt.

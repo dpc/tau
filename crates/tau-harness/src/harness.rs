@@ -22295,10 +22295,12 @@ impl Harness {
         let skills = agent_id
             .and_then(|agent_id| self.frozen_agent_discovery.get(agent_id))
             .map_or(&self.discovered_skills, |snapshot| &snapshot.skills);
+        let role_group = self.role_group_name_for_role(role_name);
         let template_context = match agent_id {
             Some(agent_id) => RolePromptTemplateContext::for_agent(role_name, agent_id),
             None => RolePromptTemplateContext::for_role(role_name),
         }
+        .with_role_group(&role_group)
         .with_exact_sentinel_boundary_rule(
             contains_exact_sentinel_envelope.then_some(EXACT_SENTINEL_BOUNDARY_RULE),
         );

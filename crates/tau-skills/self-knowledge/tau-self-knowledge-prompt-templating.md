@@ -50,6 +50,9 @@ Roles can also choose a full system prompt template with `prompt_override`; cust
 Prompt fragments can use:
 
 - `role.name` — current role name.
+- `role.group` — stable configured role-group name from the
+  `agents.role_groups.<name>` key containing the current role. For an ungrouped
+  role, this equals `role.name`.
 - `cwd` — durable agent working directory as a string, or `""` when rendering without a target agent.
 - `working_directory.present` — boolean indicating whether `cwd` is available.
 - `working_directory.path` — same path as `cwd`.
