@@ -51,7 +51,7 @@ through queueing and lock waits. Generic call-level `shell.cwd` and
 ChatGPT-facing `shell_command.workdir` remain invocation-only overrides and
 never emit metadata. The latter is distinct from the persistent top-level
 `workdir(path)` read/set transaction governed by
-[DECISION-per-agent-extension-workdirs](../../../specs/DECISION-per-agent-extension-workdirs.md).
+[SPEC-per-agent-extension-workdirs](../../../specs/SPEC-per-agent-extension-workdirs.md).
 
 ## tau-client runtime boundary
 

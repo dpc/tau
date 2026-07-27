@@ -61,7 +61,7 @@ Wire identifiers such as `ToolName` and `ToolGroupName` are validated newtypes. 
 ## Format changes
 
 Internal protocol changes follow
-[DECISION-no-backward-compatibility](../../../specs/DECISION-no-backward-compatibility.md).
+[GATE-no-backward-compatibility](../../../specs/GATE-no-backward-compatibility.md).
 Required and optional fields express only the current protocol semantics.
 
 ## Agent metadata protocol
@@ -107,7 +107,7 @@ from the matching prompt-start fact's live post-commit continuation and never
 enters semantic persistence. UI and observer lifecycle tracking should subscribe
 to `agent.prompt_started` instead of the full provider payload.
 This split is governed by
-[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
+[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
 
 ## Agent watch turn-state wire boundary
 
@@ -159,8 +159,6 @@ only from complete stats snapshots, never outgoing or replayed prompt events.
 `get_current_session` carries a correlation id and `current_session_result`
 echoes it with the harness-owned current session id and absolute canonical
 startup project root.
-See
-[DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
 
 `get_session_agent_list` carries a correlation id, exact current session id, and
 `current` or `history` scope. `session_agent_list_result` echoes the correlation

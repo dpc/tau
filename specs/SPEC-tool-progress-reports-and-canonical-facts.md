@@ -43,4 +43,4 @@ replay contract. A report committed before a crash may therefore have no
 canonical successor.
 
 This implements the tool progress row of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).

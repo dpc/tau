@@ -49,7 +49,7 @@ or read receipt.
 The exact lifecycle, outcomes, and publication contract is
 [SPEC-tau-ext-xmpp-tool-delivery-lifecycle](SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md).
 This choice is governed by
-[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 ## Rationale and tradeoffs
 

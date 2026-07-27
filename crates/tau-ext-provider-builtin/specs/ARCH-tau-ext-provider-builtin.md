@@ -25,8 +25,8 @@ Codex surface is constrained by
 The main runtime loop owns ChatGPT quota profile epochs and reconciliation.
 Prompt workers only report normalized observations through the worker channel;
 quota failures neither delay inference nor consume prompt retry budget. This
-implements
-[DECISION-provider-quota-pacing](../../../specs/DECISION-provider-quota-pacing.md).
+follows
+[GATE-provider-quota-pacing](../../../specs/GATE-provider-quota-pacing.md).
 
 ## Provider and credential boundary
 

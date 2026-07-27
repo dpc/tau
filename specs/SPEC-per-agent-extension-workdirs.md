@@ -1,8 +1,5 @@
 # SPEC-per-agent-extension-workdirs: Per-agent extension workdirs
 
-The governing choice is
-[DECISION-per-agent-extension-workdirs](DECISION-per-agent-extension-workdirs.md).
-
 ## Record justification
 
 Per-agent workdirs span ext-shell metadata folding and tool admission, harness

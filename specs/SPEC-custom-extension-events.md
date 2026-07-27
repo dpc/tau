@@ -55,6 +55,6 @@ specification adds no custom payload limit or hostile-IPC policy.
 ## Scope
 
 This specification implements only the custom-event row of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 It does not change DTOs, client APIs, subscriber matching, first-party event
 authority, or any tool, action, shell, UI-command, or publisher-envelope row.

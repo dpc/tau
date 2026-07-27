@@ -14,7 +14,7 @@ generation cache and locked-profile fallback policy; this crate never persists
 negative authentication state.
 
 Authenticated account quota is external-provider data governed by
-[DECISION-provider-quota-pacing](../../specs/DECISION-provider-quota-pacing.md).
+[GATE-provider-quota-pacing](../../specs/GATE-provider-quota-pacing.md).
 `/wham/usage` requests disable redirects, use a short timeout and body cap, and
 never expose bearer/account headers or raw response bodies above this crate.
 Pool ids use bounded normalized keys; oversized or colliding full snapshots

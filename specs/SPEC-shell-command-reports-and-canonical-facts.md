@@ -64,6 +64,6 @@ not arbitrary peer ids. Ephemeral-agent suppression therefore applies to report
 and canonical payloads without trusting peer target fields.
 
 This implements only the shell command report row of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 It does not change UI command routing, the Action family, Tool-versus-Action/Core
 semantics, the general publisher envelope, or any other authority row.

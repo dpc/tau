@@ -115,7 +115,7 @@ null clears, and a validated segmented ASCII string sets the immutable
 per-instance structural tool prefix. `toolPrefix` is normalized as a legacy
 camel-case alias in file and CLI layers. It is independent of the argv-wrapper
 `prefix`. See
-[DECISION-extension-tool-prefixes](../../../specs/DECISION-extension-tool-prefixes.md).
+[SPEC-extension-tool-prefixes](../../../specs/SPEC-extension-tool-prefixes.md).
 
 ## Atomic writes
 

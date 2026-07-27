@@ -26,18 +26,18 @@ first invalid frame and all later bytes, rebuilds folded state, and rebuilds
 derived metadata from retained records. Verification ownership is documented in
 [Durable journal append tests](../../../docs/testing.md#durable-journal-append-tests).
 The full crash and external-effect boundary is governed by
-[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
+[SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 
 Agent journals accept one source-free `agent.prompt_started` only when it uniquely
 matches an unresolved durable inference or standalone-compaction owner; they
 reject persisted full prompts. This fold and dispatch-authority boundary is
 governed by
-[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
+[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
 
 Prompt facts are the canonical raw-text and typed-provenance authority. Folding
 preserves their `PromptSubmissionSource` in derived user-input entries; provider
 assembly may then apply the source-specific presentation required by
-[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
+[SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
 UI/history/navigation continue to consume canonical facts rather than that late
 provider projection.
 
@@ -69,7 +69,7 @@ no existing backoff: later bytes coalesce under the failed path's deadline while
 newly dirty paths wake promptly. Thread creation is lazy and best-effort; store destruction
 signals one final pass but detaches rather than joining a potentially blocked
 filesystem sync. Exact semantics are governed by
-[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
+[SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 
 Store IDs used as path components share one bounded safe grammar with CLI
 minting, metadata listing, lock probes, and cleanup. They exclude path separators,

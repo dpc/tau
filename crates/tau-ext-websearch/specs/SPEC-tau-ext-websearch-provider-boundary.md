@@ -23,7 +23,7 @@ entity-like text. This prevents exact closing-sentinel breakout, but it is
 defense-in-depth rather than a sandbox: body prose remains capable of prompt
 injection and grants no identity, routing, instruction, tool, authorization, or
 egress authority. See
-[DECISION-exact-sentinel-prompt-envelopes](../../../specs/DECISION-exact-sentinel-prompt-envelopes.md).
+[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
 
 Exa defaults to `https://mcp.exa.ai/mcp`. Parallel defaults to the
 unauthenticated `https://search.parallel.ai/mcp` endpoint; the extension has no

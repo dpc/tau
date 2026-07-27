@@ -6,14 +6,14 @@ harness-authored canonical `message.*` facts, carries declared
 provider `provider.models_declared` inputs from harness-authored canonical
 `provider.models_updated` current state. The generic authenticated publisher
 delivery envelope and the remaining exact event-family mappings required by
-[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
+[SPEC-peer-event-publication](../../../specs/SPEC-peer-event-publication.md)
 remain to be implemented.
 
 Configured extensions request user-visible diagnostics with the dedicated
 `extension_notice_request` input message carrying only `message` and `level`.
 The request is not an event and cannot set publication metadata; the harness
 creates the resulting live-only `harness.notice`. See
-[DECISION-extension-notice-requests](../../../specs/DECISION-extension-notice-requests.md).
+[SPEC-extension-notice-requests](../../../specs/SPEC-extension-notice-requests.md).
 
 Tool lifecycle uses distinct transient peer declarations
 (`tool.registration_declared`, `tool.unregistration_declared`) and protected
@@ -54,19 +54,19 @@ Provider/Tool/Core extensions. Its enclosing `Emit.persist` selects live-only
 (`false`) or session-restore (`true`) publication; durable replay carries stable configured
 publisher provenance but never requests execution. See
 [SPEC-tool-requests-and-routing](../../../specs/SPEC-tool-requests-and-routing.md).
-[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
+[SPEC-peer-event-publication](../../../specs/SPEC-peer-event-publication.md)
 governs publication metadata and persistence classification.
 
 Architectural or externally meaningful functional changes to protocol-facing
-event persistence or the harness-extension interface require the separately
-reviewed, human-confirmed decision mandated by
-[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
+event persistence or the harness-extension interface require the explicit
+confirmation mandated by
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 Prompt lifecycle deliberately separates the durable, content-free
 `agent.prompt_started` authority fact from the transient, content-bearing
 `agent.prompt_created` provider request. Their ordering, replay, and compatibility
 contract is governed by
-[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
+[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
 
 Bounded provider quota reports are transient provider observations.
 
@@ -100,17 +100,17 @@ Durable `agent.prompt_submitted` and `agent.prompt_steered` facts carry an
 optional `InternalPromptKind`. `context_size_alert` marks the existing fact at
 which that harness-owned alert reaches model context; missing tags preserve
 legacy hidden-internal presentation. The contract is
-[DECISION-context-size-alert-history](../../../specs/DECISION-context-size-alert-history.md).
+[SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 Both prompt facts also carry required harness-stamped
 `PromptSubmissionSource` provenance while retaining raw accepted prompt text.
 Core and harness use that typed source for provider-only presentation; protocol
 CBOR, durable authority, and UI consumers remain raw. See
-[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
+[SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
 
 Protocol version 0 requires an extension's first harness response after
 `Hello` to be `Configure`. Its optional validated `ToolNamePrefix` establishes
 the connection's immutable structural name scope as specified by
-[DECISION-extension-tool-prefixes](../../../specs/DECISION-extension-tool-prefixes.md).
+[SPEC-extension-tool-prefixes](../../../specs/SPEC-extension-tool-prefixes.md).
 The configured extension instance name is required and supplies the stable
 harness-stamped publisher ID for canonical `message.*` facts derived
 downstream from extension-published `message.*_reported` events.
@@ -142,12 +142,12 @@ representations summarize byte length rather than formatting image bytes.
 
 Harness input and output messages are directionally typed. Keep request/response
 envelopes in the correct enum. The internal protocol compatibility policy is
-[DECISION-no-backward-compatibility](../../../specs/DECISION-no-backward-compatibility.md).
+[GATE-no-backward-compatibility](../../../specs/GATE-no-backward-compatibility.md).
 
 Message facts keep stable publisher-domain party and conversation identities
 separate from optional mutable display presentation. Provider presentation
 uses the opaque references and optional typed metadata specified by
-[DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md),
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md),
 and carries the harness-stamped publisher separately.
 Shared visible escaping covers controls, bidi/zero-width/default-ignorable
 structure, variation selectors, Hangul fillers, and noncharacters so UIs and
@@ -173,9 +173,8 @@ messages. It does not enumerate agents or expose receiving policy.
 `get_current_session` is a local-control, requester-directed RPC that returns the
 harness's in-memory current session id and immutable canonical startup project
 root. Runtime discovery uses both fields to establish live identity without
-trusting adjacent metadata.
-See
-[DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
+trusting adjacent metadata. See
+[SPEC-tau-proto-session-events](SPEC-tau-proto-session-events.md).
 
 `get_session_agent_list` is a separate UI-only, requester-directed RPC for the
 harness's exact current session. Its bounded result contains membership

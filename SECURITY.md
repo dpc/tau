@@ -63,7 +63,7 @@ published debug-log copy. Re-check stale
 user-facing command instructions, interactive/headless parity, completion
 precedence, literal escape handling around skills, and both debug-log paths
 whenever command routing or action logging changes. See
-[DECISION-colon-command-mode](specs/DECISION-colon-command-mode.md),
+[GATE-colon-command-mode](specs/GATE-colon-command-mode.md),
 [SPEC-tau-cli-command-mode](crates/tau-cli/specs/SPEC-tau-cli-command-mode.md),
 and
 [SPEC-tau-harness-session-state](crates/tau-harness/specs/SPEC-tau-harness-session-state.md).
@@ -81,7 +81,7 @@ The target's complete foreground framed write remains ACK authority; ACK does
 not wait for background filesystem sync. An ACK or provider effect can therefore
 survive a crash that loses its journal fact. Tau adds no restart deduplication,
 distributed WAL, or cross-journal transaction. See
-[DECISION-semantic-journal-writeback-durability](specs/DECISION-semantic-journal-writeback-durability.md).
+[SPEC-semantic-journal-writeback-durability](specs/SPEC-semantic-journal-writeback-durability.md).
 
 ## Agent journals and summary checkpoints
 
@@ -118,7 +118,7 @@ cut never resends work. Persisted old full prompts are unsupported. Debug JSONL
 represents full prompts only as bounded content-free summaries. Re-check these cuts
 whenever prompt persistence, interception, replay, routing, or diagnostics change;
 see
-[DECISION-compact-prompt-materialization-authority](specs/DECISION-compact-prompt-materialization-authority.md)
+[SPEC-compact-prompt-materialization-authority](specs/SPEC-compact-prompt-materialization-authority.md)
 and
 [SPEC-tau-harness-prompt-dispatch](crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md).
 
@@ -191,7 +191,7 @@ Repeated enables preserve their existing edge, while disables remain available
 to remove relations and bypass cycle analysis. Re-check this ordering and the
 no-mutation failure contract whenever watch topology ownership or event-loop
 serialization changes. See
-[`DECISION-agent-watch-acyclic-topology`](specs/DECISION-agent-watch-acyclic-topology.md).
+[`GATE-agent-watch-acyclic-topology`](specs/GATE-agent-watch-acyclic-topology.md).
 
 ## Prompt capability authority
 
@@ -217,7 +217,7 @@ This prevents exact lexical breakout, not semantic prompt injection. Re-check
 submitted/steered source preservation, exact-close replacement,
 compaction suffix handling, and non-HumanUi exclusions whenever prompt folding
 or provider assembly changes. See
-[`DECISION-interactive-user-prompt-envelope`](specs/DECISION-interactive-user-prompt-envelope.md).
+[`SPEC-interactive-user-prompt-envelope`](specs/SPEC-interactive-user-prompt-envelope.md).
 
 ## Local IPC and external ingress
 
@@ -251,7 +251,7 @@ origins are silently denied, and generic extension `Emit(harness.notice)` remain
 forbidden. Pre-Ready requests retain normal activation ordering and bounded
 admission. `ConfigError` remains a separate mandatory replayable path. Security
 review must preserve those distinctions and the non-persistence guarantee. See
-[`DECISION-extension-notice-requests`](specs/DECISION-extension-notice-requests.md).
+[`SPEC-extension-notice-requests`](specs/SPEC-extension-notice-requests.md).
 Only an attached socket UI may send the payload-free `ui_detach_request` that
 keeps the daemon alive after that UI disconnects. Other socket peers,
 embedded/non-socket UIs, dedicated external-message peers, and configured
@@ -549,8 +549,8 @@ cancellation suspends that interceptor's registration until its one outstanding
 uncorrelated stale reply is consumed, so the reply cannot bind to later session
 work without changing the extension connection lifecycle. Registration
 replacement remains suspended, no timeout applies, exactly one reply is consumed,
-and disconnect clears suspension. The confirmed interface contract is
-[`DECISION-interceptor-stale-reply-suspension`](specs/DECISION-interceptor-stale-reply-suspension.md).
+and disconnect clears suspension. The interface contract is specified by
+[`SPEC-tau-harness-event-processing`](crates/tau-harness/specs/SPEC-tau-harness-event-processing.md).
 Unrelated accepted publications retain FIFO order and complete or fail through
 their normal path.
 Rollover advances the session admission generation before quiescence. Raw

@@ -7,7 +7,7 @@ terminal-output, custom-event, attached-UI-liveness, and metadata-request slices
 now use generic `Emit` publication, immutable authenticated
 publisher snapshots, source-aware admission, and downstream processing as
 required by
-[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](../../../specs/SPEC-peer-event-publication.md).
 The metadata slice covers request-to-canonical publication; rejection outcomes
 remain unspecified and preserve silent rejection.
 UI extension-counter inspection now uses the dedicated
@@ -21,7 +21,7 @@ Configured extensions now use the dedicated `extension_notice_request`; the
 harness creates a sanitized live-only `extension.notice` through ordinary
 interception and broadcast. Extension-authored generic
 `Emit(harness.notice)` remains denied. See
-[DECISION-extension-notice-requests](../../../specs/DECISION-extension-notice-requests.md).
+[SPEC-extension-notice-requests](../../../specs/SPEC-extension-notice-requests.md).
 The general protocol-level authenticated publisher envelope and remaining peer
 event families remain to be migrated.
 
@@ -30,7 +30,7 @@ registration but suspends that connection from matching new publications until
 exactly one stale reply is consumed without action. Registration replacement is
 accepted during indefinite suspension; disconnect clears it and a new connection
 starts unsuspended. See
-[DECISION-interceptor-stale-reply-suspension](../../../specs/DECISION-interceptor-stale-reply-suspension.md).
+[SPEC-tau-harness-event-processing](SPEC-tau-harness-event-processing.md).
 
 Peer frames retain their admission session/generation through activation
 staging. Rollover raw-commits documented session-bound observations but blocks
@@ -67,15 +67,15 @@ semantic replay. See
 [SPEC-ui-prompt-draft-and-focus-events](../../../specs/SPEC-ui-prompt-draft-and-focus-events.md).
 
 Architectural or externally meaningful functional changes to harness event
-logs/journals or interfaces with extensions require the separately reviewed,
-human-confirmed decision mandated by
-[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
+logs/journals or interfaces with extensions require the explicit confirmation
+mandated by
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 Provider prompt materialization crosses the semantic-store and extension-route
 boundary: a durable dispatch owner permits one content-free prompt-start append,
 and only its write-complete post-commit continuation directs the transient full
 request to the selected provider. The authority and crash cuts are governed by
-[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
+[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
 
 Provider account quota is an ephemeral current-state cache. The harness accepts
 it only when every effective model route in the provider namespace has one
@@ -145,8 +145,7 @@ recoverable I/O omit diagnostics, while uncertain rollback poisons the singleton
 No harness lifecycle owns, drains, joins, or fsyncs this worker. Authoritative
 CBOR journals never use its queue or lock; they use a separate lifecycle-owned
 coalesced sync worker under
-[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md). See
-[DECISION-async-debug-event-log-writes](../../../specs/DECISION-async-debug-event-log-writes.md).
+[SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 
 Configured Provider execution uses the same generic commit boundary. Five `_reported`
 observations commit before exact generation and prompt/retry correlation; the harness
@@ -249,7 +248,7 @@ creation fact, and general metadata intake cannot set, unset, or inherit this ke
 
 ## Watch ownership
 
-The harness owns the live acyclic topology, endpoint retirement, sanitized provider-work snapshots, and notification fanout specified by [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md) and [DECISION-agent-watch-acyclic-topology](../../../specs/DECISION-agent-watch-acyclic-topology.md). Display labels remain separate from topology.
+The harness owns the live acyclic topology, endpoint retirement, sanitized provider-work snapshots, and notification fanout specified by [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md) and [GATE-agent-watch-acyclic-topology](../../../specs/GATE-agent-watch-acyclic-topology.md). Display labels remain separate from topology.
 
 
 ## Skills
@@ -329,8 +328,8 @@ Runtime metadata and persisted session directories provide neither live records
 nor returned field authority. The overall scan has a fixed deadline and fails
 instead of returning a partial snapshot when candidate traversal or the total
 probe budget is incomplete.
-This authority is governed by
-[DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
+The wire contract is specified by
+[SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
 
 Accept-loop shutdown must use an owned wake/cancellation primitive tied to the
 accept thread, not polling sleeps and not the filesystem socket pathname. Runtime
@@ -353,8 +352,8 @@ target. The accepted-interaction append precedes the mode/stats publication,
 which precedes queue or dispatch. Complete harness stats are the only UI
 projection authority; CLIs and transcript replay must not infer a mode change.
 
-The authoritative rationale and lifecycle are recorded in
-[DECISION-harness-owned-agent-navigation-modes](../../../specs/DECISION-harness-owned-agent-navigation-modes.md).
+The wire contract is specified by
+[SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
 
 ## Directed agent roster
 

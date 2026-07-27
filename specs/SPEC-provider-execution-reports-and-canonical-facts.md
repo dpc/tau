@@ -84,7 +84,7 @@ Ephemeral-agent debug suppression covers inbound and committed reports and canon
 updates/responses without making reports persistence targets.
 
 This implements the Provider execution row of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 Streaming payload semantics are refined by
 [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), watcher
 projection by [SPEC-agent-watch](SPEC-agent-watch.md), and recovery by

@@ -42,7 +42,7 @@ agent watch would create a cycle: `<watcher>` -> `<watched>`
 Rejection publishes no topology snapshot or initial turn/provider state event.
 Re-enabling an existing edge retains its established behavior and subscription
 identity. Disable bypasses cycle analysis. See
-[DECISION-agent-watch-acyclic-topology](DECISION-agent-watch-acyclic-topology.md).
+[GATE-agent-watch-acyclic-topology](GATE-agent-watch-acyclic-topology.md).
 Clients may derive recursive UI activity over this live DAG, but that projection
 does not create protocol state, lifecycle edges, or model-visible notifications.
 Direct watch lifecycle facts remain scoped to their individual subscription edge.

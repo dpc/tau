@@ -28,7 +28,7 @@ is staged before `Ready`; a later successful Configure replaces that instance's
 schema. A rejected Configure disconnects the extension and unregisters its
 schema. The harness stamps schema owner identity, while structural tool prefixes
 do not rewrite action roots or mix inventories between instances, following
-[`DECISION-extension-tool-prefixes`](../../../specs/DECISION-extension-tool-prefixes.md).
+[`SPEC-extension-tool-prefixes`](../../../specs/SPEC-extension-tool-prefixes.md).
 
 Persistent extension-data storage goes through tau-client's manual-runtime
 `ExtensionDataClient`. It generates request ids, waits for matching

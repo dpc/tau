@@ -12,7 +12,7 @@ The inbound transport and local-wait boundary follow
 
 External ingress is constrained by [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
 Structural tool naming follows
-[DECISION-extension-tool-prefixes](../../../specs/DECISION-extension-tool-prefixes.md).
+[SPEC-extension-tool-prefixes](../../../specs/SPEC-extension-tool-prefixes.md).
 
 ## State
 
@@ -57,7 +57,7 @@ references; native conversation IDs remain durable fact/UI provenance but are
 not projected into model context. The original body is published without a
 transport prefix. The harness stamps publisher provenance and performs ordinary
 durable fact projection according to
-[DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
 
 Successful `telegram_send` calls emit `message.sent_reported` before returning their
 transient `tool.result_reported`. The sent report uses the original body and a

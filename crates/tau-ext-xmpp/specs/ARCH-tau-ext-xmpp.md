@@ -88,7 +88,7 @@ identifier into model context; it remains durable fact/UI provenance. Native
 stanza IDs are hashed with sender/conversation identity, while missing IDs use a
 process-unique local identity. The original stanza body is published without a
 transport prefix according to
-[DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
 
 Successful `xmpp_send` calls emit `message.sent_reported` before their transient
 `tool.result_reported`. The sent report uses the original body and a bounded identity derived from

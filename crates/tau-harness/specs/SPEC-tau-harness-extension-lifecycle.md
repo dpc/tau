@@ -2,7 +2,7 @@
 
 Architectural or externally meaningful functional changes to this
 harness-extension contract are subject to
-[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 ## Daemon listener and accept forwarding
 
@@ -101,7 +101,7 @@ ordinary interception and broadcasts to every current matching subscriber. A
 publisher disconnect after inline handling does not cancel a parked
 harness-authored output. Generic extension `Emit(harness.notice)` remains denied,
 and `ConfigError` retains its separate mandatory replayable diagnostic path. See
-[DECISION-extension-notice-requests](../../../specs/DECISION-extension-notice-requests.md).
+[SPEC-extension-notice-requests](../../../specs/SPEC-extension-notice-requests.md).
 
 Cross-harness agent messages use the dedicated `ExternalAgentMessage` protocol
 RPC, not `Emit`. The sender-side built-in `message` tool parses bare
@@ -140,7 +140,7 @@ names, visible aliases, and groups inside the assigned exact component envelope.
 Final internal-name ownership is unique across live connections; prompt
 snapshots separately reject simultaneously visible alias collisions. These
 rules implement
-[DECISION-extension-tool-prefixes](../../../specs/DECISION-extension-tool-prefixes.md).
+[SPEC-extension-tool-prefixes](../../../specs/SPEC-extension-tool-prefixes.md).
 The client runtime applies structural mapping through its logical builder
 declarations, scoped factories, and dynamic registration helpers. Raw `emit`
 remains a wire-level operation and receives no rewriting.

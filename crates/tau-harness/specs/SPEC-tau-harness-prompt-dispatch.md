@@ -143,7 +143,7 @@ restored usage. Disabled alerts remain inherited config but never inject prompts
 The tagged delivery fact itself remains ordinary durable transcript history and
 replays at its original position; no second notice or synthetic replay entry is
 created. This implements
-[DECISION-context-size-alert-history](../../../specs/DECISION-context-size-alert-history.md).
+[SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 
 ## Prompt dispatch lifecycle split
 
@@ -169,7 +169,7 @@ Any mismatch fails closed. Persisted full `agent.prompt_created` records are
 unsupported legacy data; operators must discard or reset those journals rather
 than relying on decoding compatibility or migration.
 This authority chain is governed by
-[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
+[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
 
 Typed image bytes in provider tool results are never generic UI traffic. Live
 `provider.tool_result` delivery excludes UI clients; they receive the separate
@@ -221,9 +221,9 @@ raw in the fact while the complete expansion is preserved inside the provider
 external-message, agent-message, and watch domains retain their existing
 projections. UI/history/tree anchors, activation, queueing, and wake behavior do
 not consume the provider wrapper. See
-[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
+[SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
 Exact-sentinel framing and the conditional model-visible provenance rule follow
-[DECISION-exact-sentinel-prompt-envelopes](../../../specs/DECISION-exact-sentinel-prompt-envelopes.md).
+[SPEC-exact-sentinel-prompt-envelopes](../../../specs/SPEC-exact-sentinel-prompt-envelopes.md).
 
 Prompt dispatch is blocked while the target agent has a pending discovery
 initialization. Prompt assembly reads model-visible skills and tool lookup from

@@ -50,5 +50,5 @@ shared fragment entirely when the turn's effective tool snapshot contains no
 guidance behind.
 
 This specification implements the prompt-fragment part of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md)
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md)
 under the configured-local-extension boundary in [`SECURITY.md`](../SECURITY.md).

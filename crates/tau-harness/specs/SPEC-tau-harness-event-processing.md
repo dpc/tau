@@ -9,11 +9,11 @@ persistence contract coherently.
 
 Changes to event persistence, sequencing authority, replay, or logging behavior
 are subject to
-[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 ## Event sequencing, interception, and persistence
 
-[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
+[SPEC-peer-event-publication](../../../specs/SPEC-peer-event-publication.md)
 governs publication metadata; event-family exclusions and persistence exceptions
 remain independent.
 
@@ -37,8 +37,6 @@ immediate admission to the process-wide bounded writer queue. File locking,
 opening, EOF lookup, append, flush, and rollback run only on the detached writer
 thread and never gate semantic persistence, publication, lifecycle, or process
 exit. Queue contention or capacity exhaustion drops only that diagnostic line.
-The confirmed owning contract is
-[DECISION-async-debug-event-log-writes](../../../specs/DECISION-async-debug-event-log-writes.md).
 
 When lifecycle teardown destructively cancels an intercepted publication, the
 harness temporarily skips that interceptor registration until it consumes the
@@ -47,8 +45,7 @@ registration while preventing an uncorrelated old reply from applying to a
 later publication. Replacement registration is accepted while suspended, no
 timeout applies, exactly one reply is consumed without action, and disconnect
 clears the suspension; normal interception resumes after reply consumption or a
-new connection. The owning contract is
-[DECISION-interceptor-stale-reply-suspension](../../../specs/DECISION-interceptor-stale-reply-suspension.md).
+new connection.
 Deferred publications removed by teardown run the same
 reservation, ACK, and ephemeral-marker cleanup as an interceptor Drop.
 Rollover advances the admission generation before quiescing publication.
@@ -110,7 +107,7 @@ interception, commit, and live broadcast but never semantic persistence or
 replay. Debug JSONL and protocol metering retain the raw
 `message.extension_notice_request` input separately from the later published
 event. See
-[DECISION-extension-notice-requests](../../../specs/DECISION-extension-notice-requests.md).
+[SPEC-extension-notice-requests](../../../specs/SPEC-extension-notice-requests.md).
 
 Interceptors are local privileged extensions. They can inspect, modify, or drop
 most matching events before commit. The harness protects selected facts as
@@ -332,9 +329,8 @@ connection and returns the event loop's in-memory current session id plus its
 immutable canonical startup project root directly to that requester. Socket
 connections currently retain their accepted UI metadata; the `Hello.client_kind`
 claim does not authorize this same-UID control RPC. Runtime files locate the
-socket but supply neither returned field.
-See
-[DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
+socket but supply neither returned field. The wire contract is specified by
+[SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
 
 `get_session_agent_list` uses the same harness-assigned local UI/control
 connection metadata as `get_current_session`; `Hello.client_kind` does not

@@ -16,7 +16,7 @@ Protocol records contain no credential, account ID, provider display prose,
 plan, balance, or raw response.
 
 The governing choice is
-[DECISION-provider-quota-pacing](DECISION-provider-quota-pacing.md).
+[GATE-provider-quota-pacing](GATE-provider-quota-pacing.md).
 
 ## Acquisition and ownership
 
@@ -42,7 +42,7 @@ snapshots stay out of semantic
 journals and cold replay; runtime debug records retain committed events. Late
 subscribers receive only harness-sourced canonical current state, including an
 empty capability snapshot after clear or route loss. This flow implements
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 
 ## Applicability
 

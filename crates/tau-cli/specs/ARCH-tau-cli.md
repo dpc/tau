@@ -13,7 +13,7 @@ only a fresh exact binding and trustworthy weekly timing permit colored pacing.
 Capability lasts for the running harness: a replayed empty snapshot after
 provider clear keeps live and late clients converged on neutral unknown.
 The lifecycle split is governed by
-[DECISION-compact-prompt-materialization-authority](../../../specs/DECISION-compact-prompt-materialization-authority.md).
+[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
 
 Terminal bells and OSC user-variable writes are live-only side effects. The CLI
 requests their event names only in its live selector set and independently drops
@@ -241,7 +241,7 @@ responsive harness, including duplicates, so automation can distinguish zero,
 one, or multiple matching harnesses. The runtime scan and protocol authority are
 governed by
 [ARCH-tau-harness](../../tau-harness/specs/ARCH-tau-harness.md) and
-[DECISION-current-session-control-rpc](../../../specs/DECISION-current-session-control-rpc.md).
+[SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
 Relative filters resolve from caller CWD; missing, inaccessible, and
 non-directory values fail as CLI misuse with exit 2. Zero, one, and multiple
 matches plus broken output pipes succeed. Bounded discovery, probe,
@@ -264,4 +264,4 @@ remain configurable, and the all-agent action has no built-in key binding. The
 CLI revalidates the chosen agent against the same category with a second
 snapshot and uses the existing local selection transition. Picker cancellation
 and failure do not retarget the prompt draft. This eligibility projection follows
-[DECISION-harness-owned-agent-navigation-modes](../../../specs/DECISION-harness-owned-agent-navigation-modes.md).
+[SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).

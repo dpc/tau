@@ -63,6 +63,6 @@ policy under the trusted same-UID UI boundary.
 ## Scope
 
 This specification implements only the UI liveness row of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 It does not change DTOs, draft semantics, terminal focus handling, the general
 publisher envelope, or any state-changing or dedicated UI request row.

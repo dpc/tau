@@ -8,9 +8,9 @@ producers and tool-completion integration. No one implementation area owns the
 complete ordering, identity, replay, and failure behavior.
 
 Architectural or externally meaningful functional changes are governed by
-[DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
-The underlying choice is recorded by
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
+The underlying publication contract is specified by
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 
 Message bridges publish six transient report event types through ordinary
 `Emit`: `message.delivered_reported`, `message.edited_reported`,
@@ -164,9 +164,8 @@ publisher's identifier domain. “Stable” distinguishes an identifier from a
 changeable display label; it does not establish global identity or authority.
 Conversation data is descriptive provenance only and is never a reply or send
 route. Optional displays are presentation hints. `MessageParty.sender_auth` and
-`MessageConversation.alias` are the typed optional prompt metadata defined by
-[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
-They do not grant authority. `agent_id` is the Tau transcript target/owner.
+`MessageConversation.alias` are typed optional prompt metadata. They do not grant
+authority. `agent_id` is the Tau transcript target/owner.
 
 `message.sent` means the publisher reports that a message met its own transport
 send-success criterion. It is not a generic delivery or read receipt. Inert,
@@ -371,8 +370,7 @@ projection-failure/UI reasons. Logs and notices carry no raw message or
 
 ## Uniform safe model presentation
 
-Project facts to the shared external `message` boundary specified by
-[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
+Project facts to the shared external `message` boundary specified below.
 Optional prompt metadata is carried by typed party and conversation fields;
 `extension_data` remains opaque and is never included automatically. `agent_id`
 is omitted because it is the owner of the rendered prompt.
@@ -461,9 +459,7 @@ upgraded to verified identity.
 
 Native routes, allowlist evidence, reply authority, and transport policy remain
 extension-local. The published text is the original normalized body rather than
-a transport prefix. These mappings create no transport-specific wire fields and
-are presented according to
-[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
+a transport prefix. These mappings create no transport-specific wire fields.
 
 ## Security and visibility
 

@@ -20,5 +20,5 @@ parsed additive roots.
 Transport failures expose only closed route, phase, and category facts. Provider
 backends retain ownership of HTTP/provider status classification and product
 behavior. See [SECURITY.md](../SECURITY.md) for the threat boundary and
-[the repository decision](../../../specs/DECISION-provider-backend-split-and-codex-ws-only.md)
+[the repository gate](../../../specs/GATE-provider-backend-split-and-codex-ws-only.md)
 for confirmed authority.

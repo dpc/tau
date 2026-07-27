@@ -62,7 +62,7 @@ Cancellation, failure, and a success from an older generation do not release a
 current cooldown. Replacing the configured profile identity also invalidates the
 old profile's cooldown, while best-effort quota display telemetry never does.
 The telemetry non-authority follows
-[DECISION-provider-quota-pacing](../../../specs/DECISION-provider-quota-pacing.md).
+[GATE-provider-quota-pacing](../../../specs/GATE-provider-quota-pacing.md).
 
 This behavior implements
 [DECISION-tau-ext-provider-builtin-required-work-retries](DECISION-tau-ext-provider-builtin-required-work-retries.md).

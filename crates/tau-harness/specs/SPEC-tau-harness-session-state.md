@@ -90,7 +90,7 @@ No durability barrier precedes provider, tool, renderer, or other external
 effects. A crash may therefore preserve an external effect while losing its
 journal fact. Process crash relies on ordinary kernel writeback; kernel or power
 loss may lose or tear an unsynced suffix. This boundary is governed by
-[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
+[SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 
 Durable sequence numbers count only records written to that stream. In a
 durable session, memory-only ephemeral-agent membership is retained in a
@@ -182,7 +182,7 @@ injected user messages, internal prompts, compaction triggers, assistant/tool
 nodes, and agent-message projections are not.
 Anchor previews use the raw canonical accepted prompt text, never the
 provider-only `<user>` projection described by
-[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
+[SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
 
 Live agent-message activation is runtime-only branch ownership. Navigation to a
 sibling is allowed but cannot acknowledge or scan an owed wake from the other
@@ -240,8 +240,7 @@ terminal fact was persisted before detachment. Its immutable
 default while historical prompt and response originators remain unchanged. A
 fresh user turn cannot emit another start result or unload the worker as request
 completion. Parentless non-tool typed starts remain one-shot and unloaded; peer
-entrypoints retain their separate ordinary-agent lifecycle. See
-[DECISION-cold-restored-completed-worker-ownership](../../../specs/DECISION-cold-restored-completed-worker-ownership.md).
+entrypoints retain their separate ordinary-agent lifecycle.
 
 ## Agent roster projection
 

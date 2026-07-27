@@ -9,7 +9,7 @@ producer. No component-local artifact describes the complete contract.
 
 This specification implements the `agent.start_request` part of the request row
 in
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 
 ## Authority and commit
 
@@ -77,8 +77,7 @@ parent supplies the restored delegated navigation default.
 
 A parentless non-tool typed start remains a one-shot side query and unloads
 after its terminal result. Peer auto-start entrypoints retain their separate
-ordinary loaded-agent lifecycle and never enter side-query completion. See
-[DECISION-cold-restored-completed-worker-ownership](DECISION-cold-restored-completed-worker-ownership.md).
+ordinary loaded-agent lifecycle and never enter side-query completion.
 
 `tau-ext-std-notifications` explicitly emits transient requests for idle-summary
 side agents and includes a random process-generation nonce in each monotonic

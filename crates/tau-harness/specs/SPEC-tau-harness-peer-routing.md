@@ -79,12 +79,12 @@ dispatch and response are not prerequisites. Exact transcript placement and
 activation are specified by
 [SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 The append/sync crash boundary is governed by
-[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
+[SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 If receive cancellation removes an already-delivered interception request, the
 responder is bypassed until one stale reply is consumed without action. A
 replacement registration remains suspended, no timeout applies, and disconnect
 resets the connection as specified by
-[DECISION-interceptor-stale-reply-suspension](../../../specs/DECISION-interceptor-stale-reply-suspension.md).
+[SPEC-tau-harness-event-processing](SPEC-tau-harness-event-processing.md).
 
 Delivery is best-effort at-least-once, not distributed exactly-once. A crash or
 transport loss after receive commit but before acknowledgement is indeterminate;

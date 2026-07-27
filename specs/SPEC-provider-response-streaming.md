@@ -23,8 +23,6 @@ rendering text, and Tau UI/harness protocol bytes, and are never folded into
 transcripts. The harness validates prompt ownership and cancellation before
 deriving public routing identity and broadcasting the samples unchanged.
 
-This ownership choice is recorded by
-[DECISION-provider-response-stats](DECISION-provider-response-stats.md).
 Report/canonical authority and terminal correlation are specified by
 [SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).
 

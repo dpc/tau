@@ -91,7 +91,7 @@ installation-scoped opaque sender reference, an honest optional authentication
 outcome, and a bounded untrusted display. Optional operator sender aliases are
 also presentation-only and do not affect admission, routing, reply, reaction, or
 mention authority. See
-[DECISION-common-external-message-envelope](../../../specs/DECISION-common-external-message-envelope.md).
+[SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
 
 ## Sending
 

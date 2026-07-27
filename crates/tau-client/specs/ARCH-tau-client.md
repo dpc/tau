@@ -1,9 +1,8 @@
 # ARCH-tau-client: tau-client architecture
 
 Architectural or externally meaningful functional changes to this shared
-harness-extension interface require the separately reviewed, human-confirmed
-decision mandated by
-[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
+harness-extension interface require the explicit confirmation mandated by
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
 `tau-client` is the shared runtime for Tau extension protocol peers. It sits
 above `tau-proto`, which owns the wire messages. First-party extensions now use
@@ -27,7 +26,7 @@ accepted Configure-derived declarations, and `Ready`, in that order.
 `startup_event` preserves durable `Emit` metadata, while
 `startup_transient_event` sets `Emit.persist=false` for runtime-only declarations;
 both retain their builder order before `Ready`.
-[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md)
+[SPEC-peer-event-publication](../../../specs/SPEC-peer-event-publication.md)
 governs publication metadata and persistence classification.
 Tool helpers always publish transient `tool.registration_declared` /
 `tool.unregistration_declared` inputs rather than harness-owned canonical state;
@@ -55,7 +54,7 @@ canonical completion. See
 harness owns the resulting notice kind, source, visibility, transience, and
 publication. Generic `emit` does not authorize an extension-authored
 `harness.notice`. See
-[DECISION-extension-notice-requests](../../../specs/DECISION-extension-notice-requests.md).
+[SPEC-extension-notice-requests](../../../specs/SPEC-extension-notice-requests.md).
 Configure-derived declarations are buffered while handlers run so they override
 same-name static defaults without becoming visible before configuration is
 accepted. Rejection emits `ConfigError`, discards buffered declarations, and
@@ -64,7 +63,7 @@ including from a state factory, rejects the same startup transaction. Ordinary
 manual startup returns that rejection as an error rather than returning a
 runtime that never became ready. Later configuration may change extension-owned
 settings but not the tool prefix. This implements
-[DECISION-extension-tool-prefixes](../../../specs/DECISION-extension-tool-prefixes.md).
+[SPEC-extension-tool-prefixes](../../../specs/SPEC-extension-tool-prefixes.md).
 
 The manual-loop runtime uses the same startup writer and dispatch machinery, but
 hands receive-loop ownership to the extension. It starts a reader thread, exposes

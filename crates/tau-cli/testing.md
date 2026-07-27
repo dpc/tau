@@ -41,7 +41,7 @@ pending before its durable terminal result arrives. Chat does not select
 `tool.request` historically or live because its renderer does not consume that
 fact; generic and non-chat subscribers can still select it. These exceptions
 refine the exact-by-default policy in
-[`DECISION-exact-event-subscriptions`](../../specs/DECISION-exact-event-subscriptions.md).
+[`GATE-exact-event-subscriptions`](../../specs/GATE-exact-event-subscriptions.md).
 Cross-crate boundaries pair harness subscription/catch-up coverage with CLI
 renderer ordering coverage using the same protocol event shapes.
 

@@ -14,7 +14,7 @@ accounting includes encoded bytes and conservative 32-by-32 image patches;
 provider adapters separately enforce aggregate canonical-image and generated
 data-URL request bounds. A compacted replacement may summarize an old image
 away like any other input fact. This behavior is confirmed by
-[DECISION-typed-image-tool-results](DECISION-typed-image-tool-results.md).
+[GATE-typed-image-tool-results](GATE-typed-image-tool-results.md).
 
 ## Recovery authority
 
@@ -188,7 +188,7 @@ watermark. Replay folds transaction outcomes and inference
 responses in core; an uncompleted checkpoint restores as dispatch-uncertain
 rather than being silently duplicated.
 This materialization gate is governed by
-[DECISION-compact-prompt-materialization-authority](DECISION-compact-prompt-materialization-authority.md).
+[SPEC-compact-prompt-materialization-authority](SPEC-compact-prompt-materialization-authority.md).
 
 If persistence rejects a completion-bearing steer after successful compaction,
 the harness retains the exact interceptor-approved failed event, untouched
@@ -205,7 +205,7 @@ interception request for a checkpoint or completion envelope. The registration
 then remains installed but its connection is bypassed until exactly one stale
 reply is consumed; registration replacement, indefinite suspension, and
 disconnect reset follow
-[DECISION-interceptor-stale-reply-suspension](DECISION-interceptor-stale-reply-suspension.md).
+[SPEC-tau-harness-event-processing](../crates/tau-harness/specs/SPEC-tau-harness-event-processing.md).
 
 Crash recovery after a successful compaction but before its continuation
 checkpoint retains the transaction's exact model, cut, and owed transcript
@@ -235,9 +235,9 @@ Typed suffix facts use the current projection, so a historical raw user prompt o
 `<tau_message>` may coexist with newly projected `<user>` or external `<message>`
 items across the compaction boundary. New compactions preserve their actual
 provider-visible input. See
-[DECISION-interactive-user-prompt-envelope](DECISION-interactive-user-prompt-envelope.md)
+[SPEC-interactive-user-prompt-envelope](SPEC-interactive-user-prompt-envelope.md)
 and
-[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
+[SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
 
 Cold agent rehydration restores context usage only from the latest
 model-qualified durable assistant response on the selected branch and never
@@ -279,5 +279,4 @@ existing durable submitted or steered fact carries the
 `context_size_alert` internal kind. UIs render that fact in journal order as
 `[tau-internal]: <exact configured text>` during live delivery and replay.
 Crossing, queued-delivery, and one-shot suppression state remains runtime-only;
-cleared alerts do not gain synthetic history. This behavior is confirmed by
-[DECISION-context-size-alert-history](DECISION-context-size-alert-history.md).
+cleared alerts do not gain synthetic history.

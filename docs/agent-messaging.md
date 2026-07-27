@@ -17,7 +17,7 @@ placement and provider dispatch may follow later. Replay reconstructs context
 without creating a runtime wake. `message.sent` projects as assistant context and
 never activates the model by itself.
 The common prompt shape is defined by
-[`DECISION-common-external-message-envelope`](../specs/DECISION-common-external-message-envelope.md).
+[`SPEC-external-message-reports-and-facts`](../specs/SPEC-external-message-reports-and-facts.md).
 
 Transport admission, duplicate suppression, native identity interpretation,
 reply routes, proactive destinations, retries, and remote-send policy belong to

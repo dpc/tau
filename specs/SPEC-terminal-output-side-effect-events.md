@@ -48,6 +48,6 @@ event authority.
 ## Scope
 
 This specification implements only the terminal-output row of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 It does not change terminal DTOs, OSC encoding, notification triggers, extension
 configuration, or any tool, action, shell, or UI-command authority row.

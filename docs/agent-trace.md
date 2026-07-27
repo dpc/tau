@@ -136,7 +136,7 @@ without JSON coercion.
 
 Schema version `0` is an internal-format contract. Tau provides no compatibility
 or migration reader for later incompatible revisions, following
-[`DECISION-no-backward-compatibility`](../specs/DECISION-no-backward-compatibility.md).
+[`GATE-no-backward-compatibility`](../specs/GATE-no-backward-compatibility.md).
 
 
 ## OTLP JSON

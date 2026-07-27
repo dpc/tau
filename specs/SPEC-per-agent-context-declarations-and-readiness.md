@@ -8,9 +8,9 @@ disconnect handling, and shell production; no component-local artifact owns all
 of it.
 
 This specification implements the per-agent context row of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md)
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md)
 and is constrained by
-[DECISION-agent-initialization-discovery-snapshots](DECISION-agent-initialization-discovery-snapshots.md).
+[SPEC-session-discovery-declarations-and-readiness](SPEC-session-discovery-declarations-and-readiness.md).
 
 ## Correlation and authority
 

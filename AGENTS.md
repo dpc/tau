@@ -17,10 +17,10 @@
   an approved threat-model change.
 - Before any architectural or externally meaningful functional change to event
   logs/journals or a harness-extension interface, read
-  `specs/DECISION-persistence-and-extension-interface-change-approval.md`. Create
-  a separately reviewed `DECISION-*` record for that change and obtain explicit
-  user or maintainer confirmation before implementation; do not hide it in
-  unrelated work.
+  `specs/GATE-persistence-and-extension-interface-change-approval.md`. Obtain
+  explicit user or maintainer confirmation of the exact semantics before
+  implementation; do not hide the choice in unrelated work or create another
+  gate unless the user explicitly requests one.
 
 ## Verification
 

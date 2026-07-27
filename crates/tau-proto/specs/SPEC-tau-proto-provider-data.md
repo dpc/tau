@@ -118,7 +118,7 @@ source and injected input remains raw or uses its separate typed projection.
 This late presentation boundary makes live and replay deterministic, including
 historical facts already tagged `HumanUi`, without changing canonical text,
 provider-specific lowering, or provider cache identity. See
-[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
+[SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
 
 ## Provider model declarations and canonical state
 
@@ -138,7 +138,7 @@ source; canonical payload provenance remains the stable configured publisher.
 Current-state replay emits one canonical update for each active provider, including
 an active provider's empty snapshot, and must not regenerate declarations or
 model-application side effects. This is the provider-model row of
-[DECISION-generic-peer-event-emission](../../../specs/DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](../../../specs/SPEC-peer-event-publication.md).
 
 ## Provider tool-type metadata
 

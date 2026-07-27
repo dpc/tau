@@ -56,13 +56,13 @@ presentation comes from a durable `agent.prompt_submitted` or
 fact's live or replay position as `[tau-internal]: <text>`. Missing tags,
 untagged internal prompts, `ctx_id`, and prompt text never imply this
 presentation. This behavior is confirmed by
-[DECISION-context-size-alert-history](../../../specs/DECISION-context-size-alert-history.md).
+[SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 
 Visible prompt facts, prompt recall/history, and transcript snapshots render the
 raw accepted canonical text. The provider-only `<user>` projection derived from
 typed `HumanUi` provenance never enters CLI display, editor state, or navigation
 anchors. See
-[DECISION-interactive-user-prompt-envelope](../../../specs/DECISION-interactive-user-prompt-envelope.md).
+[SPEC-interactive-user-prompt-envelope](../../../specs/SPEC-interactive-user-prompt-envelope.md).
 
 The overview is renderer-local rather than a durable session index. It contains
 message projections observed by that CLI plus catch-up projections the harness

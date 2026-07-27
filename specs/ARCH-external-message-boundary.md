@@ -8,8 +8,8 @@ own transport registration, admission, routing, reply authority, or send
 completion.
 The exact shared behavior is specified by
 [SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md);
-the underlying publication choice is
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+the underlying publication contract is
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 
 Extension-provided labels or payload can never claim `HumanUi`,
 harness-internal, authenticated Tau-agent, or another extension instance
@@ -44,7 +44,7 @@ races may duplicate delivery.
 Valid committed facts project to an escaped `<message event="…">` boundary
 with opaque message/sender references and optional display, authentication, and
 configured-alias metadata as specified by
-[DECISION-common-external-message-envelope](DECISION-common-external-message-envelope.md).
+[SPEC-external-message-reports-and-facts](SPEC-external-message-reports-and-facts.md).
 Incoming facts immediately create a payload-free live wake; branch-applicable
 transcript placement and provider dispatch may follow later. Replay reconstructs
 context without creating a runtime wake. Publisher metadata and message

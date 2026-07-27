@@ -62,7 +62,7 @@ External transport identity and trust boundaries are governed by [ARCH-external-
 Interactive UI prompt facts retain raw canonical text and typed harness-stamped
 provenance; provider assembly alone derives their fieldless `<user>` presentation
 under
-[DECISION-interactive-user-prompt-envelope](DECISION-interactive-user-prompt-envelope.md).
+[SPEC-interactive-user-prompt-envelope](SPEC-interactive-user-prompt-envelope.md).
 
 Local configured extensions are trusted host executables with limited protocol
 authority, cooperative inter-harness IPC is a separate same-UID coordination
@@ -74,6 +74,6 @@ Dependency direction is inward toward shared protocol/core/client libraries: the
 
 Architectural or externally meaningful functional changes to event logs or
 journals and harness-extension interfaces are gated by
-[DECISION-persistence-and-extension-interface-change-approval](DECISION-persistence-and-extension-interface-change-approval.md).
+[GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
 Extension-owned durable state that can be reconstructed from committed facts follows
-[DECISION-event-log-first-extension-state](DECISION-event-log-first-extension-state.md).
+[GATE-event-log-first-extension-state](GATE-event-log-first-extension-state.md).

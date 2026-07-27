@@ -4,7 +4,7 @@
 
 This specification implements the request-to-canonical-fact portion of the
 agent metadata row in
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 Validation failures retain the established behavior: the committed request has
 no canonical successor. A typed or directed rejection interface is not yet
 specified and remains outside this migration slice.

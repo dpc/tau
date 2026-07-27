@@ -9,7 +9,7 @@ No component-local artifact can describe the complete contract.
 
 This specification implements the `extension.internal_prompt_submit_request`
 part of the request row in
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 `agent.start_request` remains a separate migration slice.
 
 ## Authority and commit

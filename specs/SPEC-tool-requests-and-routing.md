@@ -43,7 +43,7 @@ terminal reports retain their routed producer metadata.
 
 Ownerless, non-transcript calls have no durable provider-terminal journal
 authority and remain outside
-[DECISION-tool-terminal-publication-transactions](DECISION-tool-terminal-publication-transactions.md).
+[SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 For journal-backed request rejection, the durable provider terminal instead
 commits before renderer projection or pending-call cleanup, as specified by
 [SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md).
@@ -57,6 +57,6 @@ Harness-internal and agent-generated requests retain their existing non-peer
 publication path and do not enter the peer consumer.
 
 This flow is governed by
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 Session restore sequencing follows
 [SPEC-tau-harness-event-processing](../crates/tau-harness/specs/SPEC-tau-harness-event-processing.md).

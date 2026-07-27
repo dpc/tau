@@ -48,7 +48,7 @@ fallback. Closed credential-invalidating 400/401 codes may suppress the exact
 generation for this process. Profile rotation clears it; restart may retry once.
 
 The cross-component authority and no-guessed-applicability rule are defined by
-[DECISION-provider-quota-pacing](../../specs/DECISION-provider-quota-pacing.md).
+[GATE-provider-quota-pacing](../../specs/GATE-provider-quota-pacing.md).
 
 ## Provider cancellation boundary
 

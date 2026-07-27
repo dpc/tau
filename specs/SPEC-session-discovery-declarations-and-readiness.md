@@ -7,11 +7,8 @@ scanning, harness collision resolution, role preflight, agent initialization,
 prompt/tool consumers, and UI current-state projection; no component owns the
 complete contract.
 
-This specification implements
-[DECISION-agent-initialization-discovery-snapshots](DECISION-agent-initialization-discovery-snapshots.md),
-[DECISION-session-discovery-declarations-and-readiness](DECISION-session-discovery-declarations-and-readiness.md),
-and the discovery row of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+This specification implements the discovery row of
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 
 ## Publication and atomic replacement
 

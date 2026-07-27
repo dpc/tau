@@ -11,6 +11,6 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
   shared crate such as `tau-proto`, not be copied between `tau-core` and
   extensions.
 - `AgentStore` and `SessionStore` event-log or journal changes are governed by
-  `../../specs/DECISION-persistence-and-extension-interface-change-approval.md`;
-  obtain the required separately reviewed, human-confirmed `DECISION-*` before
+  `../../specs/GATE-persistence-and-extension-interface-change-approval.md`;
+  obtain explicit user or maintainer confirmation of the exact semantics before
   functional changes.

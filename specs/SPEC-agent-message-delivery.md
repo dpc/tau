@@ -8,9 +8,6 @@ context assembly, watch lifecycle, checkpoint/compaction ownership, and cold
 replay. No one component can describe the end-to-end authority, ordering, and
 liveness contract coherently.
 
-This specification implements
-[DECISION-agent-message-transcript-projection](DECISION-agent-message-transcript-projection.md).
-
 ## Authority and occurrence identity
 
 `AgentMessageSent` is the sender-owned durable projection and
@@ -101,7 +98,7 @@ All body text other than the current envelope's own exact close remains literal,
 including ampersands, quotes, entity-like strings, nested tags, and other
 families' close tokens. Dynamic peer attributes retain separate attribute-safe
 escaping. See
-[DECISION-exact-sentinel-prompt-envelopes](DECISION-exact-sentinel-prompt-envelopes.md).
+[SPEC-exact-sentinel-prompt-envelopes](SPEC-exact-sentinel-prompt-envelopes.md).
 
 ## Live activation and waits
 
@@ -189,7 +186,7 @@ weights; committed facts remain. Stale-generation completions cannot install
 wakes in a replacement session. If this cleanup destructively cancels an already
 delivered interception request, the responder follows the one-reply suspension
 contract in
-[DECISION-interceptor-stale-reply-suspension](DECISION-interceptor-stale-reply-suspension.md):
+[SPEC-tau-harness-event-processing](../crates/tau-harness/specs/SPEC-tau-harness-event-processing.md):
 new publications bypass it until one stale reply is consumed, or disconnect
 resets the connection.
 
@@ -220,7 +217,7 @@ The target ACK becomes eligible after the exact receive occurrence completes its
 authoritative foreground framed write. It does not wait for background
 filesystem sync, so an ACK or provider effect can survive a crash that loses the
 journal fact. This boundary is governed by
-[DECISION-semantic-journal-writeback-durability](DECISION-semantic-journal-writeback-durability.md).
+[SPEC-semantic-journal-writeback-durability](SPEC-semantic-journal-writeback-durability.md).
 The target's same-loop post-commit reaction queues or transfers the live wake
 before sending that ACK, but model inference and response are not ACK
 prerequisites. Only a confirmed target ACK permits the sender projection.

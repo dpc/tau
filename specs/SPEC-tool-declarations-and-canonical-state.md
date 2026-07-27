@@ -49,4 +49,4 @@ instance remain current. Disconnect still removes the connection's registry
 ownership and availability projections; it does not regenerate a peer declaration.
 
 This implements the tool registration/unregistration rows of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).

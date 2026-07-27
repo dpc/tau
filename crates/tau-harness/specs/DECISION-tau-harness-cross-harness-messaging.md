@@ -18,7 +18,7 @@ that ambiguity rather than adding a distributed WAL, restart deduplication, or a
 transaction coordinator.
 
 The storage boundary is governed by
-[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
+[SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 
 The RPC protects against accidental misrouting, not malicious same-user
 processes. Exact behavior is specified by
@@ -26,6 +26,6 @@ processes. Exact behavior is specified by
 [SPEC-tau-harness-peer-discovery](SPEC-tau-harness-peer-discovery.md).
 Receive-commit projection, runtime activation, replay, and provider-context
 cardinality are governed by
-[DECISION-agent-message-transcript-projection](../../../specs/DECISION-agent-message-transcript-projection.md)
+[SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md)
 and specified end to end by
 [SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).

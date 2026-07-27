@@ -19,5 +19,5 @@ prove valid without salvaging plausible bytes after corruption.
 Exact behavior is specified by
 [SPEC-tau-harness-session-state](../../tau-harness/specs/SPEC-tau-harness-session-state.md).
 Writeback and crash-cut semantics are governed by
-[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md),
+[SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md),
 which supersedes this record where older wording implies whole-journal rejection.

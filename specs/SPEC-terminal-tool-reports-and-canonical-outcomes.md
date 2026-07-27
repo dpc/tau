@@ -78,11 +78,10 @@ renderer projection or terminal-dependent state. Clean open, lock, and write
 failures remain retryable; an unrestored partial write poisons only its journal.
 Background sync failure neither retracts the semantic append nor fail-stops the
 live harness epoch. Reopen or restart rebuilds the longest valid prefix; cold
-recovery never automatically
-resends an uncertain tool, provider, or compaction effect. This is governed by
-[DECISION-tool-terminal-publication-transactions](DECISION-tool-terminal-publication-transactions.md).
+recovery never automatically resends an uncertain tool, provider, or compaction
+effect.
 The writeback and recovery boundary is governed by
-[DECISION-semantic-journal-writeback-durability](DECISION-semantic-journal-writeback-durability.md).
+[SPEC-semantic-journal-writeback-durability](SPEC-semantic-journal-writeback-durability.md).
 
 ## Persistence, debug logging, and replay
 
@@ -109,4 +108,4 @@ existing canonical semantic facts and never reruns report validation,
 canonicalization, cleanup, waits, or background notifications.
 
 This implements the terminal tool rows of
-[DECISION-generic-peer-event-emission](DECISION-generic-peer-event-emission.md).
+[SPEC-peer-event-publication](SPEC-peer-event-publication.md).

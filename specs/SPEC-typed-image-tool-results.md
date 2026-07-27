@@ -68,7 +68,7 @@ because its decoder has additional workspace allocations, and only one image
 decode may run concurrently in the shell extension.
 
 The native typed-result choice is recorded by
-[DECISION-typed-image-tool-results](DECISION-typed-image-tool-results.md).
+[GATE-typed-image-tool-results](GATE-typed-image-tool-results.md).
 This behavior refines
 [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md)
 and is implemented at the component boundaries described by

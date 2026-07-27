@@ -18,7 +18,7 @@ queryable indexes. The exact checkpoint, repair, legacy, and summary contracts
 are described by [ARCH-tau-core](ARCH-tau-core.md) and
 [SPEC-tau-harness-session-state](../../tau-harness/specs/SPEC-tau-harness-session-state.md).
 The change is governed by
-[DECISION-persistence-and-extension-interface-change-approval](../../../specs/DECISION-persistence-and-extension-interface-change-approval.md).
+[GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 The asynchronous writeback rule supersedes the earlier append-and-sync ordering
 under
-[DECISION-semantic-journal-writeback-durability](../../../specs/DECISION-semantic-journal-writeback-durability.md).
+[SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).

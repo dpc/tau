@@ -10,6 +10,6 @@ Before changing this crate, discover and read the applicable Linked Specs in `sp
 - Read the applicable trust-boundary records in the repository-root `specs/` directory before changing event routing, custom event validation, tool-result/error payloads, or any field that can carry extension-provided data.
 - Keep `docs/events.md` aligned when changing event names or selected event semantics.
 - Event-persistence and harness-extension protocol changes are governed by
-  `../../specs/DECISION-persistence-and-extension-interface-change-approval.md`;
-  obtain the required separately reviewed, human-confirmed `DECISION-*` before
+  `../../specs/GATE-persistence-and-extension-interface-change-approval.md`;
+  obtain explicit user or maintainer confirmation of the exact semantics before
   functional changes.

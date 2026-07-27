@@ -433,7 +433,7 @@ Recovery is a separately gated follow-on. The exact authority question is:
 
 Current `:retry` is not that operation: it addresses a live provider-owned
 parked delayed retry and requires transient in-flight routing. Pause this
-follow-on until a separately reviewed decision answers the question; do not
+follow-on until the user or a maintainer explicitly confirms the semantics; do not
 change recovery behavior to make the E2E terminate.
 
 ### S6 — Interrupted worker foreground tool
@@ -592,8 +592,8 @@ The scenarios above test current confirmed behavior. They do not authorize new
 persistence, replay, provider acknowledgement, watch, navigation, or worker
 ownership semantics.
 
-Stop and request a separately reviewed decision before implementing a test whose
-expected result would require any of the following:
+Stop and request explicit user or maintainer confirmation before implementing a
+test whose expected result would require any of the following:
 
 - automatically resending a dispatch-uncertain inference;
 - terminalizing or recovering a cold-restored dispatch-uncertain inference
@@ -622,9 +622,10 @@ This plan follows:
 - [`SPEC-terminal-tool-reports-and-canonical-outcomes`](../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md)
 - [`SPEC-provider-execution-reports-and-canonical-facts`](../specs/SPEC-provider-execution-reports-and-canonical-facts.md)
 - [`SPEC-compaction-and-context-recovery`](../specs/SPEC-compaction-and-context-recovery.md)
-- [`DECISION-cold-restored-completed-worker-ownership`](../specs/DECISION-cold-restored-completed-worker-ownership.md)
-- [`DECISION-harness-owned-agent-navigation-modes`](../specs/DECISION-harness-owned-agent-navigation-modes.md)
-- [`DECISION-persistence-and-extension-interface-change-approval`](../specs/DECISION-persistence-and-extension-interface-change-approval.md)
+- [`SPEC-start-agent-requests`](../specs/SPEC-start-agent-requests.md)
+- [`SPEC-tau-harness-session-state`](../crates/tau-harness/specs/SPEC-tau-harness-session-state.md)
+- [`SPEC-tau-proto-session-events`](../crates/tau-proto/specs/SPEC-tau-proto-session-events.md)
+- [`GATE-persistence-and-extension-interface-change-approval`](../specs/GATE-persistence-and-extension-interface-change-approval.md)
 - [`ARCH-tau-e2e-tests`](../crates/tau-e2e-tests/specs/ARCH-tau-e2e-tests.md)
 - [`SPEC-tau-e2e-deterministic-provider`](../crates/tau-e2e-tests/specs/SPEC-tau-e2e-deterministic-provider.md)
 
