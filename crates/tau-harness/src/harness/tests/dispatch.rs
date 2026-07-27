@@ -238,7 +238,7 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
         vec![
             "* `engineer` - \"Capable individual contributor. Good default for most tasks.\"",
             "* `engineer-junior` - \"Lower-reasoning but fast individual contributor. Best for straightforward coding tasks.\"",
-            "* `engineer-senior` - \"Slow and expensive individual contributor using maximum reasoning. Best used only for hardest engineering problems.\"",
+            "* `engineer-senior` - \"Slow and expensive individual contributor using maximum reasoning. Use only for the hardest tasks without prior planning, or when specifically requested.\"",
         ]
     );
 

@@ -69,5 +69,5 @@ agents:
         engineer-senior:
           enable: true
           order: 30
-          description: Slow and expensive individual contributor using maximum reasoning. Best used only for hardest engineering problems.
+          description: Slow and expensive individual contributor using maximum reasoning. Use only for the hardest tasks without prior planning, or when specifically requested.
           effort: high
