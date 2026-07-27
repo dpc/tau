@@ -1235,7 +1235,7 @@ fn disconnected_state_requires_fresh_online_readiness() {
 
 /// `xmpp_send` rejects unexpected arguments such as a destination JID so future
 /// protocol or schema changes cannot accidentally make model-chosen recipients
-/// meaningful. This guards `DECISION-tau-ext-xmpp-fixed-destinations`.
+/// meaningful.
 #[test]
 fn xmpp_send_rejects_unknown_destination_argument() {
     let (ext, rx, _bridge) = extension();

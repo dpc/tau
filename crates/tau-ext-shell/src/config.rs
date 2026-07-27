@@ -8,9 +8,6 @@ use crate::isolation::{apply_command_isolation, apply_read_only_cwd_mount};
 use crate::shell_process::ShellProcess;
 
 /// Pager variables protected at the shared model/user shell spawn boundary.
-///
-/// Governed by
-/// `DECISION-tau-ext-shell-non-interactive-pager-environment`.
 const NON_INTERACTIVE_PAGER_ENV: [(&str, &str); 5] = [
     ("PAGER", "cat"),
     ("GIT_PAGER", "cat"),
