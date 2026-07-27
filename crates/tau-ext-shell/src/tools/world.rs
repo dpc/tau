@@ -14,7 +14,7 @@ use crate::display::ToolFailure;
 
 pub(crate) const MAX_SAFE_FILE_READ_BYTES: usize = 10 * 1024 * 1024;
 
-// Keep at zero per `DECISION-no-backward-compatibility`.
+// Keep at zero per `GATE-no-backward-compatibility`.
 const CASSETTE_VERSION: u32 = 0;
 
 pub(crate) struct ShellWorld {

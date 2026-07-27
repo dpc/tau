@@ -24,7 +24,7 @@ pub mod pool;
 pub mod ws;
 pub mod ws_runtime;
 
-// Keep at zero per `DECISION-no-backward-compatibility`.
+// Keep at zero per `GATE-no-backward-compatibility`.
 const PROVIDER_STREAM_CASSETTE_VERSION: u32 = 0;
 const MAX_PROVIDER_CASSETTE_EVENTS: usize = 1024;
 const MAX_PROVIDER_CASSETTE_FRAME_BYTES: usize = 256 * 1024;

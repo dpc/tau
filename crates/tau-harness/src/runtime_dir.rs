@@ -30,7 +30,7 @@ const SESSION_DISCOVERY_MAX_PROBES: usize = 8;
 const SESSION_DISCOVERY_MAX_CALLS: usize = 8;
 const SESSION_DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const SESSION_DISCOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(2);
-// Keep at zero per `DECISION-no-backward-compatibility`.
+// Keep at zero per `GATE-no-backward-compatibility`.
 const DAEMON_METADATA_VERSION: u32 = 0;
 
 /// Maximum number of sessions returned by one discovery request.

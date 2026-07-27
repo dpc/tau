@@ -1,9 +1,10 @@
 # SPEC-tau-harness-activating-input-wait: Activating Input Wait
 
-## Activating-input waits
+## Record justification
 
-This specification implements
-[DECISION-tau-harness-activating-input-wait](DECISION-tau-harness-activating-input-wait.md).
+Activating-input waits span tool argument and display handling, event-loop waiter state, canonical input queueing and activation classification, lifecycle cancellation, and cold restore, so no one implementation area can own the complete contract.
+
+## Activating-input waits
 
 `wait({"timeout_minutes":N})` is a runtime-only, target-scoped suspension inside
 an existing tool round. `N` must be a positive CBOR integer; zero, negatives,

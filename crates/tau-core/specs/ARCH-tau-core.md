@@ -75,11 +75,15 @@ Store IDs used as path components share one bounded safe grammar with CLI
 minting, metadata listing, lock probes, and cleanup. They exclude path separators,
 NUL, and the reserved `.` and `..` names.
 
-Durability mode is governed by
-[DECISION-tau-core-semantic-store-durability](DECISION-tau-core-semantic-store-durability.md).
-Per-agent listing checkpoints and their journal-authority boundary are governed
-by
-[DECISION-tau-core-agent-summary-checkpoints](DECISION-tau-core-agent-summary-checkpoints.md).
+Memory-only streams use the same semantic fold as journal-backed streams and
+support same-daemon replay, but create no durable artifact. Agent journals remain
+the sole durable identity and listing authority: atomically replaced `meta.json`
+files are versioned, journal-bound derived checkpoints rather than a second
+index or evidence of durability. A complete journal-frame write precedes
+checkpoint replacement. Missing, stale, corrupt, or over-budget checkpoints
+must not hide a valid journal-backed agent, and recovery invalidates a checkpoint
+when it truncates an invalid journal suffix.
+
 Current-session roster enrichment is read-only and path-exact: `AgentStore`
 reads at most the bounded first record plus an already-loaded or journal-bound checkpoint
 display projection. It does not replay the transcript, repair the checkpoint, or

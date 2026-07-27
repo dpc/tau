@@ -59,7 +59,7 @@ impl ToolPromptFragment {
 /// Context made available to role prompt Handlebars templates.
 ///
 /// Dynamic system-prompt values remain template inputs as required by
-/// `DECISION-tau-harness-system-prompt-templates`.
+/// `GATE-tau-harness-system-prompt-templates`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RolePromptTemplateContext<'a> {
     /// Name of the role whose prompt is being rendered.
@@ -74,7 +74,7 @@ pub(crate) struct RolePromptTemplateContext<'a> {
 /// Harness-owned capabilities visible to one prompt render.
 ///
 /// Source-of-truth and render-failure semantics are governed by
-/// `DECISION-tau-harness-effective-tool-surface-authority`.
+/// `SPEC-tau-harness-prompt-dispatch`.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub(crate) struct PromptCapabilities {
     /// Model-visible tools authorized for this turn.

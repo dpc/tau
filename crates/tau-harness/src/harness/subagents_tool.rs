@@ -3,7 +3,7 @@
 //! Watch turn-state transitions follow
 //! `SPEC-agent-watch`.
 //! Cross-session delivery and sender authentication follow
-//! `DECISION-tau-harness-cross-harness-messaging`.
+//! `SPEC-tau-harness-peer-routing`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -545,7 +545,7 @@ impl Harness {
     /// mutation and event publication.
     ///
     /// See `SPEC-agent-watch` and
-    /// `DECISION-agent-watch-acyclic-topology`.
+    /// `GATE-agent-watch-acyclic-topology`.
     pub(crate) fn try_set_agent_watch(
         &mut self,
         watcher_id: &str,

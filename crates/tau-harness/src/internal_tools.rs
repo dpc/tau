@@ -662,7 +662,7 @@ impl<'a> InternalToolHost<'a> {
     /// watch mutation or event publication. Re-enabling retains established
     /// snapshot behavior. Disabling bypasses lifecycle and cycle analysis and
     /// is idempotent, including for stopped or unknown target ids. See
-    /// `DECISION-agent-watch-acyclic-topology`.
+    /// `GATE-agent-watch-acyclic-topology`.
     pub fn try_set_agent_watch(
         &mut self,
         watcher_id: &str,

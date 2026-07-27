@@ -399,7 +399,7 @@ fn agent_message_activation_class(
 
 fn provider_response_update_has_public_content(updated: &ProviderResponseUpdated) -> bool {
     // Provider-owned stats remain public content per
-    // `DECISION-provider-response-stats`.
+    // `SPEC-provider-response-streaming`.
     !updated.deltas.is_empty()
         || updated.compaction.is_some()
         || updated.status.is_some()
@@ -10123,7 +10123,7 @@ impl Harness {
             }
             HarnessInputMessage::Emit(emit) => {
                 // Governing contract:
-                // `specs/DECISION-generic-peer-event-emission.md`.
+                // `specs/SPEC-peer-event-publication.md`.
                 // `Emit` is a private protocol submission request, not a committed
                 // event fact. Keep this arm a generic
                 // admission/interception/commit chokepoint: never add
@@ -10249,7 +10249,7 @@ impl Harness {
             Event::ToolRegistrationDeclared(_) | Event::ToolUnregistrationDeclared(_)
         ) {
             // This is declarative authorship/resource admission only. Per
-            // `DECISION-generic-peer-event-emission`, prefix/schema/ownership
+            // `SPEC-peer-event-publication`, prefix/schema/ownership
             // validation and registry mutation run from the committed-event
             // consumer, never from this generic Emit intake path.
             let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
@@ -10291,7 +10291,7 @@ impl Harness {
                 | Event::ToolCancelledReported(_)
         ) {
             // This is only declarative event-authority admission. Per
-            // `specs/DECISION-generic-peer-event-emission.md`, routed-call
+            // `specs/SPEC-peer-event-publication.md`, routed-call
             // validation, background suppression, and canonical publication run
             // from the committed-event consumer. Keep this path semantically
             // identical to ordinary generic Emit publication.
@@ -10354,7 +10354,7 @@ impl Harness {
         }
         if let Event::ToolRequest(request) = &event {
             // This is only structural and authoring-authority admission. Per
-            // `specs/DECISION-generic-peer-event-emission.md`, duplicate
+            // `specs/SPEC-peer-event-publication.md`, duplicate
             // correlation checks, pending-call bookkeeping, and registry routing
             // run from the committed-event consumer.
             let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
@@ -10417,7 +10417,7 @@ impl Harness {
                 | Event::ProviderCacheMissDiagnosticReported(_)
         ) {
             // This is only configured event-authority admission. Per
-            // `specs/DECISION-generic-peer-event-emission.md`, prompt ownership,
+            // `specs/SPEC-peer-event-publication.md`, prompt ownership,
             // retry correlation, response normalization, and terminal processing
             // run from the committed-event consumer.
             let authorized = self.extensions.entries.get(source_id).is_some_and(|entry| {
@@ -10447,7 +10447,7 @@ impl Harness {
                 | Event::ProviderQuotaClearReported(_)
         ) {
             // This is only declarative event-authority admission. Per
-            // `specs/DECISION-generic-peer-event-emission.md`, provider ownership,
+            // `specs/SPEC-peer-event-publication.md`, provider ownership,
             // route bindings, bounds, and epoch/sequence validation run from the
             // committed-event consumer. A configured Provider's unowned payload
             // still commits as its report before downstream validation rejects it.
@@ -10473,7 +10473,7 @@ impl Harness {
         }
         if matches!(event, Event::ProviderModelsDeclared(_)) {
             // This is declarative source-aware admission, not provider-model
-            // processing. `DECISION-generic-peer-event-emission` requires the
+            // processing. `SPEC-peer-event-publication` requires the
             // accepted declaration to use ordinary interception/commit before the
             // downstream consumer derives canonical current state.
             if !self.is_provider_extension(source_id)
@@ -10850,7 +10850,7 @@ impl Harness {
     ///
     /// Keep semantic work out of `HarnessInputMessage::Emit` intake. This is
     /// the downstream boundary required by
-    /// `DECISION-generic-peer-event-emission`; adding a new `Emit` special case
+    /// `SPEC-peer-event-publication`; adding a new `Emit` special case
     /// in `handle_extension_message` would bypass interception and recreate the
     /// architectural problem that decision prohibits.
     fn process_committed_peer_event(
@@ -11218,7 +11218,7 @@ impl Harness {
     /// The request has already passed interception, persistence when selected,
     /// debug recording, and broadcast. Correlation checks, pending-call
     /// mutation, and registry routing intentionally remain downstream under
-    /// `specs/DECISION-generic-peer-event-emission.md`.
+    /// `specs/SPEC-peer-event-publication.md`.
     fn process_committed_tool_request(
         &mut self,
         peer_context: &interception::PeerPublicationContext,
@@ -11312,7 +11312,7 @@ impl Harness {
     /// The report has already passed ordinary interception, commit, and
     /// broadcast. Provider ownership, route bindings, bounds, and
     /// epoch/sequence transitions intentionally remain downstream under
-    /// `DECISION-generic-peer-event-emission`.
+    /// `SPEC-peer-event-publication`.
     fn process_committed_provider_quota_report(
         &mut self,
         peer_context: &interception::PeerPublicationContext,
@@ -11361,7 +11361,7 @@ impl Harness {
     /// The report has already passed ordinary interception, commit, and
     /// broadcast. Prompt ownership, retry correlation, response normalization,
     /// and terminal response processing intentionally remain downstream under
-    /// `specs/DECISION-generic-peer-event-emission.md`.
+    /// `specs/SPEC-peer-event-publication.md`.
     fn process_committed_provider_execution_report(
         &mut self,
         peer_context: &interception::PeerPublicationContext,
@@ -11584,7 +11584,7 @@ impl Harness {
     /// canonical harness-authored fact.
     ///
     /// This method is intentionally downstream of generic `Emit` commit under
-    /// `specs/DECISION-generic-peer-event-emission.md`. Interception
+    /// `specs/SPEC-peer-event-publication.md`. Interception
     /// replacements must reach this point before routed-call ownership and
     /// background suppression are evaluated.
     fn process_committed_tool_progress_report(
@@ -12785,7 +12785,7 @@ impl Harness {
             }
             HarnessInputMessage::Emit(emit) => {
                 // Keep this arm aligned with
-                // `specs/DECISION-generic-peer-event-emission.md`: `Emit` is a
+                // `specs/SPEC-peer-event-publication.md`: `Emit` is a
                 // private submission request rather than a committed fact. New
                 // peer event families must not acquire semantic work at intake;
                 // process them downstream of commit or use a dedicated message

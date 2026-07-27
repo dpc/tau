@@ -6,7 +6,7 @@
 //! client.
 //! Update-stream ownership follows
 //! `SPEC-tau-ext-telegram-stream-owner`, while instance-specific tool
-//! names follow the workspace-wide `DECISION-extension-tool-prefixes`.
+//! names follow the workspace-wide `SPEC-extension-tool-prefixes`.
 //! Shared-token multi-session ownership follows
 //! `SPEC-tau-telegram-gateway`.
 //! The standalone daemon and sidecar split is described by
@@ -1605,7 +1605,7 @@ fn generated_send_message_id(call_id: &str, destination: &str) -> MessageFactId 
 }
 
 /// Derive the opaque message reference required by
-/// `DECISION-common-external-message-envelope`.
+/// `SPEC-external-message-reports-and-facts`.
 fn telegram_message_ref(conversation_id: &str, occurrence_id: &str) -> MessageFactId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"tau-ext-telegram/message-ref/v1\0");

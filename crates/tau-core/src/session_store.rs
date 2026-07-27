@@ -375,7 +375,7 @@ impl SessionMembership {
 /// syncs journals in the background.
 ///
 /// Durable replay and memory-only parity follow
-/// `DECISION-tau-core-semantic-store-durability`.
+/// `ARCH-tau-core`.
 #[derive(Debug)]
 pub struct SessionStore {
     sessions_dir: PathBuf,

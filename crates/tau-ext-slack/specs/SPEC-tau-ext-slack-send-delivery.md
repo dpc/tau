@@ -1,5 +1,9 @@
 # SPEC-tau-ext-slack-send-delivery: Slack send delivery
 
+## Record justification
+
+Slack send delivery spans reader-side reservation, HTTP worker scheduling, lifecycle and replay ledgers, serialized report output, and downstream canonical facts, so no one implementation area can own the complete delivery contract.
+
 A send freezes agent, arguments, route, lifecycle/config generations,
 installation, logical text, and serialized body. It reserves `ToolCallId` before
 I/O; HTTP and waits run off the protocol reader. There is one initial attempt and
@@ -25,7 +29,5 @@ permission, target, and request rejection are not retried. Errors and
 `Retry-After` are bounded and expose no body, header, token, native ID, mention,
 or text.
 
-The governing choice is
-[DECISION-tau-ext-slack-send-delivery](DECISION-tau-ext-slack-send-delivery.md).
 Submitted sent reports and downstream canonical facts follow
 [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).

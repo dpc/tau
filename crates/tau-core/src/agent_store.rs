@@ -381,7 +381,7 @@ pub struct AgentAppendOutcome {
 /// the tree immediately and a coalesced worker syncs them in the background.
 ///
 /// Durable replay and memory-only parity follow
-/// `DECISION-tau-core-semantic-store-durability`.
+/// `ARCH-tau-core`.
 #[derive(Debug)]
 pub struct AgentStore {
     agents_dir: PathBuf,

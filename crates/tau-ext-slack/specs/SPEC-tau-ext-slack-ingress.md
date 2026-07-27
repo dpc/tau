@@ -1,5 +1,9 @@
 # SPEC-tau-ext-slack-ingress: Slack ingress identity and admission
 
+## Record justification
+
+Slack ingress spans Socket Mode lifecycle, identity lookup and admission, occurrence deduplication, route triggering, report submission, and mention projection, so no one implementation area can own the complete trust and delivery contract.
+
 Sender admission, route trigger, and content trust are independent. Strict mode
 admits only allowlisted verified humans; lax adds verified humans only on static
 receive routes. Payload remains untrusted. Dynamic links still require exact
@@ -61,6 +65,3 @@ controls; authored `@slack_bridge` stays literal, and the safe source-mention
 path is the sole generator. Successful registration returns exactly
 `{"status":"registered","incoming_transport_reference":"@slack_bridge"}`;
 unregister returns exactly `{"status":"unregistered"}`.
-
-This behavior refines
-[DECISION-tau-ext-slack-sender-admission](DECISION-tau-ext-slack-sender-admission.md).

@@ -47,7 +47,12 @@ impl ShellProcess {
         })
     }
 
-    /// Attach closed stdin plus output pipes on platforms without PTY support.
+    /// Attach closed stdin plus output pipes on platforms without
+    /// atomic-CLOEXEC PTY support.
+    ///
+    /// A create-then-`fcntl` PTY setup could leak a parent-only endpoint across
+    /// a concurrent spawn, so these targets deliberately retain pipe
+    /// capture.
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     pub(crate) fn spawn(command: &mut Command) -> std::io::Result<Self> {
         command

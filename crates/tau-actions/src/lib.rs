@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// Current action schema version understood by this crate.
 ///
-/// This stays at zero under `DECISION-no-backward-compatibility`.
+/// This stays at zero under `GATE-no-backward-compatibility`.
 pub const ACTION_SCHEMA_VERSION: u32 = 0;
 
 /// Maximum UTF-8 byte length accepted for command tokens, argument names,

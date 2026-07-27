@@ -1,8 +1,6 @@
 # ARCH-tau-telegram-gateway: Telegram gateway daemon
 
-The gateway shape implements the confirmed topology choice in
-[DECISION-tau-ext-telegram-single-token-gateway](DECISION-tau-ext-telegram-single-token-gateway.md).
-Its socket, lease, durable-state, loss-window, routing, and resource contracts
+The gateway socket, lease, durable-state, loss-window, routing, and resource contracts
 are [SPEC-tau-telegram-gateway](SPEC-tau-telegram-gateway.md). Shared stream
 ownership is [SPEC-tau-ext-telegram-stream-owner](SPEC-tau-ext-telegram-stream-owner.md).
 

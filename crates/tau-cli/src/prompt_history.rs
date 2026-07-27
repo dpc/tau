@@ -34,7 +34,7 @@ const LOCK_FILE: &str = "prompt-history.lock";
 const MAX_HISTORY_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES: u64 = MAX_HISTORY_FILE_BYTES;
 const MAX_PROMPT_HISTORY_ENTRIES: usize = 1000;
-// Keep at zero per `DECISION-no-backward-compatibility`.
+// Keep at zero per `GATE-no-backward-compatibility`.
 const PROMPT_HISTORY_VERSION: u8 = 0;
 
 /// Persistent prompt-history access with a shared process-local tail witness.

@@ -40,6 +40,3 @@ harness derives canonical facts.
 Harness replay performs no Telegram I/O or report submission and reconstructs no live
 registration, route, link, or stream ownership. This is distinct from gateway
 restart recovery of its own durable cursor and deduplication state.
-
-The inbound transport and local coordination choice is
-[DECISION-tau-ext-telegram-long-polling](DECISION-tau-ext-telegram-long-polling.md).

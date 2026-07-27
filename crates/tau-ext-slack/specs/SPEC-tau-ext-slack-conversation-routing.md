@@ -1,5 +1,9 @@
 # SPEC-tau-ext-slack-conversation-routing: Slack conversation routing
 
+## Record justification
+
+Conversation authority spans configuration validation, ingress and dynamic-link state, proactive send and mutation routing, and bounded discovery, so no one implementation area can own the complete route contract.
+
 One bounded exact configured conversation list uses stable aliases for exact
 conversation kind/ID and optional immutable thread root. Receive and proactive
 send grants are independent. Dynamic DMs are separately bounded exact-user,
@@ -54,6 +58,3 @@ Alias/cursor data grants no authority; send always re-resolves current config.
 
 Legacy `channel_ids`, `listening_scope`, and `send_destinations` configuration
 keys are hard errors, not compatibility aliases.
-
-These contracts refine
-[DECISION-tau-ext-slack-conversation-policy](DECISION-tau-ext-slack-conversation-policy.md).

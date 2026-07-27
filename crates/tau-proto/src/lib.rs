@@ -65,7 +65,7 @@ pub use tool_name_prefix::{
 /// Current protocol version implemented by this crate.
 ///
 /// This stays at zero under
-/// `DECISION-no-backward-compatibility`; Tau does not support old protocols.
+/// `GATE-no-backward-compatibility`; Tau does not support old protocols.
 pub const PROTOCOL_VERSION: u32 = 0;
 
 /// UI marker text for responses, thinking blocks, and tool calls that

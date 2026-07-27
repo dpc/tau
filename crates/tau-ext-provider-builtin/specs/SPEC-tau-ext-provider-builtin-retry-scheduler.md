@@ -1,5 +1,9 @@
 # SPEC-tau-ext-provider-builtin-retry-scheduler: Required-work retry scheduler
 
+## Record justification
+
+Required-work retry behavior spans provider workers and adapters, the delayed scheduler actor, profile cooldown state, cancellation, and manual retry handling, so no one implementation area can own its lifecycle.
+
 A logical prompt remains pending across retryable provider attempts until it
 succeeds, is canceled, the process/session shuts down, or the unchanged request
 is positively proven deterministic and invalid. Unknown remote failures retry;
@@ -63,6 +67,3 @@ current cooldown. Replacing the configured profile identity also invalidates the
 old profile's cooldown, while best-effort quota display telemetry never does.
 The telemetry non-authority follows
 [GATE-provider-quota-pacing](../../../specs/GATE-provider-quota-pacing.md).
-
-This behavior implements
-[DECISION-tau-ext-provider-builtin-required-work-retries](DECISION-tau-ext-provider-builtin-required-work-retries.md).

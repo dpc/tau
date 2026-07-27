@@ -81,7 +81,7 @@ truncation contracts. The child still starts in its own session without gaining
 the harness terminal as a controlling terminal. Other targets retain pipe
 capture and closed stdin.
 See
-[DECISION-tau-ext-shell-pty-execution](DECISION-tau-ext-shell-pty-execution.md).
+[SPEC-tau-ext-shell-process-lifecycle](SPEC-tau-ext-shell-process-lifecycle.md).
 
 At the shared spawn boundary for both model and user shell commands, ext-shell
 applies ordinary `shell.extra_env`, then normally protects `PAGER`, `GIT_PAGER`,

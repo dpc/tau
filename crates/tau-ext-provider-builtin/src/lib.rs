@@ -2521,7 +2521,7 @@ struct CooldownConstraint {
 ///
 /// Time is supplied to [`Self::pop_due`] by the caller so scheduling and
 /// cooldown behavior can be acceptance-tested without wall-clock sleeps.
-/// See `DECISION-tau-ext-provider-builtin-required-work-retries`.
+/// See `SPEC-tau-ext-provider-builtin-retry-scheduler`.
 #[derive(Default)]
 struct RetryScheduleQueue {
     /// Min-heap of delayed logical prompts.

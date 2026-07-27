@@ -4,7 +4,7 @@
 //! events to Rhai scripts as JSON-shaped maps matching Serde's JSON form.
 //! Component boundaries are summarized in `ARCH-tau-ext-rhai`.
 //! Runtime concurrency and shell-worker supervision follow
-//! `DECISION-tau-ext-rhai-runtime-model`.
+//! `ARCH-tau-ext-rhai`.
 
 mod shell;
 

@@ -10,7 +10,7 @@ pub const FAKE_MODEL_ID: &str = "fake/test";
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioV1 {
-    /// Schema version, fixed at zero by `DECISION-no-backward-compatibility`.
+    /// Schema version, fixed at zero by `GATE-no-backward-compatibility`.
     pub version: u8,
     /// Stable diagnostic scenario name.
     pub name: String,
@@ -22,7 +22,7 @@ pub struct ScenarioV1 {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioV2 {
-    /// Schema version, fixed at zero by `DECISION-no-backward-compatibility`.
+    /// Schema version, fixed at zero by `GATE-no-backward-compatibility`.
     pub version: u8,
     /// Stable diagnostic scenario name.
     pub name: String,

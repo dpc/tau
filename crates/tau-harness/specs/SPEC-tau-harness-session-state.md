@@ -215,7 +215,7 @@ harness publishes their route or session membership. Loading an existing agent
 into another session publishes membership but never appends a second creation
 fact. A sidecar-only artifact reserves its id but is not a semantic routing
 identity. See
-[DECISION-tau-core-agent-summary-checkpoints](../../tau-core/specs/DECISION-tau-core-agent-summary-checkpoints.md).
+[ARCH-tau-core](../../tau-core/specs/ARCH-tau-core.md).
 
 ## Navigation classification
 

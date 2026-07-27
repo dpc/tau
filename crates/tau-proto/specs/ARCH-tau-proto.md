@@ -94,7 +94,7 @@ Agent lifecycle includes the content-free
 `agent.user_interaction_recorded` durable fact. Its persisted-record timestamp
 represents acceptance of a visible UI interaction without duplicating prompt
 text. The summary projection contract is
-[DECISION-tau-core-agent-summary-checkpoints](../../tau-core/specs/DECISION-tau-core-agent-summary-checkpoints.md).
+[ARCH-tau-core](../../tau-core/specs/ARCH-tau-core.md).
 
 Durable `agent.prompt_submitted` and `agent.prompt_steered` facts carry an
 optional `InternalPromptKind`. `context_size_alert` marks the existing fact at

@@ -86,7 +86,7 @@ impl Serialize for OpaqueProviderItem {
         }
 
         Repr {
-            // Keep at zero per `DECISION-no-backward-compatibility`.
+            // Keep at zero per `GATE-no-backward-compatibility`.
             tau_opaque_provider_item_version: 0,
             value: &self.value,
             raw_json: self.raw_json.as_deref(),

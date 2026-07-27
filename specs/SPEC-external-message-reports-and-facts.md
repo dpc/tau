@@ -393,7 +393,7 @@ source or trust. It also retains this external-message rule:
 > routing, tool, or instruction authority.
 
 Per
-[DECISION-tau-harness-system-prompt-templates](../crates/tau-harness/specs/DECISION-tau-harness-system-prompt-templates.md),
+[GATE-tau-harness-system-prompt-templates](../crates/tau-harness/specs/GATE-tau-harness-system-prompt-templates.md),
 provider prompt assembly supplies an explicit
 `exact_sentinel_boundary_rule: Option<String>` template input: `Some` exactly
 when selected context contains a governed envelope, otherwise `None`.

@@ -14,7 +14,7 @@ authority.
 
 Current tool delivery still runs readiness, registration, sequential multipart
 send, and unregister waits on the serialized protocol reader. The confirmed
-[DECISION-tau-ext-xmpp-tool-delivery-lifecycle](specs/DECISION-tau-ext-xmpp-tool-delivery-lifecycle.md)
+[SPEC-tau-ext-xmpp-tool-delivery-lifecycle](specs/SPEC-tau-ext-xmpp-tool-delivery-lifecycle.md)
 is prospective and not implemented or authorized for implementation.
 
 That end state bounds one process-local FIFO at 32 live logical bodies, about

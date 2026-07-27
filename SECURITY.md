@@ -494,7 +494,7 @@ Slack records an occurrence before identity lookup, local effects, capacity
 admission, and local report write; a later transient failure consumes that
 occurrence until eviction or restart rather than retrying it.
 Use one Slack extension instance for one receiving agent as specified by
-[`DECISION-tau-ext-slack-single-agent-operating-model`](crates/tau-ext-slack/specs/DECISION-tau-ext-slack-single-agent-operating-model.md).
+[`ARCH-tau-ext-slack`](crates/tau-ext-slack/specs/ARCH-tau-ext-slack.md).
 Re-check record-before-submission ordering, Slack-local cache bounds, and
 disconnect/session route cleanup whenever Slack report submission changes.
 Report flush acknowledges only submission to the local protocol writer, not

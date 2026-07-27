@@ -694,7 +694,7 @@ fn valid_display(value: &str) -> bool {
 /// Render one validated fact with centralized visible Unicode and XML escaping.
 fn render_message_fact(view: &MessageFactView<'_>) -> String {
     // Keep this common transport-neutral projection aligned with
-    // DECISION-common-external-message-envelope.
+    // SPEC-external-message-reports-and-facts.
     let mut output = format!(
         "<message event=\"{}\" publisher=\"{}\"",
         view.event_name(),

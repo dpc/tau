@@ -10,7 +10,7 @@ use crate::MAX_GATEWAY_RESPONSE_BYTES;
 
 /// Version of the private gateway socket protocol used by sidecars.
 ///
-/// This stays at zero under `DECISION-no-backward-compatibility`.
+/// This stays at zero under `GATE-no-backward-compatibility`.
 const SOCKET_PROTOCOL_VERSION: u32 = 0;
 
 /// Configuration for the no-poll gateway-client sidecar mode.

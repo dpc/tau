@@ -9,7 +9,7 @@ use super::*;
 const FIXTURE_DIR: &str = "fixtures/provider-vcr";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 // Fixture format versions stay at zero per
-// `DECISION-no-backward-compatibility`.
+// `GATE-no-backward-compatibility`.
 const FIXTURE_FORMAT_VERSION: u32 = 0;
 
 /// Review manifest for the deliberately synthetic public cassette corpus.

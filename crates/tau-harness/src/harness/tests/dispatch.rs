@@ -9619,7 +9619,7 @@ fn restore_looking_user_text_remains_an_activation() {
 /// A completed checkpoint consumes every true activation through its head,
 /// leaves a later true node pending once, and an uncompleted replacement
 /// checkpoint restores as uncertain without redispatch. This guards
-/// `DECISION-tau-harness-compaction-activation-binding`.
+/// `SPEC-compaction-and-context-recovery`.
 #[test]
 fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
     let td = TempDir::new().expect("tempdir");

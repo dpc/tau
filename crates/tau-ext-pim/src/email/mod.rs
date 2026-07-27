@@ -46,7 +46,7 @@ const EMAIL_LOG_TITLE_MAX_CHARS: usize = 80;
 const ACCESS_FULL: &str = "full";
 const ACCESS_PREVIEW: &str = "preview";
 const ACCESS_NONE: &str = "none";
-// Persisted schemas stay at zero per `DECISION-no-backward-compatibility`.
+// Persisted schemas stay at zero per `GATE-no-backward-compatibility`.
 const STATE_SCHEMA: u32 = 0;
 const GOOGLE_AUTH_SCHEMA: u32 = 0;
 const GOOGLE_AUTH_PENDING_SCHEMA: u32 = 0;

@@ -436,7 +436,7 @@ fn wait_args_parse_explicit_input_mode_and_reject_ambiguous_forms() {
 /// another agent's waiter untouched, and never copies input content into the
 /// bounded input-wait result.
 ///
-/// See `DECISION-tau-harness-activating-input-wait`.
+/// See `SPEC-tau-harness-activating-input-wait`.
 #[test]
 fn activating_input_wakes_only_target_owned_waits() {
     let owner = conv("owner");

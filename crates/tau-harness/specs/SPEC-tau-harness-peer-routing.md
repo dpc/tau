@@ -2,10 +2,7 @@
 
 ## Record justification
 
-Peer delivery spans runtime discovery, typed socket RPC and callback
-authentication, target admission and auto-start, durable receive/sender
-projections, post-commit acknowledgement, and crash cleanup. No single owning
-module can state the complete best-effort routing contract coherently.
+Peer delivery spans runtime discovery, typed socket RPC and callback authentication, target admission and auto-start, durable receive/sender projections, post-commit acknowledgement, and crash cleanup, so no single owning module can state the complete best-effort routing contract coherently.
 
 The harness-owned `message` tool accepts bare `&<session-id>` and the exact-agent
 forms `&<session-id>/@<agent-id>` and `<session-id>/<agent-id>`. A bare address
@@ -96,6 +93,3 @@ Immediately before receive commit, bare authority, creation-role
 membership, provider/model/skill availability, endpoint liveness, and generation
 are revalidated. Authority loss reselects once; a second loss fails. Exact routes
 never redirect.
-
-Policy and trust are governed by
-[DECISION-tau-harness-cross-harness-messaging](DECISION-tau-harness-cross-harness-messaging.md).

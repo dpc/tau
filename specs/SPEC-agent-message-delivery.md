@@ -2,11 +2,7 @@
 
 ## Record justification
 
-Agent-message behavior spans protocol events and peer RPC, harness admission and
-post-commit activation, core journal folding and branch placement, provider
-context assembly, watch lifecycle, checkpoint/compaction ownership, and cold
-replay. No one component can describe the end-to-end authority, ordering, and
-liveness contract coherently.
+Agent-message behavior spans protocol events and peer RPC, harness admission and post-commit activation, core journal folding and branch placement, provider context assembly, watch lifecycle, checkpoint/compaction ownership, and cold replay, so no one component can describe the end-to-end authority, ordering, and liveness contract coherently.
 
 ## Authority and occurrence identity
 

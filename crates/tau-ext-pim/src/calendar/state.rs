@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::{SharedStorage, StorageCreateError, file_name};
 
-// Persisted schemas stay at zero per `DECISION-no-backward-compatibility`.
+// Persisted schemas stay at zero per `GATE-no-backward-compatibility`.
 const LOG_SCHEMA: u32 = 0;
 const CHANGE_SCHEMA: u32 = 0;
 const CHANGE_KIND: &str = "calendar_change";

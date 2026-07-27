@@ -20,7 +20,7 @@ prompt, prewarm, retry, and quota resolution share that value; credential reload
 and OAuth refresh do not change it. An on-disk mode edit takes effect after
 restart, and different namespaces may select different modes. The selected
 Codex surface is constrained by
-[DECISION-tau-provider-codex-responses-surface-selection](../../tau-provider-codex/specs/DECISION-tau-provider-codex-responses-surface-selection.md).
+[GATE-tau-provider-codex-responses-surface-selection](../../tau-provider-codex/specs/GATE-tau-provider-codex-responses-surface-selection.md).
 
 The main runtime loop owns ChatGPT quota profile epochs and reconciliation.
 Prompt workers only report normalized observations through the worker channel;

@@ -1,5 +1,9 @@
 # SPEC-tau-telegram-gateway: Telegram single-token gateway
 
+## Record justification
+
+The single-token contract spans the standalone gateway's polling, persistence, routing, and socket service plus each extension sidecar's leases and harness report submission, so neither process can own it coherently.
+
 One local gateway exclusively owns a shared token, `getUpdates` cursor,
 webhook/conflict handling, stream lock, durable offset and recent-ID dedup state,
 allowlist/destination policy, and sends. Per-session sidecars own only live local
@@ -38,7 +42,5 @@ outbound/reply text 3,500 bytes, send rate 20 per 60 seconds, and recent dedup
 capacity 128. Protocol errors close the connection; bounded ordinary send failures
 keep it live.
 
-The topology choice is
-[DECISION-tau-ext-telegram-single-token-gateway](DECISION-tau-ext-telegram-single-token-gateway.md).
-Heartbeat timing and local coordination are constrained by
-[DECISION-tau-ext-telegram-long-polling](DECISION-tau-ext-telegram-long-polling.md).
+Long-poll stream ownership and local coordination are specified by
+[SPEC-tau-ext-telegram-stream-owner](SPEC-tau-ext-telegram-stream-owner.md).

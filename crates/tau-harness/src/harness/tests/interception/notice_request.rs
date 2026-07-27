@@ -1,4 +1,4 @@
-//! Contract tests for `DECISION-extension-notice-requests`.
+//! Contract tests for `SPEC-extension-notice-requests`.
 
 use super::*;
 

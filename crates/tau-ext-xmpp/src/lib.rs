@@ -2208,7 +2208,7 @@ fn generated_xmpp_send_message_id(call_id: &str, conversation: &str) -> MessageF
 }
 
 /// Derive an opaque canonical sender reference as required by
-/// `DECISION-common-external-message-envelope`.
+/// `SPEC-external-message-reports-and-facts`.
 fn xmpp_sender_ref(sender_id: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"tau-ext-xmpp/sender-ref/v1\0");

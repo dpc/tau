@@ -60,7 +60,7 @@ const RECENT_UPDATE_LIMIT: usize = 128;
 
 /// Version of the local gateway status socket protocol.
 ///
-/// This stays at zero under `DECISION-no-backward-compatibility`.
+/// This stays at zero under `GATE-no-backward-compatibility`.
 const SOCKET_PROTOCOL_VERSION: u32 = 0;
 
 /// Maximum bytes read from one local socket request.

@@ -2,10 +2,7 @@
 
 ## Record justification
 
-Compaction and recovery span core transcript cuts and boundaries, harness
-transaction/checkpoint ownership, provider execution, typed message activation,
-context accounting, cold restore, and CLI/model authority. No component-local
-documentation can state the complete closed-prefix and recovery contract.
+Compaction and recovery span core transcript cuts and boundaries, harness transaction/checkpoint ownership, provider execution, typed message activation, context accounting, cold restore, and CLI/model authority, so no component-local documentation can state the complete closed-prefix and recovery contract.
 
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and

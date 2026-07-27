@@ -11,8 +11,9 @@ Every accepted visible UI submission commits a content-free
 `agent.user_interaction_recorded` fact, including an accepted queued prompt that
 may later be recalled. Live untargeted shell output chooses among user agents by
 the harness-local monotonic acceptance order; it never treats a derived
-`meta.json` wall-clock value as routing authority. These rules refine
-[DECISION-tau-core-agent-summary-checkpoints](../../tau-core/specs/DECISION-tau-core-agent-summary-checkpoints.md).
+`meta.json` wall-clock value as routing authority. These rules preserve the
+journal/checkpoint authority described by
+[ARCH-tau-core](../../tau-core/specs/ARCH-tau-core.md).
 
 ## Prompt capability snapshot
 
@@ -33,9 +34,6 @@ persistence, and dispatch remain lossless if a provider violates a false claim
 and returns multiple calls. Template data is sparse, render failures are
 explicit and prevent provider dispatch, and capability state is not persisted
 separately.
-
-The authority choice is recorded by
-[DECISION-tau-harness-effective-tool-surface-authority](DECISION-tau-harness-effective-tool-surface-authority.md).
 
 ## Provider model registry
 

@@ -2,20 +2,15 @@
 
 ## Status
 
-This is the confirmed but unimplemented end state governed by
-[DECISION-tau-ext-xmpp-tool-delivery-lifecycle](DECISION-tau-ext-xmpp-tool-delivery-lifecycle.md).
-Implementation is not authorized by these records. The current serialized-reader
+This is the confirmed but unimplemented end state. Implementation is not
+authorized by this record. The current serialized-reader
 behavior remains described by [ARCH-tau-ext-xmpp](ARCH-tau-ext-xmpp.md),
 [SPEC-tau-ext-xmpp-readiness-waits](SPEC-tau-ext-xmpp-readiness-waits.md), and
 [SPEC-tau-ext-xmpp-muc-lifecycle](SPEC-tau-ext-xmpp-muc-lifecycle.md).
 
 ## Record justification
 
-The complete lifecycle spans the protocol reader, XMPP-local executor and FIFO,
-worker/transport command path, registration and inbound-routing leases,
-extension lifecycle messages, serialized output gate, and deterministic test
-surfaces. No one implementation area can describe reservation, remote effects,
-revocation, terminal ownership, and publication coherently.
+The complete lifecycle spans the protocol reader, XMPP-local executor and FIFO, worker/transport command path, registration and inbound-routing leases, extension lifecycle messages, serialized output gate, and deterministic test surfaces, so no one implementation area can describe reservation, remote effects, revocation, terminal ownership, and publication coherently.
 
 ## Admission and execution
 

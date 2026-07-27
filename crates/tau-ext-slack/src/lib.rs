@@ -851,7 +851,7 @@ fn message_fact_conversation(conversation: &SlackConversation) -> MessageConvers
 }
 
 /// Derive the opaque model/tool reference required by
-/// `DECISION-common-external-message-envelope`.
+/// `SPEC-external-message-reports-and-facts`.
 fn slack_message_fact_id(channel_id: &str, native_id: &str) -> MessageFactId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"tau-ext-slack/message-ref/v1\0");

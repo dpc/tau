@@ -4,8 +4,6 @@ External messages follow
 [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md)
 and the extension-report/canonical-fact interface in
 [SPEC-external-message-reports-and-facts](../../../specs/SPEC-external-message-reports-and-facts.md).
-Conversation policy follows
-[DECISION-tau-ext-slack-conversation-policy](DECISION-tau-ext-slack-conversation-policy.md).
 Exact routing, ingress, and mutation behavior is specified by
 [SPEC-tau-ext-slack-conversation-routing](SPEC-tau-ext-slack-conversation-routing.md),
 [SPEC-tau-ext-slack-ingress](SPEC-tau-ext-slack-ingress.md), and
@@ -26,7 +24,8 @@ thread root. A bounded runtime map holds exact dynamic D-to-U/W links.
 Each configured extension instance is intended for one receiving Tau agent at a
 time. Multi-agent sharing or retargeting is ad hoc best-effort behavior and does
 not provide exact cross-agent routing, permanent ownership, once-only delivery,
-or cross-agent deduplication.
+or cross-agent deduplication. Dependable deployments use separate configured
+instances for separate receiving agents.
 
 ## Receive and report submission
 

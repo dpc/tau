@@ -43,6 +43,3 @@ current API limitation, not a durable policy choice.
 `shell_spawn` is direct trusted host execution in this extension, not `tau-ext-shell`. It does not participate in ext-shell directory locks. Pending shell jobs are capped per extension and timeouts are bounded before worker spawn. On Unix, commands run in their own process group; timeout and extension shutdown cancellation kill the group before collecting bounded stdout/stderr output.
 
 Output capture never requires pipe EOF after the foreground shell has exited, timed out, or been canceled. A command can deliberately detach descendants into a different process group/session while leaving stdout/stderr inherited; those descendants may survive the owned process-group kill, so the extension performs only a bounded post-stop drain of immediately available pipe output before returning.
-
-Runtime and shell ownership follow
-[DECISION-tau-ext-rhai-runtime-model](DECISION-tau-ext-rhai-runtime-model.md).

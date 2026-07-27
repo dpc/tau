@@ -93,7 +93,7 @@ anchor, while an exact match retains suffix-only incremental reuse.
 ## GPT-5.6 Responses modes
 
 The surface choice follows
-[DECISION-tau-provider-codex-responses-surface-selection](DECISION-tau-provider-codex-responses-surface-selection.md).
+[GATE-tau-provider-codex-responses-surface-selection](GATE-tau-provider-codex-responses-surface-selection.md).
 Each profile captures an explicit mode at startup. Standard mode uses top-level
 instructions/tools, requests parallel tool calls, omits forced all-turn reasoning
 context, preserves image detail, and carries no Lite marker. Lite compatibility
