@@ -2655,6 +2655,7 @@ fn prompt_input_completion_menu_keeps_priority_over_local_scroll() {
                 label: "x".to_owned(),
                 description: "candidate".to_owned(),
                 replacement: "replacement".to_owned(),
+                cursor: "replacement".len(),
             }],
             selected: None,
             original_buffer: st.buffer.clone(),
@@ -5081,11 +5082,13 @@ fn completion_keys_take_precedence_over_bindings() {
                     label: ":model".to_owned(),
                     description: "switch model".to_owned(),
                     replacement: ":model".to_owned(),
+                    cursor: ":model".len(),
                 },
                 Candidate {
                     label: ":quit".to_owned(),
                     description: "exit".to_owned(),
                     replacement: ":quit".to_owned(),
+                    cursor: ":quit".len(),
                 },
             ]
         } else {
@@ -5134,6 +5137,97 @@ fn completion_keys_take_precedence_over_bindings() {
     assert_eq!(handle.get_buffer(), ":quit");
 }
 
+/// Enter acceptance keeps a whole-buffer candidate's explicit UTF-8 byte
+/// cursor.
+#[test]
+fn completion_accept_preserves_suffix_and_explicit_cursor() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    handle.set_buffer("日 tail".to_owned(), "日".len());
+    {
+        let mut st = handle.lock();
+        st.completion = Some(CompletionMenu {
+            candidates: vec![Candidate {
+                label: "日本".to_owned(),
+                description: "candidate".to_owned(),
+                replacement: "日本 tail".to_owned(),
+                cursor: "日本".len(),
+            }],
+            selected: None,
+            original_buffer: st.buffer.clone(),
+            original_cursor: st.cursor,
+        });
+    }
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("cycle completion");
+    assert!(matches!(
+        term.get_next_event().expect("preview completion"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "日本 tail");
+    assert_eq!(handle.get_cursor(), "日本".len());
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .expect("accept completion");
+    assert!(matches!(
+        term.get_next_event().expect("accept completion"),
+        Event::CompletionAccept
+    ));
+    assert_eq!(handle.get_buffer(), "日本 tail");
+    assert_eq!(handle.get_cursor(), "日本".len());
+}
+
+/// Rejects malformed completion cursor metadata before preview or later edits.
+#[test]
+fn completion_rejects_invalid_cursor_metadata() {
+    for (replacement, invalid_cursor) in [("e\u{301}", 1), ("é", 99)] {
+        let buf = SharedBuffer::new();
+        let (mut term, handle, input_tx) =
+            Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+        term.set_completion_source(Some(Box::new(move |_: &str, _: usize| {
+            vec![Candidate {
+                label: "invalid".to_owned(),
+                description: "candidate".to_owned(),
+                replacement: replacement.to_owned(),
+                cursor: invalid_cursor,
+            }]
+        })));
+
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            )))
+            .expect("type initial text");
+        assert!(matches!(
+            term.get_next_event().expect("initial edit"),
+            Event::BufferChanged
+        ));
+        assert!(handle.lock().completion.is_none());
+
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::NONE,
+            )))
+            .expect("edit after malformed candidate");
+        assert!(matches!(
+            term.get_next_event().expect("safe subsequent edit"),
+            Event::BufferChanged
+        ));
+        assert_eq!(handle.get_buffer(), "xy");
+    }
+}
+
 /// Accepting a filesystem-like directory completion must immediately refresh
 /// the menu for the accepted path. This keeps drilling into `./crates/` usable
 /// without requiring an extra keypress to discover entries inside it.
@@ -5148,11 +5242,13 @@ fn accepting_completion_refreshes_next_candidates_immediately() {
                 label: "./crates/".to_owned(),
                 description: "directory".to_owned(),
                 replacement: "./crates/".to_owned(),
+                cursor: "./crates/".len(),
             }],
             "./crates/" => vec![Candidate {
                 label: "./crates/tau-cli-term-raw/".to_owned(),
                 description: "directory".to_owned(),
                 replacement: "./crates/tau-cli-term-raw/".to_owned(),
+                cursor: "./crates/tau-cli-term-raw/".len(),
             }],
             _ => Vec::new(),
         },

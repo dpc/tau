@@ -181,6 +181,70 @@ fn dynamic_arg_completers_are_replaced_with_dynamic_commands() {
     assert!(completion::build_candidates(&[], &data, ":email ", 7).is_empty());
 }
 
+/// Keeps the suffix and reports the byte cursor immediately after a
+/// replacement.
+#[test]
+fn argument_completion_reports_mid_buffer_utf8_cursor() {
+    let data = CompletionData::new();
+    data.set_arg_completions(
+        CommandName::new(":model"),
+        vec![CompletionItem::plain("日本")],
+    );
+
+    let candidate =
+        &completion::build_candidates(&[], &data, "  :model 日 suffix", "  :model 日".len())[0];
+
+    assert_eq!(candidate.replacement, "  :model 日本 suffix");
+    assert_eq!(candidate.cursor, "  :model 日本".len());
+}
+
+/// Reports the insertion point before a suffix when completing an empty token.
+#[test]
+fn argument_completion_reports_mid_buffer_insertion_cursor() {
+    let data = CompletionData::new();
+    data.set_arg_completions(
+        CommandName::new(":model"),
+        vec![CompletionItem::plain("inserted")],
+    );
+
+    let candidate = &completion::build_candidates(&[], &data, ":model  suffix", ":model ".len())[0];
+
+    assert_eq!(candidate.replacement, ":model inserted suffix");
+    assert_eq!(candidate.cursor, ":model inserted".len());
+}
+
+/// Includes command indentation while leaving the cursor before a preserved
+/// suffix.
+#[test]
+fn command_completion_reports_indented_mid_buffer_cursor() {
+    let data = CompletionData::new();
+    let candidate = &completion::build_candidates(
+        &[CommandCompletion::new(":quit", "Exit")],
+        &data,
+        "  :q suffix",
+        "  :q".len(),
+    )[0];
+
+    assert_eq!(candidate.replacement, "  :quit suffix");
+    assert_eq!(candidate.cursor, "  :quit".len());
+}
+
+/// Keeps the established end-of-buffer behavior when no suffix follows
+/// completion.
+#[test]
+fn command_completion_reports_end_of_buffer_cursor() {
+    let data = CompletionData::new();
+    let candidate = &completion::build_candidates(
+        &[CommandCompletion::new(":quit", "Exit")],
+        &data,
+        ":q",
+        ":q".len(),
+    )[0];
+
+    assert_eq!(candidate.replacement, ":quit");
+    assert_eq!(candidate.cursor, candidate.replacement.len());
+}
+
 #[test]
 fn typed_history_item_matching_completion_needs_one_up_per_item() {
     let (mut term, handle, input_tx) = new_test_term(vec![

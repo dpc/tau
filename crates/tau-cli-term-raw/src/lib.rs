@@ -140,6 +140,8 @@ pub struct Candidate {
     /// Buffer contents to install when this candidate is selected
     /// (preview) or accepted.
     pub replacement: String,
+    /// UTF-8 byte offset at which to place the prompt cursor in `replacement`.
+    pub cursor: usize,
 }
 
 /// Builds the candidate list for the current buffer.
@@ -155,7 +157,9 @@ pub trait CompletionSource: Send + Sync {
     /// synchronously on the input-event path, so implementations should avoid
     /// blocking work. Accepting or previewing a returned candidate replaces the
     /// entire prompt buffer with [`Candidate::replacement`] and places the
-    /// cursor at the replacement's end.
+    /// cursor at [`Candidate::cursor`]. Sources must provide a UTF-8 byte
+    /// offset on an extended-grapheme boundary no larger than the
+    /// replacement length; malformed candidates are omitted.
     fn candidates(&self, buffer: &str, cursor: usize) -> Vec<Candidate>;
 }
 
@@ -605,8 +609,9 @@ impl SharedState {
             match new_selected {
                 None => (menu.original_buffer.clone(), menu.original_cursor),
                 Some(idx) => {
-                    let buf = menu.candidates[idx].replacement.clone();
-                    let cursor = buf.len();
+                    let candidate = &menu.candidates[idx];
+                    let buf = candidate.replacement.clone();
+                    let cursor = candidate.cursor;
                     (buf, cursor)
                 }
             }
@@ -2087,7 +2092,14 @@ impl Term {
             let st = self.handle.lock();
             (st.buffer.clone(), st.cursor)
         };
-        let candidates = source.candidates(&buffer, cursor);
+        let candidates = source
+            .candidates(&buffer, cursor)
+            .into_iter()
+            .filter(|candidate| {
+                candidate.cursor
+                    == clamp_cursor_to_grapheme_boundary(&candidate.replacement, candidate.cursor)
+            })
+            .collect::<Vec<_>>();
         let mut st = self.handle.lock();
         if candidates.is_empty() {
             st.completion = None;

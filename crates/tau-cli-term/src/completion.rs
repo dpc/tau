@@ -500,6 +500,7 @@ fn build_cmd_candidates(
             label: cmd.name.to_string(),
             description: cmd.description.clone(),
             replacement: cmd.name.to_string(),
+            cursor: cmd.name.as_str().len(),
         })
         .collect()
 }
@@ -508,6 +509,7 @@ fn prepend_to_replacements(prefix: &str, candidates: Vec<Candidate>) -> Vec<Cand
         .into_iter()
         .map(|candidate| Candidate {
             replacement: format!("{prefix}{}", candidate.replacement),
+            cursor: prefix.len() + candidate.cursor,
             ..candidate
         })
         .collect()
@@ -520,11 +522,19 @@ fn replace_token_candidates(
 ) -> Vec<Candidate> {
     candidates
         .into_iter()
-        .map(|candidate| Candidate {
-            replacement: format!("{before}{}{after}", candidate.replacement),
-            ..candidate
+        .map(|candidate| {
+            let accepted = candidate.replacement.clone();
+            replace_candidate(candidate, before, &accepted, after)
         })
         .collect()
+}
+
+fn replace_candidate(candidate: Candidate, before: &str, accepted: &str, after: &str) -> Candidate {
+    Candidate {
+        replacement: format!("{before}{accepted}{after}"),
+        cursor: before.len() + accepted.len(),
+        ..candidate
+    }
 }
 
 fn build_action_token_candidates(
@@ -553,10 +563,7 @@ fn build_action_token_candidates(
                     candidate.replacement.trim_start_matches(':')
                 )
             };
-            Candidate {
-                replacement: format!("{}{}{}", token.before, replacement, token.after),
-                ..candidate
-            }
+            replace_candidate(candidate, token.before, &replacement, token.after)
         })
         .collect()
 }
@@ -603,13 +610,19 @@ fn build_agent_mention_candidates(
         .unwrap_or(token.prefix);
     completer(&[partial])
         .into_iter()
-        .map(|item| Candidate {
-            label: item.value.clone(),
-            description: item.description.clone(),
-            replacement: format!(
-                "{}{}{}{}",
-                token.before, trigger_prefix, item.value, token.after
-            ),
+        .map(|item| {
+            let accepted = format!("{trigger_prefix}{}", item.value);
+            replace_candidate(
+                Candidate {
+                    label: item.value,
+                    description: item.description,
+                    replacement: String::new(),
+                    cursor: 0,
+                },
+                token.before,
+                &accepted,
+                token.after,
+            )
         })
         .collect()
 }
@@ -683,14 +696,17 @@ fn build_filesystem_candidates_with_home(
                     .into_iter()
                     .map(|path| {
                         let display = git_files::dotslash_display_path(path, &repo_root, &cwd);
-                        Candidate {
-                            label: display.clone(),
-                            description: "git file".to_owned(),
-                            replacement: format!(
-                                "{}{}{}",
-                                path_token.before, display, path_token.after
-                            ),
-                        }
+                        replace_candidate(
+                            Candidate {
+                                label: display.clone(),
+                                description: "git file".to_owned(),
+                                replacement: String::new(),
+                                cursor: 0,
+                            },
+                            path_token.before,
+                            &display,
+                            path_token.after,
+                        )
                     })
                     .collect();
             }
@@ -719,11 +735,17 @@ fn build_filesystem_candidates_with_home(
         if is_dir && !replacement.ends_with('/') {
             replacement.push('/');
         }
-        candidates.push(Candidate {
-            label: replacement.clone(),
-            description: if is_dir { "directory" } else { "file" }.to_owned(),
-            replacement: format!("{}{}{}", path_token.before, replacement, path_token.after),
-        });
+        candidates.push(replace_candidate(
+            Candidate {
+                label: replacement.clone(),
+                description: if is_dir { "directory" } else { "file" }.to_owned(),
+                replacement: String::new(),
+                cursor: 0,
+            },
+            path_token.before,
+            &replacement,
+            path_token.after,
+        ));
     }
 
     candidates.sort_by(|a, b| a.label.cmp(&b.label));
@@ -772,10 +794,19 @@ fn build_arg_candidates(
 
     completer(&args)
         .into_iter()
-        .map(|item| Candidate {
-            label: item.value.clone(),
-            description: item.description.clone(),
-            replacement: format!("{replacement_prefix}{}{}", item.value, replacement_suffix),
+        .map(|item| {
+            let accepted = item.value.clone();
+            replace_candidate(
+                Candidate {
+                    label: item.value,
+                    description: item.description,
+                    replacement: String::new(),
+                    cursor: 0,
+                },
+                &replacement_prefix,
+                &accepted,
+                replacement_suffix,
+            )
         })
         .collect()
 }
