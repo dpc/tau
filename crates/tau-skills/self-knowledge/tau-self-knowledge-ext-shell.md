@@ -48,7 +48,7 @@ User `!`/`!!` commands are routed to exactly one generic shell instance. They
 fail without execution when none is available, when several are ambiguous, or
 when the target session/agent workdir is not ready.
 
-On Linux and Android, the model-visible `shell` / `shell_command` surfaces and user
+On Linux, Android, and macOS, the model-visible `shell` / `shell_command` surfaces and user
 `!`/`!!` commands use independent stdout/stderr PTYs. Commands detect TTY output
 descriptors while stream identity remains intact. Stdin stays closed because the
 surfaces do not accept interactive input. Other platforms retain closed stdin

@@ -3950,6 +3950,7 @@ dependencies = [
  "ignore",
  "image",
  "libc",
+ "rustix 1.1.4",
  "rustix-openpty",
  "serde",
  "serde_json",

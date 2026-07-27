@@ -56,7 +56,7 @@ timeout operations that take longer than timeout argument, but currently 100%
 reliable child process termination is not implemented and will require advanced
 techniques to implement in the future (e.g. cgroups).
 
-On Linux and Android, ext-shell shell commands use independent PTYs for stdout
+On Linux, Android, and macOS, ext-shell shell commands use independent PTYs for stdout
 and stderr while stdin remains closed. Verify `[ ! -t 0 ]`, `[ -t 1 ]`, and
 `[ -t 2 ]`; verify stdout and stderr remain separately prefixed in captured
 output; and verify a poll/select-driven input consumer sees persistent readiness

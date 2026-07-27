@@ -72,14 +72,17 @@ mpsc-backed adapter for direct state-machine coverage.
 
 ## User-shell reports
 
-On Linux and Android, model and user shell commands attach independent
+On Linux, Android, and macOS, model and user shell commands attach independent
 pseudo-terminals to stdout and stderr. This makes both output descriptors
 TTY-like without merging the captured streams. Stdin remains closed, preserving
 persistent EOF/readiness for the input-less tool surface. Output PTYs disable
 terminal newline translation to preserve the line-ending, byte-count, and
-truncation contracts. The child still starts in its own session without gaining
-the harness terminal as a controlling terminal. Other targets retain pipe
-capture and closed stdin.
+truncation contracts. Tau creates its PTY endpoints atomically close-on-exec;
+this does not strengthen independent descriptor allocation in Rust's macOS
+fork/exec implementation, whose exec-status pipe retains a small inheritance
+race. The child still starts in its own session without gaining the harness
+terminal as a controlling terminal. Other targets, including unvalidated BSD
+targets, retain pipe capture and closed stdin.
 See
 [SPEC-tau-ext-shell-process-lifecycle](SPEC-tau-ext-shell-process-lifecycle.md).
 

@@ -1,7 +1,47 @@
 use std::os::fd::AsRawFd;
 use std::process::Command;
 
-use super::PtyStdio;
+use super::{OutputModes, PtyStdio, open_pty, rustix};
+
+/// Both endpoints returned by each platform allocator must be close-on-exec.
+#[test]
+fn allocated_endpoints_are_close_on_exec() {
+    let pty = open_pty().expect("open PTY");
+    for fd in [&pty.controller, &pty.user] {
+        let flags = rustix::io::fcntl_getfd(fd).expect("inspect descriptor flags");
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
+    }
+}
+
+/// Every parent-retained endpoint must be close-on-exec, including the guard
+/// clones, so unrelated child processes cannot keep output PTYs alive.
+#[test]
+fn all_parent_retained_endpoints_are_close_on_exec() {
+    let mut command = Command::new("sh");
+    let ptys = PtyStdio::attach(&mut command).expect("attach PTYs");
+    for fd in [
+        &ptys.stdout_controller,
+        &ptys.stderr_controller,
+        &ptys.output_users[0],
+        &ptys.output_users[1],
+    ] {
+        let flags = rustix::io::fcntl_getfd(fd).expect("inspect descriptor flags");
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
+    }
+}
+
+/// Output PTYs keep the fixed geometry and byte-preserving output mode relied
+/// on by shell capture semantics.
+#[test]
+fn allocated_pty_has_expected_terminal_configuration() {
+    let pty = open_pty().expect("open PTY");
+    let winsize = rustix::termios::tcgetwinsize(&pty.user).expect("read window size");
+    let attributes = rustix::termios::tcgetattr(&pty.user).expect("read attributes");
+
+    assert_eq!(winsize.ws_row, 24);
+    assert_eq!(winsize.ws_col, 80);
+    assert!(!attributes.output_modes.contains(OutputModes::OPOST));
+}
 
 /// Ensures releasing output user guards after foreground exit exposes
 /// immediate controller hangup instead of forcing a timed final drain.

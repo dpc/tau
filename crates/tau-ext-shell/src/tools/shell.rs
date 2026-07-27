@@ -1067,7 +1067,7 @@ fn dispatch_user_shell_command_unix(
 
     let mut stdout_pipe = process.stdout.take();
     let mut stderr_pipe = process.stderr.take();
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     let mut output_users = process.output_users.take();
     if let Some(pipe) = stdout_pipe.as_ref() {
         set_user_shell_nonblocking(pipe.as_raw_fd());
@@ -1242,7 +1242,7 @@ fn dispatch_user_shell_command_unix(
         }
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     drop(output_users.take());
     let drain_deadline = std::time::Instant::now() + USER_SHELL_DRAIN_AFTER_DONE;
     loop {
@@ -1720,8 +1720,8 @@ struct ShellWaitState {
     stdout_pipe: Option<ShellStdout>,
     /// Nonblocking stderr endpoint owned by the foreground wait loop.
     stderr_pipe: Option<ShellStderr>,
-    /// Linux/Android PTY user guards retained across child pre-exec.
-    #[cfg(any(target_os = "android", target_os = "linux"))]
+    /// PTY user guards retained across child pre-exec on supported targets.
+    #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     output_users: Option<[std::fs::File; 2]>,
     /// Wake fd signalled when the child exits or cancellation arrives.
     wake_read: Option<std::os::fd::OwnedFd>,
@@ -1779,7 +1779,7 @@ impl ShellWaitState {
             pid,
             stdout_pipe,
             stderr_pipe,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
+            #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
             output_users: process.output_users,
             wake_read,
             event_rx,
@@ -1814,7 +1814,7 @@ impl ShellWaitState {
             }
         }
 
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
         drop(self.output_users.take());
         self.drain_after_terminal(&mut output, &mut status);
         output.finish();

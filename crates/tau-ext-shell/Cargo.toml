@@ -45,5 +45,8 @@ tracing.workspace = true
 [target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
 rustix-openpty.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix-v1 = { workspace = true, features = ["alloc", "fs", "pty", "termios"] }
+
 [dev-dependencies]
 tau-core.workspace = true

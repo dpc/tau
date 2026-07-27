@@ -38,7 +38,7 @@ compatibility test.
 
 ## Processes, locking, and scheduling
 
-Process tests cover Linux/Android TTY-backed output descriptors, persistent
+Process tests cover Linux/Android/macOS TTY-backed output descriptors, persistent
 stdin EOF/readiness, separated stdout/stderr capture, foreground exit, timeout,
 cancellation, signals, bounded output, truncation, and descendants retaining PTY
 user endpoints. Unix-only helpers are gated and may skip when unavailable.

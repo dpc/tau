@@ -6150,7 +6150,7 @@ fn shell_tool_use_state_mode_can_show_inferred_access_mode() {
 
 /// Ensures PTY-supported shell commands see TTY-backed output descriptors while
 /// stdin stays closed and the result still distinguishes stdout from stderr.
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 #[test]
 fn shell_tool_runs_with_tty_outputs_closed_stdin_and_separate_streams() {
     let args = CborValue::Map(vec![(
@@ -6371,7 +6371,7 @@ fn protected_pager_reports_command_not_found_when_cat_is_absent() {
 
 /// Ensures closed stdin presents persistent poll-visible readiness rather than
 /// leaving event-driven consumers waiting for input forever.
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 #[test]
 fn shell_tool_closed_stdin_provides_poll_visible_readiness() {
     let helper = std::env::current_exe()
@@ -6414,7 +6414,7 @@ fn shell_tool_closed_stdin_provides_poll_visible_readiness() {
 
 /// Repository-owned subprocess helper that asserts closed stdin is immediately
 /// poll-ready without depending on an external interpreter.
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 #[test]
 #[ignore = "invoked explicitly by shell_tool_closed_stdin_provides_poll_visible_readiness"]
 fn shell_tool_poll_stdin_helper() {

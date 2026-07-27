@@ -193,6 +193,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 rhai = { version = "1", default-features = false, features = ["serde", "std"] }
 rrule = { version = "0.14", default-features = false }
 rustix-openpty = { version = "0.2", default-features = false }
+rustix-v1 = { package = "rustix", version = "1", default-features = false }
 rustls = { version = "0.23", default-features = false, features = [
   "ring",
   "std",

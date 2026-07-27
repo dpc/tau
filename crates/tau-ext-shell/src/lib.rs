@@ -32,7 +32,7 @@ mod diff;
 mod dir_lock;
 mod display;
 mod isolation;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
 mod pty_stdio;
 mod runtime;
 mod scheduler;

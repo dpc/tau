@@ -12,12 +12,15 @@ the process-group identity, handles cancellation and deadlines, initiates group
 termination, drains bounded output, and reports the result. Non-Unix
 coordinators retain and reap the child directly.
 
-On Linux and Android, commands attach stdout and stderr to independent PTYs.
+On Linux, Android, and macOS, commands attach stdout and stderr to independent PTYs.
 This retains stream identity while making both output descriptors TTY-like;
 stdin remains closed and persistently ready at EOF. PTY readers are nonblocking
 and shell completion does not depend on stdout/stderr EOF because escaped
-descendants can keep user endpoints open after the foreground shell exits. On
-other Unix targets, stdout and stderr retain pipe capture. On all Unix targets,
+descendants can keep user endpoints open after the foreground shell exits.
+Other Unix targets, including unvalidated BSD targets, retain pipe capture. The
+supported allocators create Tau's PTY endpoints atomically close-on-exec; this
+guarantee does not cover independent descriptors allocated inside the
+platform's process-spawn implementation. On all Unix targets,
 commands run in a separate session/process group and cancellation or timeout
 kills that process group. On
 non-Unix/Windows, cancellation and timeout use direct-child termination and a
