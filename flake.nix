@@ -232,68 +232,44 @@
               # its target directory would recompress about 3 GiB after every run.
               doInstallCargoArtifacts = false;
               nativeBuildInputs = [ pkgs.ripgrep ];
-            };
-
-            # Public provider cassettes are a wire-compatibility gate, separate
-            # from scheduler correctness. Nix's build sandbox denies Internet
-            # access while the exact filter and no-tests policy prevent skips.
-            vcrTests = craneLib.mkCargoDerivation {
-              pname = "${projectName}-curated-provider-vcr";
-              cargoArtifacts = workspace;
-              buildPhaseCargoCommand = ''
+              postCheck = ''
+                # Public provider cassettes are a wire-compatibility gate.
                 export TAU_VCR=replay-only
                 export TAU_VCR_DIR="$PWD/crates/tau-provider-codex/fixtures/provider-vcr"
                 export TAU_CURATED_VCR_LANE=1
                 cargo nextest run --locked \
-                  -p tau-provider-codex \
-                  --cargo-profile $CARGO_PROFILE \
-                  --no-tests=fail \
-                  ${nextestReporterArgs} \
-                  -E 'test(/curated_provider_vcr_replay_only_lane/)'
-                mkdir -p "$out"
-              '';
-              doInstallCargoArtifacts = false;
-              nativeBuildInputs = [ pkgs.cargo-nextest ];
-              doCheck = false;
-            };
+                   --workspace \
+                   --cargo-profile $CARGO_PROFILE \
+                   --no-tests=fail \
+                   ${nextestReporterArgs} \
+                   -E 'package(tau-provider-codex) & test(/curated_provider_vcr_replay_only_lane/)'
+                unset TAU_VCR TAU_VCR_DIR TAU_CURATED_VCR_LANE
 
-            # Always-on fake-provider acceptance. Nix's build sandbox denies
-            # Internet access; the exact filter and no-tests policy prevent skips.
-            deterministicE2eTests = craneLib.mkCargoDerivation {
-              pname = "${projectName}-deterministic-e2e";
-              cargoArtifacts = workspace;
-              buildPhaseCargoCommand = ''
                 # Poison every ambient startup transport. The fixture must ignore
                 # them (including runtime settings reloads and secret discovery)
                 # and still prove its exact extension allowlist.
                 export TAU_ENABLE_EXTENSIONS=core-shell
                 export TAU_EXTENSION_CLI_OVERRIDES='["EnableAll"]'
                 export TAU_ROLE_CLI_OVERRIDES='["DisableAll"]'
-                export TAU_HARNESS_CONFIG_OVERRIDES='[{"key":"agents.default_role","raw_value":"missing"}]'
-                export TAU_STARTUP_ROLE=missing
-                  env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
-                    -p tau-e2e-tests \
-                    --test deterministic_provider \
-                    --test cancellation_liveness \
-                    --cargo-profile $CARGO_PROFILE \
-                    --no-tests=fail \
-                    ${nextestReporterArgs}
+                  export TAU_HARNESS_CONFIG_OVERRIDES='[{"key":"agents.default_role","raw_value":"missing"}]'
+                  export TAU_STARTUP_ROLE=missing
+                   env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
+                     --workspace \
+                     --cargo-profile $CARGO_PROFILE \
+                     --no-tests=fail \
+                     ${nextestReporterArgs} \
+                     -E 'package(tau-e2e-tests) & (binary(deterministic_provider) | binary(cancellation_liveness))'
                  # The PTY gate must spawn the exact universal binary from this
                  # Cargo profile rather than discovering a user PATH entry.
                  export TAU_E2E_TAU_BIN="$PWD/target/$CARGO_PROFILE/tau"
-                 test -x "$TAU_E2E_TAU_BIN"
-                 env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
-                   -p tau-e2e-tests \
-                   --test core_resume \
-                   --test core_shell_resume \
-                   --cargo-profile $CARGO_PROFILE \
-                   --no-tests=fail \
-                   ${nextestReporterArgs}
-                 mkdir -p "$out"
+                  test -x "$TAU_E2E_TAU_BIN"
+                  env 'TAU_SECRET_BAD@=poison' cargo nextest run --locked \
+                    --workspace \
+                    --cargo-profile $CARGO_PROFILE \
+                    --no-tests=fail \
+                    ${nextestReporterArgs} \
+                    -E 'package(tau-e2e-tests) & (binary(core_resume) | binary(core_shell_resume))'
               '';
-              doInstallCargoArtifacts = false;
-              nativeBuildInputs = [ pkgs.cargo-nextest ];
-              doCheck = false;
             };
 
             clippy = craneLib.cargoClippy {
@@ -518,8 +494,6 @@
             workspace
             clippy
             tests
-            deterministicE2eTests
-            vcrTests
             workspaceCcov
             testsCcov
             crapBaseline

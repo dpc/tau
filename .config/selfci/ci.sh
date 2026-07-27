@@ -20,9 +20,7 @@ function job_cargo() {
   if ! nix build -L --no-link \
     .#ci.workspace \
     .#ci.clippy \
-    .#ci.tests \
-    .#ci.vcrTests \
-    .#ci.deterministicE2eTests
+    .#ci.tests
   then
     selfci step fail
   fi
