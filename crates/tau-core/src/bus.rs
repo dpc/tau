@@ -1,6 +1,9 @@
 //! [`EventBus`]: routes protocol events between connections and tracks
 //! per-connection subscription state.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::HashMap;
 
 use tau_proto::{ClientKind, ConnectionId, EventSelector, HarnessOutputMessage};
@@ -143,11 +146,10 @@ impl EventBus {
 
     /// Registers a connection and returns its assigned connection ID.
     pub fn connect(&mut self, connection: Connection) -> ConnectionId {
-        let connection_id = if connection.metadata.id.is_empty() {
-            self.allocate_connection_id()
-        } else {
-            connection.metadata.id.clone()
-        };
+        let connection_id = connection
+            .metadata
+            .id
+            .unwrap_or_else(|| self.allocate_connection_id());
 
         let metadata = ConnectionMetadata {
             id: connection_id.clone(),
@@ -168,7 +170,7 @@ impl EventBus {
     }
 
     /// Removes a connection from the bus and returns its metadata if present.
-    pub fn disconnect(&mut self, connection_id: &str) -> Option<ConnectionMetadata> {
+    pub fn disconnect(&mut self, connection_id: &ConnectionId) -> Option<ConnectionMetadata> {
         self.connections
             .remove(connection_id)
             .map(|entry| entry.metadata)
@@ -176,7 +178,7 @@ impl EventBus {
 
     /// Returns immutable metadata for one connection.
     #[must_use]
-    pub fn connection(&self, connection_id: &str) -> Option<&ConnectionMetadata> {
+    pub fn connection(&self, connection_id: &ConnectionId) -> Option<&ConnectionMetadata> {
         self.connections
             .get(connection_id)
             .map(|entry| &entry.metadata)
@@ -204,7 +206,7 @@ impl EventBus {
     /// pending live frames.
     pub fn set_subscriptions(
         &mut self,
-        connection_id: &str,
+        connection_id: &ConnectionId,
         historical_selectors: Vec<EventSelector>,
         live_selectors: Vec<EventSelector>,
     ) -> Result<(), RouteError> {
@@ -213,7 +215,7 @@ impl EventBus {
             .get(connection_id)
             .map(|entry| entry.metadata.clone())
             .ok_or_else(|| RouteError::UnknownConnection {
-                connection_id: connection_id.into(),
+                connection_id: connection_id.clone(),
             })?;
         let mut selectors = historical_selectors.clone();
         for selector in &live_selectors {
@@ -223,13 +225,13 @@ impl EventBus {
         }
         validate_socket_subscription(&metadata, &selectors).map_err(|reason| {
             RouteError::SubscriptionDenied {
-                connection_id: connection_id.into(),
+                connection_id: connection_id.clone(),
                 reason: reason.to_owned(),
             }
         })?;
         let entry = self.connections.get_mut(connection_id).ok_or_else(|| {
             RouteError::UnknownConnection {
-                connection_id: connection_id.into(),
+                connection_id: connection_id.clone(),
             }
         })?;
         let should_release_catch_up =
@@ -244,10 +246,10 @@ impl EventBus {
     }
 
     /// Pauses live delivery for one connection while catch-up replay runs.
-    pub fn begin_catch_up(&mut self, connection_id: &str) -> Result<(), RouteError> {
+    pub fn begin_catch_up(&mut self, connection_id: &ConnectionId) -> Result<(), RouteError> {
         let entry = self.connections.get_mut(connection_id).ok_or_else(|| {
             RouteError::UnknownConnection {
-                connection_id: connection_id.into(),
+                connection_id: connection_id.clone(),
             }
         })?;
         entry.subscriptions.catch_up_blocked = true;
@@ -256,7 +258,10 @@ impl EventBus {
 
     /// Returns the active historical selectors for one connection.
     #[must_use]
-    pub fn historical_subscriptions(&self, connection_id: &str) -> Option<&[EventSelector]> {
+    pub fn historical_subscriptions(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Option<&[EventSelector]> {
         self.connections
             .get(connection_id)
             .map(|entry| entry.subscriptions.historical_selectors())
@@ -264,30 +269,33 @@ impl EventBus {
 
     /// Returns the active live selectors for one connection.
     #[must_use]
-    pub fn live_subscriptions(&self, connection_id: &str) -> Option<&[EventSelector]> {
+    pub fn live_subscriptions(&self, connection_id: &ConnectionId) -> Option<&[EventSelector]> {
         self.connections
             .get(connection_id)
             .map(|entry| entry.subscriptions.live_selectors())
     }
 
     /// Releases live delivery for one connection and flushes queued frames.
-    pub fn finish_catch_up(&mut self, connection_id: &str) -> Result<RouteReport, RouteError> {
+    pub fn finish_catch_up(
+        &mut self,
+        connection_id: &ConnectionId,
+    ) -> Result<RouteReport, RouteError> {
         let entry = self.connections.get_mut(connection_id).ok_or_else(|| {
             RouteError::UnknownConnection {
-                connection_id: connection_id.into(),
+                connection_id: connection_id.clone(),
             }
         })?;
         let pending = entry.subscriptions.finish_catch_up();
         let mut report = RouteReport::default();
         for routed in pending {
             if !entry.visibility_filter.allows(&routed) {
-                report.blocked_by_filter.push(connection_id.into());
+                report.blocked_by_filter.push(connection_id.clone());
                 continue;
             }
             match entry.sink.send(routed) {
-                Ok(()) => report.delivered_to.push(connection_id.into()),
+                Ok(()) => report.delivered_to.push(connection_id.clone()),
                 Err(error) => report.failed_deliveries.push(DeliveryFailure {
-                    connection_id: connection_id.into(),
+                    connection_id: connection_id.clone(),
                     error,
                 }),
             }
@@ -303,7 +311,7 @@ impl EventBus {
     /// Broadcasts one harness output message from a specific source connection.
     pub fn publish_from(
         &mut self,
-        source_id: Option<&str>,
+        source_id: Option<&ConnectionId>,
         message: HarnessOutputMessage,
     ) -> RouteReport {
         self.publish_from_excluding_kinds(source_id, message, &[])
@@ -314,11 +322,11 @@ impl EventBus {
     /// `excluded_kinds`.
     pub fn publish_from_excluding_kinds(
         &mut self,
-        source_id: Option<&str>,
+        source_id: Option<&ConnectionId>,
         message: HarnessOutputMessage,
         excluded_kinds: &[ClientKind],
     ) -> RouteReport {
-        let routed = RoutedFrame::new(source_id.map(ConnectionId::from), message);
+        let routed = RoutedFrame::new(source_id.cloned(), message);
         let mut report = RouteReport::default();
 
         for (connection_id, entry) in &mut self.connections {
@@ -355,28 +363,28 @@ impl EventBus {
     /// Sends one directed harness output message to a specific connection.
     pub fn send_to(
         &mut self,
-        target_id: &str,
-        source_id: Option<&str>,
+        target_id: &ConnectionId,
+        source_id: Option<&ConnectionId>,
         message: HarnessOutputMessage,
     ) -> Result<RouteReport, RouteError> {
-        let routed = RoutedFrame::new(source_id.map(ConnectionId::from), message);
+        let routed = RoutedFrame::new(source_id.cloned(), message);
         let entry =
             self.connections
                 .get_mut(target_id)
                 .ok_or_else(|| RouteError::UnknownConnection {
-                    connection_id: target_id.into(),
+                    connection_id: target_id.clone(),
                 })?;
 
         let mut report = RouteReport::default();
         if !entry.visibility_filter.allows(&routed) {
-            report.blocked_by_filter.push(target_id.into());
+            report.blocked_by_filter.push(target_id.clone());
             return Ok(report);
         }
 
         match entry.sink.send(routed) {
-            Ok(()) => report.delivered_to.push(target_id.into()),
+            Ok(()) => report.delivered_to.push(target_id.clone()),
             Err(error) => report.failed_deliveries.push(DeliveryFailure {
-                connection_id: target_id.into(),
+                connection_id: target_id.clone(),
                 error,
             }),
         }
@@ -386,6 +394,7 @@ impl EventBus {
 
     fn allocate_connection_id(&mut self) -> ConnectionId {
         self.next_connection_id += 1;
-        format!("conn-{}", self.next_connection_id).into()
+        ConnectionId::parse(format!("conn-{}", self.next_connection_id))
+            .expect("generated connection id must satisfy the connection identifier grammar")
     }
 }

@@ -44,13 +44,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("resumed") => tau_harness::SessionLaunchStatus::Resumed,
         _ => return Err("status must be new or resumed".into()),
     };
-    let mut allowed_extensions = BTreeSet::from(["e2e-fake-provider".into()]);
+    let mut allowed_extensions =
+        BTreeSet::from([tau_proto::ExtensionName::parse("e2e-fake-provider")?]);
     if test_dummy {
-        allowed_extensions.insert("e2e-test-dummy".into());
+        allowed_extensions.insert(tau_proto::ExtensionName::parse("e2e-test-dummy")?);
     }
     if let Some(cwd) = core_shell_cwd {
         std::env::set_current_dir(cwd)?;
-        allowed_extensions.insert("core-shell".into());
+        allowed_extensions.insert(tau_proto::ExtensionName::parse("core-shell")?);
     }
     tau_harness::run_daemon_with_internal_tools(
         PathBuf::from(socket),

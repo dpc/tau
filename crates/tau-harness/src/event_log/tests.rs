@@ -22,14 +22,19 @@ fn append_assigns_sequence_and_timestamp_without_retaining_payloads_in_productio
 fn test_observer_records_committed_events() {
     let log = EventLog::new();
     let (seq, recorded_at) = log.append();
-    log.record_for_test(seq, recorded_at, Some("conn-1".into()), info("hello"));
+    log.record_for_test(
+        seq,
+        recorded_at,
+        Some(crate::test_connection_id("conn-1")),
+        info("hello"),
+    );
 
     let entry = log
         .get_next_from(crate::event_log::EventLogSeq::new(0))
         .expect("entry should exist");
     assert_eq!(entry.seq.get(), 0);
     assert_eq!(entry.recorded_at, recorded_at);
-    assert_eq!(entry.source, Some("conn-1".into()));
+    assert_eq!(entry.source, Some(crate::test_connection_id("conn-1")));
 }
 
 #[test]

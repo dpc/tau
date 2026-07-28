@@ -99,7 +99,8 @@ fn prompt_terminated(id: &str) -> Event {
 
 fn message_sent(id: usize, payload: &str) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: format!("message-{id}").into(),
+        message_id: tau_proto::AgentMessageId::parse(format!("message-{id}"))
+            .expect("test message id must satisfy its identifier grammar"),
         sender_id: AgentId::parse("agent-test").expect("agent id"),
         recipient: tau_proto::AgentMessageRecipient::Agent {
             agent_id: AgentId::parse("agent-peer").expect("agent id"),
@@ -196,8 +197,8 @@ fn repeated_message_key_is_one_operation() {
 #[test]
 fn chain_domains_generate_distinct_span_ids() {
     let keys = [
-        OperationKey::OuterTurn("shared".to_owned().into()),
-        OperationKey::Message("shared".into()),
+        OperationKey::OuterTurn(test_agent_outer_turn_id("ot-shared")),
+        OperationKey::Message(test_agent_message_id("shared")),
         OperationKey::Compaction(
             tau_proto::CompactionTransactionId::parse("shared").expect("transaction id"),
         ),
@@ -258,4 +259,16 @@ fn many_unique_large_operation_ids_remain_distinct() {
     }
 
     assert_eq!(operations.len(), 128);
+}
+
+/// Builds a validated agent message id used by this test module.
+fn test_agent_message_id(value: impl AsRef<str>) -> tau_proto::AgentMessageId {
+    tau_proto::AgentMessageId::parse(value.as_ref())
+        .expect("test identifier must satisfy its grammar")
+}
+
+/// Builds a validated agent outer turn id used by this test module.
+fn test_agent_outer_turn_id(value: impl AsRef<str>) -> tau_proto::AgentOuterTurnId {
+    tau_proto::AgentOuterTurnId::parse(value.as_ref())
+        .expect("test identifier must satisfy its grammar")
 }

@@ -7,7 +7,7 @@ use std::error::Error;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ClientKind, ConnectionId, HarnessOutputMessage};
+use tau_proto::{ClientKind, ConnectionId, ExtensionName, HarnessOutputMessage};
 
 /// The origin class of one live connection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -21,16 +21,35 @@ pub enum ConnectionOrigin {
 /// Immutable metadata describing one live connection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ConnectionMetadata {
+    /// Allocated route identity for this live connection.
     pub id: ConnectionId,
-    pub name: String,
+    /// Canonical protocol client name.
+    pub name: ExtensionName,
+    /// Protocol client kind.
     pub kind: ClientKind,
+    /// Transport origin.
+    pub origin: ConnectionOrigin,
+}
+
+/// Metadata supplied before a connection receives its live route identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PendingConnectionMetadata {
+    /// Requested identity, or `None` when the bus must allocate one.
+    pub id: Option<ConnectionId>,
+    /// Canonical protocol client name.
+    pub name: ExtensionName,
+    /// Protocol client kind.
+    pub kind: ClientKind,
+    /// Transport origin.
     pub origin: ConnectionOrigin,
 }
 
 /// One harness output message routed through the internal bus.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoutedFrame {
+    /// Publishing live connection, or `None` for an internal source.
     pub source_id: Option<ConnectionId>,
+    /// Output frame to route.
     pub frame: HarnessOutputMessage,
 }
 
@@ -73,7 +92,7 @@ impl VisibilityFilter for AllowAll {
 
 /// A transport-agnostic connection registered with the bus.
 pub struct Connection {
-    pub(crate) metadata: ConnectionMetadata,
+    pub(crate) metadata: PendingConnectionMetadata,
     pub(crate) sink: Box<dyn ConnectionSink>,
     pub(crate) visibility_filter: Box<dyn VisibilityFilter>,
 }
@@ -81,7 +100,7 @@ pub struct Connection {
 impl Connection {
     /// Creates a connection with an allow-all visibility filter.
     #[must_use]
-    pub fn new(metadata: ConnectionMetadata, sink: Box<dyn ConnectionSink>) -> Self {
+    pub fn new(metadata: PendingConnectionMetadata, sink: Box<dyn ConnectionSink>) -> Self {
         Self {
             metadata,
             sink,
@@ -98,7 +117,7 @@ impl Connection {
 
     /// Returns immutable metadata for the connection.
     #[must_use]
-    pub fn metadata(&self) -> &ConnectionMetadata {
+    pub fn metadata(&self) -> &PendingConnectionMetadata {
         &self.metadata
     }
 }

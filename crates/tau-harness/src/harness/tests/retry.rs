@@ -64,7 +64,7 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
             prompt_id
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
-            provider_id.into(),
+            crate::test_connection_id(provider_id),
         );
     }
 }
@@ -105,8 +105,11 @@ fn retry_routes_exact_prompt_and_trusts_only_correlated_provider_result() {
     add_routed_prompt(&mut h, "agent-a", "prompt-a", Some("provider-a"));
     add_routed_prompt(&mut h, "agent-b", "prompt-b", Some("provider-b"));
 
-    h.handle_client_event_inner("requester", retry_request("retry-1", "s1", Some("agent-b")))
-        .expect("retry request");
+    h.handle_client_event_inner(
+        &crate::test_connection_id("requester"),
+        retry_request("retry-1", &crate::test_connection_id("s1"), Some("agent-b")),
+    )
+    .expect("retry request");
     let provider_token = provider_request_id(&h, "retry-1");
 
     assert_eq!(
@@ -229,7 +232,7 @@ fn retry_rejects_invalid_targets_and_duplicate_request_ids() {
         retry_request("missing", "s1", Some("unknown-agent")),
         retry_request("stale", "s1", Some("no-route")),
     ] {
-        h.handle_client_event_inner("requester", request)
+        h.handle_client_event_inner(&crate::test_connection_id("requester"), request)
             .expect("rejection");
     }
 
@@ -264,11 +267,11 @@ fn retry_pending_requests_resolve_on_disconnect_and_session_rollover() {
     add_routed_prompt(&mut h, "agent", "prompt", Some("provider"));
 
     h.handle_client_event_inner(
-        "requester",
+        &crate::test_connection_id("requester"),
         retry_request("disconnect", "s1", Some("agent")),
     )
     .expect("disconnect request");
-    h.handle_disconnect("provider");
+    h.handle_disconnect(&crate::test_connection_id("provider"));
     assert_eq!(
         matching_events(&requester, |event| matches!(
             event,
@@ -288,10 +291,13 @@ fn retry_pending_requests_resolve_on_disconnect_and_session_rollover() {
         "prompt"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
-        "provider".into(),
+        crate::test_connection_id("provider"),
     );
-    h.handle_client_event_inner("requester", retry_request("rollover", "s1", Some("agent")))
-        .expect("rollover request");
+    h.handle_client_event_inner(
+        &crate::test_connection_id("requester"),
+        retry_request("rollover", &crate::test_connection_id("s1"), Some("agent")),
+    )
+    .expect("rollover request");
     let rollover_token = provider_request_id(&h, "rollover");
     h.switch_session(
         "s2".parse::<tau_proto::SessionId>()
@@ -335,7 +341,7 @@ fn retry_request_tombstones_are_bounded() {
 
     for index in 0..1_100 {
         h.handle_client_event_inner(
-            "requester",
+            &crate::test_connection_id("requester"),
             retry_request(&format!("request-{index}"), "s1", None),
         )
         .expect("bounded rejection");
@@ -361,8 +367,11 @@ fn retry_same_ui_id_isolated_across_requesters() {
     add_routed_prompt(&mut h, "agent", "prompt", Some("provider"));
 
     for requester in ["first", "second"] {
-        h.handle_client_event_inner(requester, retry_request("same", "s1", Some("agent")))
-            .expect("retry request");
+        h.handle_client_event_inner(
+            &crate::test_connection_id(requester),
+            retry_request("same", &crate::test_connection_id("s1"), Some("agent")),
+        )
+        .expect("retry request");
     }
     let tokens = h.pending_retry_prompts.keys().cloned().collect::<Vec<_>>();
     assert_eq!(tokens.len(), 2);
@@ -419,7 +428,7 @@ fn retry_pending_nonresponsive_provider_is_bounded() {
             Some("provider"),
         );
         h.handle_client_event_inner(
-            "requester",
+            &crate::test_connection_id("requester"),
             retry_request(
                 &format!("request-{index}"),
                 "s1",
@@ -456,19 +465,25 @@ fn retry_tombstone_eviction_does_not_reuse_provider_token() {
     );
     let requester = connect_test_client(&mut h, "requester", tau_proto::ClientKind::Ui);
     add_routed_prompt(&mut h, "agent", "prompt", Some("provider"));
-    h.handle_client_event_inner("requester", retry_request("reuse", "s1", Some("agent")))
-        .expect("old request");
+    h.handle_client_event_inner(
+        &crate::test_connection_id("requester"),
+        retry_request("reuse", &crate::test_connection_id("s1"), Some("agent")),
+    )
+    .expect("old request");
     let old = provider_request_id(&h, "reuse");
     h.pending_retry_prompts.remove(&old);
     for index in 0..1_024 {
         h.handle_client_event_inner(
-            "requester",
+            &crate::test_connection_id("requester"),
             retry_request(&format!("evict-{index}"), "s1", None),
         )
         .expect("eviction request");
     }
-    h.handle_client_event_inner("requester", retry_request("reuse", "s1", Some("agent")))
-        .expect("reused UI id");
+    h.handle_client_event_inner(
+        &crate::test_connection_id("requester"),
+        retry_request("reuse", &crate::test_connection_id("s1"), Some("agent")),
+    )
+    .expect("reused UI id");
     let new = provider_request_id(&h, "reuse");
     assert_ne!(old, new);
     h.handle_extension_event(

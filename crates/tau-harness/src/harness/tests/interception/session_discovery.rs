@@ -70,13 +70,13 @@ fn complete_source_snapshot_atomically_adds_updates_deletes_renames_and_clears()
     let two = tmp.path().join("two.md");
 
     h.apply_session_discovery_snapshot(
-        "source",
+        &crate::test_connection_id("source"),
         snapshot(vec![skill(&one, "one", Some(1))], vec![]),
     );
     assert!(h.discovered_skills.contains_key("one"));
 
     h.apply_session_discovery_snapshot(
-        "source",
+        &crate::test_connection_id("source"),
         snapshot(vec![skill(&two, "two", Some(2))], vec![]),
     );
     assert!(!h.discovered_skills.contains_key("one"));
@@ -88,7 +88,10 @@ fn complete_source_snapshot_atomically_adds_updates_deletes_renames_and_clears()
         Some("[args]")
     );
 
-    h.apply_session_discovery_snapshot("source", snapshot(vec![], vec![]));
+    h.apply_session_discovery_snapshot(
+        &crate::test_connection_id("source"),
+        snapshot(vec![], vec![]),
+    );
     assert!(!h.discovered_skills.contains_key("two"));
 }
 
@@ -102,11 +105,11 @@ fn collision_update_and_source_clear_fall_back_with_stable_equal_mtime_order() {
     let second = tmp.path().join("second.md");
 
     h.apply_session_discovery_snapshot(
-        "first",
+        &crate::test_connection_id("first"),
         snapshot(vec![skill(&first, "same", Some(7))], vec![]),
     );
     h.apply_session_discovery_snapshot(
-        "second",
+        &crate::test_connection_id("second"),
         snapshot(vec![skill(&second, "same", Some(7))], vec![]),
     );
     assert_eq!(
@@ -116,7 +119,10 @@ fn collision_update_and_source_clear_fall_back_with_stable_equal_mtime_order() {
         Some(first.as_path())
     );
 
-    h.apply_session_discovery_snapshot("first", snapshot(vec![], vec![]));
+    h.apply_session_discovery_snapshot(
+        &crate::test_connection_id("first"),
+        snapshot(vec![], vec![]),
+    );
     assert_eq!(
         h.discovered_skills[&tau_proto::SkillName::new("same")]
             .source
@@ -138,7 +144,7 @@ fn invalid_and_duplicate_items_are_omitted_without_rejecting_valid_replacement()
     let canonical_duplicate = tmp.path().join(".").join("AGENTS.md");
 
     h.apply_session_discovery_snapshot(
-        "source",
+        &crate::test_connection_id("source"),
         snapshot(
             vec![
                 skill(&valid, "valid", None),
@@ -178,7 +184,7 @@ fn agents_files_keep_declared_order_and_empty_snapshot_removes_them() {
     std::fs::write(&nested, "nested").expect("nested");
 
     h.apply_session_discovery_snapshot(
-        "source",
+        &crate::test_connection_id("source"),
         snapshot(
             vec![],
             vec![tau_proto::DiscoveryAgentsFile {
@@ -188,7 +194,7 @@ fn agents_files_keep_declared_order_and_empty_snapshot_removes_them() {
         ),
     );
     h.apply_session_discovery_snapshot(
-        "source",
+        &crate::test_connection_id("source"),
         snapshot(
             vec![],
             vec![
@@ -214,7 +220,10 @@ fn agents_files_keep_declared_order_and_empty_snapshot_removes_them() {
         ]
     );
 
-    h.apply_session_discovery_snapshot("source", snapshot(vec![], vec![]));
+    h.apply_session_discovery_snapshot(
+        &crate::test_connection_id("source"),
+        snapshot(vec![], vec![]),
+    );
     assert!(h.discovered_agents_files.is_empty());
 }
 
@@ -228,7 +237,7 @@ fn wrong_session_snapshot_is_effect_free() {
     wrong.session_id = "other"
         .parse::<tau_proto::SessionId>()
         .expect("known-safe SessionId must be valid");
-    h.apply_session_discovery_snapshot("source", wrong);
+    h.apply_session_discovery_snapshot(&crate::test_connection_id("source"), wrong);
     assert!(!h.discovered_skills.contains_key("wrong"));
 }
 
@@ -323,7 +332,7 @@ fn session_snapshot_commit_boundary_honors_replace_and_drop() {
     let original = tmp.path().join("original.md");
     let replacement = tmp.path().join("replacement.md");
     h.handle_extension_event_inner(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
             vec![skill(&original, "original", None)],
             vec![],
@@ -347,7 +356,7 @@ fn session_snapshot_commit_boundary_honors_replace_and_drop() {
     assert!(h.discovered_skills.contains_key("replacement"));
 
     h.handle_extension_event_inner(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(vec![], vec![])),
     )
     .expect("park clear");
@@ -383,7 +392,9 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
             skill_candidates: Default::default(),
             skills: Default::default(),
             agents_files: Vec::new(),
-            waiting_on: ["agent-snapshot-owner".into()].into_iter().collect(),
+            waiting_on: [crate::test_connection_id("agent-snapshot-owner")]
+                .into_iter()
+                .collect(),
         },
     );
     let path = tmp.path().join("agent.md");
@@ -401,7 +412,7 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
         )
     };
     h.handle_extension_event_inner(
-        "agent-snapshot-owner",
+        &crate::test_connection_id("agent-snapshot-owner"),
         event(
             tau_proto::AgentInitializationId::parse("stale-init")
                 .expect("test identifier must be valid"),
@@ -409,8 +420,11 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
     )
     .expect("stale");
     assert!(h.pending_agent_discovery[&agent_id].skills.is_empty());
-    h.handle_extension_event_inner("agent-snapshot-owner", event(initialization_id))
-        .expect("current");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("agent-snapshot-owner"),
+        event(initialization_id),
+    )
+    .expect("current");
     assert!(
         h.pending_agent_discovery[&agent_id]
             .skills
@@ -459,8 +473,11 @@ fn pre_ready_session_snapshot_waits_for_commit_before_activation() {
             .get("snapshot-owner"),
         Some(&1)
     );
-    h.handle_extension_message("snapshot-owner", TestMessage::Ready(Default::default()))
-        .expect("record ready");
+    h.handle_extension_message(
+        &crate::test_connection_id("snapshot-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("record ready");
 
     assert_eq!(
         h.extensions.entries["snapshot-owner"].state,
@@ -524,7 +541,9 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
             skill_candidates: Default::default(),
             skills: Default::default(),
             agents_files: Vec::new(),
-            waiting_on: ["snapshot-owner".into()].into_iter().collect(),
+            waiting_on: [crate::test_connection_id("snapshot-owner")]
+                .into_iter()
+                .collect(),
         },
     );
     let original = tmp.path().join("original.md");
@@ -544,7 +563,7 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
     };
 
     h.handle_extension_event_inner(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         event(vec![skill(&original, "original", None)]),
     )
     .expect("park original");
@@ -566,8 +585,11 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
             .contains_key("replacement")
     );
 
-    h.handle_extension_event_inner("snapshot-owner", event(Vec::new()))
-        .expect("park clear");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("snapshot-owner"),
+        event(Vec::new()),
+    )
+    .expect("park clear");
     h.handle_extension_event(
         "snapshot-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -600,7 +622,7 @@ fn disconnected_snapshot_generation_cannot_mutate_discovery() {
     );
     let stale = tmp.path().join("stale.md");
     h.handle_extension_event_inner(
-        "old-generation",
+        &crate::test_connection_id("old-generation"),
         Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
             vec![skill(&stale, "stale", None)],
             Vec::new(),
@@ -608,7 +630,7 @@ fn disconnected_snapshot_generation_cannot_mutate_discovery() {
     )
     .expect("park stale snapshot");
 
-    h.handle_disconnect("old-generation");
+    h.handle_disconnect(&crate::test_connection_id("old-generation"));
     connect_ready_configured_extension(
         &mut h,
         "new-generation",
@@ -639,7 +661,7 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
         tau_proto::ClientKind::Tool,
     );
     h.handle_extension_message(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: vec![EventSelector::Exact(
@@ -649,7 +671,7 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
     )
     .expect("subscribe to agent loads");
     h.handle_extension_event_inner(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
     )
     .expect("register context provider");
@@ -665,7 +687,7 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
         .clone();
     let path = tmp.path().join("unloaded.md");
     h.handle_extension_event_inner(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionAgentDiscoverySnapshotDeclared(
             tau_proto::ExtensionAgentDiscoverySnapshotDeclared {
                 session_id: "s1"
@@ -776,7 +798,7 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
         tau_proto::ClientKind::Tool,
     );
     h.handle_extension_message(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: vec![EventSelector::Exact(
@@ -793,8 +815,10 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
     )
     .expect("register context provider");
     assert!(
-        h.agent_context_providers
-            .contains(&tau_proto::ConnectionId::from("snapshot-owner"))
+        h.agent_context_providers.contains(
+            &tau_proto::ConnectionId::parse("snapshot-owner")
+                .expect("test connection id must satisfy the identifier grammar")
+        )
     );
     let first_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
@@ -835,7 +859,7 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
 
     for _ in 0..2 {
         h.handle_extension_event_inner(
-            "snapshot-owner",
+            &crate::test_connection_id("snapshot-owner"),
             event(
                 first.clone(),
                 first_init.clone(),
@@ -844,12 +868,18 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
         )
         .expect("publish duplicate first snapshot");
     }
-    h.handle_extension_event_inner("snapshot-owner", ready(first.clone(), first_init.clone()))
-        .expect("finalize first");
-    h.handle_extension_event_inner("snapshot-owner", ready(second.clone(), second_init.clone()))
-        .expect("finalize second before snapshot");
     h.handle_extension_event_inner(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
+        ready(first.clone(), first_init.clone()),
+    )
+    .expect("finalize first");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("snapshot-owner"),
+        ready(second.clone(), second_init.clone()),
+    )
+    .expect("finalize second before snapshot");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("snapshot-owner"),
         event(
             second.clone(),
             second_init,
@@ -896,7 +926,7 @@ fn configured_snapshot_omits_items_beyond_all_discovery_bounds() {
         .collect();
     let notices_before = h.replayable_harness_notices.len();
     h.handle_extension_event_inner(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(skills, Vec::new())),
     )
     .expect("publish item-bounded snapshot");
@@ -913,7 +943,7 @@ fn configured_snapshot_omits_items_beyond_all_discovery_bounds() {
     let mut oversized = skill(&oversized_path, "oversized-description", None);
     oversized.description = "x".repeat(super::super::super::MAX_DISCOVERY_SNAPSHOT_BYTES + 1);
     h.handle_extension_event_inner(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
             vec![
                 oversized,
@@ -929,7 +959,7 @@ fn configured_snapshot_omits_items_beyond_all_discovery_bounds() {
     let oversized_agents = tmp.path().join("AGENTS.local.md");
     let accepted_agents = tmp.path().join("AGENTS.md");
     h.handle_extension_event_inner(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
             Vec::new(),
             vec![
@@ -977,7 +1007,7 @@ fn byte_full_snapshot_still_stops_at_raw_item_limit() {
     let notices_before = h.replayable_harness_notices.len();
 
     h.handle_extension_event_inner(
-        "snapshot-owner",
+        &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(skills, Vec::new())),
     )
     .expect("publish byte-full snapshot");

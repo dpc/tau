@@ -292,7 +292,8 @@ pub(super) fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error
     };
     peer.send(&HarnessInputMessage::Hello(Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
-        client_name: "tau-e2e-daemon".into(),
+        client_name: tau_proto::ExtensionName::parse("tau-e2e-daemon")
+            .expect("test extension name must satisfy the identifier grammar"),
         client_kind: ClientKind::Ui,
         capabilities: Default::default(),
     }))?;

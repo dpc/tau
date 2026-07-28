@@ -32,7 +32,7 @@ use tau_proto::{
 
 use super::agent_runtime_state_for_turn;
 use crate::extension::ExtensionState;
-use crate::harness::{HARNESS_CONNECTION_ID, Harness, selector_matches_event};
+use crate::harness::{Harness, selector_matches_event};
 use crate::model::{
     baseline_params_for_selection, context_window_for_model, efforts_for_model, role_infos,
     thinking_summaries_for_model, verbosities_for_model,
@@ -88,7 +88,7 @@ impl Harness {
     /// init completes.
     pub(crate) fn complete_subscription(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         historical_selectors: Vec<EventSelector>,
         live_selectors: Vec<EventSelector>,
     ) -> Result<(), RouteError> {
@@ -108,7 +108,7 @@ impl Harness {
 
     fn replay_session_events(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         selectors: &[EventSelector],
     ) -> ReplayOutcome {
         let session_started = Event::SessionStarted(tau_proto::SessionStarted {
@@ -131,14 +131,15 @@ impl Harness {
     /// and only need the history.
     fn replay_session_history(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         selectors: &[EventSelector],
     ) -> ReplayOutcome {
         let mut outcome = ReplayOutcome::default();
-        let is_ui =
-            self.bus.connections().iter().any(|meta| {
-                meta.id.as_str() == client_id && meta.kind == tau_proto::ClientKind::Ui
-            });
+        let is_ui = self
+            .bus
+            .connections()
+            .iter()
+            .any(|meta| meta.id == *client_id && meta.kind == tau_proto::ClientKind::Ui);
         let (loaded_agents, session_events) = match self
             .store
             .session_events(self.current_session_id.as_str())
@@ -193,7 +194,11 @@ impl Harness {
                 continue;
             }
             let frame = HarnessOutputMessage::deliver_replay(entry.recorded_at, entry.event);
-            let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
+            let source = entry
+                .source
+                .as_ref()
+                .and_then(tau_core::PersistedEventSource::connection_id);
+            let _ = self.bus.send_to(client_id, source, frame);
         }
 
         match self
@@ -205,7 +210,11 @@ impl Harness {
                     if selector_matches_event(selectors, &entry.event) {
                         let frame =
                             HarnessOutputMessage::deliver_replay(entry.recorded_at, entry.event);
-                        let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
+                        let source = entry
+                            .source
+                            .as_ref()
+                            .and_then(tau_core::PersistedEventSource::connection_id);
+                        let _ = self.bus.send_to(client_id, source, frame);
                     }
                 }
             }
@@ -281,7 +290,11 @@ impl Harness {
                         continue;
                     }
                     let frame = HarnessOutputMessage::deliver_replay(entry.recorded_at, event);
-                    let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
+                    let source = entry
+                        .source
+                        .as_ref()
+                        .and_then(tau_core::PersistedEventSource::connection_id);
+                    let _ = self.bus.send_to(client_id, source, frame);
                 }
             }
         }
@@ -322,16 +335,20 @@ impl Harness {
     /// replaying those current-state notices again would duplicate the visible
     /// `harness.session_dir` and `extension.ready` status block.
     pub(crate) fn catch_up_subscribers_after_session_init(&mut self) {
-        let subscribers: Vec<(String, tau_proto::ClientKind, Vec<EventSelector>)> = self
+        let subscribers: Vec<(
+            tau_proto::ConnectionId,
+            tau_proto::ClientKind,
+            Vec<EventSelector>,
+        )> = self
             .bus
             .connections()
             .into_iter()
             .filter_map(|meta| {
-                let selectors = self.bus.historical_subscriptions(meta.id.as_str())?;
+                let selectors = self.bus.historical_subscriptions(&meta.id)?;
                 if selectors.is_empty() {
                     return None;
                 }
-                Some((meta.id.to_string(), meta.kind, selectors.to_vec()))
+                Some((meta.id, meta.kind, selectors.to_vec()))
             })
             .collect();
         for (client_id, kind, selectors) in subscribers {
@@ -347,7 +364,7 @@ impl Harness {
 
     fn emit_agent_replay_complete(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         agent_id: tau_proto::AgentId,
         error: Option<String>,
     ) {
@@ -364,7 +381,11 @@ impl Harness {
         );
     }
 
-    fn emit_session_replay_complete(&mut self, client_id: &str, error: Option<String>) {
+    fn emit_session_replay_complete(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        error: Option<String>,
+    ) {
         let _ = self.bus.send_to(
             client_id,
             None,
@@ -382,16 +403,20 @@ impl Harness {
         &mut self,
         agent_id: &tau_proto::AgentId,
     ) {
-        let subscribers: Vec<(String, tau_proto::ClientKind, Vec<EventSelector>)> = self
+        let subscribers: Vec<(
+            tau_proto::ConnectionId,
+            tau_proto::ClientKind,
+            Vec<EventSelector>,
+        )> = self
             .bus
             .connections()
             .into_iter()
             .filter_map(|meta| {
-                let selectors = self.bus.historical_subscriptions(meta.id.as_str())?;
+                let selectors = self.bus.historical_subscriptions(&meta.id)?;
                 if selectors.is_empty() {
                     return None;
                 }
-                Some((meta.id.to_string(), meta.kind, selectors.to_vec()))
+                Some((meta.id, meta.kind, selectors.to_vec()))
             })
             .collect();
         let snapshot = self
@@ -435,7 +460,11 @@ impl Harness {
                             }
                             let frame =
                                 HarnessOutputMessage::deliver_replay(entry.recorded_at, event);
-                            let _ = self.bus.send_to(&client_id, entry.source.as_deref(), frame);
+                            let source = entry
+                                .source
+                                .as_ref()
+                                .and_then(tau_core::PersistedEventSource::connection_id);
+                            let _ = self.bus.send_to(&client_id, source, frame);
                         }
                     }
                 }
@@ -460,7 +489,7 @@ impl Harness {
         }
     }
 
-    fn send_replay_error(&mut self, client_id: &str, message: &str) {
+    fn send_replay_error(&mut self, client_id: &tau_proto::ConnectionId, message: &str) {
         self.send_catch_up_event(
             client_id,
             None,
@@ -473,7 +502,12 @@ impl Harness {
         );
     }
 
-    fn send_catch_up_event(&mut self, client_id: &str, source: Option<&str>, event: Event) {
+    fn send_catch_up_event(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+    ) {
         let _ = self.bus.send_to(
             client_id,
             source,
@@ -481,7 +515,11 @@ impl Harness {
         );
     }
 
-    fn replay_active_queued_prompts(&mut self, client_id: &str, selectors: &[EventSelector]) {
+    fn replay_active_queued_prompts(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        selectors: &[EventSelector],
+    ) {
         let mut agent_by_conversation = std::collections::HashMap::new();
         for (agent_id, conversation_id) in &self.agent_routes {
             agent_by_conversation.insert(conversation_id.clone(), agent_id.clone());
@@ -529,7 +567,11 @@ impl Harness {
     /// Runtime-only historical events are intentionally not replayed here. The
     /// transcript catch-up path above comes from durable agent logs, while this
     /// method reconstructs current harness status snapshots.
-    pub(crate) fn replay_harness_notice(&mut self, client_id: &str, selectors: &[EventSelector]) {
+    pub(crate) fn replay_harness_notice(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        selectors: &[EventSelector],
+    ) {
         let session_dir_event = self.current_session_dir_event();
         if selector_matches_event(selectors, &session_dir_event) {
             self.send_catch_up_event(client_id, None, session_dir_event);
@@ -555,7 +597,11 @@ impl Harness {
         });
         for event in agent_state_events {
             if selector_matches_event(selectors, &event) {
-                self.send_catch_up_event(client_id, Some("harness"), event);
+                self.send_catch_up_event(
+                    client_id,
+                    Some(crate::harness::harness_connection_id()),
+                    event,
+                );
             }
         }
 
@@ -563,7 +609,11 @@ impl Harness {
         for info in replayable_harness_notices {
             let event = Event::HarnessNotice(info);
             if selector_matches_event(selectors, &event) {
-                self.send_catch_up_event(client_id, Some("harness"), event);
+                self.send_catch_up_event(
+                    client_id,
+                    Some(crate::harness::harness_connection_id()),
+                    event,
+                );
             }
         }
 
@@ -576,19 +626,19 @@ impl Harness {
                 ExtensionState::Spawning | ExtensionState::Handshaking => {
                     Event::ExtensionStarting(tau_proto::ExtensionStarting {
                         instance_id: entry.instance_id,
-                        extension_name: entry.name.clone().into(),
+                        extension_name: entry.name.clone(),
                         pid: entry.pid,
                     })
                 }
                 ExtensionState::Ready => Event::ExtensionReady(tau_proto::ExtensionReady {
                     instance_id: entry.instance_id,
-                    extension_name: entry.name.clone().into(),
+                    extension_name: entry.name.clone(),
                     pid: entry.pid,
                 }),
                 ExtensionState::Disconnected => {
                     Event::ExtensionExited(tau_proto::ExtensionExited {
                         instance_id: entry.instance_id,
-                        extension_name: entry.name.clone().into(),
+                        extension_name: entry.name.clone(),
                         pid: entry.pid,
                         exit_code: None,
                         signal: None,
@@ -598,7 +648,11 @@ impl Harness {
             .collect();
         for event in extension_events {
             if selector_matches_event(selectors, &event) {
-                self.send_catch_up_event(client_id, Some("harness"), event);
+                self.send_catch_up_event(
+                    client_id,
+                    Some(crate::harness::harness_connection_id()),
+                    event,
+                );
             }
         }
 
@@ -609,21 +663,29 @@ impl Harness {
             let Some(models) = self.provider_models_by_extension.get(&source_id).cloned() else {
                 continue;
             };
-            let Some(entry) = self.extensions.entries.get(source_id.as_str()) else {
+            let Some(entry) = self.extensions.entries.get(&source_id) else {
                 continue;
             };
             let provider_event = Event::ProviderModelsUpdated(tau_proto::ProviderModelsUpdated {
-                publisher_extension_id: tau_proto::ExtensionName::from(entry.name.clone()),
+                publisher_extension_id: entry.name.clone(),
                 models,
             });
             if selector_matches_event(selectors, &provider_event) {
-                self.send_catch_up_event(client_id, Some(HARNESS_CONNECTION_ID), provider_event);
+                self.send_catch_up_event(
+                    client_id,
+                    Some(crate::harness::harness_connection_id()),
+                    provider_event,
+                );
             }
         }
         let session_skills =
             Event::HarnessSessionSkillsAvailable(self.session_skills_available.clone());
         if selector_matches_event(selectors, &session_skills) {
-            self.send_catch_up_event(client_id, Some(HARNESS_CONNECTION_ID), session_skills);
+            self.send_catch_up_event(
+                client_id,
+                Some(crate::harness::harness_connection_id()),
+                session_skills,
+            );
         }
         let mut initialized = self
             .agent_context_initialized
@@ -634,7 +696,11 @@ impl Harness {
         for projection in initialized {
             let event = Event::HarnessAgentContextInitialized(projection);
             if selector_matches_event(selectors, &event) {
-                self.send_catch_up_event(client_id, Some(HARNESS_CONNECTION_ID), event);
+                self.send_catch_up_event(
+                    client_id,
+                    Some(crate::harness::harness_connection_id()),
+                    event,
+                );
             }
         }
         let mut quota_snapshots = self
@@ -647,7 +713,11 @@ impl Harness {
         for snapshot in quota_snapshots {
             let event = Event::HarnessProviderQuotaChanged(snapshot);
             if selector_matches_event(selectors, &event) {
-                self.send_catch_up_event(client_id, Some(HARNESS_CONNECTION_ID), event);
+                self.send_catch_up_event(
+                    client_id,
+                    Some(crate::harness::harness_connection_id()),
+                    event,
+                );
             }
         }
 
@@ -658,11 +728,7 @@ impl Harness {
                 schema: published.schema,
             });
             if selector_matches_event(selectors, &action_event) {
-                self.send_catch_up_event(
-                    client_id,
-                    Some(published.connection_id.as_str()),
-                    action_event,
-                );
+                self.send_catch_up_event(client_id, Some(&published.connection_id), action_event);
             }
         }
 

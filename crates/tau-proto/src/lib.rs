@@ -135,20 +135,25 @@ macro_rules! string_newtype {
 /// Maximum length for validated session and prompt identifiers.
 pub const SESSION_SCOPED_ID_MAX_LEN: usize = 128;
 
-#[macro_export]
 macro_rules! validated_string_newtype {
     ($(#[$meta:meta])* $name:ident, $error:ident, $label:literal, $max:expr) => {
         $(#[$meta])*
         #[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, serde::Serialize)]
         #[serde(transparent)]
-        pub struct $name(String);
+        pub struct $name(
+            #[doc = concat!("Validated ", $label, " text.")] String
+        );
 
         #[doc = concat!("Error returned when parsing ", $label, ".")]
         #[derive(Clone, Debug, Eq, PartialEq)]
         pub enum $error {
             /// Identifiers must not be empty.
             Empty,
-            /// Identifiers must not exceed [`SESSION_SCOPED_ID_MAX_LEN`] bytes.
+            #[doc = concat!(
+                "Identifiers must not exceed `",
+                stringify!($max),
+                "` bytes."
+            )]
             TooLong {
                 /// Maximum accepted byte length.
                 max: usize,
@@ -186,7 +191,9 @@ macro_rules! validated_string_newtype {
             #[doc = concat!(
                 "Parses and validates ",
                 $label,
-                ".\n\nAccepts 1 through 128 bytes containing only ASCII letters, digits, `_`, and `-`."
+                ".\n\nAccepts 1 through `",
+                stringify!($max),
+                "` bytes containing only ASCII letters, digits, `_`, and `-`."
             )]
             pub fn parse(value: impl Into<String>) -> Result<Self, $error> {
                 let value = value.into();
@@ -283,6 +290,7 @@ macro_rules! validated_string_newtype {
         }
     };
 }
+pub(crate) use validated_string_newtype;
 
 validated_string_newtype!(
     /// Stable identifier for one Tau session.
@@ -453,26 +461,30 @@ validated_string_newtype!(
     "action invocation id",
     64
 );
-string_newtype!(/// Connection identifier.
-    ConnectionId);
+validated_string_newtype!(
+    /// Identifier assigned to one live harness connection.
+    ///
+    /// Values contain 1 through 128 bytes of ASCII letters, digits, `_`, or
+    /// `-`. Construction and deserialization validate this grammar.
+    ConnectionId,
+    ConnectionIdParseError,
+    "connection id",
+    128
+);
 
-string_newtype!(/// Extension name.
-    ExtensionName);
+validated_string_newtype!(
+    /// Canonical configured extension name.
+    ///
+    /// Values contain 1 through 128 bytes of ASCII letters, digits, `_`, or
+    /// `-`. Construction and deserialization validate this grammar.
+    ExtensionName,
+    ExtensionNameParseError,
+    "extension name",
+    EXTENSION_NAME_MAX_BYTES
+);
 
 /// Maximum encoded bytes in a configured extension name.
 pub const EXTENSION_NAME_MAX_BYTES: usize = 128;
-
-/// Return whether a name follows the shared configured-extension grammar.
-///
-/// Valid names contain 1–128 ASCII letters, digits, `_`, or `-`.
-#[must_use]
-pub fn valid_extension_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= EXTENSION_NAME_MAX_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-}
 
 string_newtype!(/// Agent-scoped context key published by an extension.
     AgentContextKey);

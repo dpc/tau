@@ -39,10 +39,15 @@ pub(crate) enum ExtensionState {
     Disconnected,
 }
 
+/// One admitted extension instance and its live routing state.
 pub(crate) struct ExtensionEntry {
-    pub(crate) name: String,
+    /// Stable configured extension identity.
+    pub(crate) name: tau_proto::ExtensionName,
+    /// Run-local extension instance identity.
     pub(crate) instance_id: tau_proto::ExtensionInstanceId,
+    /// Allocated live routing identity.
     pub(crate) connection_id: tau_proto::ConnectionId,
+    /// Authenticated protocol client kind.
     pub(crate) kind: ClientKind,
     /// Optional protocol authorities declared in the authenticated handshake.
     pub(crate) peer_capabilities: std::collections::BTreeSet<tau_proto::PeerCapability>,
@@ -126,7 +131,8 @@ static NEXT_EXTENSION_CONNECTION_ID: AtomicU64 = AtomicU64::new(0);
 
 fn next_extension_connection_id() -> tau_proto::ConnectionId {
     let next = NEXT_EXTENSION_CONNECTION_ID.fetch_add(1, Ordering::Relaxed) + 1;
-    format!("ext-conn-{next}").into()
+    tau_proto::ConnectionId::parse(format!("ext-conn-{next}"))
+        .expect("generated extension connection id must satisfy the connection identifier grammar")
 }
 
 #[cfg_attr(not(any(test, feature = "echo-agent")), allow(dead_code))]

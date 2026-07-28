@@ -373,7 +373,8 @@ fn parse_debug_show_event_stats_command(
     }
     Ok(Some(HarnessInputMessage::UiDebugEventStatsRequest(
         tau_proto::UiDebugEventStatsRequest {
-            extension_name: extension_name.into(),
+            extension_name: tau_proto::ExtensionName::parse(extension_name)
+                .map_err(|_| DEBUG_SHOW_EVENT_STATS_USAGE)?,
         },
     )))
 }
@@ -490,7 +491,8 @@ mod ui_io_tests {
             .expect("local selection");
         local_tx
             .send(RendererCmd::ActionInvoked {
-                invocation_id: "action-test".into(),
+                invocation_id: tau_proto::ActionInvocationId::parse("action-test")
+                    .expect("test identifier must satisfy its grammar"),
                 owner_agent_id: Some("worker".to_owned()),
             })
             .expect("local action");
@@ -631,7 +633,8 @@ mod ui_io_tests {
             .expect("older remote");
         local_tx
             .send(RendererCmd::ActionInvoked {
-                invocation_id: "action-test".into(),
+                invocation_id: tau_proto::ActionInvocationId::parse("action-test")
+                    .expect("test identifier must satisfy its grammar"),
                 owner_agent_id: Some("worker".to_owned()),
             })
             .expect("local action");
@@ -1062,7 +1065,8 @@ mod ui_io_tests {
         assert_eq!(
             message,
             HarnessInputMessage::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
-                extension_name: "std-shell".into()
+                extension_name: tau_proto::ExtensionName::parse("std-shell")
+                    .expect("test identifier must satisfy its grammar")
             })
         );
         assert_eq!(
@@ -1099,7 +1103,8 @@ mod ui_io_tests {
             reader.read_message().expect("read request"),
             Some(HarnessInputMessage::UiDebugEventStatsRequest(
                 tau_proto::UiDebugEventStatsRequest {
-                    extension_name: "std-shell".into(),
+                    extension_name: tau_proto::ExtensionName::parse("std-shell")
+                        .expect("test identifier must satisfy its grammar"),
                 },
             ))
         );
@@ -1199,7 +1204,10 @@ mod ui_io_tests {
         let error = send_handshake_frame(
             &writer,
             &mut read_stream,
-            &crate::ui_client::hello_message("tau-chat"),
+            &crate::ui_client::hello_message(
+                tau_proto::ExtensionName::parse("tau-chat")
+                    .expect("chat UI name must satisfy the extension identifier grammar"),
+            ),
         )
         .expect_err("handshake should fail");
 
@@ -1633,7 +1641,10 @@ pub(crate) fn run_chat(
     send_handshake_frame(
         &writer,
         &mut read_stream,
-        &crate::ui_client::hello_message("tau-chat"),
+        &crate::ui_client::hello_message(
+            tau_proto::ExtensionName::parse("tau-chat")
+                .expect("chat UI name must satisfy the extension identifier grammar"),
+        ),
     )?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent hello");
     send_handshake_frame(

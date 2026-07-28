@@ -581,7 +581,7 @@ fn invalid_tool_example_rejects_registration() {
     });
 
     let mut registry = ToolRegistry::new();
-    let report = registry.register("ext", tool);
+    let report = registry.register(&test_connection_id("ext"), tool);
 
     assert!(registry.providers_for("strict").is_empty());
     assert_eq!(report.errors.len(), 1);
@@ -636,7 +636,7 @@ fn internal_tools_preserve_independent_registration_groups() {
     cross_tool.name = ToolName::new("agent_compact");
 
     registry.register_internal_with_group(
-        "harness",
+        &test_connection_id("harness"),
         self_tool,
         ToolGroup {
             name: tau_proto::ToolGroupName::new("compaction"),
@@ -644,7 +644,7 @@ fn internal_tools_preserve_independent_registration_groups() {
         },
     );
     registry.register_internal_with_group(
-        "harness",
+        &test_connection_id("harness"),
         cross_tool,
         ToolGroup {
             name: tau_proto::ToolGroupName::new("cross_agent_compaction"),
@@ -682,13 +682,13 @@ fn internal_registration_preempts_extension_owner() {
 
     assert!(
         registry
-            .register("extension", tool.clone())
+            .register(&test_connection_id("extension"), tool.clone())
             .errors
             .is_empty()
     );
     assert!(
         registry
-            .register_internal("harness", tool)
+            .register_internal(&test_connection_id("harness"), tool)
             .errors
             .is_empty()
     );
@@ -698,7 +698,11 @@ fn internal_registration_preempts_extension_owner() {
         .expect("internal provider replaces extension provider");
     assert_eq!(provider.connection_id.as_str(), "harness");
     assert_eq!(provider.kind, ToolProviderKind::Internal);
-    assert!(registry.unregister_connection("extension").is_empty());
+    assert!(
+        registry
+            .unregister_connection(&test_connection_id("extension"))
+            .is_empty()
+    );
     assert_eq!(
         registry
             .resolve_provider("message")
@@ -918,4 +922,10 @@ fn tool_example_validation_reports_selector_value_errors() {
             .to_string()
             .contains("subcommand selector value does not match")
     );
+}
+
+/// Builds a validated connection identifier used by this test module.
+fn test_connection_id(value: impl AsRef<str>) -> tau_proto::ConnectionId {
+    tau_proto::ConnectionId::parse(value.as_ref())
+        .expect("test connection id must satisfy the identifier grammar")
 }

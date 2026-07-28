@@ -516,7 +516,8 @@ fn valid_config_message() -> HarnessOutputMessage {
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
     HarnessOutputMessage::Configure(tau_proto::Configure {
         tool_prefix: None,
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         config: tau_proto::json_to_cbor(&serde_json::json!({
             "app_token_secret": "app",
             "bot_token_secret": "bot",
@@ -561,7 +562,8 @@ fn proactive_config_message() -> HarnessOutputMessage {
 fn malformed_config_message() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
         tool_prefix: None,
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         config: tau_proto::json_to_cbor(&serde_json::json!({
             "unknown_field": true,
         })),
@@ -693,7 +695,7 @@ fn extension() -> (
         let mut state = ext.state.lock().expect("lock");
         state.bot_user_id = Some("UBOT123".to_owned());
         state.installation_team_id = Some("T123".to_owned());
-        state.instance_name = Some("std-slack".into());
+        state.instance_name = Some(test_extension_name("std-slack"));
     }
     (ext, rx, client)
 }
@@ -816,7 +818,8 @@ fn dynamic_dm_message_facts_omit_synthesized_conversation_alias() {
     let metadata = message_fact_conversation(&conversation);
     assert_eq!(metadata.alias, None);
     let fact = Event::MessageDelivered(MessageDelivered::new(
-        MessagePublisherId::new("std-slack"),
+        tau_proto::MessagePublisherId::parse("std-slack")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         MessageAgentTarget::new("agent-a"),
         slack_message_fact_id("D123", "1.0"),
         MessageParty {
@@ -835,7 +838,8 @@ fn dynamic_dm_message_facts_omit_synthesized_conversation_alias() {
     assert!(!text.contains(DYNAMIC_DM_LABEL), "{text}");
 
     let sent = Event::MessageSent(MessageSent::new(
-        MessagePublisherId::new("std-slack"),
+        tau_proto::MessagePublisherId::parse("std-slack")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         MessageAgentTarget::new("agent-a"),
         slack_message_fact_id("D123", "2.0"),
         Some(MessageParty {
@@ -939,7 +943,7 @@ fn apply_test_config(ext: &Extension, mut config: RuntimeConfig) {
     state.installation_team_id = Some("T123".to_owned());
     state
         .instance_name
-        .get_or_insert_with(|| "std-slack".into());
+        .get_or_insert_with(|| test_extension_name("std-slack"));
 }
 
 /// Return sorted text keys from one structured CBOR object.
@@ -1362,7 +1366,7 @@ fn deletion_writer_failure_retires_all_remote_effect_authority() {
         let mut state = ext.state.lock().expect("state");
         state.bot_user_id = Some("UBOT123".to_owned());
         state.installation_team_id = Some("T123".to_owned());
-        state.instance_name = Some("std-slack".into());
+        state.instance_name = Some(test_extension_name("std-slack"));
         state.session_active = true;
         state.registered_agents.insert(agent_id("agent-a"));
     }
@@ -1440,7 +1444,7 @@ fn deletion_writer_failure_rejects_late_reaction_completion() {
         let mut state = ext.state.lock().expect("state");
         state.bot_user_id = Some("UBOT123".to_owned());
         state.installation_team_id = Some("T123".to_owned());
-        state.instance_name = Some("std-slack".into());
+        state.instance_name = Some(test_extension_name("std-slack"));
         state.session_active = true;
         assert!(state.reactions.insert_target(
             MessageFactId::new("slack-message:test-c456-1.0"),
@@ -1516,7 +1520,7 @@ fn output_failure_latch_blocks_new_remote_effects_before_retirement_lock() {
         let mut state = ext.state.lock().expect("state");
         state.bot_user_id = Some("UBOT123".to_owned());
         state.installation_team_id = Some("T123".to_owned());
-        state.instance_name = Some("std-slack".into());
+        state.instance_name = Some(test_extension_name("std-slack"));
     }
     register_agent(&ext, "agent-a");
     let message_ref = "slack-message:test-c123-13.0";
@@ -2565,7 +2569,12 @@ fn successful_send_uses_local_reply_selector() {
             .map(|party| party.stable_id.as_str()),
         Some(slack_sender_ref("T123", "U123").as_str())
     );
-    let projection = tau_proto::project_message_fact(&Event::MessageSent(sent_report))
+    let canonical = Event::MessageSentReported(sent_report)
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse("std-slack").expect("canonical publisher"),
+        )
+        .expect("sent report converts to a canonical fact");
+    let projection = tau_proto::project_message_fact(&canonical)
         .expect("canonical message fact")
         .expect("valid projection");
     let ContentPart::Text { text } = &projection.item.content[0];
@@ -5427,4 +5436,10 @@ fn latency_trace_classes_have_stable_spellings() {
     for (outcome, expected) in admission_outcomes {
         assert_eq!(outcome.as_str(), expected);
     }
+}
+
+/// Builds a validated extension name used by this test module.
+fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
+    tau_proto::ExtensionName::parse(value.as_ref())
+        .expect("test extension name must satisfy the identifier grammar")
 }

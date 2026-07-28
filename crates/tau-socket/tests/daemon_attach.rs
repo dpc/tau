@@ -70,7 +70,8 @@ fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
     denied_client
         .send(&HarnessInputMessage::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
-            client_name: "denied-client".into(),
+            client_name: tau_proto::ExtensionName::parse("denied-client")
+                .expect("test identifier must satisfy its grammar"),
             client_kind: ClientKind::Ui,
             capabilities: Default::default(),
         }))

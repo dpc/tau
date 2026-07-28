@@ -1,10 +1,9 @@
 use std::fs::OpenOptions;
 
 use tau_proto::{
-    ActionInvocationId, AgentPromptId, CborValue, ExtensionInstanceId, ExtensionName,
-    HarnessInputMessage, ModelId, PromptOriginator, ProviderResponseFinished,
-    ProviderResponseTextDelta, ProviderResponseUpdated, ProviderTokenUsage, ReasoningTextKind,
-    SessionId,
+    ActionInvocationId, AgentPromptId, CborValue, ExtensionInstanceId, HarnessInputMessage,
+    ModelId, PromptOriginator, ProviderResponseFinished, ProviderResponseTextDelta,
+    ProviderResponseUpdated, ProviderTokenUsage, ReasoningTextKind, SessionId,
 };
 
 use super::*;
@@ -245,7 +244,8 @@ fn harness_and_published_logging_observe_append_failures_consistently() {
     });
     harness_log
         .log_harness_event(&HarnessEvent::Disconnected {
-            connection_id: ConnectionId::from("conn-1"),
+            connection_id: tau_proto::ConnectionId::parse("conn-1")
+                .expect("test connection id must satisfy the identifier grammar"),
         })
         .expect_err("raw harness append failure is observable");
     assert!(read_lines(harness_log.path()).is_empty());
@@ -319,7 +319,10 @@ fn published_line_preserves_enriched_token_usage() {
         ws_pool_delta: None,
     });
     log.log_published_event(
-        Some(&ConnectionId::from("conn-1")),
+        Some(
+            &tau_proto::ConnectionId::parse("conn-1")
+                .expect("test connection id must satisfy the identifier grammar"),
+        ),
         &event,
         UnixMicros::now(),
     )
@@ -393,7 +396,7 @@ fn published_action_invoke_redacts_gmail_oauth_redirect_url() {
     let event = Event::ActionInvoke(tau_proto::ActionInvoke {
         invocation_id: ActionInvocationId::parse("action-1").expect("test identifier must be valid"),
         session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
-        extension_name: ExtensionName::from("tau-ext-pim"),
+        extension_name: tau_proto::ExtensionName::parse("tau-ext-pim").expect("test extension name must satisfy the identifier grammar"),
         instance_id: ExtensionInstanceId::from(0),
         action_id: "email.auth.google.finish".to_owned(),
         raw_line: ":email auth google finish work http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret".to_owned(),
@@ -552,7 +555,7 @@ fn full_prompt_debug_projection_is_fixed_shape_and_content_free() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut log = DebugEventLog::open(td.path()).expect("open");
     log.log_harness_event(&HarnessEvent::FromConnection {
-        connection_id: "interceptor".into(),
+        connection_id: crate::test_connection_id("interceptor"),
         message: Box::new(HarnessInputMessage::InterceptReply(
             tau_proto::InterceptReply {
                 action: tau_proto::InterceptAction::Pass(Some(Box::new(event))),
@@ -675,7 +678,8 @@ fn transient_from_connection_events_are_not_logged_twice() {
     });
 
     log.log_harness_event(&HarnessEvent::FromConnection {
-        connection_id: ConnectionId::from("conn-1"),
+        connection_id: tau_proto::ConnectionId::parse("conn-1")
+            .expect("test connection id must satisfy the identifier grammar"),
         message: Box::new(HarnessInputMessage::emit(event)),
     })
     .expect("skip transient harness event");
@@ -695,10 +699,11 @@ fn ui_debug_event_stats_requests_are_not_logged() {
     let mut log = DebugEventLog::open(td.path()).expect("open");
 
     log.log_harness_event(&HarnessEvent::FromConnection {
-        connection_id: ConnectionId::from("ui"),
+        connection_id: tau_proto::ConnectionId::parse("ui")
+            .expect("test connection id must satisfy the identifier grammar"),
         message: Box::new(HarnessInputMessage::UiDebugEventStatsRequest(
             tau_proto::UiDebugEventStatsRequest {
-                extension_name: "secret-extension".into(),
+                extension_name: crate::test_extension_name("secret-extension"),
             },
         )),
     })

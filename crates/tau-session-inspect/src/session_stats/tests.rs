@@ -94,7 +94,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
             Event::AgentOuterTurnStarted(AgentOuterTurnStarted {
                 agent_id: agent_id.clone(),
                 session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
-                outer_turn_id: "ot-ap-engineer_0-0".into(),
+                outer_turn_id: test_agent_outer_turn_id("ot-ap-engineer_0-0"),
                 agent_prompt_id: "ap-engineer_0-0"
                     .parse::<tau_proto::AgentPromptId>()
                     .expect("known-safe AgentPromptId must be valid"),
@@ -116,7 +116,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
                     effort: Effort::High,
                     ..ModelParams::default()
                 }),
-                outer_turn_id: Some("ot-ap-engineer_0-0".into()),
+                outer_turn_id: Some(test_agent_outer_turn_id("ot-ap-engineer_0-0")),
                 operation: PromptOperation::Inference,
                 originator: Default::default(),
                 ctx_id: None,
@@ -169,7 +169,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
             Event::AgentOuterTurnFinished(AgentOuterTurnFinished {
                 agent_id,
                 session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
-                outer_turn_id: "ot-ap-engineer_0-0".into(),
+                outer_turn_id: test_agent_outer_turn_id("ot-ap-engineer_0-0"),
                 disposition: tau_proto::AgentOuterTurnDisposition::Settled,
             }),
         ),
@@ -409,4 +409,10 @@ fn persisted_traversal_reports_missing_member_journal() {
         super::MissingAccountingFact::AgentJournalMissing
     );
     assert!(!temp.path().join("state").join("agents").exists());
+}
+
+/// Builds a validated agent outer turn id used by this test module.
+fn test_agent_outer_turn_id(value: impl AsRef<str>) -> tau_proto::AgentOuterTurnId {
+    tau_proto::AgentOuterTurnId::parse(value.as_ref())
+        .expect("test identifier must satisfy its grammar")
 }

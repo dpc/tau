@@ -70,10 +70,15 @@ impl<State> ExtensionBuilder<State> {
     }
 
     /// Creates an empty builder for one extension peer.
-    #[must_use]
-    pub fn new(name: impl Into<tau_proto::ExtensionName>, kind: tau_proto::ClientKind) -> Self {
-        Self {
-            name: name.into(),
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `name` is not a canonical extension identifier.
+    pub fn new(name: impl AsRef<str>, kind: tau_proto::ClientKind) -> ClientResult<Self> {
+        let name = tau_proto::ExtensionName::parse(name.as_ref().to_owned())
+            .map_err(|error| ClientError::builder(error.to_string()))?;
+        Ok(Self {
+            name,
             kind,
             peer_capabilities: Vec::new(),
             historical_selectors: Vec::new(),
@@ -90,7 +95,7 @@ impl<State> ExtensionBuilder<State> {
             action_handlers: Vec::new(),
             intercept_handler: None,
             error: None,
-        }
+        })
     }
 
     /// Declares that this extension publishes external-message reports.
@@ -147,13 +152,12 @@ impl<State> ExtensionBuilder<State> {
 
     /// Publishes an extension-provided action schema during startup.
     ///
-    /// The owner fields in the startup event are placeholders; the harness
-    /// stamps the real extension name and instance id before broadcasting the
-    /// schema.
+    /// The extension name is authenticated startup identity. The harness stamps
+    /// the live instance id before broadcasting the schema.
     pub fn publish_actions(&mut self, schema: tau_proto::ActionSchema) -> &mut Self {
         self.startup_event(tau_proto::Event::ActionSchemaPublished(
             tau_proto::ActionSchemaPublished {
-                extension_name: tau_proto::ExtensionName::default(),
+                extension_name: self.name.clone(),
                 instance_id: 0.into(),
                 schema,
             },

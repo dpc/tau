@@ -19,10 +19,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use tau_proto::{AgentId, ConnectionId, Event, SessionId, UnixMicros};
+use tau_proto::{AgentId, Event, SessionId, UnixMicros};
 
 use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES, missing_directories};
-use crate::session::SessionMeta;
+use crate::session::{PersistedEventSource, SessionMeta};
 
 /// Persistence policy for session events and sidecar state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -245,8 +245,8 @@ pub struct PersistedSessionEvent {
     /// spliced logs. Ephemeral-agent overlay records use the same positional
     /// check in their independent memory-only stream.
     pub seq: PersistedSessionEventSeq,
-    /// Connection that published the fact, when known.
-    pub source: Option<ConnectionId>,
+    /// Typed publisher provenance, when known.
+    pub source: Option<PersistedEventSource>,
     /// Membership/fallback fact for an ordinary stream, or an execution fact
     /// for a restore stream.
     pub event: Event,
@@ -564,7 +564,7 @@ impl SessionStore {
     pub fn append_session_event(
         &mut self,
         session_id: &str,
-        source: Option<ConnectionId>,
+        source: Option<PersistedEventSource>,
         event: Event,
     ) -> Result<AppendOutcome, SessionStoreError> {
         self.append_session_event_at(session_id, source, event, UnixMicros::now())
@@ -579,7 +579,7 @@ impl SessionStore {
     pub fn append_session_event_at(
         &mut self,
         session_id: &str,
-        source: Option<ConnectionId>,
+        source: Option<PersistedEventSource>,
         event: Event,
         recorded_at: UnixMicros,
     ) -> Result<AppendOutcome, SessionStoreError> {
@@ -612,7 +612,7 @@ impl SessionStore {
     pub fn append_session_event_at_with_persistence(
         &mut self,
         session_id: &str,
-        source: Option<ConnectionId>,
+        source: Option<PersistedEventSource>,
         event: Event,
         recorded_at: UnixMicros,
         event_persistence: SessionPersistenceMode,
@@ -759,12 +759,13 @@ impl SessionStore {
     ///
     /// Returns [`SessionStoreError`] for invalid restore facts or session ids,
     /// lock and foreground I/O failures, or a restore journal poisoned by an
-    /// unrestored partial write. Locked replay truncates an invalid suffix
-    /// before choosing the next sequence.
+    /// unrestored partial write. Locked replay truncates only an incomplete EOF
+    /// crash tail before choosing the next sequence; complete invalid frames
+    /// fail closed unchanged.
     pub fn append_session_restore_event_at(
         &mut self,
         session_id: &str,
-        source: Option<ConnectionId>,
+        source: Option<PersistedEventSource>,
         event: Event,
         recorded_at: UnixMicros,
     ) -> Result<(), SessionStoreError> {
@@ -846,13 +847,14 @@ impl SessionStore {
         Ok(events)
     }
 
-    /// Acquires the session writer lock and recovers the longest valid restore
-    /// journal prefix.
+    /// Acquires the session writer lock and repairs an incomplete
+    /// restore-journal EOF crash tail when present.
     ///
     /// # Errors
     ///
     /// Returns [`SessionStoreError`] for invalid ids, lock or journal I/O
-    /// failure, or inability to truncate an invalid suffix.
+    /// failure, a complete invalid frame, or inability to truncate an
+    /// incomplete EOF crash tail.
     pub fn lock_and_recover_session_restore_events(
         &mut self,
         session_id: &str,
@@ -1310,15 +1312,14 @@ where
 
 #[cfg(test)]
 mod record_bound_tests {
-    use tau_proto::{
-        MessageAgentTarget, MessageDelivered, MessageFactId, MessageParty, MessagePublisherId,
-    };
+    use tau_proto::{MessageAgentTarget, MessageDelivered, MessageFactId, MessageParty};
 
     use super::*;
 
     fn delivered_message(body: String) -> Event {
         Event::MessageDelivered(MessageDelivered::new(
-            MessagePublisherId::new("bridge-main"),
+            tau_proto::MessagePublisherId::parse("bridge-main")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             MessageAgentTarget::new("missing-agent"),
             MessageFactId::new("message-1"),
             MessageParty {

@@ -34,9 +34,9 @@ use stream_owner::{
 use tau_client::{ClientHandle, ClientResult, ExtensionBuilder, ManualRuntimeInput, TauExtension};
 use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
-    MessageDelivered, MessageFactId, MessageParty, MessagePublisherId, MessageSenderAuth,
-    MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
-    ToolStarted, ToolUseState, ToolUseStatus,
+    MessageDelivered, MessageFactId, MessageParty, MessageSenderAuth, MessageSent, NoticeLevel,
+    RawMessagePublisherId, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted,
+    ToolUseState, ToolUseStatus,
 };
 
 /// Tracing target used by this extension.
@@ -335,6 +335,8 @@ struct State {
     /// end.
     shutdown_requested: bool,
     config: Option<RuntimeConfig>,
+    /// Stable configured publisher identity used in top-level report claims.
+    publisher_name: Option<tau_proto::ExtensionName>,
     /// Harness-provided user-scoped state directory for this extension
     /// instance.
     state_dir: Option<std::path::PathBuf>,
@@ -374,15 +376,17 @@ fn emit_gateway_deliveries(
             );
             continue;
         };
-        let delivery_is_live = {
+        let publisher_name = {
             let state = state.lock();
-            state
+            (state
                 .current_session_id
                 .as_ref()
                 .is_some_and(|session_id| delivery.session_id == session_id.as_ref())
-                && state.registered_agents.contains(&agent_id)
+                && state.registered_agents.contains(&agent_id))
+            .then(|| state.publisher_name.clone())
+            .flatten()
         };
-        if !delivery_is_live {
+        let Some(publisher_name) = publisher_name else {
             tracing::warn!(
                 target: LOG_TARGET,
                 request_id = delivery.request_id,
@@ -392,7 +396,7 @@ fn emit_gateway_deliveries(
             continue;
         };
         output.emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
-            MessagePublisherId::default(),
+            RawMessagePublisherId::new(publisher_name.as_str()),
             MessageAgentTarget::new(agent_id.as_ref()),
             telegram_message_ref(&delivery.conversation_id, &delivery.message_id),
             MessageParty {
@@ -671,6 +675,21 @@ impl Extension {
             BridgeMode::LocalPoll(cfg) => self.apply_local_poll_config(cfg, state_dir),
             BridgeMode::GatewayClient(cfg) => self.apply_gateway_client_config(cfg, state_dir),
         }
+    }
+
+    fn set_publisher_name(&self, publisher_name: tau_proto::ExtensionName) {
+        self.state.lock().publisher_name = Some(publisher_name);
+    }
+
+    fn publisher_claim(&self) -> RawMessagePublisherId {
+        RawMessagePublisherId::new(
+            self.state
+                .lock()
+                .publisher_name
+                .as_ref()
+                .expect("configured Telegram runtime retains its instance name")
+                .as_str(),
+        )
     }
 
     fn apply_local_poll_config(
@@ -1548,7 +1567,7 @@ impl Extension {
         }
         self.output
             .emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
-                MessagePublisherId::default(),
+                self.publisher_claim(),
                 MessageAgentTarget::new(agent_id.as_ref()),
                 telegram_message_ref(&message.chat_id.to_string(), &update_id.to_string()),
                 MessageParty {
@@ -1579,7 +1598,7 @@ impl Extension {
             .unwrap_or_else(|| "gateway".to_owned());
         self.output
             .emit_message_report(Event::MessageSentReported(MessageSent::new(
-                MessagePublisherId::default(),
+                self.publisher_claim(),
                 MessageAgentTarget::new(agent_id.as_ref()),
                 generated_send_message_id(call_id, &destination),
                 None,
@@ -1944,6 +1963,10 @@ fn configure_tool_names(
         .state()
         .ext
         .apply_config(runtime_cfg, configure.state_dir.clone())?;
+    runtime
+        .state()
+        .ext
+        .set_publisher_name(configure.instance_name.clone());
     Ok(tool_names)
 }
 
@@ -2017,6 +2040,7 @@ fn drive_manual_runtime(
 
 /// Apply a runtime reconfiguration and report errors explicitly to the harness.
 fn handle_configure_message(runtime: &mut TelegramRuntime, configure: tau_proto::Configure) {
+    let publisher_name = configure.instance_name.clone();
     let result = parse_ext_config(&configure.config)
         .and_then(|cfg| cfg.validate(&configure.secrets))
         .and_then(|cfg| runtime.ext.apply_config(cfg, configure.state_dir));
@@ -2025,6 +2049,8 @@ fn handle_configure_message(runtime: &mut TelegramRuntime, configure: tau_proto:
         if let Output::Client(handle) = &runtime.ext.output {
             let _ = handle.config_error(message);
         }
+    } else {
+        runtime.ext.set_publisher_name(publisher_name);
     }
 }
 

@@ -12,8 +12,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_core::{
-    AgentEntry, AgentStore, AgentTree, Connection, ConnectionMetadata, ConnectionOrigin,
-    ConnectionSendError, ConnectionSink, RoutedFrame,
+    AgentEntry, AgentStore, AgentTree, Connection, ConnectionOrigin, ConnectionSendError,
+    ConnectionSink, PendingConnectionMetadata, RoutedFrame,
 };
 use tau_proto::{
     AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled, AgentPromptSteered,
@@ -272,7 +272,10 @@ impl HarnessTestProtocolExt for Harness {
         source_id: &str,
         frame: TestProtocolItem,
     ) -> Result<(), HarnessError> {
-        self.handle_extension_message(source_id, frame.into_input_message())
+        self.handle_extension_message(
+            &crate::test_connection_id(source_id),
+            frame.into_input_message(),
+        )
     }
 
     fn handle_client_event(
@@ -280,7 +283,10 @@ impl HarnessTestProtocolExt for Harness {
         client_id: &str,
         frame: TestProtocolItem,
     ) -> Result<bool, HarnessError> {
-        self.handle_client_message(client_id, frame.into_input_message())
+        self.handle_client_message(
+            &crate::test_connection_id(client_id),
+            frame.into_input_message(),
+        )
     }
 }
 
@@ -308,7 +314,7 @@ fn test_discovered_skill(
     modified_secs: u64,
 ) -> DiscoveredSkill {
     DiscoveredSkill {
-        source_id: source_id.into(),
+        source_id: crate::test_connection_id(source_id),
         description: description.to_owned(),
         source: DiscoveredSkillSource::File(PathBuf::from(format!("/tmp/{description}.md"))),
         add_to_prompt: false,
@@ -412,7 +418,7 @@ fn skill_winner_disconnect_restores_next_best_candidate() {
     h.recompute_discovered_skill_winner(&name);
     assert_eq!(h.discovered_skills[&name].description, "newer");
 
-    h.remove_discovered_context("new-ext");
+    h.remove_discovered_context(&crate::test_connection_id("new-ext"));
     assert_eq!(h.discovered_skills[&name].description, "older");
 
     h.shutdown().expect("shutdown");
@@ -1163,7 +1169,7 @@ fn quiet_provider_harness_for_with_start_reason_and_persistence(
             writer.write_frame(&TestProtocolItem::Message(TestMessage::Hello(
                 tau_proto::Hello {
                     protocol_version: tau_proto::PROTOCOL_VERSION,
-                    client_name: "tau-quiet-provider".into(),
+                    client_name: crate::test_extension_name("tau-quiet-provider"),
                     client_kind: tau_proto::ClientKind::Provider,
                     capabilities: Default::default(),
                 },
@@ -1257,9 +1263,9 @@ fn connect_test_client_with_origin(
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let events = Arc::new(Mutex::new(Vec::new()));
     h.bus.connect(Connection::new(
-        ConnectionMetadata {
-            id: name.into(),
-            name: name.to_owned(),
+        PendingConnectionMetadata {
+            id: Some(crate::test_connection_id(name)),
+            name: crate::test_extension_name(name),
             kind,
             origin,
         },
@@ -1293,12 +1299,12 @@ fn mark_connected_test_extension_configured(
     name: &str,
     kind: tau_proto::ClientKind,
 ) {
-    let connection_id: tau_proto::ConnectionId = connection_id.into();
+    let connection_id: tau_proto::ConnectionId = crate::test_connection_id(connection_id);
     h.extensions.entries.insert(
         connection_id.clone(),
         crate::extension::ExtensionEntry {
             tool_prefix: None,
-            name: name.to_owned(),
+            name: crate::test_extension_name(name),
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
             kind,
@@ -1710,3 +1716,26 @@ use strict_compaction_provider::{
     strict_compaction_provider_harness, strict_compaction_provider_harness_with_start_reason,
     validate_closed_tool_timeline,
 };
+
+/// Harness-owned correlation producers preserve their complete maximum inputs
+/// within each validated identifier cap.
+#[test]
+fn generated_runtime_initialization_and_shell_ids_accept_maximum_inputs() {
+    let runtime = super::accounting_runtime_id(u64::MAX);
+    assert_eq!(runtime.as_str(), "ffffffffffffffff");
+    assert!(runtime.as_str().len() <= 32);
+
+    let initialization = super::agent_initialization_id(&runtime, u64::MAX, u64::MAX);
+    assert_eq!(
+        initialization.as_str(),
+        "ffffffffffffffff-ffffffffffffffff-ffffffffffffffff"
+    );
+    assert!(initialization.as_str().len() <= 64);
+
+    let shell = super::shell_route_id(u64::MAX, u64::MAX);
+    assert_eq!(
+        shell.as_str(),
+        "harness-shell-ffffffffffffffffffffffffffffffff"
+    );
+    assert!(shell.as_str().len() <= 64);
+}

@@ -80,7 +80,8 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
 
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: REQUEST_ID.to_owned(),
-        message_id: tau_proto::AgentMessageId::parse("peer-navigation-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("peer-navigation-message")
+            .expect("test identifier must satisfy its grammar"),
         capability: "peer-navigation-capability".to_owned(),
         sender_session_id: sender_session.clone(),
         sender_id: sender_id.clone(),
@@ -94,7 +95,8 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
     let mut peer = tau_socket::SocketPeer::connect(&target_socket)?;
     peer.send(&HarnessInputMessage::Hello(tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
-        client_name: CALLBACK_CLIENT_NAME.into(),
+        client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)
+            .expect("callback client name must satisfy the identifier grammar"),
         client_kind: tau_proto::ClientKind::External,
         capabilities: Default::default(),
     }))?;

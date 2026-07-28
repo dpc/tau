@@ -743,7 +743,8 @@ fn agent_watch_ignores_internal_originated_responses() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: tau_proto::ExtensionName::new("__harness__"),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test extension name must satisfy the identifier grammar"),
             query_id: "background-completion".to_owned(),
         },
         compaction_original_input_tokens: None,

@@ -338,7 +338,9 @@ fn pre_resolved_daemon_rejects_environment_bypass_and_enforces_allowlist() {
     assert!(validate_pre_resolved_serve_options(&bypass, &config).is_err());
 
     let mismatch = ServeOptions::builder()
-        .allowed_extensions(std::collections::BTreeSet::from(["not-configured".into()]))
+        .allowed_extensions(std::collections::BTreeSet::from([
+            crate::test_extension_name("not-configured"),
+        ]))
         .build();
     let error = validate_pre_resolved_serve_options(&mismatch, &config)
         .expect_err("pre-resolved allowlist mismatch must fail before harness construction");

@@ -30,7 +30,8 @@ fn extension_originated_restart() -> HarnessOutputMessage {
         arguments: tau_proto::CborValue::Map(Vec::new()),
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         originator: PromptOriginator::Extension {
-            name: tau_proto::ExtensionName::new("fixture"),
+            name: tau_proto::ExtensionName::parse("fixture")
+                .expect("test extension name must satisfy the identifier grammar"),
             query_id: "query-1".to_owned(),
         },
     }))
@@ -52,7 +53,8 @@ fn replayed_restart() -> HarnessOutputMessage {
 fn restart_config(mode: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         tool_prefix: None,
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         config: CborValue::Map(vec![(
             CborValue::Text("restart_mode".to_owned()),
             CborValue::Text(mode.to_owned()),
@@ -95,7 +97,8 @@ fn restart_input(input_frames: &[HarnessOutputMessage]) -> Vec<u8> {
         writer
             .write_message(&HarnessOutputMessage::Configure(Configure {
                 tool_prefix: None,
-                instance_name: tau_proto::ExtensionName::new("test-extension"),
+                instance_name: tau_proto::ExtensionName::parse("test-extension")
+                    .expect("test extension name must satisfy the identifier grammar"),
                 config: CborValue::Map(Vec::new()),
                 state_dir: None,
                 secrets: std::collections::BTreeMap::new(),
@@ -151,7 +154,8 @@ fn emitted_event(message: &HarnessInputMessage) -> Option<&Event> {
 
 fn fixture_extension_originator() -> PromptOriginator {
     PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("fixture"),
+        name: tau_proto::ExtensionName::parse("fixture")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "query-1".to_owned(),
     }
 }
@@ -527,7 +531,8 @@ fn run_intercept(
     writer
         .write_message(&HarnessOutputMessage::Configure(Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
@@ -611,7 +616,8 @@ fn prompt_correction_preserves_prompt_identity_fields() {
     let mut prompt = test_prompt("internal Tao");
     prompt.message_class = PromptMessageClass::Internal;
     prompt.originator = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("fixture"),
+        name: tau_proto::ExtensionName::parse("fixture")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "query-1".to_owned(),
     };
     prompt.display_name = Some("fixture".to_owned());
@@ -632,7 +638,8 @@ fn prompt_correction_preserves_prompt_identity_fields() {
     assert_eq!(
         replaced.originator,
         PromptOriginator::Extension {
-            name: tau_proto::ExtensionName::new("fixture"),
+            name: tau_proto::ExtensionName::parse("fixture")
+                .expect("test extension name must satisfy the identifier grammar"),
             query_id: "query-1".to_owned(),
         }
     );

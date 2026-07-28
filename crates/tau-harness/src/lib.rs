@@ -53,6 +53,20 @@ pub(crate) fn parse_agent_id(value: impl AsRef<str>) -> AgentId {
     AgentId::parse(value.as_ref()).expect("harness stores only valid agent ids")
 }
 
+/// Build a validated connection identifier used by test modules.
+#[cfg(test)]
+pub(crate) fn test_connection_id(value: impl AsRef<str>) -> tau_proto::ConnectionId {
+    tau_proto::ConnectionId::parse(value.as_ref())
+        .expect("test connection id must satisfy the identifier grammar")
+}
+
+/// Build a validated extension name used by test modules.
+#[cfg(test)]
+pub(crate) fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
+    tau_proto::ExtensionName::parse(value.as_ref())
+        .expect("test extension name must satisfy the identifier grammar")
+}
+
 #[cfg(feature = "provider-test-support")]
 pub use crate::daemon::run_embedded_message_with_test_provider;
 pub use crate::daemon::{

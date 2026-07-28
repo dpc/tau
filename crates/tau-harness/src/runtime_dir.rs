@@ -586,7 +586,8 @@ fn probe_peer_entrypoint(
         harness_path,
         deadline,
         cancelled,
-        crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+        tau_proto::ExtensionName::parse(crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME)
+            .expect("built-in extension name must satisfy the extension identifier grammar"),
         tau_proto::ClientKind::External,
     ) else {
         return false;
@@ -1045,7 +1046,8 @@ fn probe_current_session(
             harness_path,
             deadline,
             cancelled,
-            "tau-session-list".into(),
+            tau_proto::ExtensionName::parse("tau-session-list")
+                .expect("built-in extension name must satisfy the extension identifier grammar"),
             tau_proto::ClientKind::Ui,
         ) {
             ProbeConnect::Connected(peer, probe_deadline) => (peer, probe_deadline),

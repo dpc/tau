@@ -97,11 +97,14 @@ fn provider_quota_report_commits_before_canonical_snapshot() {
         "quota-provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    harness.set_provider_models(
+        &crate::test_connection_id("quota-provider"),
+        vec![quota_model()],
+    );
 
     harness
         .handle_extension_event_inner_with_persist(
-            "quota-provider",
+            &crate::test_connection_id("quota-provider"),
             quota_replace_report("epoch-commit-order", 1_000),
             Some(false),
         )
@@ -174,7 +177,10 @@ fn rollover_applies_deferred_provider_quota_for_current_generation() {
         "quota-provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    harness.set_provider_models(
+        &crate::test_connection_id("quota-provider"),
+        vec![quota_model()],
+    );
     connect_test_tool(&mut harness, "rollover-blocker");
     harness
         .handle_extension_event(
@@ -188,7 +194,7 @@ fn rollover_applies_deferred_provider_quota_for_current_generation() {
     harness.publish_event(None, draft_event("block provider quota"));
     harness
         .handle_extension_event_inner_with_persist(
-            "quota-provider",
+            &crate::test_connection_id("quota-provider"),
             quota_replace_report("epoch-rollover", 2_500),
             Some(false),
         )
@@ -236,7 +242,10 @@ fn provider_quota_report_family_drives_state_end_to_end() {
         "quota-provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    harness.set_provider_models(
+        &crate::test_connection_id("quota-provider"),
+        vec![quota_model()],
+    );
     let epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-family").expect("epoch");
     let reports = [
         Event::ProviderQuotaReplaceReported(tau_proto::ProviderQuotaReplace {
@@ -263,7 +272,11 @@ fn provider_quota_report_family_drives_state_end_to_end() {
     ];
     for report in reports {
         harness
-            .handle_extension_event_inner_with_persist("quota-provider", report, Some(false))
+            .handle_extension_event_inner_with_persist(
+                &crate::test_connection_id("quota-provider"),
+                report,
+                Some(false),
+            )
             .expect("submit quota report");
     }
 
@@ -306,7 +319,7 @@ fn provider_quota_unowned_report_commits_without_canonical_state() {
 
     harness
         .handle_extension_event_inner_with_persist(
-            "quota-provider",
+            &crate::test_connection_id("quota-provider"),
             quota_replace_report("epoch-unowned", 1_000),
             Some(true),
         )
@@ -334,10 +347,13 @@ fn provider_quota_reports_and_state_do_not_cold_replay() {
             "quota-provider",
             tau_proto::ClientKind::Provider,
         );
-        harness.set_provider_models("quota-provider", vec![quota_model()]);
+        harness.set_provider_models(
+            &crate::test_connection_id("quota-provider"),
+            vec![quota_model()],
+        );
         harness
             .handle_extension_event_inner_with_persist(
-                "quota-provider",
+                &crate::test_connection_id("quota-provider"),
                 quota_replace_report("epoch-no-replay", 1_000),
                 Some(true),
             )
@@ -377,7 +393,7 @@ fn provider_quota_report_rejects_non_provider_authority() {
         connect_ready_configured_extension(&mut harness, source, source, kind);
         harness
             .handle_extension_event_inner_with_persist(
-                source,
+                &crate::test_connection_id(source),
                 quota_replace_report("epoch-forbidden", 1_000),
                 Some(false),
             )
@@ -390,7 +406,7 @@ fn provider_quota_report_rejects_non_provider_authority() {
     );
     harness
         .handle_extension_event_inner_with_persist(
-            "unconfigured-provider",
+            &crate::test_connection_id("unconfigured-provider"),
             quota_replace_report("epoch-forbidden", 1_000),
             Some(false),
         )
@@ -402,7 +418,7 @@ fn provider_quota_report_rejects_non_provider_authority() {
         connect_test_client(&mut harness, source, kind);
         harness
             .handle_client_event_inner_with_persist(
-                source,
+                &crate::test_connection_id(source),
                 quota_replace_report("epoch-forbidden", 1_000),
                 Some(false),
             )
@@ -425,7 +441,10 @@ fn provider_quota_report_replacement_drives_canonical_state() {
         "quota-provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    harness.set_provider_models(
+        &crate::test_connection_id("quota-provider"),
+        vec![quota_model()],
+    );
     connect_test_tool(&mut harness, "interceptor");
     harness
         .handle_extension_event(
@@ -441,7 +460,7 @@ fn provider_quota_report_replacement_drives_canonical_state() {
 
     harness
         .handle_extension_event_inner_with_persist(
-            "quota-provider",
+            &crate::test_connection_id("quota-provider"),
             quota_replace_report("epoch-replaced", 1_000),
             Some(false),
         )
@@ -468,7 +487,7 @@ fn provider_quota_report_replacement_drives_canonical_state() {
 
     harness
         .handle_extension_event_inner_with_persist(
-            "quota-provider",
+            &crate::test_connection_id("quota-provider"),
             quota_replace_report("epoch-invalid-replacement", 5_000),
             Some(false),
         )
@@ -516,7 +535,10 @@ fn dropping_provider_quota_report_prevents_canonical_state() {
         "quota-provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    harness.set_provider_models(
+        &crate::test_connection_id("quota-provider"),
+        vec![quota_model()],
+    );
     connect_test_tool(&mut harness, "interceptor");
     harness
         .handle_extension_event(
@@ -532,7 +554,7 @@ fn dropping_provider_quota_report_prevents_canonical_state() {
 
     harness
         .handle_extension_event_inner_with_persist(
-            "quota-provider",
+            &crate::test_connection_id("quota-provider"),
             quota_replace_report("epoch-dropped", 1_000),
             Some(false),
         )
@@ -562,7 +584,10 @@ fn parked_stale_provider_quota_report_cannot_mutate_state() {
         "quota-provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    harness.set_provider_models(
+        &crate::test_connection_id("quota-provider"),
+        vec![quota_model()],
+    );
     connect_test_tool(&mut harness, "interceptor");
     harness
         .handle_extension_event(
@@ -577,13 +602,13 @@ fn parked_stale_provider_quota_report_cannot_mutate_state() {
         .expect("register interceptor");
     harness
         .handle_extension_event_inner_with_persist(
-            "quota-provider",
+            &crate::test_connection_id("quota-provider"),
             quota_replace_report("epoch-stale", 1_000),
             Some(false),
         )
         .expect("submit quota report");
 
-    harness.handle_disconnect("quota-provider");
+    harness.handle_disconnect(&crate::test_connection_id("quota-provider"));
     connect_ready_configured_extension(
         &mut harness,
         "quota-provider",
@@ -596,7 +621,10 @@ fn parked_stale_provider_quota_report_cannot_mutate_state() {
         .get_mut("quota-provider")
         .expect("replacement provider")
         .instance_id = 43.into();
-    harness.set_provider_models("quota-provider", vec![quota_model()]);
+    harness.set_provider_models(
+        &crate::test_connection_id("quota-provider"),
+        vec![quota_model()],
+    );
     harness
         .handle_extension_event(
             "interceptor",
@@ -620,10 +648,10 @@ fn parked_stale_provider_quota_report_cannot_mutate_state() {
 fn provider_quota_replace_patch_and_spoofing_are_validated() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.set_provider_models("owner", vec![quota_model()]);
+    harness.set_provider_models(&crate::test_connection_id("owner"), vec![quota_model()]);
     let epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch");
     harness.handle_provider_quota_replace(
-        "spoof",
+        &crate::test_connection_id("spoof"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
@@ -635,7 +663,7 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
     );
     assert!(harness.provider_quota.is_empty());
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
@@ -652,7 +680,7 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
         1
     );
     harness.handle_provider_quota_patch(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaPatch {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch,
@@ -674,10 +702,10 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
 fn provider_quota_two_pool_default_binding_projects_without_ambiguity() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.set_provider_models("owner", vec![quota_model()]);
+    harness.set_provider_models(&crate::test_connection_id("owner"), vec![quota_model()]);
     let epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch");
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
@@ -691,7 +719,7 @@ fn provider_quota_two_pool_default_binding_projects_without_ambiguity() {
         },
     );
     harness.handle_provider_quota_patch(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaPatch {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch,
@@ -722,8 +750,8 @@ fn provider_quota_two_pool_default_binding_projects_without_ambiguity() {
 fn duplicate_provider_namespace_cannot_spoof_effective_route() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.set_provider_models("a-owner", vec![quota_model()]);
-    harness.set_provider_models("z-winner", vec![quota_model()]);
+    harness.set_provider_models(&crate::test_connection_id("a-owner"), vec![quota_model()]);
+    harness.set_provider_models(&crate::test_connection_id("z-winner"), vec![quota_model()]);
     let replace = |sequence| tau_proto::ProviderQuotaReplace {
         provider: tau_proto::ProviderName::new("chatgpt"),
         profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
@@ -732,9 +760,9 @@ fn duplicate_provider_namespace_cannot_spoof_effective_route() {
         windows: vec![quota_window(1_000)],
         route_bindings: vec![quota_binding()],
     };
-    harness.handle_provider_quota_replace("a-owner", replace(1));
+    harness.handle_provider_quota_replace(&crate::test_connection_id("a-owner"), replace(1));
     assert!(harness.provider_quota.is_empty());
-    harness.handle_provider_quota_replace("z-winner", replace(1));
+    harness.handle_provider_quota_replace(&crate::test_connection_id("z-winner"), replace(1));
     assert_eq!(
         harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
             .source_id
@@ -751,10 +779,10 @@ fn split_namespace_ownership_fails_closed() {
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
     let mut second = quota_model();
     second.id = "chatgpt/gpt-other".into();
-    harness.set_provider_models("owner-a", vec![quota_model()]);
-    harness.set_provider_models("owner-b", vec![second]);
+    harness.set_provider_models(&crate::test_connection_id("owner-a"), vec![quota_model()]);
+    harness.set_provider_models(&crate::test_connection_id("owner-b"), vec![second]);
     harness.handle_provider_quota_replace(
-        "owner-a",
+        &crate::test_connection_id("owner-a"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
@@ -773,10 +801,11 @@ fn split_namespace_ownership_fails_closed() {
 fn model_change_preserves_provider_sequence_space() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.apply_provider_models_snapshot("owner", vec![quota_model()]);
+    harness
+        .apply_provider_models_snapshot(&crate::test_connection_id("owner"), vec![quota_model()]);
     let epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch");
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
@@ -788,7 +817,7 @@ fn model_change_preserves_provider_sequence_space() {
     );
     let mut changed = quota_model();
     changed.context_window = 200_000;
-    harness.apply_provider_models_snapshot("owner", vec![changed]);
+    harness.apply_provider_models_snapshot(&crate::test_connection_id("owner"), vec![changed]);
     assert_eq!(
         harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
@@ -796,7 +825,7 @@ fn model_change_preserves_provider_sequence_space() {
         1
     );
     harness.handle_provider_quota_patch(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaPatch {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch,
@@ -821,9 +850,10 @@ fn model_change_preserves_provider_sequence_space() {
 fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.apply_provider_models_snapshot("owner", vec![quota_model()]);
+    harness
+        .apply_provider_models_snapshot(&crate::test_connection_id("owner"), vec![quota_model()]);
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
@@ -838,7 +868,11 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
         tau_proto::EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
     )];
     harness
-        .complete_subscription("late-quota-ui", selectors.clone(), selectors)
+        .complete_subscription(
+            &crate::test_connection_id("late-quota-ui"),
+            selectors.clone(),
+            selectors,
+        )
         .expect("subscribe to quota current state");
     let routed_events = events.lock().expect("events");
     assert!(
@@ -866,10 +900,13 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
     });
     assert_eq!(
         observed,
-        Some((Some(HARNESS_CONNECTION_ID.into()), 123_000))
+        Some((
+            Some(crate::test_connection_id(HARNESS_CONNECTION_ID)),
+            123_000
+        ))
     );
     drop(routed_events);
-    harness.apply_provider_models_snapshot("owner", Vec::new());
+    harness.apply_provider_models_snapshot(&crate::test_connection_id("owner"), Vec::new());
     assert!(harness.provider_quota.is_empty());
     let cleared_events = connect_test_client(
         &mut harness,
@@ -880,7 +917,11 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
         tau_proto::EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
     )];
     harness
-        .complete_subscription("post-clear-quota-ui", selectors.clone(), selectors)
+        .complete_subscription(
+            &crate::test_connection_id("post-clear-quota-ui"),
+            selectors.clone(),
+            selectors,
+        )
         .expect("subscribe after quota clear");
     let cleared = cleared_events
         .lock()
@@ -902,9 +943,10 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
         Some((tau_proto::ProviderName::new("chatgpt"), 0, 0)),
         "late subscribers must retain the same running-harness capability as live clients"
     );
-    harness.apply_provider_models_snapshot("owner", vec![quota_model()]);
+    harness
+        .apply_provider_models_snapshot(&crate::test_connection_id("owner"), vec![quota_model()]);
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
@@ -961,7 +1003,11 @@ fn validated_quota_projection_is_must_pass_and_immutable() {
         tau_proto::ClientKind::Provider,
     );
     harness
-        .handle_extension_event_inner_with_persist("quota-provider", original.clone(), Some(false))
+        .handle_extension_event_inner_with_persist(
+            &crate::test_connection_id("quota-provider"),
+            original.clone(),
+            Some(false),
+        )
         .expect("reject peer-authored canonical state");
     assert!(committed_quota_events(&harness).is_empty());
 
@@ -978,7 +1024,10 @@ fn validated_quota_projection_is_must_pass_and_immutable() {
         )
         .expect("register interceptor");
 
-    harness.publish_event(Some(HARNESS_CONNECTION_ID), original.clone());
+    harness.publish_event(
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+        original.clone(),
+    );
     harness
         .handle_extension_event(
             "interceptor",
@@ -987,7 +1036,10 @@ fn validated_quota_projection_is_must_pass_and_immutable() {
             })),
         )
         .expect("attempt canonical replacement");
-    harness.publish_event(Some(HARNESS_CONNECTION_ID), original.clone());
+    harness.publish_event(
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+        original.clone(),
+    );
     harness
         .handle_extension_event(
             "interceptor",
@@ -1010,10 +1062,10 @@ fn validated_quota_projection_is_must_pass_and_immutable() {
 fn provider_quota_clear_orders_and_retires_epochs() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.set_provider_models("owner", vec![quota_model()]);
+    harness.set_provider_models(&crate::test_connection_id("owner"), vec![quota_model()]);
     let epoch_a = tau_proto::ProviderQuotaEpoch::parse("epoch-a").expect("epoch");
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch_a.clone(),
@@ -1024,7 +1076,7 @@ fn provider_quota_clear_orders_and_retires_epochs() {
         },
     );
     harness.handle_provider_quota_clear(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaClear {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch_a.clone(),
@@ -1037,7 +1089,7 @@ fn provider_quota_clear_orders_and_retires_epochs() {
             .contains(&epoch_a)
     );
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch_a,
@@ -1049,7 +1101,7 @@ fn provider_quota_clear_orders_and_retires_epochs() {
     );
     assert!(harness.provider_quota.is_empty());
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-b").expect("epoch"),
@@ -1074,9 +1126,10 @@ fn provider_quota_clear_orders_and_retires_epochs() {
 fn restored_owner_accepts_unretired_rotated_full_epoch() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.apply_provider_models_snapshot("owner", vec![quota_model()]);
+    harness
+        .apply_provider_models_snapshot(&crate::test_connection_id("owner"), vec![quota_model()]);
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-e").expect("epoch"),
@@ -1086,10 +1139,11 @@ fn restored_owner_accepts_unretired_rotated_full_epoch() {
             route_bindings: vec![quota_binding()],
         },
     );
-    harness.apply_provider_models_snapshot("owner", Vec::new());
-    harness.apply_provider_models_snapshot("owner", vec![quota_model()]);
+    harness.apply_provider_models_snapshot(&crate::test_connection_id("owner"), Vec::new());
+    harness
+        .apply_provider_models_snapshot(&crate::test_connection_id("owner"), vec![quota_model()]);
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-f").expect("epoch"),
@@ -1114,10 +1168,11 @@ fn restored_owner_accepts_unretired_rotated_full_epoch() {
 fn clear_consumes_matching_route_loss_tombstone() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.apply_provider_models_snapshot("owner", vec![quota_model()]);
+    harness
+        .apply_provider_models_snapshot(&crate::test_connection_id("owner"), vec![quota_model()]);
     let epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-e").expect("epoch");
     harness.handle_provider_quota_replace(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
@@ -1127,14 +1182,14 @@ fn clear_consumes_matching_route_loss_tombstone() {
             route_bindings: vec![quota_binding()],
         },
     );
-    harness.apply_provider_models_snapshot("owner", Vec::new());
+    harness.apply_provider_models_snapshot(&crate::test_connection_id("owner"), Vec::new());
     assert!(
         harness
             .provider_quota_tombstones
             .contains_key(&tau_proto::ProviderName::new("chatgpt"))
     );
     harness.handle_provider_quota_clear(
-        "owner",
+        &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaClear {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),

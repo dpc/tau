@@ -176,7 +176,8 @@ fn configure(config: CborValue, state_root: &std::path::Path) -> tau_proto::Conf
     tau_proto::Configure {
         tool_prefix: None,
         config,
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         state_dir: Some(state_root.join("state")),
         secrets: BTreeMap::new(),
     }
@@ -429,7 +430,8 @@ fn effective_config_and_reconfigure_replace_google_auth_inventory() {
                     tau_proto::ToolNamePrefix::parse("work").expect("valid tool prefix"),
                 ),
                 config,
-                instance_name: tau_proto::ExtensionName::new("work-pim"),
+                instance_name: tau_proto::ExtensionName::parse("work-pim")
+                    .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: Some(temp.path().join("state")),
                 secrets: secrets.clone(),
             },
@@ -482,7 +484,8 @@ fn effective_config_and_reconfigure_replace_google_auth_inventory() {
                         }]
                     }
                 })),
-                instance_name: tau_proto::ExtensionName::new("work-pim"),
+                instance_name: tau_proto::ExtensionName::parse("work-pim")
+                    .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: Some(temp.path().join("state")),
                 secrets,
             },
@@ -987,7 +990,8 @@ fn unknown_action(invocation_id: &str) -> Event {
             .expect("test identifier must be valid"),
         session_id: tau_proto::SessionId::parse("session-1")
             .expect("known-safe SessionId must be valid"),
-        extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
+        extension_name: tau_proto::ExtensionName::parse("tau-ext-pim")
+            .expect("test extension name must satisfy the identifier grammar"),
         instance_id: tau_proto::ExtensionInstanceId::from(1),
         action_id: "pim.unknown".to_owned(),
         raw_line: "/pim unknown".to_owned(),

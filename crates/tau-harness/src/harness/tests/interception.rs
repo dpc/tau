@@ -19,10 +19,11 @@ use super::*;
 use crate::harness::interception::AgentPublishCompletion;
 use crate::harness::{PendingTool, background_completion_prompt};
 
-/// Construct one forged-provenance report for ordinary extension publication.
+/// Construct one authenticated-provenance report for ordinary extension
+/// publication.
 fn extension_message_report(message_id: &str) -> Event {
     Event::MessageDeliveredReported(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("forged"),
+        tau_proto::RawMessagePublisherId::new("configured-bridge"),
         tau_proto::MessageAgentTarget::new("invalid target"),
         tau_proto::MessageFactId::new(message_id),
         tau_proto::MessageParty {
@@ -68,7 +69,7 @@ fn clear_interception_fixture_models(h: &mut Harness) {
         .extension_connection_id("provider")
         .expect("quiet provider")
         .to_owned();
-    h.set_provider_models(&provider_id, Vec::new());
+    h.set_provider_models(&crate::test_connection_id(&provider_id), Vec::new());
 }
 
 /// Collect committed model declaration/state events with their delivery source.
@@ -118,7 +119,7 @@ fn dropping_provider_model_declaration_prevents_canonical_state() {
     .expect("register interceptor");
 
     h.handle_extension_event_inner_with_persist(
-        "model-provider",
+        &crate::test_connection_id("model-provider"),
         provider_models_declaration("declared/dropped", 1),
         Some(false),
     )
@@ -164,7 +165,7 @@ fn rollover_applies_deferred_provider_models_for_current_generation() {
     .expect("register rollover blocker");
     h.publish_event(None, draft_event("block provider models"));
     h.handle_extension_event_inner_with_persist(
-        "model-provider",
+        &crate::test_connection_id("model-provider"),
         provider_models_declaration("declared/rollover", 1234),
         Some(false),
     )
@@ -222,7 +223,7 @@ fn replaced_provider_model_declaration_drives_canonical_state() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "model-provider",
+        &crate::test_connection_id("model-provider"),
         provider_models_declaration("declared/original", 1),
         Some(false),
     )
@@ -283,7 +284,7 @@ fn provider_prefix_interception_protects_canonical_model_state() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "model-provider",
+        &crate::test_connection_id("model-provider"),
         provider_models_declaration("declared/protected", 10),
         Some(false),
     )
@@ -304,7 +305,8 @@ fn provider_prefix_interception_protects_canonical_model_state() {
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(Some(Box::new(Event::ProviderModelsUpdated(
                 tau_proto::ProviderModelsUpdated {
-                    publisher_extension_id: tau_proto::ExtensionName::from("configured-provider"),
+                    publisher_extension_id: tau_proto::ExtensionName::parse("configured-provider")
+                        .expect("test extension name must satisfy the identifier grammar"),
                     models: Vec::new(),
                 },
             )))),
@@ -323,7 +325,7 @@ fn provider_prefix_interception_protects_canonical_model_state() {
     ));
 
     h.handle_extension_event_inner_with_persist(
-        "model-provider",
+        &crate::test_connection_id("model-provider"),
         provider_models_declaration("declared/drop-protected", 20),
         Some(false),
     )
@@ -370,7 +372,7 @@ fn provider_disconnect_rewrites_parked_canonical_state_to_empty() {
     .expect("register interceptor");
 
     h.handle_extension_event_inner_with_persist(
-        "model-provider",
+        &crate::test_connection_id("model-provider"),
         provider_models_declaration("declared/disconnected", 10),
         Some(false),
     )
@@ -389,7 +391,7 @@ fn provider_disconnect_rewrites_parked_canonical_state_to_empty() {
     let model: tau_proto::ModelId = "declared/disconnected".into();
     assert!(h.provider_model_routes.contains_key(&model));
 
-    h.handle_disconnect("model-provider");
+    h.handle_disconnect(&crate::test_connection_id("model-provider"));
     assert!(matches!(
         h.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::ProviderModelsUpdated(update))
@@ -439,13 +441,13 @@ fn parked_provider_declaration_cannot_mutate_replacement_generation() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "model-provider",
+        &crate::test_connection_id("model-provider"),
         provider_models_declaration("declared/stale", 1),
         Some(false),
     )
     .expect("park declaration");
 
-    h.handle_disconnect("model-provider");
+    h.handle_disconnect(&crate::test_connection_id("model-provider"));
     h.extensions.entries.remove("model-provider");
     connect_ready_configured_extension(
         &mut h,
@@ -502,13 +504,13 @@ fn parked_old_generation_drop_cannot_activate_same_id_replacement() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "model-provider",
+        &crate::test_connection_id("model-provider"),
         provider_models_declaration("declared/old-generation", 1),
         Some(false),
     )
     .expect("park old declaration");
 
-    h.handle_disconnect("model-provider");
+    h.handle_disconnect(&crate::test_connection_id("model-provider"));
     h.extensions.entries.remove("model-provider");
     connect_ready_configured_extension(
         &mut h,
@@ -524,17 +526,17 @@ fn parked_old_generation_drop_cannot_activate_same_id_replacement() {
     replacement.instance_id = 43.into();
     replacement.state = crate::extension::ExtensionState::Handshaking;
     h.extensions.activation_staging.insert(
-        "model-provider".into(),
+        crate::test_connection_id("model-provider"),
         crate::harness::extensions::ExtensionActivationStage::default(),
     );
     h.handle_extension_event_inner_with_persist(
-        "model-provider",
+        &crate::test_connection_id("model-provider"),
         provider_models_declaration("declared/new-generation", 2),
         Some(false),
     )
     .expect("queue replacement declaration");
     h.handle_extension_message(
-        "model-provider",
+        &crate::test_connection_id("model-provider"),
         TestMessage::Ready(tau_proto::Ready { message: None }),
     )
     .expect("replacement ready waits");
@@ -599,7 +601,7 @@ fn assert_message_report_is_intercepted(selector: EventSelector, intercepts_cano
     connect_ready_message_publisher(&mut h, "bridge-connection", "configured-bridge");
 
     h.handle_extension_event_inner_with_persist(
-        "bridge-connection",
+        &crate::test_connection_id("bridge-connection"),
         extension_message_report("m1"),
         Some(false),
     )
@@ -687,7 +689,7 @@ fn dropping_message_report_produces_no_canonical_fact() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "bridge",
+        &crate::test_connection_id("bridge"),
         extension_message_report("original"),
         Some(false),
     )
@@ -730,7 +732,7 @@ fn rollover_message_report_is_observation_only() {
     )
     .expect("register interceptor");
     let report = Event::MessageDeliveredReported(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("forged"),
+        tau_proto::RawMessagePublisherId::new("forged"),
         tau_proto::MessageAgentTarget::new(agent_id.as_str()),
         tau_proto::MessageFactId::new("rollover-message"),
         tau_proto::MessageParty {
@@ -741,8 +743,12 @@ fn rollover_message_report_is_observation_only() {
         None,
         "wake replacement",
     ));
-    h.handle_extension_event_inner_with_persist("bridge", report, Some(false))
-        .expect("park report");
+    h.handle_extension_event_inner_with_persist(
+        &crate::test_connection_id("bridge"),
+        report,
+        Some(false),
+    )
+    .expect("park report");
 
     h.switch_session(
         "replacement"
@@ -788,7 +794,7 @@ fn replacing_message_report_canonicalizes_replacement() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "bridge",
+        &crate::test_connection_id("bridge"),
         extension_message_report("original"),
         Some(false),
     )
@@ -829,12 +835,12 @@ fn parked_message_report_survives_bridge_disconnect() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "bridge",
+        &crate::test_connection_id("bridge"),
         extension_message_report("m1"),
         Some(false),
     )
     .expect("report");
-    h.handle_disconnect("bridge");
+    h.handle_disconnect(&crate::test_connection_id("bridge"));
     // Supervised replacement removes the disconnected entry before installing
     // its successor connection.
     h.extensions.entries.remove("bridge");
@@ -852,7 +858,9 @@ fn parked_message_report_survives_bridge_disconnect() {
             source: Some(source),
             event: Event::MessageDelivered(fact),
             ..
-        }] if source.as_str() == HARNESS_CONNECTION_ID
+        }] if source.connection_id().is_some_and(|source| {
+            source == crate::harness::harness_connection_id()
+        })
             && fact.publisher_extension_id.as_str() == "configured-bridge"
     ));
 }
@@ -889,7 +897,7 @@ fn message_report_preserves_deferred_publish_fifo() {
     assert!(h.pending_intercept.is_some());
 
     h.handle_extension_event_inner_with_persist(
-        "bridge-connection",
+        &crate::test_connection_id("bridge-connection"),
         extension_message_report("m1"),
         Some(false),
     )
@@ -979,7 +987,8 @@ fn queue_intercepted_peer_receive(
         h.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: format!("peer-request-{suffix}"),
-            message_id: tau_proto::AgentMessageId::parse(format!("peer-message-{suffix}")).unwrap(),
+            message_id: tau_proto::AgentMessageId::parse(format!("peer-message-{suffix}"))
+                .expect("test identifier must satisfy its grammar"),
             capability: "test-capability".to_owned(),
             sender_session_id: "sender-session"
                 .parse::<tau_proto::SessionId>()
@@ -1028,7 +1037,8 @@ fn peer_receive_ack_waits_for_intercepted_projection_commit() {
         })),
     )
     .expect("register interceptor");
-    let connection_id = tau_proto::ConnectionId::from("peer-client");
+    let connection_id = tau_proto::ConnectionId::parse("peer-client")
+        .expect("test connection id must satisfy the identifier grammar");
 
     queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id, "commit");
 
@@ -1064,7 +1074,8 @@ fn peer_receive_interception_drop_never_acknowledges_or_commits() {
         })),
     )
     .expect("register interceptor");
-    let connection_id = tau_proto::ConnectionId::from("peer-client");
+    let connection_id = tau_proto::ConnectionId::parse("peer-client")
+        .expect("test connection id must satisfy the identifier grammar");
 
     queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id, "drop");
     h.handle_extension_event(
@@ -1098,7 +1109,8 @@ fn peer_receive_target_disappearance_before_commit_fails() {
         })),
     )
     .expect("register interceptor");
-    let connection_id = tau_proto::ConnectionId::from("peer-client");
+    let connection_id = tau_proto::ConnectionId::parse("peer-client")
+        .expect("test connection id must satisfy the identifier grammar");
     queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id, "target-gone");
 
     h.remove_agent(&cid);
@@ -1294,14 +1306,16 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
         .expect("local pending")
         .recipient_id
         .clone();
-    let connection_id = tau_proto::ConnectionId::from("coalesce-peer-client");
+    let connection_id = tau_proto::ConnectionId::parse("coalesce-peer-client")
+        .expect("test connection id must satisfy the identifier grammar");
     h.external_message_peers.insert(connection_id.clone());
     let remote = h.complete_external_agent_message_auth(
         connection_id,
         h.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: "coalesce-remote".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("coalesce-remote-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("coalesce-remote-message")
+                .expect("test identifier must satisfy its grammar"),
             capability: "capability".to_owned(),
             sender_session_id: "sender-session"
                 .parse::<tau_proto::SessionId>()
@@ -1341,7 +1355,8 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
     configure_inter_session_receivers(&mut h, &[("engineer", true)]);
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "auth-before-spend".to_owned(),
-        message_id: tau_proto::AgentMessageId::parse("auth-before-spend-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("auth-before-spend-message")
+            .expect("test identifier must satisfy its grammar"),
         capability: "invalid".to_owned(),
         sender_session_id: "sender-session"
             .parse::<tau_proto::SessionId>()
@@ -1355,7 +1370,7 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
 
     let result = h
         .complete_external_agent_message_auth(
-            "peer-client".into(),
+            crate::test_connection_id("peer-client"),
             h.current_session_generation,
             request,
             Err("external message authentication failed".to_owned()),
@@ -1381,7 +1396,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
     let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
         request_id: format!("stale-auth-{suffix}"),
         message_id: tau_proto::AgentMessageId::parse(format!("stale-auth-message-{suffix}"))
-            .unwrap(),
+            .expect("test message id must satisfy its grammar"),
         capability: "valid".to_owned(),
         sender_session_id: "sender-session"
             .parse::<tau_proto::SessionId>()
@@ -1392,7 +1407,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
         kind: tau_proto::AgentMessageKind::Message,
         message: "must not create".to_owned(),
     };
-    let peer: tau_proto::ConnectionId = "peer-client".into();
+    let peer: tau_proto::ConnectionId = crate::test_connection_id("peer-client");
     h.external_message_peers.insert(peer.clone());
     let stale = h
         .complete_external_agent_message_auth(
@@ -1492,14 +1507,16 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
         })),
     )
     .expect("register interceptor");
-    let connection_id = tau_proto::ConnectionId::from("peer-client");
+    let connection_id = tau_proto::ConnectionId::parse("peer-client")
+        .expect("test connection id must satisfy the identifier grammar");
     h.external_message_peers.insert(connection_id.clone());
     let result = h.complete_external_agent_message_auth(
         connection_id,
         h.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: "bare-revoke".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("bare-revoke-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("bare-revoke-message")
+                .expect("test identifier must satisfy its grammar"),
             capability: "capability".to_owned(),
             sender_session_id: "sender-session"
                 .parse::<tau_proto::SessionId>()
@@ -1551,14 +1568,16 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
         })),
     )
     .expect("register interceptor");
-    let connection_id = tau_proto::ConnectionId::from("peer-client");
+    let connection_id = tau_proto::ConnectionId::parse("peer-client")
+        .expect("test connection id must satisfy the identifier grammar");
     h.external_message_peers.insert(connection_id.clone());
     let result = h.complete_external_agent_message_auth(
         connection_id,
         h.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: "bare-reselect".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("bare-reselect-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("bare-reselect-message")
+                .expect("test identifier must satisfy its grammar"),
             capability: "capability".to_owned(),
             sender_session_id: "sender-session"
                 .parse::<tau_proto::SessionId>()
@@ -1646,7 +1665,8 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
         })),
     )
     .expect("register interceptor");
-    let connection_id = tau_proto::ConnectionId::from("peer-client");
+    let connection_id = tau_proto::ConnectionId::parse("peer-client")
+        .expect("test connection id must satisfy the identifier grammar");
     let peer_results = connect_test_client(&mut h, "peer-client", tau_proto::ClientKind::External);
     queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id.clone(), "rollover");
     assert_eq!(h.pending_external_receive_acks.len(), 1);
@@ -1843,7 +1863,7 @@ fn intercepted_inference_checkpoint_fails_before_unroutable_send() {
         connect_test_client(&mut h, "unowned-provider", tau_proto::ClientKind::Provider);
     h.bus
         .set_subscriptions(
-            "unowned-provider",
+            &crate::test_connection_id("unowned-provider"),
             Vec::new(),
             vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_PROMPT_CREATED,
@@ -1913,7 +1933,7 @@ fn intercepted_prompt_start_append_failure_prevents_provider_delivery() {
     );
     h.bus
         .set_subscriptions(
-            "append-fault-observer",
+            &crate::test_connection_id("append-fault-observer"),
             Vec::new(),
             vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_PROMPT_CREATED,
@@ -1996,7 +2016,7 @@ fn intercepted_prompt_rejects_changed_runtime_incarnation() {
         connect_test_client(&mut h, "runtime-observer", tau_proto::ClientKind::Provider);
     h.bus
         .set_subscriptions(
-            "runtime-observer",
+            &crate::test_connection_id("runtime-observer"),
             Vec::new(),
             vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_PROMPT_CREATED,
@@ -2846,12 +2866,12 @@ fn suspended_interceptor_disconnect_reconnects_unsuspended() {
     assert!(h.pending_intercept.is_some());
 
     h.remove_agent(&cid);
-    let typed_connection_id = tau_proto::ConnectionId::from(connection_id);
+    let typed_connection_id = crate::test_connection_id(connection_id);
     assert!(
         h.suspended_interceptor_connections
             .contains(&typed_connection_id)
     );
-    h.handle_disconnect(connection_id);
+    h.handle_disconnect(&crate::test_connection_id(connection_id));
     assert!(
         !h.suspended_interceptor_connections
             .contains(&typed_connection_id)
@@ -3332,9 +3352,9 @@ fn connect_named_test_tool(
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let events = Arc::new(Mutex::new(Vec::new()));
     h.bus.connect(Connection::new(
-        ConnectionMetadata {
-            id: connection_id.into(),
-            name: component_name.to_owned(),
+        PendingConnectionMetadata {
+            id: Some(crate::test_connection_id(connection_id)),
+            name: crate::test_extension_name(component_name),
             kind: tau_proto::ClientKind::Tool,
             origin: ConnectionOrigin::InMemory,
         },
@@ -3347,9 +3367,9 @@ fn connect_named_test_tool(
 
 fn connect_failing_test_tool(h: &mut Harness, name: &str) {
     h.bus.connect(Connection::new(
-        ConnectionMetadata {
-            id: name.into(),
-            name: name.to_owned(),
+        PendingConnectionMetadata {
+            id: Some(crate::test_connection_id(name)),
+            name: crate::test_extension_name(name),
             kind: tau_proto::ClientKind::Tool,
             origin: ConnectionOrigin::InMemory,
         },
@@ -3955,7 +3975,7 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
         },
     );
     h.pending_tool_providers
-        .insert(call_id.clone(), "tool-provider".into());
+        .insert(call_id.clone(), crate::test_connection_id("tool-provider"));
     let _provider = connect_ready_configured_extension(
         &mut h,
         "tool-provider",
@@ -4494,7 +4514,7 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
     let observer = connect_test_client(&mut h, "interaction-observer", tau_proto::ClientKind::Ui);
     h.bus
         .set_subscriptions(
-            "interaction-observer",
+            &crate::test_connection_id("interaction-observer"),
             Vec::new(),
             vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_STATS_UPDATED,
@@ -4687,7 +4707,8 @@ fn session_shutdown_event(session_id: &str) -> Event {
 
 fn agent_message_sent_event(message: &str) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: tau_proto::AgentMessageId::parse("msg-intercept").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("msg-intercept")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: tau_proto::AgentId::parse("agent-message-sender").expect("agent id"),
         recipient: tau_proto::AgentMessageRecipient::Agent {
             agent_id: tau_proto::AgentId::parse("agent-message-recipient").expect("agent id"),
@@ -4699,7 +4720,8 @@ fn agent_message_sent_event(message: &str) -> Event {
 
 fn agent_message_received_event(recipient_id: &str) -> Event {
     Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse("msg-intercept").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("msg-intercept")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: tau_proto::AgentId::parse("agent-message-sender").expect("agent id"),
         sender_session_id: None,
         recipient_id: tau_proto::AgentId::parse(recipient_id).expect("agent id"),
@@ -5001,7 +5023,7 @@ fn interception_disconnect_mid_reply_publishes_original() {
     h.publish_event(None, draft_event("inflight"));
     // Disconnect before the interceptor replies. The harness should
     // treat this as Pass(None) and still commit the event.
-    h.handle_disconnect("interceptor");
+    h.handle_disconnect(&crate::test_connection_id("interceptor"));
 
     let entry = h
         .event_log
@@ -5624,7 +5646,7 @@ fn interception_disconnect_clears_registration() {
         })),
     )
     .expect("intercept registration");
-    h.handle_disconnect("interceptor");
+    h.handle_disconnect(&crate::test_connection_id("interceptor"));
     let after_disconnect_seq = h.event_log.next_seq();
 
     h.publish_event(None, draft_event("not intercepted"));
@@ -5804,7 +5826,7 @@ fn rollover_commits_deferred_peer_observations_without_semantic_effects() {
         ),
     ];
     for event in observations.clone() {
-        h.handle_extension_event_inner("observation-owner", event)
+        h.handle_extension_event_inner(&crate::test_connection_id("observation-owner"), event)
             .expect("defer observation");
     }
 
@@ -5831,7 +5853,8 @@ fn rollover_commits_deferred_peer_observations_without_semantic_effects() {
                 if prompt.text == "stale internal prompt"
         )
     }));
-    let source = tau_proto::ConnectionId::from("observation-owner");
+    let source = tau_proto::ConnectionId::parse("observation-owner")
+        .expect("test connection id must satisfy the identifier grammar");
     assert!(!h.agent_context_providers.contains(&source));
     assert!(!h.session_context_providers.contains(&source));
 }
@@ -5858,7 +5881,8 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
 
     let agent_id = tau_proto::AgentId::parse("shell-agent").expect("agent id");
     let progress = Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
-        command_id: tau_proto::ShellCommandId::parse("shell-progress").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("shell-progress")
+            .expect("test identifier must satisfy its grammar"),
         stream: tau_proto::ShellStream::Stdout,
         chunk: "original".to_owned(),
         target_agent_id: Some(agent_id.clone()),
@@ -5870,7 +5894,8 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(Some(Box::new(Event::ShellCommandProgress(
                 tau_proto::ShellCommandProgress {
-                    command_id: tau_proto::ShellCommandId::parse("redirected").unwrap(),
+                    command_id: tau_proto::ShellCommandId::parse("redirected")
+                        .expect("test identifier must satisfy its grammar"),
                     stream: tau_proto::ShellStream::Stderr,
                     chunk: "rewritten".to_owned(),
                     target_agent_id: Some(
@@ -5892,7 +5917,8 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
 
     interceptor.lock().expect("events").clear();
     let finished = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
-        command_id: tau_proto::ShellCommandId::parse("shell-finished").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("shell-finished")
+            .expect("test identifier must satisfy its grammar"),
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
@@ -5910,7 +5936,8 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(Some(Box::new(Event::ShellCommandFinished(
                 tau_proto::ShellCommandFinished {
-                    command_id: tau_proto::ShellCommandId::parse("redirected").unwrap(),
+                    command_id: tau_proto::ShellCommandId::parse("redirected")
+                        .expect("test identifier must satisfy its grammar"),
                     session_id: "other-session"
                         .parse::<tau_proto::SessionId>()
                         .expect("known-safe SessionId must be valid"),
@@ -5942,7 +5969,8 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
 
     interceptor.lock().expect("events").clear();
     let must_pass = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
-        command_id: tau_proto::ShellCommandId::parse("shell-must-pass").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("shell-must-pass")
+            .expect("test identifier must satisfy its grammar"),
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
@@ -5985,7 +6013,7 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
     let ui = connect_test_client(&mut h, "shell-terminal-ui", tau_proto::ClientKind::Ui);
     h.bus
         .set_subscriptions(
-            "shell-terminal-ui",
+            &crate::test_connection_id("shell-terminal-ui"),
             Vec::new(),
             vec![EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND)],
         )
@@ -5999,12 +6027,13 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
     );
     let command = tau_proto::UiShellCommand {
         session_id: h.current_session_id.clone(),
-        command_id: tau_proto::ShellCommandId::parse("parked-ui-id").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("parked-ui-id")
+            .expect("test identifier must satisfy its grammar"),
         command: "pwd".to_owned(),
         include_in_context: false,
         target_agent_id: Some(agent_id.clone()),
     };
-    h.handle_ui_shell_command("ui", command.clone());
+    h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
     let provider_id = super::super::ui_shell_provider_ids(&h.registry)
         .into_iter()
         .next()
@@ -6026,14 +6055,14 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         cancelled: false,
     };
     h.canonicalize_committed_shell_command_report(
-        provider_id.as_str(),
+        &provider_id,
         Event::ShellCommandFinishedReported(terminal),
     );
     let _ = intercepted_payload(&interceptor);
     assert!(h.pending_ui_shell_commands.is_empty());
     assert!(h.active_ui_shell_command_ids.contains(&command.command_id));
 
-    h.handle_ui_shell_command("ui", command.clone());
+    h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
     assert!(h.pending_ui_shell_commands.is_empty());
     assert_eq!(
         ui.lock()
@@ -6058,7 +6087,7 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
     .expect("must-pass terminal");
     assert!(!h.active_ui_shell_command_ids.contains(&command.command_id));
 
-    h.handle_ui_shell_command("ui", command.clone());
+    h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
     assert_eq!(h.pending_ui_shell_commands.len(), 1);
     assert_eq!(
         ui.lock()
@@ -6080,7 +6109,7 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         .expect("second route")
         .clone();
     h.canonicalize_committed_shell_command_report(
-        provider_id.as_str(),
+        &provider_id,
         Event::ShellCommandFinishedReported(tau_proto::ShellCommandFinished {
             command_id: second_route.as_protocol_id().clone(),
             session_id: command.session_id,

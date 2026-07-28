@@ -22,8 +22,8 @@ use rand::RngCore;
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
-    MessageDelivered, MessageFactId, MessageParty, MessagePublisherId, MessageSenderAuth,
-    MessageSent, SessionId, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
+    MessageDelivered, MessageFactId, MessageParty, MessageSenderAuth, MessageSent,
+    RawMessagePublisherId, SessionId, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
     ToolStarted, ToolUseState, ToolUseStatus,
 };
 use tokio_xmpp::{Client, IqRequest, IqResponse};
@@ -265,7 +265,8 @@ struct RuntimeConfig {
     muc: MucConfig,
     /// Maximum accepted outbound or inbound text length.
     max_message_bytes: usize,
-    /// Optional extension instance name for generated resources/rooms.
+    /// Harness-configured instance identity used for publisher claims and
+    /// generated resources/rooms; present in every admitted runtime config.
     instance_name: Option<String>,
 }
 
@@ -949,6 +950,10 @@ impl Extension {
                 RoutingMode::Muc => registered_conversation,
                 RoutingMode::DirectResource => cfg.default_recipient.to_bare().to_string(),
             };
+            let publisher_name = cfg
+                .instance_name
+                .clone()
+                .expect("configured XMPP runtime retains its instance name");
             drop(state);
             let parts = match outbound_message_parts(&invoke.agent_id, &message) {
                 Ok(parts) => parts,
@@ -971,7 +976,7 @@ impl Extension {
             }
             self.output
                 .emit_message_report(Event::MessageSentReported(MessageSent::new(
-                    MessagePublisherId::default(),
+                    RawMessagePublisherId::new(publisher_name),
                     MessageAgentTarget::new(invoke.agent_id.as_ref()),
                     generated_xmpp_send_message_id(invoke.call_id.as_str(), &conversation),
                     None,
@@ -2157,7 +2162,12 @@ impl WorkerState {
     ) {
         self.output
             .emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
-                MessagePublisherId::default(),
+                RawMessagePublisherId::new(
+                    self.cfg
+                        .instance_name
+                        .as_deref()
+                        .expect("configured XMPP worker retains its instance name"),
+                ),
                 MessageAgentTarget::new(agent_id.as_ref()),
                 message_id,
                 sender,

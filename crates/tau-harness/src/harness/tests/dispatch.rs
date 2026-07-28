@@ -3,9 +3,8 @@ use crate::AgentId;
 use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::interception::AgentPublishCompletion;
 use crate::harness::{
-    BackgroundCompletionPromptMode, MAX_UI_SHELL_COMMAND_ID_BYTES, PendingTool,
-    RestoredCheckpointAuthority, background_completion_prompt,
-    extension_disconnected_background_tool_call_error_message,
+    BackgroundCompletionPromptMode, PendingTool, RestoredCheckpointAuthority,
+    background_completion_prompt, extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
     restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
 };
@@ -512,8 +511,10 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
     unsupported.name = ToolName::new("hidden_custom");
     unsupported.model_visible_name = None;
     unsupported.tool_type = tau_proto::ToolType::Custom;
-    h.registry.register("capability-test", aliased);
-    h.registry.register("capability-test", unsupported);
+    h.registry
+        .register(&crate::test_connection_id("capability-test"), aliased);
+    h.registry
+        .register(&crate::test_connection_id("capability-test"), unsupported);
     let selected_role = h.selected_role.clone();
     h.system_prompt_templates.insert(
         "conditional-template".to_owned(),
@@ -597,7 +598,8 @@ fn message_fact_conditional_template_failure_precedes_dispatch_checkpoint() {
     h.commit_message_fact(
         None,
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
-            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessagePublisherId::parse("bridge")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             tau_proto::MessageAgentTarget::new(agent_id.as_str()),
             tau_proto::MessageFactId::new("m1"),
             tau_proto::MessageParty {
@@ -671,7 +673,7 @@ fn late_prompt_surface_failure_terminalizes_running_compaction() {
 
     for internal_name in ["first_internal", "second_internal"] {
         h.registry.register(
-            "late-surface-test",
+            &crate::test_connection_id("late-surface-test"),
             ToolSpec {
                 name: ToolName::new(internal_name),
                 model_visible_name: Some(ToolName::new("duplicate_visible")),
@@ -1070,12 +1072,13 @@ fn shell_workdir_prompt_renders_prefixed_instances_independently() {
         .cloned()
         .expect("core shell workdir fragment");
     h.extension_prompt_fragments.insert(
-        "shell-prod".into(),
+        crate::test_connection_id("shell-prod"),
         std::collections::BTreeMap::from([("shell.workdir".to_owned(), fragment)]),
     );
     let mut prod_workdir = shared_test_tool_spec("prod_workdir");
     prod_workdir.tags = vec![tau_proto::ToolTag::new("shell:workdir")];
-    h.registry.register("shell-prod", prod_workdir);
+    h.registry
+        .register(&crate::test_connection_id("shell-prod"), prod_workdir);
     publish_shell_workdir_context(
         &mut h,
         &agent_id,
@@ -1197,7 +1200,7 @@ fn shell_workdir_prompt_is_absent_without_a_shell_instance() {
         .map(|provider| provider.connection_id.clone())
         .collect::<std::collections::HashSet<_>>();
     for connection_id in shell_connections {
-        h.registry.unregister_connection(connection_id.as_str());
+        h.registry.unregister_connection(&connection_id);
     }
 
     let prompt = render_shell_workdir_prompt(&h, &agent_id);
@@ -1218,11 +1221,11 @@ fn duplicate_shell_workdir_fragments_are_coalesced_once() {
         "{{#each agent_context.workdir}}{{value.label}}={{value.path}}{{/each}}",
     );
     h.extension_prompt_fragments.insert(
-        "shell-a".into(),
+        crate::test_connection_id("shell-a"),
         std::collections::BTreeMap::from([("shell.workdir".to_owned(), fragment.clone())]),
     );
     h.extension_prompt_fragments.insert(
-        "shell-b".into(),
+        crate::test_connection_id("shell-b"),
         std::collections::BTreeMap::from([("shell.workdir".to_owned(), fragment)]),
     );
     let fragments = h.gather_prompt_fragments();
@@ -1242,7 +1245,7 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
     fn command(agent_id: tau_proto::AgentId, id: &str) -> tau_proto::UiShellCommand {
         tau_proto::UiShellCommand {
             session_id: test_session_id("s1"),
-            command_id: id.into(),
+            command_id: test_shell_command_id(id),
             command: "pwd".to_owned(),
             include_in_context: false,
             target_agent_id: Some(agent_id),
@@ -1260,7 +1263,7 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
     );
     let mut stale = command(agent_id.clone(), "stale");
     stale.session_id = test_session_id("old-session");
-    h.handle_ui_shell_command("ui", stale);
+    h.handle_ui_shell_command(&crate::test_connection_id("ui"), stale);
     assert_eq!(
         event_log_events(&h)
             .iter()
@@ -1272,13 +1275,16 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
             .count(),
         1
     );
-    h.handle_ui_shell_command("ui", command(agent_id.clone(), "one"));
+    h.handle_ui_shell_command(
+        &crate::test_connection_id("ui"),
+        command(agent_id.clone(), &crate::test_connection_id("one")),
+    );
     assert!(!event_log_events(&h).iter().any(
         |event| matches!(event, Event::ShellCommandFinished(finished) if finished.command_id.as_str() == "one")
     ));
 
     h.registry.register(
-        "extra-shell",
+        &crate::test_connection_id("extra-shell"),
         tau_proto::ToolSpec {
             name: tau_proto::ToolName::new("extra_shell"),
             model_visible_name: None,
@@ -1292,7 +1298,10 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
             examples: Vec::new(),
         },
     );
-    h.handle_ui_shell_command("ui", command(agent_id.clone(), "many"));
+    h.handle_ui_shell_command(
+        &crate::test_connection_id("ui"),
+        command(agent_id.clone(), &crate::test_connection_id("many")),
+    );
     assert_eq!(
         event_log_events(&h)
             .iter()
@@ -1307,9 +1316,12 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
 
     let providers = super::super::ui_shell_provider_ids(&h.registry);
     for provider in providers {
-        h.registry.unregister_connection(provider.as_str());
+        h.registry.unregister_connection(&provider);
     }
-    h.handle_ui_shell_command("ui", command(agent_id, "zero"));
+    h.handle_ui_shell_command(
+        &crate::test_connection_id("ui"),
+        command(agent_id, &crate::test_connection_id("zero")),
+    );
     assert_eq!(
         event_log_events(&h)
             .iter()
@@ -1323,7 +1335,7 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
     );
 
     h.registry.register(
-        "lost-shell",
+        &crate::test_connection_id("lost-shell"),
         tau_proto::ToolSpec {
             name: tau_proto::ToolName::new("lost_shell"),
             model_visible_name: None,
@@ -1344,7 +1356,10 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
             .as_deref()
             .expect("durable agent id"),
     );
-    h.handle_ui_shell_command("ui", command(target, "delivery-lost"));
+    h.handle_ui_shell_command(
+        &crate::test_connection_id("ui"),
+        command(target, &crate::test_connection_id("delivery-lost")),
+    );
     assert_eq!(
         event_log_events(&h)
             .iter()
@@ -1365,13 +1380,13 @@ fn ui_shell_route_is_point_to_point_with_resolved_target() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path()).expect("harness");
     for provider in super::super::ui_shell_provider_ids(&h.registry) {
-        h.registry.unregister_connection(provider.as_str());
+        h.registry.unregister_connection(&provider);
     }
     let sink = connect_test_tool(&mut h, "shell-provider");
     let decoy = connect_test_tool(&mut h, "shell-decoy");
     h.bus
         .set_subscriptions(
-            "shell-provider",
+            &crate::test_connection_id("shell-provider"),
             Vec::new(),
             vec![tau_proto::EventSelector::Exact(
                 tau_proto::EventName::UI_SHELL_COMMAND,
@@ -1380,7 +1395,7 @@ fn ui_shell_route_is_point_to_point_with_resolved_target() {
         .expect("subscribe shell provider");
     h.bus
         .set_subscriptions(
-            "shell-decoy",
+            &crate::test_connection_id("shell-decoy"),
             Vec::new(),
             vec![tau_proto::EventSelector::Exact(
                 tau_proto::EventName::UI_SHELL_COMMAND,
@@ -1392,7 +1407,7 @@ fn ui_shell_route_is_point_to_point_with_resolved_target() {
     for ui in ["shell-ui-a", "shell-ui-b"] {
         h.bus
             .set_subscriptions(
-                ui,
+                &crate::test_connection_id(ui),
                 Vec::new(),
                 vec![tau_proto::EventSelector::Exact(
                     tau_proto::EventName::UI_SHELL_COMMAND,
@@ -1401,7 +1416,7 @@ fn ui_shell_route_is_point_to_point_with_resolved_target() {
             .expect("subscribe ui projection");
     }
     h.registry.register(
-        "shell-provider",
+        &crate::test_connection_id("shell-provider"),
         tau_proto::ToolSpec {
             name: tau_proto::ToolName::new("shell"),
             model_visible_name: None,
@@ -1423,10 +1438,11 @@ fn ui_shell_route_is_point_to_point_with_resolved_target() {
             .expect("durable agent id"),
     );
     h.handle_ui_shell_command(
-        "ui",
+        &crate::test_connection_id("ui"),
         tau_proto::UiShellCommand {
             session_id: test_session_id("s1"),
-            command_id: tau_proto::ShellCommandId::parse("routed-shell").unwrap(),
+            command_id: tau_proto::ShellCommandId::parse("routed-shell")
+                .expect("test identifier must satisfy its grammar"),
             command: "pwd".to_owned(),
             include_in_context: false,
             target_agent_id: None,
@@ -1474,12 +1490,12 @@ fn configure_test_ui_shell_provider(
     connection_id: &str,
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
     for provider in super::super::ui_shell_provider_ids(&h.registry) {
-        h.registry.unregister_connection(provider.as_str());
+        h.registry.unregister_connection(&provider);
     }
     let sink = connect_test_tool(h, connection_id);
     h.bus
         .set_subscriptions(
-            connection_id,
+            &crate::test_connection_id(connection_id),
             Vec::new(),
             vec![tau_proto::EventSelector::Exact(
                 tau_proto::EventName::UI_SHELL_COMMAND,
@@ -1487,7 +1503,7 @@ fn configure_test_ui_shell_provider(
         )
         .expect("subscribe shell provider");
     h.registry.register(
-        connection_id,
+        &crate::test_connection_id(connection_id),
         tau_proto::ToolSpec {
             name: tau_proto::ToolName::new("shell"),
             model_visible_name: None,
@@ -1518,12 +1534,12 @@ fn routed_ui_shell_command(
     );
     let command = tau_proto::UiShellCommand {
         session_id: h.current_session_id.clone(),
-        command_id: command_id.into(),
+        command_id: test_shell_command_id(command_id),
         command: "pwd".to_owned(),
         include_in_context,
         target_agent_id: Some(agent_id),
     };
-    h.handle_ui_shell_command("ui", command.clone());
+    h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
     command
 }
 
@@ -1538,7 +1554,7 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
     let ui = connect_test_client(&mut h, "shell-owner-ui", tau_proto::ClientKind::Ui);
     h.bus
         .set_subscriptions(
-            "shell-owner-ui",
+            &crate::test_connection_id("shell-owner-ui"),
             Vec::new(),
             vec![tau_proto::EventSelector::Exact(
                 tau_proto::EventName::UI_SHELL_COMMAND,
@@ -1546,7 +1562,7 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         )
         .expect("subscribe shell ui");
     let command = routed_ui_shell_command(&mut h, "owned-shell", true);
-    h.handle_ui_shell_command("ui", command.clone());
+    h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
     assert_eq!(h.pending_ui_shell_commands.len(), 1);
     let first_route_id = h
         .pending_ui_shell_commands
@@ -1563,13 +1579,13 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         target_agent_id: target_agent_id.clone(),
     };
     h.canonicalize_committed_shell_command_report(
-        "shell-non-owner",
+        &crate::test_connection_id("shell-non-owner"),
         Event::ShellCommandProgressReported(progress.clone()),
     );
     let mut altered_progress = progress;
     altered_progress.target_agent_id = Some(crate::parse_agent_id("other_agent"));
     h.canonicalize_committed_shell_command_report(
-        "shell-owner",
+        &crate::test_connection_id("shell-owner"),
         Event::ShellCommandProgressReported(altered_progress),
     );
     assert!(!event_log_events(&h).iter().any(
@@ -1577,7 +1593,7 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
             if progress.command_id == command.command_id)
     ));
     h.canonicalize_committed_shell_command_report(
-        "shell-owner",
+        &crate::test_connection_id("shell-owner"),
         Event::ShellCommandProgressReported(tau_proto::ShellCommandProgress {
             command_id: first_route_id.as_protocol_id().clone(),
             stream: tau_proto::ShellStream::Stdout,
@@ -1603,13 +1619,13 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         cancelled: false,
     };
     h.canonicalize_committed_shell_command_report(
-        "shell-non-owner",
+        &crate::test_connection_id("shell-non-owner"),
         Event::ShellCommandFinishedReported(finished.clone()),
     );
     let mut altered_finished = finished.clone();
     altered_finished.include_in_context = false;
     h.canonicalize_committed_shell_command_report(
-        "shell-owner",
+        &crate::test_connection_id("shell-owner"),
         Event::ShellCommandFinishedReported(altered_finished),
     );
     assert!(
@@ -1620,11 +1636,11 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
     );
 
     h.canonicalize_committed_shell_command_report(
-        "shell-owner",
+        &crate::test_connection_id("shell-owner"),
         Event::ShellCommandFinishedReported(finished.clone()),
     );
     h.canonicalize_committed_shell_command_report(
-        "shell-owner",
+        &crate::test_connection_id("shell-owner"),
         Event::ShellCommandFinishedReported(finished.clone()),
     );
     assert_eq!(
@@ -1636,13 +1652,7 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         1
     );
 
-    h.handle_ui_shell_command("ui", command.clone());
-    let mut empty = command.clone();
-    empty.command_id = "".into();
-    h.handle_ui_shell_command("ui", empty);
-    let mut oversized = command.clone();
-    oversized.command_id = "x".repeat(MAX_UI_SHELL_COMMAND_ID_BYTES + 1).into();
-    h.handle_ui_shell_command("ui", oversized);
+    h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
     let second_route_id = h
         .pending_ui_shell_commands
         .keys()
@@ -1651,7 +1661,7 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         .clone();
     assert_ne!(first_route_id, second_route_id);
     h.canonicalize_committed_shell_command_report(
-        "shell-owner",
+        &crate::test_connection_id("shell-owner"),
         Event::ShellCommandFinishedReported(finished.clone()),
     );
     assert_eq!(
@@ -1663,7 +1673,7 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
     second_finished.command_id = second_route_id.as_protocol_id().clone();
     second_finished.output = "second".to_owned();
     h.canonicalize_committed_shell_command_report(
-        "shell-owner",
+        &crate::test_connection_id("shell-owner"),
         Event::ShellCommandFinishedReported(second_finished),
     );
     assert!(h.pending_ui_shell_commands.is_empty());
@@ -1707,8 +1717,8 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
     );
 }
 
-/// UI shell correlation accepts the documented 256-byte boundary and rejects
-/// empty or 257-byte ids before either UI projection or provider delivery.
+/// UI shell correlation accepts the validated 64-byte identifier boundary
+/// without truncating its provider or UI projection.
 #[test]
 fn ui_shell_command_id_bounds_apply_before_projection() {
     let td = TempDir::new().expect("tempdir");
@@ -1717,7 +1727,7 @@ fn ui_shell_command_id_bounds_apply_before_projection() {
     let ui = connect_test_client(&mut h, "bounded-shell-ui", tau_proto::ClientKind::Ui);
     h.bus
         .set_subscriptions(
-            "bounded-shell-ui",
+            &crate::test_connection_id("bounded-shell-ui"),
             Vec::new(),
             vec![tau_proto::EventSelector::Exact(
                 tau_proto::EventName::UI_SHELL_COMMAND,
@@ -1734,15 +1744,16 @@ fn ui_shell_command_id_bounds_apply_before_projection() {
     let session_id = h.current_session_id.clone();
     let command = |id: String| tau_proto::UiShellCommand {
         session_id: session_id.clone(),
-        command_id: id.into(),
+        command_id: test_shell_command_id(id),
         command: "pwd".to_owned(),
         include_in_context: false,
         target_agent_id: target_agent_id.clone(),
     };
-    let accepted_id = "a".repeat(MAX_UI_SHELL_COMMAND_ID_BYTES);
-    h.handle_ui_shell_command("ui", command(accepted_id.clone()));
-    h.handle_ui_shell_command("ui", command(String::new()));
-    h.handle_ui_shell_command("ui", command("x".repeat(MAX_UI_SHELL_COMMAND_ID_BYTES + 1)));
+    let accepted_id = "a".repeat(64);
+    h.handle_ui_shell_command(
+        &crate::test_connection_id("ui"),
+        command(accepted_id.clone()),
+    );
 
     let provider_commands = provider
         .lock()
@@ -1770,7 +1781,7 @@ fn ui_shell_command_id_bounds_apply_before_projection() {
         vec![tau_proto::ShellCommandId::parse(accepted_id).expect("test identifier must be valid")]
     );
     assert_eq!(h.pending_ui_shell_commands.len(), 1);
-    h.handle_disconnect("bounded-shell-owner");
+    h.handle_disconnect(&crate::test_connection_id("bounded-shell-owner"));
     assert!(h.pending_ui_shell_commands.is_empty());
     assert!(h.active_ui_shell_command_ids.is_empty());
 }
@@ -1783,7 +1794,7 @@ fn ui_shell_pending_commands_fail_on_provider_disconnect_and_session_shutdown() 
     let mut h = echo_harness(td.path()).expect("harness");
     configure_test_ui_shell_provider(&mut h, "shell-owner");
     let disconnected = routed_ui_shell_command(&mut h, "disconnect-shell", false);
-    h.handle_disconnect("shell-owner");
+    h.handle_disconnect(&crate::test_connection_id("shell-owner"));
     assert_eq!(
         event_log_events(&h)
             .iter()
@@ -2031,10 +2042,11 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
     let agent_id = {
         let mut h = echo_harness(&sp).expect("start");
         h.selected_model = Some("test/model".into());
+        connect_test_tool(&mut h, "conn-delegate");
         let parent = ensure_test_user_agent(&mut h);
         h.tool_agents.insert("delegate-call".into(), parent);
         h.handle_start_agent_request(
-            "conn-delegate",
+            &crate::test_connection_id("conn-delegate"),
             StartAgentRequest {
                 parent_agent: None,
                 query_id: "q-role".to_owned(),
@@ -2758,8 +2770,10 @@ pub(super) fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (Te
         "configured-wrong",
         tau_proto::ClientKind::Tool,
     );
-    h.registry
-        .register("conn-owner", shared_test_tool_spec(tool_name));
+    h.registry.register(
+        &crate::test_connection_id("conn-owner"),
+        shared_test_tool_spec(tool_name),
+    );
 
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id(format!("sp-{call_id}"));
@@ -2846,7 +2860,8 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
         note: Some("Only include schema-declared fields.".to_owned()),
         subcommand: None,
     }];
-    h.registry.register("conn-strict-tool", spec);
+    h.registry
+        .register(&crate::test_connection_id("conn-strict-tool"), spec);
 
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-invalid-tool-args");
@@ -2979,7 +2994,8 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
         "required": ["count", "flags"],
         "additionalProperties": false
     }));
-    h.registry.register("conn-repair-tool", spec);
+    h.registry
+        .register(&crate::test_connection_id("conn-repair-tool"), spec);
 
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-repair-tool-args");
@@ -3083,7 +3099,10 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
         "required": ["count"],
         "additionalProperties": false
     }));
-    h.registry.register("conn-repair-revalidate-tool", spec);
+    h.registry.register(
+        &crate::test_connection_id("conn-repair-revalidate-tool"),
+        spec,
+    );
 
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-repair-revalidate-tool-args");
@@ -3208,7 +3227,7 @@ fn invalid_tool_example_registration_is_rejected_with_notice() {
     }];
 
     h.handle_extension_event_inner(
-        "conn-invalid-example",
+        &crate::test_connection_id("conn-invalid-example"),
         Event::ToolRegistrationDeclared(tau_proto::ToolRegistrationDeclared {
             tool: spec,
             tool_group: None,
@@ -3461,7 +3480,7 @@ fn side_agent_repetition_response_propagates_error_result() {
     let frames = connect_test_client(&mut h, "conn-side", tau_proto::ClientKind::External);
 
     h.handle_start_agent_request(
-        "conn-side",
+        &crate::test_connection_id("conn-side"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-repetition".to_owned(),
@@ -3486,7 +3505,7 @@ fn side_agent_repetition_response_propagates_error_result() {
         tau_proto::AgentId::parse("side").expect("agent id"),
     );
     response.originator = tau_proto::PromptOriginator::Extension {
-        name: "conn-side".into(),
+        name: crate::test_extension_name("conn-side"),
         query_id: "q-repetition".to_owned(),
     };
     response.error = Some("provider stream repetition detected".to_owned());
@@ -3532,7 +3551,7 @@ fn side_agent_error_response_propagates_error_result() {
     let frames = connect_test_client(&mut h, "conn-side-error", tau_proto::ClientKind::External);
 
     h.handle_start_agent_request(
-        "conn-side-error",
+        &crate::test_connection_id("conn-side-error"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-error".to_owned(),
@@ -3563,7 +3582,7 @@ fn side_agent_error_response_propagates_error_result() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "conn-side-error".into(),
+            name: crate::test_extension_name("conn-side-error"),
             query_id: "q-error".to_owned(),
         },
         compaction_original_input_tokens: None,
@@ -3618,7 +3637,7 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
         .expect("parent agent id");
 
     h.handle_start_agent_request(
-        "conn-side-invalid",
+        &crate::test_connection_id("conn-side-invalid"),
         StartAgentRequest {
             parent_agent: Some(parent),
             query_id: "q-invalid-tool".to_owned(),
@@ -3651,7 +3670,7 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
     })];
     response.stop_reason = tau_proto::ProviderStopReason::ToolCalls;
     response.originator = tau_proto::PromptOriginator::Extension {
-        name: "conn-side-invalid".into(),
+        name: crate::test_extension_name("conn-side-invalid"),
         query_id: "q-invalid-tool".to_owned(),
     };
 
@@ -4140,9 +4159,10 @@ fn loop_guard_block_preserves_canonical_agent_message_wake() {
         .mark_cycle_blocked("cycle");
     seed_tools_running(&mut h, &cid, vec!["done-call".into()]);
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("loop-guard-agent-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("loop-guard-agent-message")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
@@ -4223,7 +4243,7 @@ fn loop_guard_resets_on_successful_background_tool_result() {
     );
 
     h.handle_background_tool_result(
-        "conn-bg",
+        &crate::test_connection_id("conn-bg"),
         tau_proto::ToolResult {
             call_id: "bg-call".into(),
             tool_name: ToolName::new("read"),
@@ -4300,10 +4320,14 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
         },
     );
 
-    h.registry
-        .register("conn-readable", shared_test_tool_spec("readable"));
-    h.registry
-        .register("conn-disabled", shared_test_tool_spec("disabled_tool"));
+    h.registry.register(
+        &crate::test_connection_id("conn-readable"),
+        shared_test_tool_spec("readable"),
+    );
+    h.registry.register(
+        &crate::test_connection_id("conn-disabled"),
+        shared_test_tool_spec("disabled_tool"),
+    );
 
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-unavailable-tool-errors");
@@ -4395,8 +4419,10 @@ fn current_role_disabled_tool_error_names_role_model_authority() {
             ..Default::default()
         },
     );
-    h.registry
-        .register("conn-disabled", shared_test_tool_spec("disabled_tool"));
+    h.registry.register(
+        &crate::test_connection_id("conn-disabled"),
+        shared_test_tool_spec("disabled_tool"),
+    );
     let cid = ensure_test_user_agent(&mut h);
 
     h.execute_agent_tool_call(
@@ -4433,8 +4459,10 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    h.registry
-        .register("conn-current", shared_test_tool_spec("current_tool"));
+    h.registry.register(
+        &crate::test_connection_id("conn-current"),
+        shared_test_tool_spec("current_tool"),
+    );
 
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-snapshot-tool-suggestion");
@@ -4538,13 +4566,15 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
         "required": ["allowed"],
         "additionalProperties": false
     }));
-    h.registry.register("conn-strict-old-tool", spec);
+    h.registry
+        .register(&crate::test_connection_id("conn-strict-old-tool"), spec);
 
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-strict-old-tool");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
-    h.registry.unregister_connection("conn-strict-old-tool");
+    h.registry
+        .unregister_connection(&crate::test_connection_id("conn-strict-old-tool"));
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
@@ -4618,8 +4648,10 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     h.selected_model = Some("test/model".into());
 
     let tool_events = connect_test_tool(&mut h, "conn-dead-tool");
-    h.registry
-        .register("conn-dead-tool", exclusive_test_tool_spec("dead_slow"));
+    h.registry.register(
+        &crate::test_connection_id("conn-dead-tool"),
+        exclusive_test_tool_spec("dead_slow"),
+    );
 
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-dead-tool");
@@ -4705,7 +4737,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     )
     .expect("register disconnect terminal interceptor");
 
-    h.handle_disconnect("conn-dead-tool");
+    h.handle_disconnect(&crate::test_connection_id("conn-dead-tool"));
 
     assert_eq!(h.tool_turn.pending_len(), 1);
     h.handle_extension_event(
@@ -4780,7 +4812,7 @@ fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
     let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     let live_events = connect_test_tool(&mut h, "conn-live-after-fault");
     h.registry.register(
-        "conn-live-after-fault",
+        &crate::test_connection_id("conn-live-after-fault"),
         shared_test_tool_spec("live_after_fault"),
     );
     h.tool_turn.push(
@@ -4803,7 +4835,7 @@ fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
     let backup = journal.with_extension("cbor.disconnect-fault-backup");
     std::fs::rename(&journal, &backup).expect("park journal");
     std::fs::create_dir(&journal).expect("block journal");
-    h.handle_disconnect("conn-owner");
+    h.handle_disconnect(&crate::test_connection_id("conn-owner"));
 
     assert_eq!(h.tool_turn.pending_len(), 1);
     assert!(tool_invoke_call_ids(&live_events).is_empty());
@@ -4946,22 +4978,28 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
     let state = td.path().join("state");
     let mut h = quiet_provider_harness(&state).expect("harness");
     let first = h
-        .prepare_start_agent_request(HARNESS_CONNECTION_ID, ext_query("q-fail"))
+        .prepare_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query("q-fail"),
+        )
         .expect("prepare first")
         .expect("first pending");
     let second = h
-        .prepare_start_agent_request(HARNESS_CONNECTION_ID, ext_query("q-next"))
+        .prepare_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query("q-next"),
+        )
         .expect("prepare second")
         .expect("second pending");
     let first_agent_id = first.agent_id.clone();
     let second_agent_id = second.agent_id.clone();
     h.accept_duplicate_start_agent_request(
-        HARNESS_CONNECTION_ID,
+        &crate::test_connection_id(HARNESS_CONNECTION_ID),
         &first.query.query_id,
         &first_agent_id,
     );
     h.accept_duplicate_start_agent_request(
-        HARNESS_CONNECTION_ID,
+        &crate::test_connection_id(HARNESS_CONNECTION_ID),
         &second.query.query_id,
         &second_agent_id,
     );
@@ -5114,11 +5152,11 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-bg-result-drain",
+        &crate::test_connection_id("conn-bg-result-drain"),
         scheduled_test_tool_spec("bg_update", tau_proto::BackgroundSupport::Instant),
     );
     h.registry.register(
-        "conn-bg-result-drain",
+        &crate::test_connection_id("conn-bg-result-drain"),
         scheduled_test_tool_spec("queued_update", tau_proto::BackgroundSupport::Never),
     );
 
@@ -5174,7 +5212,7 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
     assert_eq!(h.tool_turn.pending_len(), 0);
 
     h.handle_extension_event_inner(
-        "conn-bg-result-drain",
+        &crate::test_connection_id("conn-bg-result-drain"),
         Event::ToolResultReported(final_tool_result(
             "bg-update-running",
             "bg_update",
@@ -5213,11 +5251,11 @@ fn background_error_clears_actual_running_call() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-bg-error-drain",
+        &crate::test_connection_id("conn-bg-error-drain"),
         scheduled_test_tool_spec("bg_exclusive", tau_proto::BackgroundSupport::Instant),
     );
     h.registry.register(
-        "conn-bg-error-drain",
+        &crate::test_connection_id("conn-bg-error-drain"),
         scheduled_test_tool_spec(
             "queued_update_after_error",
             tau_proto::BackgroundSupport::Never,
@@ -5279,7 +5317,7 @@ fn background_error_clears_actual_running_call() {
     assert_eq!(h.tool_turn.pending_len(), 0);
 
     h.handle_extension_event_inner(
-        "conn-bg-error-drain",
+        &crate::test_connection_id("conn-bg-error-drain"),
         Event::ToolErrorReported(tool_error(
             "bg-exclusive-running",
             "bg_exclusive",
@@ -5327,11 +5365,11 @@ fn background_cancel_clears_actual_running_call() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-bg-cancel-drain",
+        &crate::test_connection_id("conn-bg-cancel-drain"),
         scheduled_test_tool_spec("bg_exclusive_cancel", tau_proto::BackgroundSupport::Instant),
     );
     h.registry.register(
-        "conn-bg-cancel-drain",
+        &crate::test_connection_id("conn-bg-cancel-drain"),
         scheduled_test_tool_spec(
             "queued_update_after_cancel",
             tau_proto::BackgroundSupport::Never,
@@ -5399,7 +5437,7 @@ fn background_cancel_clears_actual_running_call() {
     assert_eq!(h.tool_turn.pending_len(), 0);
 
     h.handle_extension_event_inner(
-        "conn-bg-cancel-drain",
+        &crate::test_connection_id("conn-bg-cancel-drain"),
         Event::ToolCancelledReported(tau_proto::ToolCancelled {
             call_id: "bg-exclusive-cancel-running".into(),
             tool_name: ToolName::new("bg_exclusive_cancel"),
@@ -5465,15 +5503,15 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
     let _dead_events = connect_test_tool(&mut h, "conn-bg-disconnect-batch");
     let live_events = connect_test_tool(&mut h, "conn-bg-disconnect-live");
     h.registry.register(
-        "conn-bg-disconnect-batch",
+        &crate::test_connection_id("conn-bg-disconnect-batch"),
         scheduled_test_tool_spec("dead_bg_shared", tau_proto::BackgroundSupport::Instant),
     );
     h.registry.register(
-        "conn-bg-disconnect-batch",
+        &crate::test_connection_id("conn-bg-disconnect-batch"),
         scheduled_test_tool_spec("dead_bg_update", tau_proto::BackgroundSupport::Instant),
     );
     h.registry.register(
-        "conn-bg-disconnect-live",
+        &crate::test_connection_id("conn-bg-disconnect-live"),
         scheduled_test_tool_spec("live_queued_update", tau_proto::BackgroundSupport::Never),
     );
 
@@ -5548,7 +5586,7 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
     assert!(h.tool_turn.is_backgrounded(&"a-bg-update".into()));
     assert!(h.tool_turn.is_backgrounded(&"b-bg-shared".into()));
 
-    h.handle_disconnect("conn-bg-disconnect-batch");
+    h.handle_disconnect(&crate::test_connection_id("conn-bg-disconnect-batch"));
 
     assert_eq!(
         tool_invoke_call_ids(&live_events),
@@ -5582,11 +5620,11 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
 
     let _dead_events = connect_test_tool(&mut h, "conn-bg-idle-disconnect");
     h.registry.register(
-        "conn-bg-idle-disconnect",
+        &crate::test_connection_id("conn-bg-idle-disconnect"),
         scheduled_test_tool_spec("dead_bg_one", tau_proto::BackgroundSupport::Instant),
     );
     h.registry.register(
-        "conn-bg-idle-disconnect",
+        &crate::test_connection_id("conn-bg-idle-disconnect"),
         scheduled_test_tool_spec("dead_bg_two", tau_proto::BackgroundSupport::Instant),
     );
 
@@ -5657,7 +5695,7 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
         AgentTurnState::Idle
     ));
 
-    h.handle_disconnect("conn-bg-idle-disconnect");
+    h.handle_disconnect(&crate::test_connection_id("conn-bg-idle-disconnect"));
 
     let first_error_seq = event_log_position(&h, |event| {
         matches!(
@@ -5695,11 +5733,11 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
 
     let dead_events = connect_test_tool(&mut h, "conn-mixed-disconnect");
     h.registry.register(
-        "conn-mixed-disconnect",
+        &crate::test_connection_id("conn-mixed-disconnect"),
         scheduled_test_tool_spec("dead_foreground", tau_proto::BackgroundSupport::Never),
     );
     h.registry.register(
-        "conn-mixed-disconnect",
+        &crate::test_connection_id("conn-mixed-disconnect"),
         scheduled_test_tool_spec("dead_background", tau_proto::BackgroundSupport::Instant),
     );
 
@@ -5765,7 +5803,7 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
         AgentTurnState::ToolsRunning { .. }
     ));
 
-    h.handle_disconnect("conn-mixed-disconnect");
+    h.handle_disconnect(&crate::test_connection_id("conn-mixed-disconnect"));
 
     let foreground_error_seq = event_log_position(&h, |event| {
         matches!(
@@ -5799,7 +5837,7 @@ fn provider_owner_validation_rejects_wrong_tool_result() {
     let (_td, mut h) = setup_routed_test_tool_call("owner-result-call", "owned_tool");
 
     h.handle_extension_event_inner(
-        "conn-wrong",
+        &crate::test_connection_id("conn-wrong"),
         Event::ToolResultReported(final_tool_result(
             "owner-result-call",
             "owned_tool",
@@ -5821,7 +5859,7 @@ fn provider_owner_validation_rejects_wrong_tool_result() {
     )));
 
     h.handle_extension_event_inner(
-        "conn-owner",
+        &crate::test_connection_id("conn-owner"),
         Event::ToolResultReported(final_tool_result(
             "owner-result-call",
             "owned_tool",
@@ -5853,7 +5891,7 @@ fn provider_owner_validation_rejects_wrong_tool_error() {
     let (_td, mut h) = setup_routed_test_tool_call("owner-error-call", "owned_tool");
 
     h.handle_extension_event_inner(
-        "conn-wrong",
+        &crate::test_connection_id("conn-wrong"),
         Event::ToolErrorReported(tool_error(
             "owner-error-call",
             "owned_tool",
@@ -5875,7 +5913,7 @@ fn provider_owner_validation_rejects_wrong_tool_error() {
     )));
 
     h.handle_extension_event_inner(
-        "conn-owner",
+        &crate::test_connection_id("conn-owner"),
         Event::ToolErrorReported(tool_error("owner-error-call", "owned_tool", "real failure")),
     )
     .expect("owner error accepted");
@@ -5902,7 +5940,7 @@ fn provider_owner_validation_rejects_wrong_tool_progress() {
     let (_td, mut h) = setup_routed_test_tool_call("owner-progress-call", "owned_tool");
 
     h.handle_extension_event_inner(
-        "conn-wrong",
+        &crate::test_connection_id("conn-wrong"),
         Event::ToolProgressReported(tool_progress(
             "owner-progress-call",
             "owned_tool",
@@ -5920,7 +5958,7 @@ fn provider_owner_validation_rejects_wrong_tool_progress() {
     assert!(h.tool_agents.contains_key("owner-progress-call"));
 
     h.handle_extension_event_inner(
-        "conn-owner",
+        &crate::test_connection_id("conn-owner"),
         Event::ToolProgressReported(tool_progress(
             "owner-progress-call",
             "owned_tool",
@@ -5950,7 +5988,7 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
     let (_td, mut h) = setup_routed_test_tool_call("owner-cancelled-call", "owned_tool");
 
     h.handle_extension_event_inner(
-        "conn-wrong",
+        &crate::test_connection_id("conn-wrong"),
         Event::ToolCancelledReported(tau_proto::ToolCancelled {
             call_id: "owner-cancelled-call".into(),
             tool_name: ToolName::new("owned_tool"),
@@ -5967,7 +6005,7 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
     )));
 
     h.handle_extension_event_inner(
-        "conn-owner",
+        &crate::test_connection_id("conn-owner"),
         Event::ToolResultReported(final_tool_result(
             "owner-cancelled-call",
             "owned_tool",
@@ -5998,7 +6036,7 @@ fn provider_owner_validation_rejects_external_background_result() {
     let (_td, mut h) = setup_routed_test_tool_call("owner-background-call", "owned_tool");
 
     h.handle_extension_event_inner(
-        "conn-wrong",
+        &crate::test_connection_id("conn-wrong"),
         Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
             call_id: "owner-background-call".into(),
             tool_name: ToolName::new("owned_tool"),
@@ -6025,7 +6063,7 @@ fn provider_owner_validation_rejects_external_background_error() {
     let (_td, mut h) = setup_routed_test_tool_call("owner-background-error-call", "owned_tool");
 
     h.handle_extension_event_inner(
-        "conn-wrong",
+        &crate::test_connection_id("conn-wrong"),
         Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
             call_id: "owner-background-error-call".into(),
             tool_name: ToolName::new("owned_tool"),
@@ -6057,7 +6095,7 @@ fn provider_owner_validation_rejects_external_provider_tool_result() {
     let _provider = connect_test_client(&mut h, "provider-spoof", tau_proto::ClientKind::Provider);
 
     h.handle_extension_event_inner(
-        "provider-spoof",
+        &crate::test_connection_id("provider-spoof"),
         Event::ProviderToolResult(final_tool_result(
             "provider-tool-call",
             "owned_tool",
@@ -6148,7 +6186,7 @@ fn provider_owner_validation_rejects_late_tool_progress_after_completion() {
     let (_td, mut h) = setup_routed_test_tool_call("late-progress-call", "owned_tool");
 
     h.handle_extension_event_inner(
-        "conn-owner",
+        &crate::test_connection_id("conn-owner"),
         Event::ToolResultReported(final_tool_result(
             "late-progress-call",
             "owned_tool",
@@ -6159,7 +6197,7 @@ fn provider_owner_validation_rejects_late_tool_progress_after_completion() {
     assert!(!h.tool_agents.contains_key("late-progress-call"));
 
     h.handle_extension_event_inner(
-        "conn-owner",
+        &crate::test_connection_id("conn-owner"),
         Event::ToolProgressReported(tool_progress(
             "late-progress-call",
             "owned_tool",
@@ -6189,8 +6227,10 @@ fn cancel_publishes_tool_cancel_request() {
     h.selected_model = Some("test/model".into());
 
     let _owner_events = connect_test_tool(&mut h, "conn-cancel-owner");
-    h.registry
-        .register("conn-cancel-owner", shared_test_tool_spec("cancel_tool"));
+    h.registry.register(
+        &crate::test_connection_id("conn-cancel-owner"),
+        shared_test_tool_spec("cancel_tool"),
+    );
 
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-cancel-tool");
@@ -6333,7 +6373,7 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
 
     let _tool_events = connect_test_tool(&mut h, "conn-cancel-bg");
     h.registry.register(
-        "conn-cancel-bg",
+        &crate::test_connection_id("conn-cancel-bg"),
         instant_background_test_tool_spec("cancel_bg_tool"),
     );
 
@@ -6607,11 +6647,11 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
 
     let _tool_events = connect_test_tool(&mut h, "conn-live-mixed-cancel");
     h.registry.register(
-        "conn-live-mixed-cancel",
+        &crate::test_connection_id("conn-live-mixed-cancel"),
         instant_background_test_tool_spec("live_bg_tool"),
     );
     h.registry.register(
-        "conn-live-mixed-cancel",
+        &crate::test_connection_id("conn-live-mixed-cancel"),
         shared_test_tool_spec("live_foreground_tool"),
     );
 
@@ -6955,7 +6995,7 @@ fn cancel_target_rechecks_background_state_after_cancel_request() {
 
     assert!(!h.cancel_target_should_finish_as_background_error(&target));
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::ToolCancelRequest(tau_proto::ToolCancelRequest {
             target_call_id: call_id.clone(),
         }),
@@ -7346,10 +7386,18 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
         tau_proto::EventName::AGENT_PROMPT_CREATED,
     )];
     h.bus
-        .set_subscriptions("provider-observer", Vec::new(), prompt_selector.clone())
+        .set_subscriptions(
+            &crate::test_connection_id("provider-observer"),
+            Vec::new(),
+            prompt_selector.clone(),
+        )
         .expect("provider observer subscription");
     h.bus
-        .set_subscriptions("ui-observer", Vec::new(), prompt_selector)
+        .set_subscriptions(
+            &crate::test_connection_id("ui-observer"),
+            Vec::new(),
+            prompt_selector,
+        )
         .expect("ui observer subscription");
 
     let model_id: tau_proto::ModelId = "openai/gpt-5.5".parse().expect("model id");
@@ -7417,8 +7465,10 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             est_output_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(10),
         },
     );
-    h.provider_model_routes
-        .insert(model_id.clone(), "provider-owner".into());
+    h.provider_model_routes.insert(
+        model_id.clone(),
+        crate::test_connection_id("provider-owner"),
+    );
     h.available_roles
         .get_mut(&h.selected_role)
         .expect("selected role")
@@ -7582,8 +7632,10 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             est_output_cost_1m_usd: Default::default(),
         },
     );
-    h.provider_model_routes
-        .insert(model_id.clone(), "provider-owner".into());
+    h.provider_model_routes.insert(
+        model_id.clone(),
+        crate::test_connection_id("provider-owner"),
+    );
     h.available_roles
         .get_mut(&h.selected_role)
         .expect("selected role")
@@ -7775,11 +7827,11 @@ fn provider_response_stats_are_public_provider_updates() {
     let durable_id = durable_agent_id_for_conversation(&h, &cid);
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.pending_provider_prompts
-        .insert(spid.clone(), "provider-owner".into());
+        .insert(spid.clone(), crate::test_connection_id("provider-owner"));
     let ui_frames = connect_test_client(&mut h, "ui-stats-observer", tau_proto::ClientKind::Ui);
     h.bus
         .set_subscriptions(
-            "ui-stats-observer",
+            &crate::test_connection_id("ui-stats-observer"),
             Vec::new(),
             vec![
                 EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_UPDATED),
@@ -8148,7 +8200,7 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
         );
 
         h.handle_ui_navigate_tree(
-            "ui",
+            &crate::test_connection_id("ui"),
             tau_proto::UiNavigateTree {
                 session_id: test_session_id("s1"),
                 target_agent_id: Some(agent_id.clone()),
@@ -8179,7 +8231,7 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
         let cid = ensure_test_user_agent(&mut h);
 
         h.handle_ui_navigate_tree(
-            "ui",
+            &crate::test_connection_id("ui"),
             tau_proto::UiNavigateTree {
                 session_id: test_session_id("s1"),
                 target_agent_id: Some(agent_id.clone()),
@@ -8215,7 +8267,8 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     h.commit_message_fact(
         None,
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
-            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessagePublisherId::parse("bridge")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             tau_proto::MessageAgentTarget::new(agent_id.as_str()),
             tau_proto::MessageFactId::new("tree-message-fact"),
             tau_proto::MessageParty {
@@ -8243,7 +8296,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     assert_ne!(first_prompt_node, assistant_node);
 
     h.handle_ui_navigate_tree(
-        "ui",
+        &crate::test_connection_id("ui"),
         tau_proto::UiNavigateTree {
             session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id.clone()),
@@ -8258,7 +8311,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     );
 
     h.handle_ui_navigate_tree(
-        "ui",
+        &crate::test_connection_id("ui"),
         tau_proto::UiNavigateTree {
             session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id.clone()),
@@ -8324,7 +8377,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
     append_user_message_via_event(&mut h, "s1", "second prompt");
 
     h.handle_ui_navigate_tree(
-        "ui",
+        &crate::test_connection_id("ui"),
         tau_proto::UiNavigateTree {
             session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id.clone()),
@@ -8358,7 +8411,7 @@ fn ui_tree_root_navigation_persists_across_resume() {
         agent_id = durable_agent_id_for_conversation(&h, &cid);
 
         h.handle_ui_navigate_tree(
-            "ui",
+            &crate::test_connection_id("ui"),
             tau_proto::UiNavigateTree {
                 session_id: test_session_id("s1"),
                 target_agent_id: Some(agent_id.clone()),
@@ -8415,7 +8468,7 @@ fn resume_keeps_prompt_appended_after_root_rewind_as_head() {
         let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
         h.handle_ui_navigate_tree(
-            "ui",
+            &crate::test_connection_id("ui"),
             tau_proto::UiNavigateTree {
                 session_id: test_session_id("s1"),
                 target_agent_id: Some(agent_id),
@@ -8473,7 +8526,7 @@ fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
         append_user_message_via_event(&mut h, "s1", "second prompt");
 
         h.handle_ui_navigate_tree(
-            "ui",
+            &crate::test_connection_id("ui"),
             tau_proto::UiNavigateTree {
                 session_id: test_session_id("s1"),
                 target_agent_id: Some(agent_id),
@@ -8527,7 +8580,7 @@ fn tree_request_result_formats_prompt_anchors_without_raw_nodes() {
     );
     append_user_message_via_event(&mut h, "s1", "second prompt");
     h.handle_ui_navigate_tree(
-        "ui",
+        &crate::test_connection_id("ui"),
         tau_proto::UiNavigateTree {
             session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id.clone()),
@@ -9362,7 +9415,8 @@ fn system_prompt_drift_invalidates_chain_anchor() {
     h.discovered_skills.insert(
         tau_proto::SkillName::new("late-loaded"),
         crate::discovery::DiscoveredSkill {
-            source_id: tau_proto::ConnectionId::from("test-ext"),
+            source_id: tau_proto::ConnectionId::parse("test-ext")
+                .expect("test connection id must satisfy the identifier grammar"),
             description: "appears between turns".to_owned(),
             source: crate::discovery::DiscoveredSkillSource::File(std::path::PathBuf::from(
                 "/tmp/late-loaded.md",
@@ -9449,7 +9503,7 @@ fn tools_drift_invalidates_chain_anchor() {
     // registry on every send, so the next prompt's `tools` field
     // grows by one.
     h.registry.register(
-        "test-ext",
+        &crate::test_connection_id("test-ext"),
         ToolSpec {
             name: ToolName::new("late_tool"),
             model_visible_name: None,
@@ -11381,7 +11435,7 @@ fn restored_usage_survives_staggered_provider_discovery() {
         .clone();
     let mut model_a_info = base_info.clone();
     model_a_info.id = "provider-a/model".into();
-    h.set_provider_models("provider-a", vec![model_a_info]);
+    h.set_provider_models(&crate::test_connection_id("provider-a"), vec![model_a_info]);
     assert_eq!(
         h.agents[&cid].context_input_tokens,
         Some(900),
@@ -11393,7 +11447,7 @@ fn restored_usage_survives_staggered_provider_discovery() {
     model_b_info.supports_compaction = false;
     model_b_info.supports_standalone_compaction = true;
     model_b_info.standalone_compaction_threshold = Some(900);
-    h.set_provider_models("provider-b", vec![model_b_info]);
+    h.set_provider_models(&crate::test_connection_id("provider-b"), vec![model_b_info]);
     assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
     assert_eq!(
         h.model_for_agent_role(&h.agents[&cid]),
@@ -12276,8 +12330,9 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     let mut unrelated = capable.clone();
     unrelated.id = "provider-a/other".into();
     h.publish_provider_models_update(
-        "provider-a",
-        tau_proto::ExtensionName::from("provider-a"),
+        &crate::test_connection_id("provider-a"),
+        tau_proto::ExtensionName::parse("provider-a")
+            .expect("test extension name must satisfy the identifier grammar"),
         tau_proto::ProviderModelsDeclared {
             models: vec![unrelated],
         },
@@ -12292,8 +12347,8 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
             .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
     );
     h.publish_provider_models_update(
-        &provider_owner,
-        tau_proto::ExtensionName::from(provider_owner.clone()),
+        &crate::test_connection_id(&provider_owner),
+        crate::test_extension_name(provider_owner.clone()),
         tau_proto::ProviderModelsDeclared {
             models: vec![capable],
         },
@@ -12411,8 +12466,9 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
         .expect("test model")
         .clone();
     h.publish_provider_models_update(
-        "provider-recovery-owner",
-        tau_proto::ExtensionName::from("provider-recovery-owner"),
+        &crate::test_connection_id("provider-recovery-owner"),
+        tau_proto::ExtensionName::parse("provider-recovery-owner")
+            .expect("test extension name must satisfy the identifier grammar"),
         tau_proto::ProviderModelsDeclared {
             models: vec![unsupported],
         },
@@ -12505,8 +12561,11 @@ fn reactive_context_overflow_side_failure_completes_request() {
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
-    h.handle_start_agent_request(HARNESS_CONNECTION_ID, ext_query("q-reactive-failure"))
-        .expect("start side agent");
+    h.handle_start_agent_request(
+        &crate::test_connection_id(HARNESS_CONNECTION_ID),
+        ext_query("q-reactive-failure"),
+    )
+    .expect("start side agent");
     let side_cid = ext_query_cid(&h, "q-reactive-failure").expect("side agent");
     let inference = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(context_overflow_response(&inference))
@@ -12785,8 +12844,8 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
         let mut model = h.provider_model_info[&"test/model".into()].clone();
         model.id = "provider-b/model".into();
         h.publish_provider_models_update(
-            &owner,
-            tau_proto::ExtensionName::from(owner.clone()),
+            &crate::test_connection_id(&owner),
+            crate::test_extension_name(owner.clone()),
             tau_proto::ProviderModelsDeclared {
                 models: vec![model],
             },
@@ -12952,13 +13011,14 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
         .insert(other_model.clone(), other_info);
     h.provider_model_routes.insert(
         other_model.clone(),
-        tau_proto::ConnectionId::from("other-provider"),
+        tau_proto::ConnectionId::parse("other-provider")
+            .expect("test connection id must satisfy the identifier grammar"),
     );
     h.agents.get_mut(&cid).expect("agent").model_override = Some(other_model);
 
     h.publish_provider_models_update(
-        &provider,
-        tau_proto::ExtensionName::from(provider.clone()),
+        &crate::test_connection_id(&provider),
+        crate::test_extension_name(provider.clone()),
         tau_proto::ProviderModelsDeclared { models: Vec::new() },
     );
 
@@ -13097,9 +13157,10 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
         ("coalesced-message-two", "coalesced body two"),
     ] {
         h.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-                message_id: tau_proto::AgentMessageId::parse(message_id).unwrap(),
+                message_id: tau_proto::AgentMessageId::parse(message_id)
+                    .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("manager"),
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(&agent_id),
@@ -13219,9 +13280,10 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
         ("proactive-message-two", "proactive body two"),
     ] {
         h.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-                message_id: tau_proto::AgentMessageId::parse(message_id).unwrap(),
+                message_id: tau_proto::AgentMessageId::parse(message_id)
+                    .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("manager"),
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(&agent_id),
@@ -13299,8 +13361,11 @@ fn reactive_context_overflow_extension_preemption_cancels_once() {
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
-    h.handle_start_agent_request(HARNESS_CONNECTION_ID, ext_query("q-preempt-reactive"))
-        .expect("start extension side agent");
+    h.handle_start_agent_request(
+        &crate::test_connection_id(HARNESS_CONNECTION_ID),
+        ext_query("q-preempt-reactive"),
+    )
+    .expect("start extension side agent");
     let inference = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(context_overflow_response(&inference))
         .expect("start recovery");
@@ -13345,7 +13410,7 @@ fn reactive_context_overflow_delegate_cancel_is_terminal_once() {
     h.tool_agents.insert(call_id.clone(), parent);
     let mut query = ext_query("q-delegate-reactive");
     query.tool_call_id = Some(call_id.clone());
-    h.handle_start_agent_request(HARNESS_CONNECTION_ID, query)
+    h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
         .expect("start delegated agent");
     let inference = read_nth_prompt_created(&h, 0);
     h.handle_provider_response_finished(context_overflow_response(&inference))
@@ -14431,12 +14496,14 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
     set_test_agent_context_wait(
         &mut h,
         crate::parse_agent_id(&agent_id),
-        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+            .expect("test connection id must satisfy the identifier grammar")]),
     );
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("readiness-message-wake").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("readiness-message-wake")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&agent_id),
@@ -14505,7 +14572,8 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+            .expect("test connection id must satisfy the identifier grammar")]),
     );
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
@@ -14581,7 +14649,8 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+            .expect("test connection id must satisfy the identifier grammar")]),
     );
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
@@ -14657,7 +14726,8 @@ fn readiness_deferred_linear_activations_share_one_checkpoint() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+            .expect("test connection id must satisfy the identifier grammar")]),
     );
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("linear activation A".to_owned()))
@@ -14792,7 +14862,8 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let retained_agent_id = durable_agent_id_for_conversation(&h, &retained_cid);
     let ready_agent_id = durable_agent_id_for_conversation(&h, &ready_cid);
-    let context_provider = tau_proto::ConnectionId::from("reverse-readiness-context");
+    let context_provider = tau_proto::ConnectionId::parse("reverse-readiness-context")
+        .expect("test connection id must satisfy the identifier grammar");
     for agent_id in [&retained_agent_id, &ready_agent_id] {
         set_test_agent_context_wait(
             &mut h,
@@ -14881,7 +14952,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
 
     let ready_provider = h.pending_provider_prompts[&ready_checkpoint.agent_prompt_id].clone();
     h.handle_extension_event_inner(
-        ready_provider.as_str(),
+        &ready_provider,
         Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
             agent_prompt_id: ready_checkpoint.agent_prompt_id.clone(),
             originator: tau_proto::PromptOriginator::User,
@@ -14927,7 +14998,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
     let retained_provider =
         h.pending_provider_prompts[&retained_checkpoint.agent_prompt_id].clone();
     h.handle_extension_event_inner(
-        retained_provider.as_str(),
+        &retained_provider,
         Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
             agent_prompt_id: retained_checkpoint.agent_prompt_id.clone(),
             originator: tau_proto::PromptOriginator::User,
@@ -14967,7 +15038,8 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let blocked_agent_id = durable_agent_id_for_conversation(&h, &blocked_cid);
     let runnable_agent_id = durable_agent_id_for_conversation(&h, &runnable_cid);
-    let context_provider = tau_proto::ConnectionId::from("deferred-fairness-context");
+    let context_provider = tau_proto::ConnectionId::parse("deferred-fairness-context")
+        .expect("test connection id must satisfy the identifier grammar");
     for agent_id in [&blocked_agent_id, &runnable_agent_id] {
         set_test_agent_context_wait(
             &mut h,
@@ -15131,7 +15203,8 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
         .get_mut(&unroutable_cid)
         .expect("unroutable agent")
         .role = Some("unroutable-test-role".to_owned());
-    let context_provider = tau_proto::ConnectionId::from("unroutable-fairness-context");
+    let context_provider = tau_proto::ConnectionId::parse("unroutable-fairness-context")
+        .expect("test connection id must satisfy the identifier grammar");
     for agent_id in [&unroutable_agent_id, &runnable_agent_id] {
         set_test_agent_context_wait(
             &mut h,
@@ -15167,7 +15240,7 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
         .expect("later runnable agent prompt");
     let provider = h.pending_provider_prompts[&runnable_prompt.agent_prompt_id].clone();
     h.handle_extension_event_inner(
-        provider.as_str(),
+        &provider,
         Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
             agent_prompt_id: runnable_prompt.agent_prompt_id.clone(),
             originator: runnable_prompt.originator.clone(),
@@ -15275,7 +15348,8 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+            .expect("test connection id must satisfy the identifier grammar")]),
     );
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
@@ -15350,7 +15424,8 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+            .expect("test connection id must satisfy the identifier grammar")]),
     );
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
@@ -15369,7 +15444,8 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
     h.publish_for_agent(
         &cid,
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("branch-b-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("branch-b-message")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: agent_id.clone(),
@@ -19698,7 +19774,7 @@ fn wait_returns_internal_background_error_after_extension_disconnect() {
 
     let _tool_events = connect_test_tool(&mut h, "conn-bg-disconnect");
     h.registry.register(
-        "conn-bg-disconnect",
+        &crate::test_connection_id("conn-bg-disconnect"),
         instant_background_test_tool_spec("slow_disconnect"),
     );
 
@@ -19717,7 +19793,7 @@ fn wait_returns_internal_background_error_after_extension_disconnect() {
         Some("conn-bg-disconnect")
     );
 
-    h.handle_disconnect("conn-bg-disconnect");
+    h.handle_disconnect(&crate::test_connection_id("conn-bg-disconnect"));
 
     let expected = extension_disconnected_background_tool_call_error_message(&call_id);
     assert!(event_log_contains_any_source(&h, |event| matches!(
@@ -19729,7 +19805,7 @@ fn wait_returns_internal_background_error_after_extension_disconnect() {
 
     let _replacement_events = connect_test_tool(&mut h, "conn-bg-replacement");
     h.registry.register(
-        "conn-bg-replacement",
+        &crate::test_connection_id("conn-bg-replacement"),
         instant_background_test_tool_spec("slow_disconnect"),
     );
 
@@ -19772,7 +19848,7 @@ fn no_arg_wait_before_background_completion_suppresses_completion_prompt() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-bg-any-before",
+        &crate::test_connection_id("conn-bg-any-before"),
         instant_background_test_tool_spec("slow_any_before"),
     );
 
@@ -19789,7 +19865,7 @@ fn no_arg_wait_before_background_completion_suppresses_completion_prompt() {
     h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
         .expect("start no-arg wait");
     h.handle_extension_event_inner(
-        "conn-bg-any-before",
+        &crate::test_connection_id("conn-bg-any-before"),
         Event::ToolResultReported(final_tool_result(
             call_id.as_str(),
             "slow_any_before",
@@ -19892,7 +19968,7 @@ fn agent_message_interrupts_recipient_active_wait() {
 
     let _tool_events = connect_test_tool(&mut h, "conn-msg-wait");
     h.registry.register(
-        "conn-msg-wait",
+        &crate::test_connection_id("conn-msg-wait"),
         instant_background_test_tool_spec("slow_msg_wait"),
     );
 
@@ -19922,9 +19998,10 @@ fn agent_message_interrupts_recipient_active_wait() {
     seed_tools_running(&mut h, &cid, vec![wait_call_id.clone()]);
 
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("test-message-interrupts-wait").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("test-message-interrupts-wait")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
@@ -19987,7 +20064,7 @@ fn wait_start_is_interrupted_by_already_queued_user_prompt() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-queued-wait",
+        &crate::test_connection_id("conn-queued-wait"),
         instant_background_test_tool_spec("slow_queued_wait"),
     );
 
@@ -20029,7 +20106,7 @@ fn wait_start_is_interrupted_by_already_queued_user_prompt() {
     )));
 
     h.handle_extension_event_inner(
-        "conn-queued-wait",
+        &crate::test_connection_id("conn-queued-wait"),
         Event::ToolResultReported(final_tool_result(
             background_call_id.as_str(),
             "slow_queued_wait",
@@ -20065,7 +20142,7 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-queued-message-wait",
+        &crate::test_connection_id("conn-queued-message-wait"),
         instant_background_test_tool_spec("slow_queued_message_wait"),
     );
 
@@ -20082,9 +20159,10 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
     seed_tools_running(&mut h, &cid, vec![wait_call_id.clone()]);
     let recipient_id = h.agents[&cid].agent_id.clone().expect("agent id");
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("queued-manager-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("queued-manager-message")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
@@ -20121,7 +20199,7 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
     )));
 
     h.handle_extension_event_inner(
-        "conn-queued-message-wait",
+        &crate::test_connection_id("conn-queued-message-wait"),
         Event::ToolResultReported(final_tool_result(
             background_call_id.as_str(),
             "slow_queued_message_wait",
@@ -20767,7 +20845,7 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
     let initial_prompt = read_nth_prompt_created(&h, 0);
     let initial_provider = h.pending_provider_prompts[&initial_prompt.agent_prompt_id].clone();
     h.handle_extension_event_inner(
-        initial_provider.as_str(),
+        &initial_provider,
         Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
             agent_prompt_id: initial_prompt.agent_prompt_id.clone(),
             originator: initial_prompt.originator.clone(),
@@ -20879,7 +20957,7 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
     let continuation = read_nth_prompt_created(&h, 1);
     let continuation_provider = h.pending_provider_prompts[&continuation.agent_prompt_id].clone();
     h.handle_extension_event_inner(
-        continuation_provider.as_str(),
+        &continuation_provider,
         Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
             agent_prompt_id: continuation.agent_prompt_id.clone(),
             originator: continuation.originator.clone(),
@@ -21102,7 +21180,7 @@ fn agent_unload_discards_registered_input_wait() {
     );
 
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
             session_id: h.current_session_id.clone(),
             agent_id: crate::parse_agent_id(&durable_id),
@@ -21329,7 +21407,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
 
     let _tool_events = connect_test_tool(&mut h, "conn-cross-msg-wait");
     h.registry.register(
-        "conn-cross-msg-wait",
+        &crate::test_connection_id("conn-cross-msg-wait"),
         instant_background_test_tool_spec("slow_cross_msg_wait"),
     );
 
@@ -21384,9 +21462,10 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
     )));
 
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("test-message-to-target-owner").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("test-message-to-target-owner")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&target_agent_id),
@@ -21405,9 +21484,10 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
     )));
 
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("test-message-to-wait-owner").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("test-message-to-wait-owner")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&waiter_agent_id),
@@ -21445,7 +21525,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     h.selected_model = Some("test/model".into());
     let delegate_events = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: tau_proto::ToolName::new("side_source"),
             model_visible_name: None,
@@ -21525,7 +21605,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         .turn_state;
     assert!(matches!(default_turn, AgentTurnState::ToolsRunning { .. }));
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q1".to_owned(),
@@ -21597,7 +21677,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "conn-delegate".into(),
+            name: crate::test_extension_name("conn-delegate"),
             query_id: "q1".to_owned(),
         },
 
@@ -21666,7 +21746,7 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
 
         let mut query = ext_query("q-cold-completed");
         query.tool_call_id = Some("cold-delegate-call".into());
-        h.handle_start_agent_request("conn-cold-delegate", query)
+        h.handle_start_agent_request(&crate::test_connection_id("conn-cold-delegate"), query)
             .expect("start worker");
         let worker_cid = ext_query_cid(&h, "q-cold-completed").expect("worker conversation");
         let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
@@ -21681,7 +21761,7 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
             "worker complete",
         );
         completed.originator = tau_proto::PromptOriginator::Extension {
-            name: "conn-cold-delegate".into(),
+            name: crate::test_extension_name("conn-cold-delegate"),
             query_id: "q-cold-completed".to_owned(),
         };
         h.handle_provider_response_finished(completed)
@@ -21841,7 +21921,7 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
         let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
         let mut query = ext_query("q-explicit-parent-cut");
         query.parent_agent = Some(parent_agent_id);
-        h.handle_start_agent_request(HARNESS_CONNECTION_ID, query)
+        h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
             .expect("start explicit-parent worker");
         let worker_cid = ext_query_cid(&h, "q-explicit-parent-cut").expect("worker conversation");
         let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
@@ -21855,7 +21935,7 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
             "worker complete",
         );
         terminal.originator = tau_proto::PromptOriginator::Extension {
-            name: HARNESS_CONNECTION_ID.into(),
+            name: crate::test_extension_name(HARNESS_CONNECTION_ID),
             query_id: "q-explicit-parent-cut".to_owned(),
         };
 
@@ -21942,7 +22022,7 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
         h.tool_agents.insert("message-cut-call".into(), parent_cid);
         let mut query = ext_query("q-message-cut");
         query.tool_call_id = Some("message-cut-call".into());
-        h.handle_start_agent_request("conn-message-cut", query)
+        h.handle_start_agent_request(&crate::test_connection_id("conn-message-cut"), query)
             .expect("start worker");
         let worker_cid = ext_query_cid(&h, "q-message-cut").expect("worker");
         let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
@@ -21952,9 +22032,10 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
             .find_map(|(prompt_id, cid)| (cid == &worker_cid).then_some(prompt_id.clone()))
             .expect("first worker prompt");
         h.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-                message_id: tau_proto::AgentMessageId::parse("message-cut-delivery").unwrap(),
+                message_id: tau_proto::AgentMessageId::parse("message-cut-delivery")
+                    .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("sender"),
                 sender_session_id: None,
                 recipient_id: worker_agent_id.clone(),
@@ -21967,7 +22048,7 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
         let mut response =
             provider_text_response(&first_prompt_id, worker_agent_id.clone(), "first answer");
         response.originator = tau_proto::PromptOriginator::Extension {
-            name: "conn-message-cut".into(),
+            name: crate::test_extension_name("conn-message-cut"),
             query_id: "q-message-cut".to_owned(),
         };
         h.handle_provider_response_finished(response)
@@ -22016,7 +22097,7 @@ fn cold_restore_does_not_classify_reactive_recovery_as_completed_worker() {
         h.tool_agents.insert("reactive-cut-call".into(), parent_cid);
         let mut query = ext_query("q-reactive-cut");
         query.tool_call_id = Some("reactive-cut-call".into());
-        h.handle_start_agent_request(HARNESS_CONNECTION_ID, query)
+        h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
             .expect("start worker");
         let worker_cid = ext_query_cid(&h, "q-reactive-cut").expect("worker");
         let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
@@ -22063,7 +22144,7 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
         let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
         let mut query = ext_query("q-compaction-failure");
         query.parent_agent = Some(parent_agent_id);
-        h.handle_start_agent_request(HARNESS_CONNECTION_ID, query)
+        h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
             .expect("start worker");
         let worker_cid = ext_query_cid(&h, "q-compaction-failure").expect("worker");
         let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
@@ -22220,7 +22301,7 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
     let mut terminal =
         provider_text_response(&side_spid, crate::parse_agent_id(&side_agent_id), "done");
     terminal.originator = tau_proto::PromptOriginator::Extension {
-        name: HARNESS_CONNECTION_ID.into(),
+        name: crate::test_extension_name(HARNESS_CONNECTION_ID),
         query_id: "q-reentrant".to_owned(),
     };
     h.handle_provider_response_finished(terminal)
@@ -22253,7 +22334,7 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
     let mut late_response =
         provider_text_response(&replacement_spid, crate::parse_agent_id(&side_agent_id), "");
     late_response.originator = tau_proto::PromptOriginator::Extension {
-        name: HARNESS_CONNECTION_ID.into(),
+        name: crate::test_extension_name(HARNESS_CONNECTION_ID),
         query_id: "q-reentrant".to_owned(),
     };
     h.handle_provider_response_finished(late_response)
@@ -22300,7 +22381,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
     h.tool_agents.insert("delegate-call".into(), parent);
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-user".to_owned(),
@@ -22352,7 +22433,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "conn-delegate".into(),
+            name: crate::test_extension_name("conn-delegate"),
             query_id: "q-user".to_owned(),
         },
         compaction_original_input_tokens: None,
@@ -22386,7 +22467,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     h.tool_agents.insert("delegate-call".into(), parent);
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-message".to_owned(),
@@ -22413,9 +22494,10 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         .expect("side agent id");
 
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("test-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("test-message")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
@@ -22447,7 +22529,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "conn-delegate".into(),
+            name: crate::test_extension_name("conn-delegate"),
             query_id: "q-message".to_owned(),
         },
         compaction_original_input_tokens: None,
@@ -22507,7 +22589,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "conn-delegate".into(),
+            name: crate::test_extension_name("conn-delegate"),
             query_id: "q-message".to_owned(),
         },
         compaction_original_input_tokens: None,
@@ -22545,12 +22627,12 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     for conn_id in ["conn-delegate-a", "conn-delegate-b"] {
-        let connection_id: tau_proto::ConnectionId = conn_id.into();
+        let connection_id: tau_proto::ConnectionId = crate::test_connection_id(conn_id);
         h.extensions.entries.insert(
             connection_id.clone(),
             crate::extension::ExtensionEntry {
                 tool_prefix: None,
-                name: "delegate-ext".to_owned(),
+                name: crate::test_extension_name("delegate-ext"),
                 instance_id: 42.into(),
                 connection_id: connection_id.clone(),
                 kind: tau_proto::ClientKind::Tool,
@@ -22568,8 +22650,11 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
         );
         h.extensions.order.push(connection_id);
     }
-    h.handle_start_agent_request("conn-delegate-a", ext_query("q-named"))
-        .expect("query");
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-delegate-a"),
+        ext_query("q-named"),
+    )
+    .expect("query");
     let mut side_agents = h.agents.iter().filter(|(_, conv)| {
         matches!(
             &conv.originator,
@@ -22583,8 +22668,11 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
     assert!(!cid.as_str().starts_with("start-agent-"));
     let cid = cid.clone();
     let agent_count = h.agents.len();
-    h.handle_start_agent_request("conn-delegate-b", ext_query("q-named"))
-        .expect("duplicate query");
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-delegate-b"),
+        ext_query("q-named"),
+    )
+    .expect("duplicate query");
     assert_eq!(h.agents.len(), agent_count);
     assert_eq!(
         h.agents
@@ -22615,7 +22703,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     h.selected_model = Some("test/model".into());
     let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
@@ -22687,7 +22775,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     .expect("tool response");
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q1".to_owned(),
@@ -22766,6 +22854,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     let mut h = echo_harness(&sp).expect("start");
 
     h.selected_model = Some("test/model".into());
+    connect_test_tool(&mut h, "conn-notifications");
 
     // Drive the user's main conversation through one full
     // user-message → agent-final-response turn so the parent conv has
@@ -22837,7 +22926,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     // std-notifications-shaped query: no tool_call_id, just an
     // instruction asking the model to summarize.
     h.handle_start_agent_request(
-        "conn-notifications",
+        &crate::test_connection_id("conn-notifications"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "idle-0".to_owned(),
@@ -22936,6 +23025,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
+    connect_test_tool(&mut h, "conn-notifications");
 
     // Drive one full main-conv turn through the normal dispatch path
     // so `prompt_fingerprints`/`prompt_models` are populated and
@@ -22989,7 +23079,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
     // std-notifications-shaped query — `tool_call_id: None` triggers
     // the `tool_choice: None` branch in `send_prompt_to_agent_for`.
     h.handle_start_agent_request(
-        "conn-notifications",
+        &crate::test_connection_id("conn-notifications"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "idle-0".to_owned(),
@@ -23039,7 +23129,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
     h.selected_model = Some("test/model".into());
     let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
@@ -23111,7 +23201,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
     .expect("main response");
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q1".to_owned(),
@@ -23155,12 +23245,13 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
+    connect_test_tool(&mut h, "conn-notifications");
 
     // Seed an in-flight idle-summary side conv with a previously
     // dispatched spid that's notionally still being retried by the
     // agent.
     h.handle_start_agent_request(
-        "conn-notifications",
+        &crate::test_connection_id("conn-notifications"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "idle-0".to_owned(),
@@ -23239,7 +23330,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     h.selected_model = Some("test/model".into());
     let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
@@ -23255,7 +23346,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     );
     let websearch_events = connect_test_tool(&mut h, "conn-websearch");
     h.registry.register(
-        "conn-websearch",
+        &crate::test_connection_id("conn-websearch"),
         ToolSpec {
             name: tau_proto::ToolName::new("websearch"),
             model_visible_name: None,
@@ -23331,7 +23422,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     // Delegate extension turns it into an StartAgentRequest; the harness
     // spawns a side conversation and dispatches its prompt.
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q1".to_owned(),
@@ -23383,7 +23474,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q1".to_owned(),
         },
 
@@ -23434,7 +23525,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
 
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: ToolName::new("agent_start"),
             model_visible_name: None,
@@ -23455,7 +23546,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-slow",
+        &crate::test_connection_id("conn-slow"),
         ToolSpec {
             name: ToolName::new("slow"),
             model_visible_name: None,
@@ -23517,7 +23608,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
 
     let mut query = ext_query("q-bg");
     query.tool_call_id = Some("delegate-call".into());
-    h.handle_start_agent_request("conn-delegate", query)
+    h.handle_start_agent_request(&crate::test_connection_id("conn-delegate"), query)
         .expect("side query");
     let side_cid = ext_query_cid(&h, "q-bg").expect("side conversation");
     let side_spid = h
@@ -23546,7 +23637,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q-bg".to_owned(),
         },
         compaction_original_input_tokens: None,
@@ -23596,7 +23687,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q-bg".to_owned(),
         },
         compaction_original_input_tokens: None,
@@ -23613,7 +23704,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     assert_eq!(h.tool_agents.get("slow-call"), Some(&side_cid));
 
     h.handle_extension_event_inner(
-        "conn-slow",
+        &crate::test_connection_id("conn-slow"),
         Event::ToolResultReported(ToolResult {
             call_id: "slow-call".into(),
             tool_name: ToolName::new("slow"),
@@ -23676,7 +23767,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-slow",
+        &crate::test_connection_id("conn-slow"),
         ToolSpec {
             name: ToolName::new("slow"),
             model_visible_name: None,
@@ -23691,8 +23782,11 @@ fn background_completion_from_removed_side_conversation_is_retired() {
         },
     );
     let parent_cid = ensure_test_user_agent(&mut h);
-    h.handle_start_agent_request("conn-agent", ext_query("q-removed-bg"))
-        .expect("side query");
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-agent"),
+        ext_query("q-removed-bg"),
+    )
+    .expect("side query");
     let side_cid = ext_query_cid(&h, "q-removed-bg").expect("side conversation");
     let side_agent_id = h.agents[&side_cid].agent_id.clone().expect("side agent id");
     let call_id: ToolCallId = "removed-slow-call".into();
@@ -23761,7 +23855,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
     assert!(terminal_position < unload_position);
 
     h.handle_extension_event_inner(
-        "conn-slow",
+        &crate::test_connection_id("conn-slow"),
         Event::ToolResultReported(ToolResult {
             call_id: call_id.clone(),
             tool_name: ToolName::new("slow"),
@@ -23789,8 +23883,11 @@ fn background_completion_from_removed_side_conversation_is_retired() {
             .all(|prompt| prompt.text != background_completion_prompt(&call_id))
     );
 
-    h.handle_start_agent_request("conn-agent", ext_query("q-removed-bg-fault"))
-        .expect("fault side query");
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-agent"),
+        ext_query("q-removed-bg-fault"),
+    )
+    .expect("fault side query");
     let fault_cid = ext_query_cid(&h, "q-removed-bg-fault").expect("fault side conversation");
     let fault_agent_id = h.agents[&fault_cid]
         .agent_id
@@ -23862,7 +23959,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
 
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: ToolName::new("agent_start"),
             model_visible_name: None,
@@ -23883,7 +23980,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-slow",
+        &crate::test_connection_id("conn-slow"),
         ToolSpec {
             name: ToolName::new("slow"),
             model_visible_name: None,
@@ -23899,7 +23996,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     );
 
     h.registry.register(
-        "conn-slow",
+        &crate::test_connection_id("conn-slow"),
         scheduled_test_tool_spec("foreground_slow", tau_proto::BackgroundSupport::Never),
     );
     let parent_cid = ensure_test_user_agent(&mut h);
@@ -23951,7 +24048,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
 
     let mut query = ext_query("q-bg-cancel");
     query.tool_call_id = Some("delegate-call-cancel".into());
-    h.handle_start_agent_request("conn-delegate", query)
+    h.handle_start_agent_request(&crate::test_connection_id("conn-delegate"), query)
         .expect("side query");
     let side_cid = ext_query_cid(&h, "q-bg-cancel").expect("side conversation");
     let side_spid = h
@@ -23991,7 +24088,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q-bg-cancel".to_owned(),
         },
         compaction_original_input_tokens: None,
@@ -24045,7 +24142,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     );
 
     h.handle_extension_event_inner(
-        "conn-slow",
+        &crate::test_connection_id("conn-slow"),
         Event::ToolResultReported(ToolResult {
             call_id: "slow-call-cancel".into(),
             tool_name: ToolName::new("slow"),
@@ -24089,7 +24186,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-fail",
+        &crate::test_connection_id("conn-fail"),
         ToolSpec {
             name: ToolName::new("fail"),
             model_visible_name: None,
@@ -24151,7 +24248,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
 
     h.suppress_background_completion_prompt("fail-call".into());
     h.handle_extension_event_inner(
-        "conn-fail",
+        &crate::test_connection_id("conn-fail"),
         Event::ToolErrorReported(tau_proto::ToolError {
             call_id: "fail-call".into(),
             tool_name: ToolName::new("fail"),
@@ -24335,7 +24432,7 @@ fn backgrounded_tool_progress_is_not_published() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-slow",
+        &crate::test_connection_id("conn-slow"),
         ToolSpec {
             name: ToolName::new("slow"),
             model_visible_name: None,
@@ -24396,7 +24493,7 @@ fn backgrounded_tool_progress_is_not_published() {
     .expect("background tool call");
 
     h.handle_extension_event_inner(
-        "conn-slow",
+        &crate::test_connection_id("conn-slow"),
         Event::ToolProgressReported(tau_proto::ToolProgress {
             call_id: "slow-call".into(),
             tool_name: ToolName::new("slow"),
@@ -24463,9 +24560,9 @@ fn shared_start_agent_requests_start_concurrently() {
     let _ = connect_test_tool(&mut h, "conn-a");
     let _ = connect_test_tool(&mut h, "conn-b");
 
-    h.handle_start_agent_request("conn-a", ext_query("q-a"))
+    h.handle_start_agent_request(&crate::test_connection_id("conn-a"), ext_query("q-a"))
         .expect("query a");
-    h.handle_start_agent_request("conn-b", ext_query("q-b"))
+    h.handle_start_agent_request(&crate::test_connection_id("conn-b"), ext_query("q-b"))
         .expect("query b");
 
     assert!(ext_query_cid(&h, "q-a").is_some());
@@ -24488,14 +24585,23 @@ fn start_agent_requests_do_not_block_independent_queries() {
     let _ = connect_test_tool(&mut h, "conn-c");
     let _ = connect_test_tool(&mut h, "conn-d");
 
-    h.handle_start_agent_request("conn-a", ext_query("q-update-a"))
-        .expect("update query a");
-    h.handle_start_agent_request("conn-b", ext_query("q-shared"))
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-a"),
+        ext_query("q-update-a"),
+    )
+    .expect("update query a");
+    h.handle_start_agent_request(&crate::test_connection_id("conn-b"), ext_query("q-shared"))
         .expect("shared query");
-    h.handle_start_agent_request("conn-c", ext_query("q-update-b"))
-        .expect("update query b");
-    h.handle_start_agent_request("conn-d", ext_query("q-exclusive"))
-        .expect("exclusive query");
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-c"),
+        ext_query("q-update-b"),
+    )
+    .expect("update query b");
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-d"),
+        ext_query("q-exclusive"),
+    )
+    .expect("exclusive query");
 
     for query_id in ["q-update-a", "q-shared", "q-update-b", "q-exclusive"] {
         assert!(
@@ -24518,8 +24624,11 @@ fn nested_start_agent_request_starts_independently() {
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
 
-    h.handle_start_agent_request("conn-delegate", ext_query("q-outer"))
-        .expect("outer query");
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-delegate"),
+        ext_query("q-outer"),
+    )
+    .expect("outer query");
     let outer_cid = ext_query_cid(&h, "q-outer").expect("outer started");
 
     h.tool_agents
@@ -24527,7 +24636,7 @@ fn nested_start_agent_request_starts_independently() {
     let mut nested = ext_query("q-nested");
     nested.tool_call_id = Some("nested-call".into());
     nested.task_name = Some("nested".to_owned());
-    h.handle_start_agent_request("conn-delegate", nested)
+    h.handle_start_agent_request(&crate::test_connection_id("conn-delegate"), nested)
         .expect("nested query");
 
     let nested_cid = ext_query_cid(&h, "q-nested").expect("nested started");
@@ -24549,15 +24658,18 @@ fn tool_backed_start_agent_display_name_does_not_include_parent_lineage() {
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
 
-    h.handle_start_agent_request("conn-delegate", ext_query("q-parent"))
-        .expect("parent query");
+    h.handle_start_agent_request(
+        &crate::test_connection_id("conn-delegate"),
+        ext_query("q-parent"),
+    )
+    .expect("parent query");
     let parent_cid = ext_query_cid(&h, "q-parent").expect("parent started");
 
     h.tool_agents.insert("child-call".into(), parent_cid);
     let mut child = ext_query("q-child");
     child.tool_call_id = Some("child-call".into());
     child.task_name = Some("fix streaming ellipsis".to_owned());
-    h.handle_start_agent_request("conn-delegate", child)
+    h.handle_start_agent_request(&crate::test_connection_id("conn-delegate"), child)
         .expect("child query");
 
     let child_cid = ext_query_cid(&h, "q-child").expect("child started");
@@ -24847,7 +24959,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: ToolName::new("agent_start"),
             model_visible_name: None,
@@ -24863,7 +24975,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
     );
     let _ = connect_test_tool(&mut h, "conn-mutate");
     h.registry.register(
-        "conn-mutate",
+        &crate::test_connection_id("conn-mutate"),
         ToolSpec {
             name: ToolName::new("mutate"),
             model_visible_name: None,
@@ -24944,7 +25056,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: ToolName::new("agent_start"),
             model_visible_name: None,
@@ -24960,7 +25072,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     );
     let _ = connect_test_tool(&mut h, "conn-mutate");
     h.registry.register(
-        "conn-mutate",
+        &crate::test_connection_id("conn-mutate"),
         ToolSpec {
             name: ToolName::new("mutate"),
             model_visible_name: None,
@@ -25035,7 +25147,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     .expect("main response");
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-A".to_owned(),
@@ -25048,7 +25160,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     )
     .expect("query A");
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-B".to_owned(),
@@ -25117,7 +25229,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q-A".to_owned(),
         },
         compaction_original_input_tokens: None,
@@ -25148,7 +25260,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q-B".to_owned(),
         },
         compaction_original_input_tokens: None,
@@ -25274,7 +25386,7 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
         ),
     ] {
         h.handle_start_agent_request(
-            "conn-delegate",
+            &crate::test_connection_id("conn-delegate"),
             StartAgentRequest {
                 parent_agent: None,
                 query_id: query_id.to_owned(),
@@ -25314,7 +25426,7 @@ fn delegate_missing_default_engineer_errors_when_unavailable() {
 
     let delegate = connect_test_tool(&mut h, "conn-delegate");
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-default".to_owned(),
@@ -25350,7 +25462,7 @@ fn generic_agent_watch_snapshots_replay_and_clear_on_session_switch() {
     let mut h = echo_harness(&sp).expect("start");
     let live = connect_test_tool(&mut h, "watch-live");
     h.complete_subscription(
-        "watch-live",
+        &crate::test_connection_id("watch-live"),
         Vec::new(),
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_WATCHES_UPDATED,
@@ -25411,7 +25523,7 @@ fn generic_agent_watch_snapshots_replay_and_clear_on_session_switch() {
     );
     let replay = connect_test_tool(&mut h, "watch-replay");
     h.complete_subscription(
-        "watch-replay",
+        &crate::test_connection_id("watch-replay"),
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_WATCHES_UPDATED,
         )],
@@ -26752,9 +26864,10 @@ fn watch_chain_mixed_lifecycle_turn_emits_paired_state() {
         "initial watch snapshots must not create lifecycle turns"
     );
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("watch-chain-lifecycle").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("watch-chain-lifecycle")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id(&c_id),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&b_id),
@@ -26975,7 +27088,7 @@ fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
     h.selected_model = Some("test/model".into());
     let stats = connect_test_tool(&mut h, "stats-live");
     h.complete_subscription(
-        "stats-live",
+        &crate::test_connection_id("stats-live"),
         Vec::new(),
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_STATS_UPDATED,
@@ -27017,7 +27130,7 @@ fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
 
     let replay = connect_test_tool(&mut h, "stats-replay");
     h.complete_subscription(
-        "stats-replay",
+        &crate::test_connection_id("stats-replay"),
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_STATS_UPDATED,
         )],
@@ -27111,7 +27224,7 @@ fn rejected_pre_dispatch_tool_attempt_counts_once_in_agent_stats() {
     let mut h = echo_harness(&sp).expect("start");
     let stats = connect_test_tool(&mut h, "stats-reject");
     h.complete_subscription(
-        "stats-reject",
+        &crate::test_connection_id("stats-reject"),
         Vec::new(),
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_STATS_UPDATED,
@@ -27166,7 +27279,8 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
     );
     h.provider_model_routes.insert(
         "test/role-model".into(),
-        tau_proto::ConnectionId::from("explicit-role-provider"),
+        tau_proto::ConnectionId::parse("explicit-role-provider")
+            .expect("test connection id must satisfy the identifier grammar"),
     );
     h.system_prompt_templates.insert(
         "explicit-template".to_owned(),
@@ -27186,7 +27300,7 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
     let parent = ensure_test_user_agent(&mut h);
     h.tool_agents.insert("explicit-call".into(), parent);
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: tau_proto::ToolName::new("agent_watch"),
             model_visible_name: None,
@@ -27202,7 +27316,7 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
     );
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-explicit".to_owned(),
@@ -27263,7 +27377,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
@@ -27337,7 +27451,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
 
     // Spawn the outer side conversation.
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-outer".to_owned(),
@@ -27391,7 +27505,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q-outer".to_owned(),
         },
 
@@ -27403,7 +27517,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     })
     .expect("outer response");
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-nested".to_owned(),
@@ -27464,7 +27578,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q-nested".to_owned(),
         },
 
@@ -27558,7 +27672,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
@@ -27631,7 +27745,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     .expect("main response");
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-outer".to_owned(),
@@ -27680,7 +27794,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q-outer".to_owned(),
         },
 
@@ -27693,7 +27807,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     .expect("outer response");
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-nested".to_owned(),
@@ -27744,7 +27858,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
@@ -27817,7 +27931,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     .expect("main response");
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-outer".to_owned(),
@@ -27871,7 +27985,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q-outer".to_owned(),
         },
 
@@ -27935,7 +28049,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: tau_proto::ToolName::new("agent_start"),
             model_visible_name: None,
@@ -28008,7 +28122,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     .expect("main response");
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-top".to_owned(),
@@ -28057,7 +28171,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
             }),
         },
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: crate::test_extension_name("core-subagents"),
             query_id: "q-top".to_owned(),
         },
 
@@ -28070,7 +28184,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     .expect("top response");
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: None,
             query_id: "q-leaf".to_owned(),
@@ -28360,7 +28474,8 @@ fn external_agent_message_request_publishes_received_projection() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "external-ok".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("msg-external-ok").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-external-ok")
+                .expect("test identifier must satisfy its grammar"),
             capability: "cap-ok".to_owned(),
             sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -28425,7 +28540,8 @@ fn external_agent_message_request_rejects_wrong_active_session() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "external-wrong-session".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("msg-external-wrong-session").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-external-wrong-session")
+                .expect("test identifier must satisfy its grammar"),
             capability: "cap-wrong-session".to_owned(),
             sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -28456,7 +28572,8 @@ fn external_agent_message_request_rejects_unknown_recipient() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "external-unknown".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("msg-external-unknown").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-external-unknown")
+                .expect("test identifier must satisfy its grammar"),
             capability: "cap-unknown".to_owned(),
             sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -28494,7 +28611,8 @@ fn external_agent_message_request_rejects_empty_message() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "external-empty".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("msg-external-empty").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-external-empty")
+                .expect("test identifier must satisfy its grammar"),
             capability: "cap-empty".to_owned(),
             sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -28525,11 +28643,12 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
-    let client_id: tau_proto::ConnectionId = "external".into();
+    let client_id: tau_proto::ConnectionId = crate::test_connection_id("external");
 
     let base = tau_proto::ExternalAgentMessageRequest {
         request_id: "external-preauth".to_owned(),
-        message_id: tau_proto::AgentMessageId::parse("msg-external-preauth").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("msg-external-preauth")
+            .expect("test identifier must satisfy its grammar"),
         capability: "cap-preauth".to_owned(),
         sender_session_id: test_session_id("other-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -28593,7 +28712,8 @@ fn external_agent_message_auth_binds_sender_identity_and_kind() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let message_id = tau_proto::AgentMessageId::parse("msg-auth").unwrap();
+    let message_id = tau_proto::AgentMessageId::parse("msg-auth")
+        .expect("test identifier must satisfy its grammar");
     h.pending_external_message_auth.insert(
         message_id.clone(),
         crate::harness::PendingExternalAgentMessageAuth {
@@ -28668,7 +28788,8 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "external-forged".to_owned(),
-        message_id: tau_proto::AgentMessageId::parse("msg-external-forged").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("msg-external-forged")
+            .expect("test identifier must satisfy its grammar"),
         capability: "cap-forged".to_owned(),
         sender_session_id: test_session_id("other-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -28681,46 +28802,48 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
     };
 
     h.handle_client_message(
-        "ui",
+        &crate::test_connection_id("ui"),
         tau_proto::HarnessInputMessage::ExternalAgentMessage(request.clone()),
     )
     .expect("untrusted client request");
     h.handle_extension_message(
-        "extension",
+        &crate::test_connection_id("extension"),
         tau_proto::HarnessInputMessage::ExternalAgentMessage(request.clone()),
     )
     .expect("extension request");
     assert!(session_agent_message_received_events(&h).is_empty());
 
     h.handle_client_message(
-        "ui",
+        &crate::test_connection_id("ui"),
         tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: "ordinary-ui".into(),
+            client_name: crate::test_extension_name("ordinary-ui"),
             client_kind: tau_proto::ClientKind::Ui,
             capabilities: Default::default(),
         }),
     )
     .expect("ordinary hello");
     h.handle_client_message(
-        "ui",
+        &crate::test_connection_id("ui"),
         tau_proto::HarnessInputMessage::ExternalAgentMessage(request.clone()),
     )
     .expect("ordinary client request");
     assert!(session_agent_message_received_events(&h).is_empty());
 
     h.handle_client_message(
-        "external",
+        &crate::test_connection_id("external"),
         tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+            client_name: crate::test_extension_name(
+                crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
+            ),
             client_kind: tau_proto::ClientKind::External,
             capabilities: Default::default(),
         }),
     )
     .expect("external hello");
     h.handle_client_message(
-        "external",
+        &crate::test_connection_id("external"),
         tau_proto::HarnessInputMessage::ExternalAgentMessage(request),
     )
     .expect("external request");
@@ -28758,7 +28881,7 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
 
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
-        client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+        client_name: crate::test_extension_name(crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME),
         client_kind: tau_proto::ClientKind::External,
         capabilities: Default::default(),
     }))
@@ -28766,7 +28889,8 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
     peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessage(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "socket-external-ok".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("socket-message-ok").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("socket-message-ok")
+                .expect("test identifier must satisfy its grammar"),
             capability: "socket-capability".to_owned(),
             sender_session_id: sender.current_session_id.clone(),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -28844,7 +28968,8 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
     );
     configure_inter_session_receivers(&mut target, &[("engineer", true)]);
     let message_id: tau_proto::AgentMessageId =
-        tau_proto::AgentMessageId::parse("two-harness-message").unwrap();
+        tau_proto::AgentMessageId::parse("two-harness-message")
+            .expect("test identifier must satisfy its grammar");
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "two-harness-request".to_owned(),
         message_id: message_id.clone(),
@@ -28895,7 +29020,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
         .expect("register target client");
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
-        client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+        client_name: crate::test_extension_name(crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME),
         client_kind: tau_proto::ClientKind::External,
         capabilities: Default::default(),
     }))
@@ -29084,10 +29209,12 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
 
     h.handle_client_message(
-        "external",
+        &crate::test_connection_id("external"),
         tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+            client_name: crate::test_extension_name(
+                crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
+            ),
             client_kind: tau_proto::ClientKind::External,
             capabilities: Default::default(),
         }),
@@ -29096,12 +29223,12 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
 
     let started = Instant::now();
     h.handle_client_message(
-        "external",
+        &crate::test_connection_id("external"),
         tau_proto::HarnessInputMessage::ExternalAgentMessage(
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "external-nonblocking-auth".to_owned(),
                 message_id: tau_proto::AgentMessageId::parse("msg-external-nonblocking-auth")
-                    .unwrap(),
+                    .expect("test message id must satisfy its grammar"),
                 capability: "cap-nonblocking".to_owned(),
                 sender_session_id: test_session_id("missing-sender-session"),
                 sender_id: crate::parse_agent_id("sender_agent"),
@@ -29216,7 +29343,8 @@ fn external_message_success_completion_publishes_sent_projection_and_tool_result
             tool_type: tau_proto::ToolType::Function,
             result: Ok((crate::parse_agent_id("recipient_agent"), false)),
             details: CborValue::Null,
-            auth_message_id: tau_proto::AgentMessageId::parse("delivered-message").unwrap(),
+            auth_message_id: tau_proto::AgentMessageId::parse("delivered-message")
+                .expect("test identifier must satisfy its grammar"),
             publish_sent: true,
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: test_session_id("other-session"),
@@ -29259,7 +29387,8 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
     let idle_id = h.ensure_agent_id_for_agent(&idle).expect("idle id");
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "bare-select".to_owned(),
-        message_id: tau_proto::AgentMessageId::parse("bare-select-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("bare-select-message")
+            .expect("test identifier must satisfy its grammar"),
         capability: "test-only".to_owned(),
         sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -29294,7 +29423,8 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
     h.provider_model_info.clear();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "model-revoked".to_owned(),
-        message_id: tau_proto::AgentMessageId::parse("model-revoked-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("model-revoked-message")
+            .expect("test identifier must satisfy its grammar"),
         capability: "test-only".to_owned(),
         sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -29324,7 +29454,8 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
     let agents_before = h.agents.len();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "auto-start".to_owned(),
-        message_id: tau_proto::AgentMessageId::parse("auto-start-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("auto-start-message")
+            .expect("test identifier must satisfy its grammar"),
         capability: "test-only".to_owned(),
         sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -29400,7 +29531,8 @@ fn bare_peer_auto_start_uses_first_configured_candidate() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "ordered-auto-start".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("ordered-auto-start-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("ordered-auto-start-message")
+                .expect("test identifier must satisfy its grammar"),
             capability: "test-only".to_owned(),
             sender_session_id: test_session_id("sender-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -29444,7 +29576,7 @@ fn bare_peer_auto_start_skips_unavailable_role_model() {
         tau_proto::ExternalAgentMessageRequest {
             request_id: "skip-unavailable-auto-start".to_owned(),
             message_id: tau_proto::AgentMessageId::parse("skip-unavailable-auto-start-message")
-                .unwrap(),
+                .expect("test message id must satisfy its grammar"),
             capability: "test-only".to_owned(),
             sender_session_id: test_session_id("sender-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -29486,7 +29618,8 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
         let result = h.handle_external_agent_message_request_without_auth_for_test(
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "restore-peer".to_owned(),
-                message_id: tau_proto::AgentMessageId::parse("restore-peer-message").unwrap(),
+                message_id: tau_proto::AgentMessageId::parse("restore-peer-message")
+                    .expect("test identifier must satisfy its grammar"),
                 capability: "test-only".to_owned(),
                 sender_session_id: test_session_id("sender-session"),
                 sender_id: crate::parse_agent_id("sender_agent"),
@@ -29552,12 +29685,15 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     configure_inter_session_receivers(&mut h, &[("engineer", true)]);
     let _tool = connect_test_tool(&mut h, "peer-tool-owner");
-    h.registry
-        .register("peer-tool-owner", shared_test_tool_spec("peer_test_tool"));
+    h.registry.register(
+        &crate::test_connection_id("peer-tool-owner"),
+        shared_test_tool_spec("peer_test_tool"),
+    );
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "peer-tool".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("peer-tool-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("peer-tool-message")
+                .expect("test identifier must satisfy its grammar"),
             capability: "test-only".to_owned(),
             sender_session_id: test_session_id("sender-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -29633,7 +29769,7 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
     let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
         request_id: format!("single-flight-{suffix}"),
         message_id: tau_proto::AgentMessageId::parse(format!("single-flight-message-{suffix}"))
-            .unwrap(),
+            .expect("test message id must satisfy its grammar"),
         capability: "test-only".to_owned(),
         sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -29691,7 +29827,8 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
     let agents_before = h.agents.len();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "queue-full".to_owned(),
-        message_id: tau_proto::AgentMessageId::parse("queue-full-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("queue-full-message")
+            .expect("test identifier must satisfy its grammar"),
         capability: "test-only".to_owned(),
         sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -29811,7 +29948,8 @@ fn external_message_auth_rejects_bare_exact_capability_substitution() {
             .expect("sender public id"),
     );
     let message_id: tau_proto::AgentMessageId =
-        tau_proto::AgentMessageId::parse("typed-auth-message").unwrap();
+        tau_proto::AgentMessageId::parse("typed-auth-message")
+            .expect("test identifier must satisfy its grammar");
     h.pending_external_message_auth.insert(
         message_id.clone(),
         crate::harness::PendingExternalAgentMessageAuth {
@@ -29874,7 +30012,8 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
             tool_type: tau_proto::ToolType::Function,
             result: Ok((crate::parse_agent_id("recipient_agent"), false)),
             details: CborValue::Null,
-            auth_message_id: tau_proto::AgentMessageId::parse("stale-message").unwrap(),
+            auth_message_id: tau_proto::AgentMessageId::parse("stale-message")
+                .expect("test identifier must satisfy its grammar"),
             publish_sent: true,
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: test_session_id("other-session"),
@@ -30043,7 +30182,8 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
     let result = resumed.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "external-cold-stopped".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("msg-external-cold-stopped").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-external-cold-stopped")
+                .expect("test identifier must satisfy its grammar"),
             capability: "cap-cold-stopped".to_owned(),
             sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -30332,7 +30472,8 @@ fn terminating_agent_route_rejects_direct_work() {
     );
     h.activate_received_agent_message(
         &tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-during-termination").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-during-termination")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
             sender_session_id: None,
             recipient_id: tau_proto::AgentId::parse(&recipient_id).expect("agent id"),
@@ -30461,9 +30602,10 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
     };
 
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("branch-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("branch-message")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
@@ -30688,7 +30830,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         tau_proto::ClientKind::Tool,
     );
     h.registry.register(
-        "conn-standalone-race-tool",
+        &crate::test_connection_id("conn-standalone-race-tool"),
         shared_test_tool_spec("forbidden_compaction_tool"),
     );
     let cid = ensure_test_user_agent(&mut h);
@@ -31193,14 +31335,16 @@ fn inbound_agent_message_events_are_ignored() {
     let mut h = echo_harness(&sp).expect("start");
 
     let forged_sent = Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: tau_proto::AgentMessageId::parse("test-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("test-message")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: crate::parse_agent_id("attacker"),
         recipient: tau_proto::AgentMessageRecipient::User,
         kind: tau_proto::AgentMessageKind::Message,
         message: "forged".to_owned(),
     });
     let forged_received = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse("test-message-received").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("test-message-received")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: crate::parse_agent_id("attacker"),
         sender_session_id: Some(test_session_id("other-session")),
         recipient_id: crate::parse_agent_id("victim"),
@@ -31210,12 +31354,12 @@ fn inbound_agent_message_events_are_ignored() {
         message: "forged received".to_owned(),
     });
     for forged in [forged_sent, forged_received] {
-        h.handle_client_event_inner("ui", forged.clone())
+        h.handle_client_event_inner(&crate::test_connection_id("ui"), forged.clone())
             .expect("client event");
-        h.handle_extension_event_inner("extension", forged.clone())
+        h.handle_extension_event_inner(&crate::test_connection_id("extension"), forged.clone())
             .expect("extension event");
         h.handle_extension_message(
-            "extension",
+            &crate::test_connection_id("extension"),
             TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(forged),
                 persist: true,
@@ -31332,7 +31476,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
     ] {
         let baseline_seq = h.event_log.next_seq();
         h.handle_extension_message(
-            "extension",
+            &crate::test_connection_id("extension"),
             TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(forged.clone()),
                 persist: true,
@@ -31396,12 +31540,12 @@ fn inbound_canonical_activation_forgery_is_ignored() {
 
     for event in forged {
         let baseline_seq = h.event_log.next_seq();
-        h.handle_client_event_inner("ui", event.clone())
+        h.handle_client_event_inner(&crate::test_connection_id("ui"), event.clone())
             .expect("ui event ignored");
-        h.handle_extension_event_inner("extension", event.clone())
+        h.handle_extension_event_inner(&crate::test_connection_id("extension"), event.clone())
             .expect("extension event ignored");
         h.handle_extension_message(
-            "extension",
+            &crate::test_connection_id("extension"),
             TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(event),
                 persist: true,
@@ -31452,12 +31596,14 @@ fn provider_cache_miss_diagnostic_requires_prompt_owner() {
         "provider-b",
         tau_proto::ClientKind::Provider,
     );
-    h.pending_provider_prompts
-        .insert(test_agent_prompt_id("prompt-1"), "provider-a".into());
+    h.pending_provider_prompts.insert(
+        test_agent_prompt_id("prompt-1"),
+        crate::test_connection_id("provider-a"),
+    );
 
     let baseline_seq = h.event_log.next_seq();
     h.handle_extension_message(
-        "provider-b",
+        &crate::test_connection_id("provider-b"),
         TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ProviderCacheMissDiagnosticReported(
                 cache_miss_diagnostic_for_test("prompt-1"),
@@ -31478,7 +31624,7 @@ fn provider_cache_miss_diagnostic_requires_prompt_owner() {
     )));
 
     h.handle_extension_message(
-        "provider-a",
+        &crate::test_connection_id("provider-a"),
         TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ProviderCacheMissDiagnosticReported(
                 cache_miss_diagnostic_for_test("prompt-1"),
@@ -31522,7 +31668,7 @@ fn tool_group_overrides_apply_before_individual_tool_overrides() {
         ("shell_safe", "shell"),
     ] {
         h.registry.register_with_prompt_fragment(
-            "conn-grouped",
+            &crate::test_connection_id("conn-grouped"),
             tau_core::ToolRegistration {
                 tool: ToolSpec {
                     name: ToolName::new(name),
@@ -31911,7 +32057,7 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     }
 
     h.handle_start_agent_request(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
             parent_agent: Some(parent.clone()),
             query_id: "q-inherit".to_owned(),
@@ -31951,7 +32097,7 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     let mut response =
         provider_text_response(&child_prompt_id, child_agent_id.clone(), "side result");
     response.originator = tau_proto::PromptOriginator::Extension {
-        name: "conn-delegate".into(),
+        name: crate::test_extension_name("conn-delegate"),
         query_id: "q-inherit".to_owned(),
     };
     h.handle_provider_response_finished(response)
@@ -32065,7 +32211,7 @@ fn rendered_prompt_with_seeded_agents_md_includes_synthetic_agents_message() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     seed_render_prompt_role(&mut h);
     h.discovered_agents_files.push(DiscoveredAgentsFile {
-        source_id: "shell".into(),
+        source_id: crate::test_connection_id("shell"),
         file_path: td.path().join("AGENTS.md"),
         content: "seeded AGENTS instructions\n".to_owned(),
     });
@@ -32122,7 +32268,7 @@ fn request_rendered_prompt(
 ) -> tau_proto::RenderedPromptResult {
     let frames = connect_test_client(h, "render-prompt-test", tau_proto::ClientKind::Ui);
     h.send_rendered_prompt_result(
-        "render-prompt-test",
+        &crate::test_connection_id("render-prompt-test"),
         tau_proto::GetRenderedPrompt {
             request_id: "request-1".to_owned(),
             role: role.to_owned(),
@@ -32153,7 +32299,7 @@ fn ui_emitted_custom_event_routes_to_subscribed_extension() {
     let command_name: tau_proto::EventName = "factory.sync".parse().expect("event name");
     h.bus
         .set_subscriptions(
-            "factory-ext",
+            &crate::test_connection_id("factory-ext"),
             Vec::new(),
             vec![EventSelector::Prefix("factory.".to_owned())],
         )
@@ -32166,7 +32312,7 @@ fn ui_emitted_custom_event_routes_to_subscribed_extension() {
     );
 
     h.handle_client_event_inner(
-        "ui",
+        &crate::test_connection_id("ui"),
         Event::ExtensionEvent(
             tau_proto::CustomEvent::try_new(command_name.clone(), None, CborValue::Null)
                 .expect("valid custom event"),
@@ -32271,7 +32417,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         .expect("loaded agent");
     h.bus
         .set_subscriptions(
-            "navigation-observer",
+            &crate::test_connection_id("navigation-observer"),
             Vec::new(),
             vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_STATS_UPDATED,
@@ -32303,7 +32449,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         ),
     ] {
         h.handle_client_event_inner(
-            "navigation-ui",
+            &crate::test_connection_id("navigation-ui"),
             Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
                 request_id: format!("navigation-{index}"),
                 session_id: h.current_session_id.clone(),
@@ -32316,7 +32462,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     }
 
     h.handle_client_event_inner(
-        "navigation-ui",
+        &crate::test_connection_id("navigation-ui"),
         Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
             request_id: "stale".to_owned(),
             session_id: test_session_id("other-session"),
@@ -32331,7 +32477,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     );
 
     h.handle_client_event_inner(
-        "navigation-ui",
+        &crate::test_connection_id("navigation-ui"),
         Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
             request_id: "unloaded".to_owned(),
             session_id: h.current_session_id.clone(),
@@ -32342,7 +32488,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     .expect("unloaded request");
 
     h.handle_client_event_inner(
-        "navigation-external",
+        &crate::test_connection_id("navigation-external"),
         Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
             request_id: "external".to_owned(),
             session_id: h.current_session_id.clone(),
@@ -32357,7 +32503,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     );
     assert!(external.lock().expect("external frames").is_empty());
     h.handle_client_event_inner(
-        promoted_external_id.as_str(),
+        &promoted_external_id,
         Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
             request_id: "promoted-external".to_owned(),
             session_id: h.current_session_id.clone(),
@@ -32450,7 +32596,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         ]
     );
     h.handle_client_event_inner(
-        "navigation-ui",
+        &crate::test_connection_id("navigation-ui"),
         Event::UiSetAgentNavigationMode(tau_proto::UiSetAgentNavigationMode {
             request_id: "before-reconnect".to_owned(),
             session_id: h.current_session_id.clone(),
@@ -32473,11 +32619,12 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         h.agent_navigation_modes.get(&agent_id),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
-    h.bus.disconnect("navigation-ui");
+    h.bus
+        .disconnect(&crate::test_connection_id("navigation-ui"));
     let reconnected =
         connect_test_client(&mut h, "navigation-reconnected", tau_proto::ClientKind::Ui);
     h.complete_subscription(
-        "navigation-reconnected",
+        &crate::test_connection_id("navigation-reconnected"),
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_STATS_UPDATED,
         )],
@@ -32506,8 +32653,11 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         action: tau_proto::UiAgentNavigationModeAction::SetSuspended,
     });
     connect_test_tool(&mut h, "extension-test");
-    h.handle_extension_event_inner("extension-test", extension_event)
-        .expect("extension intake");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("extension-test"),
+        extension_event,
+    )
+    .expect("extension intake");
     assert_eq!(
         h.agent_navigation_modes.get(&agent_id),
         Some(&tau_proto::AgentNavigationMode::Active)
@@ -32608,7 +32758,7 @@ fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
         );
         h.bus
             .set_subscriptions(
-                "prompt-observer",
+                &crate::test_connection_id("prompt-observer"),
                 Vec::new(),
                 vec![EventSelector::Exact(
                     tau_proto::EventName::AGENT_STATS_UPDATED,
@@ -32619,7 +32769,7 @@ fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
         observer.lock().expect("observer frames").clear();
 
         h.handle_client_event_inner(
-            "prompt-ui",
+            &crate::test_connection_id("prompt-ui"),
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 literal: false,
                 session_id: h.current_session_id.clone(),
@@ -32749,7 +32899,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
         let observer = connect_test_client(&mut h, "prompt-observer", tau_proto::ClientKind::Ui);
         h.bus
             .set_subscriptions(
-                "prompt-observer",
+                &crate::test_connection_id("prompt-observer"),
                 Vec::new(),
                 vec![EventSelector::Exact(
                     tau_proto::EventName::AGENT_STATS_UPDATED,
@@ -32774,7 +32924,8 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                     tau_proto::ClientKind::Ui,
                     ConnectionOrigin::Socket,
                 );
-                h.external_message_peers.insert("prompt-source".into());
+                h.external_message_peers
+                    .insert(crate::test_connection_id("prompt-source"));
                 "prompt-source"
             }
             Case::InMemoryUi => {
@@ -32846,7 +32997,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
         };
         let originator = if matches!(case, Case::ExtensionOriginator) {
             tau_proto::PromptOriginator::Extension {
-                name: "synthetic".into(),
+                name: crate::test_extension_name("synthetic"),
                 query_id: "side-query".to_owned(),
             }
         } else {
@@ -32864,7 +33015,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
         });
         if matches!(case, Case::ConfiguredExtension) {
             h.handle_extension_message(
-                source_id,
+                &crate::test_connection_id(source_id),
                 TestMessage::Emit(tau_proto::Emit {
                     event: Box::new(prompt_event),
                     persist: false,
@@ -32872,7 +33023,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
             )
             .expect("configured-extension prompt-shaped Emit");
         } else {
-            h.handle_client_event_inner(source_id, prompt_event)
+            h.handle_client_event_inner(&crate::test_connection_id(source_id), prompt_event)
                 .expect("UI-shaped prompt frame");
         }
 
@@ -32978,7 +33129,7 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
         connect_test_client(&mut h, "append-failure-observer", tau_proto::ClientKind::Ui);
     h.bus
         .set_subscriptions(
-            "append-failure-observer",
+            &crate::test_connection_id("append-failure-observer"),
             Vec::new(),
             vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_STATS_UPDATED,
@@ -33012,7 +33163,7 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
     h.agent_store = agent_store;
 
     let result = h.handle_client_event_inner(
-        "append-failure-ui",
+        &crate::test_connection_id("append-failure-ui"),
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
             session_id: h.current_session_id.clone(),
@@ -33091,4 +33242,10 @@ fn cache_read_ceiling_validation_preserves_valid_and_rejects_invalid_values() {
         super::super::validate_cache_read_ceiling(4_096, 3_584, None),
         None
     );
+}
+
+/// Builds a validated shell command id used by this test module.
+fn test_shell_command_id(value: impl AsRef<str>) -> tau_proto::ShellCommandId {
+    tau_proto::ShellCommandId::parse(value.as_ref())
+        .expect("test identifier must satisfy its grammar")
 }

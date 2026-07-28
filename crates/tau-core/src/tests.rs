@@ -4,8 +4,8 @@ use tau_proto::{
     AgentDisplayNameSet, AgentHead, AgentHeadMoved, AgentId, AgentPromptId, AgentPromptSubmitted,
     CborValue, ContextItem, Event, EventSelector, HarnessNotice, HarnessOutputMessage,
     MessageAgentTarget, MessageDeleted, MessageDelivered, MessageEdited, MessageFactId,
-    MessageFactRef, MessageParty, MessagePublisherId, MessageReactionAdded, MessageReactionRemoved,
-    MessageSent, NoticeLevel, PromptMessageClass, PromptOriginator, ProviderResponseFinished,
+    MessageFactRef, MessageParty, MessageReactionAdded, MessageReactionRemoved, MessageSent,
+    NoticeLevel, PromptMessageClass, PromptOriginator, ProviderResponseFinished,
     ProviderStopReason, SessionAgentLoaded, SessionAgentUnloaded, SessionId, ToolBackgroundError,
     ToolBackgroundResult, ToolCallId, ToolCallItem, ToolName, ToolRequest, ToolResult,
     ToolResultKind, ToolStarted, ToolType,
@@ -13,19 +13,19 @@ use tau_proto::{
 
 use crate::memory::MemorySink;
 use crate::{
-    AgentEntry, AgentEventParent, AgentStore, AgentStoreError, Connection, ConnectionMetadata,
-    ConnectionOrigin, EventBus, MemoryInbox, NodeId, PersistedAgentEvent, PersistedAgentEventSeq,
-    PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership, SessionStore,
-    SessionStoreError, list_session_metas, memory_connection,
+    AgentEntry, AgentEventParent, AgentStore, AgentStoreError, Connection, ConnectionOrigin,
+    EventBus, MemoryInbox, NodeId, PendingConnectionMetadata, PersistedAgentEvent,
+    PersistedAgentEventSeq, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,
+    SessionStore, SessionStoreError, list_session_metas, memory_connection,
 };
 
 /// Creates an in-memory test connection with an explicit transport origin.
 fn test_connection(origin: ConnectionOrigin) -> (Connection, MemoryInbox) {
     let inbox = MemoryInbox::default();
     let connection = Connection::new(
-        ConnectionMetadata {
-            id: Default::default(),
-            name: "test".to_owned(),
+        PendingConnectionMetadata {
+            id: Some(test_connection_id("test-connection")),
+            name: test_extension_name("test"),
             kind: tau_proto::ClientKind::Ui,
             origin,
         },
@@ -67,7 +67,8 @@ fn append_raw_cbor<T: serde::Serialize>(path: &std::path::Path, record: &T) {
 /// Construct one representative canonical message fact.
 fn delivered_message_fact(agent_id: &str, message_id: &str) -> Event {
     Event::MessageDelivered(MessageDelivered::new(
-        MessagePublisherId::new("bridge-main"),
+        tau_proto::MessagePublisherId::parse("bridge-main")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         MessageAgentTarget::new(agent_id),
         MessageFactId::new(message_id),
         MessageParty {
@@ -82,10 +83,11 @@ fn delivered_message_fact(agent_id: &str, message_id: &str) -> Event {
 
 /// Construct all six message fact variants, including unresolved references.
 fn all_message_facts(agent_id: &str) -> Vec<Event> {
-    let publisher = MessagePublisherId::new("bridge-main");
+    let publisher = tau_proto::MessagePublisherId::parse("bridge-main")
+        .expect("canonical publisher id must satisfy the identifier grammar");
     let agent = MessageAgentTarget::new(agent_id);
     let target = MessageFactRef {
-        publisher_extension_id: MessagePublisherId::new("other-bridge"),
+        publisher_extension_id: tau_proto::RawMessagePublisherId::new("other-bridge"),
         message_id: MessageFactId::new("unresolved"),
     };
     vec![
@@ -141,13 +143,10 @@ fn event_bus_accepts_known_socket_subscription() {
     let id = bus.connect(connection);
     let selector = EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE);
 
-    bus.set_subscriptions(id.as_str(), Vec::new(), vec![selector.clone()])
+    bus.set_subscriptions(&id, Vec::new(), vec![selector.clone()])
         .expect("known socket family should be accepted");
 
-    assert_eq!(
-        bus.live_subscriptions(id.as_str()),
-        Some([selector].as_slice())
-    );
+    assert_eq!(bus.live_subscriptions(&id), Some([selector].as_slice()));
 }
 
 /// Unknown families remain unrestricted for non-socket connections because the
@@ -159,13 +158,10 @@ fn event_bus_accepts_unknown_non_socket_subscription() {
     let id = bus.connect(connection);
     let selector = EventSelector::Prefix("unknown.".to_owned());
 
-    bus.set_subscriptions(id.as_str(), Vec::new(), vec![selector.clone()])
+    bus.set_subscriptions(&id, Vec::new(), vec![selector.clone()])
         .expect("non-socket subscription should remain unrestricted");
 
-    assert_eq!(
-        bus.live_subscriptions(id.as_str()),
-        Some([selector].as_slice())
-    );
+    assert_eq!(bus.live_subscriptions(&id), Some([selector].as_slice()));
 }
 
 /// The bus validates the de-duplicated historical/live union before replacing
@@ -176,12 +172,12 @@ fn event_bus_rejects_invalid_socket_union_before_commit() {
     let (connection, _) = test_connection(ConnectionOrigin::Socket);
     let id = bus.connect(connection);
     let existing = EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE);
-    bus.set_subscriptions(id.as_str(), vec![existing.clone()], vec![existing.clone()])
+    bus.set_subscriptions(&id, vec![existing.clone()], vec![existing.clone()])
         .expect("initial subscription");
 
     let error = bus
         .set_subscriptions(
-            id.as_str(),
+            &id,
             vec![EventSelector::Prefix("unknown.".to_owned())],
             vec![EventSelector::Exact(tau_proto::EventName::TOOL_STARTED)],
         )
@@ -192,13 +188,10 @@ fn event_bus_rejects_invalid_socket_union_before_commit() {
         crate::RouteError::SubscriptionDenied { .. }
     ));
     assert_eq!(
-        bus.historical_subscriptions(id.as_str()),
+        bus.historical_subscriptions(&id),
         Some([existing.clone()].as_slice())
     );
-    assert_eq!(
-        bus.live_subscriptions(id.as_str()),
-        Some([existing].as_slice())
-    );
+    assert_eq!(bus.live_subscriptions(&id), Some([existing].as_slice()));
 }
 
 /// Buffered live delivery records the publish-time live selector match so a
@@ -206,15 +199,16 @@ fn event_bus_rejects_invalid_socket_union_before_commit() {
 #[test]
 fn event_bus_buffers_only_publish_time_live_matches() {
     let mut bus = EventBus::new();
-    let (connection, inbox) = memory_connection("ext", tau_proto::ClientKind::Tool);
+    let (connection, inbox) =
+        memory_connection(test_extension_name("ext"), tau_proto::ClientKind::Tool);
     let id = bus.connect(connection);
     bus.set_subscriptions(
-        id.as_str(),
+        &id,
         vec![EventSelector::Exact(tau_proto::EventName::AGENT_STARTED)],
         vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
     )
     .expect("subscribe");
-    bus.begin_catch_up(id.as_str()).expect("begin catch-up");
+    bus.begin_catch_up(&id).expect("begin catch-up");
 
     let notice = Event::HarnessNotice(HarnessNotice {
         kind: "test".to_owned(),
@@ -227,12 +221,12 @@ fn event_bus_buffers_only_publish_time_live_matches() {
         notice.clone(),
     ));
     bus.set_subscriptions(
-        id.as_str(),
+        &id,
         vec![EventSelector::Exact(tau_proto::EventName::AGENT_STARTED)],
         vec![EventSelector::Exact(tau_proto::EventName::TOOL_STARTED)],
     )
     .expect("resubscribe while blocked");
-    bus.finish_catch_up(id.as_str()).expect("finish catch-up");
+    bus.finish_catch_up(&id).expect("finish catch-up");
 
     let frames = inbox.drain();
     assert_eq!(frames.len(), 1);
@@ -244,16 +238,17 @@ fn event_bus_buffers_only_publish_time_live_matches() {
 #[test]
 fn event_bus_releases_catch_up_when_historical_selectors_are_cleared() {
     let mut bus = EventBus::new();
-    let (connection, inbox) = memory_connection("ext", tau_proto::ClientKind::Tool);
+    let (connection, inbox) =
+        memory_connection(test_extension_name("ext"), tau_proto::ClientKind::Tool);
     let id = bus.connect(connection);
     let live_selector = EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE);
     bus.set_subscriptions(
-        id.as_str(),
+        &id,
         vec![EventSelector::Exact(tau_proto::EventName::AGENT_STARTED)],
         vec![live_selector.clone()],
     )
     .expect("subscribe with catch-up");
-    bus.begin_catch_up(id.as_str()).expect("begin catch-up");
+    bus.begin_catch_up(&id).expect("begin catch-up");
 
     let notice = Event::HarnessNotice(HarnessNotice {
         kind: "test".to_owned(),
@@ -267,7 +262,7 @@ fn event_bus_releases_catch_up_when_historical_selectors_are_cleared() {
     ));
     assert!(inbox.snapshot().is_empty());
 
-    bus.set_subscriptions(id.as_str(), Vec::new(), vec![live_selector])
+    bus.set_subscriptions(&id, Vec::new(), vec![live_selector])
         .expect("clear historical selectors");
     let frames = inbox.drain();
     assert_eq!(frames.len(), 1);
@@ -1800,10 +1795,10 @@ fn ephemeral_session_restore_log_replays_from_memory_only() {
     assert_eq!(events[0].event, started);
 }
 
-/// Restore logs truncate at the first invalid sequence and restart at the
-/// recovered prefix cursor.
+/// Restore logs reject a complete invalid sequence without changing journal
+/// bytes.
 #[test]
-fn session_restore_append_recovers_invalid_existing_sequence() {
+fn session_restore_append_rejects_invalid_existing_sequence() {
     let sessions_dir = temp_dir("bad-session-restore-seq");
     let session_dir = sessions_dir.join("session-1");
     let path = session_dir.join("restore-events.cbor");
@@ -1820,21 +1815,22 @@ fn session_restore_append_recovers_invalid_existing_sequence() {
         recorded_at: tau_proto::UnixMicros::new(1),
     };
     append_raw_cbor(&path, &bad);
+    let bytes_before = std::fs::read(&path).expect("invalid restore journal");
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
 
-    store
+    let error = store
         .append_session_restore_event_at(
             "session-1",
             None,
             bad.event.clone(),
             tau_proto::UnixMicros::new(2),
         )
-        .expect("invalid restore sequence is truncated");
-    let records = store
-        .session_restore_events("session-1")
-        .expect("recovered restore log reads");
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].seq, PersistedSessionEventSeq::new(0));
+        .expect_err("invalid complete restore sequence fails closed");
+    assert!(matches!(error, SessionStoreError::Read { .. }));
+    assert_eq!(
+        std::fs::read(&path).expect("unchanged journal"),
+        bytes_before
+    );
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
@@ -1868,10 +1864,10 @@ fn session_restore_append_recovers_truncated_existing_log() {
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
-/// Restore-log append recovery removes a semantically invalid suffix before
-/// appending the next valid restore fact.
+/// Restore-log append rejects a complete semantically invalid record without
+/// changing journal bytes.
 #[test]
-fn session_restore_append_recovers_wrong_existing_event_kind() {
+fn session_restore_append_rejects_wrong_existing_event_kind() {
     let sessions_dir = temp_dir("bad-session-restore-kind");
     let path = sessions_dir.join("session-1").join("restore-events.cbor");
     let wrong = PersistedSessionEvent {
@@ -1888,6 +1884,7 @@ fn session_restore_append_recovers_wrong_existing_event_kind() {
         recorded_at: tau_proto::UnixMicros::new(1),
     };
     append_raw_cbor(&path, &wrong);
+    let bytes_before = std::fs::read(&path).expect("invalid restore journal");
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
     let event = Event::ToolStarted(ToolStarted {
         call_id: ToolCallId::from("call-good"),
@@ -1897,14 +1894,14 @@ fn session_restore_append_recovers_wrong_existing_event_kind() {
         originator: PromptOriginator::User,
     });
 
-    store
+    let error = store
         .append_session_restore_event_at("session-1", None, event, tau_proto::UnixMicros::new(2))
-        .expect("wrong restore event kind is truncated");
-    let records = store
-        .session_restore_events("session-1")
-        .expect("recovered restore log reads");
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].seq, PersistedSessionEventSeq::new(0));
+        .expect_err("wrong complete restore event kind fails closed");
+    assert!(matches!(error, SessionStoreError::Read { .. }));
+    assert_eq!(
+        std::fs::read(&path).expect("unchanged journal"),
+        bytes_before
+    );
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
@@ -2188,10 +2185,10 @@ fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
-/// A lock-time reload truncates an invalid sequence suffix and appends from the
-/// recovered cursor rather than reusing an unlocked cached cursor.
+/// A lock-time reload rejects a complete invalid sequence without reusing an
+/// unlocked cached cursor or changing journal bytes.
 #[test]
-fn session_store_recovers_at_lock_time_reload() {
+fn session_store_rejects_invalid_lock_time_reload() {
     let sessions_dir = temp_dir("sessions-lock-reload-corrupt");
     let events_path = sessions_dir.join("session-1").join("events.cbor");
     let mut setup = SessionStore::open(&sessions_dir).expect("setup session store");
@@ -2215,19 +2212,14 @@ fn session_store_recovers_at_lock_time_reload() {
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );
-    let membership = store
+    let bytes_before = std::fs::read(&events_path).expect("invalid journal");
+    store
         .lock_and_load_session("session-1")
-        .expect("corrupt suffix recovers")
-        .expect("empty recovered membership exists");
-    assert!(membership.loaded_agents().is_empty());
-    let appended = store
-        .append_session_event(
-            "session-1",
-            None,
-            session_loaded("session-1", "agent-new", false),
-        )
-        .expect("append uses recovered sequence");
-    assert_eq!(appended.seq, PersistedSessionEventSeq::new(0));
+        .expect_err("complete invalid sequence fails closed");
+    assert_eq!(
+        std::fs::read(&events_path).expect("unchanged journal"),
+        bytes_before
+    );
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
@@ -2268,12 +2260,14 @@ fn session_store_replay_retry_preserves_ephemeral_membership_overlay() {
             recorded_at: tau_proto::UnixMicros::now(),
         },
     );
-    let membership = store
+    let bytes_before = std::fs::read(&events_path).expect("invalid journal");
+    store
         .lock_and_load_session("session-1")
-        .expect("corrupt suffix recovers")
-        .expect("overlay membership");
-    assert!(!membership.contains_agent(&AgentId::parse("agent-durable").expect("agent id")));
-    assert!(membership.contains_agent(&AgentId::parse("agent-ephemeral").expect("agent id")));
+        .expect_err("complete invalid sequence fails closed");
+    assert_eq!(
+        std::fs::read(&events_path).expect("unchanged journal"),
+        bytes_before
+    );
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
@@ -2505,4 +2499,16 @@ fn session_store_rejects_transcript_events() {
     assert!(!sessions_dir.join("session-1").join("events.cbor").exists());
 
     let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+/// Builds a validated extension name used by this test module.
+fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
+    tau_proto::ExtensionName::parse(value.as_ref())
+        .expect("test extension name must satisfy the identifier grammar")
+}
+
+/// Builds a validated connection identifier used by this test module.
+fn test_connection_id(value: impl AsRef<str>) -> tau_proto::ConnectionId {
+    tau_proto::ConnectionId::parse(value.as_ref())
+        .expect("test connection id must satisfy the identifier grammar")
 }

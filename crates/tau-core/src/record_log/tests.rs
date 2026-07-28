@@ -145,16 +145,40 @@ fn assert_rollback_failure_poisons(fault: AppendFault) {
     );
 }
 
-/// Prefix recovery truncates every framing, decoding, and semantic corruption
-/// class together with a complete valid-looking suffix.
+/// Prefix recovery truncates only incomplete crash tails.
 #[test]
-fn recovery_discards_every_invalid_suffix_class() {
+fn recovery_discards_incomplete_crash_tails() {
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("partial header", vec![1, 2, 3]),
         (
             "partial payload",
             [5_u64.to_le_bytes().as_slice(), &[1, 2]].concat(),
         ),
+    ];
+    for (name, invalid) in cases {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("events.cbor");
+        let valid = encoded_frame(&"good");
+        let bytes = [valid.as_slice(), invalid.as_slice()].concat();
+        std::fs::write(&path, &bytes).expect("write damaged journal");
+        let mut state = FramedAppendState::default();
+        state.inject_sync_spawn_failure();
+
+        let recovered = state
+            .recover(&path, |record: &String| record != "bad")
+            .unwrap_or_else(|error| panic!("{name} recovery failed: {error}"));
+
+        assert!(recovered.repaired, "{name}");
+        assert_eq!(recovered.records, vec!["good".to_owned()], "{name}");
+        assert_eq!(std::fs::read(&path).expect("read repaired journal"), valid);
+    }
+}
+
+/// Complete invalid frames fail closed without truncating themselves or any
+/// following records.
+#[test]
+fn recovery_preserves_complete_invalid_frames() {
+    let cases: Vec<(&str, Vec<u8>)> = vec![
         (
             "oversized length",
             (MAX_RECORD_BYTES + 1).to_le_bytes().to_vec(),
@@ -179,22 +203,18 @@ fn recovery_discards_every_invalid_suffix_class() {
             encoded_frame(&"valid-looking suffix").as_slice(),
         ]
         .concat();
-        std::fs::write(&path, bytes).expect("write damaged journal");
+        std::fs::write(&path, &bytes).expect("write damaged journal");
         let mut state = FramedAppendState::default();
         state.inject_sync_spawn_failure();
 
-        let recovered = state
-            .recover(&path, |record: &String| record != "bad")
-            .unwrap_or_else(|error| panic!("{name} recovery failed: {error}"));
+        let error = match state.recover(&path, |record: &String| record != "bad") {
+            Ok(_) => panic!("complete invalid frame must fail"),
+            Err(error) => error,
+        };
 
-        assert!(recovered.repaired, "{name}");
-        assert_eq!(recovered.records, vec!["good".to_owned()], "{name}");
-        assert_eq!(std::fs::read(&path).expect("read repaired journal"), valid);
-        assert_eq!(
-            state.dirty_target(&path).map(|target| target.end_offset),
-            Some(valid.len() as u64),
-            "{name}"
-        );
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{name}");
+        assert_eq!(std::fs::read(&path).expect("read unchanged journal"), bytes);
+        assert!(state.dirty_target(&path).is_none(), "{name}");
     }
 }
 

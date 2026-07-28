@@ -34,101 +34,13 @@ provides no backward wire or journal compatibility.
 ## Protocol schema
 
 The protocol uses `EventCategory::Message` and one `Event` variant per wire
-name, with no `kind`/operation enum or `MessageEnvelope` wrapper.
-
-```rust
-pub struct MessageFactId(pub String);
-
-/// Wire-decodable publisher identifier; the event's own value is stamped.
-pub struct MessagePublisherId(pub String);
-
-pub struct MessageFactRef {
-    pub publisher_extension_id: MessagePublisherId,
-    pub message_id: MessageFactId,
-}
-
-pub enum MessageSenderAuth {
-    VerifiedAllowlisted,
-    VerifiedConversationAuthorized,
-    TrustedMembership,
-}
-
-pub struct MessageParty {
-    pub stable_id: String,
-    pub display_name: Option<String>,
-    pub sender_auth: Option<MessageSenderAuth>,
-}
-
-pub struct MessageConversation {
-    pub stable_id: String,
-    pub display_name: Option<String>,
-    pub alias: Option<String>,
-}
-
-pub struct MessageExtensionData(pub CborValue);
-
-/// Raw claimed target so a malformed target remains a committable fact.
-pub struct MessageAgentTarget(pub String);
-
-pub struct MessageDelivered {
-    pub publisher_extension_id: MessagePublisherId,
-    pub agent_id: MessageAgentTarget,
-    pub message_id: MessageFactId,
-    pub sender: MessageParty,
-    pub conversation: Option<MessageConversation>,
-    pub text: String,
-    pub extension_data: MessageExtensionData,
-}
-
-pub struct MessageEdited {
-    pub publisher_extension_id: MessagePublisherId,
-    pub agent_id: MessageAgentTarget,
-    pub target: MessageFactRef,
-    pub actor: Option<MessageParty>,
-    pub conversation: Option<MessageConversation>,
-    pub text: String,
-    pub extension_data: MessageExtensionData,
-}
-
-pub struct MessageDeleted {
-    pub publisher_extension_id: MessagePublisherId,
-    pub agent_id: MessageAgentTarget,
-    pub target: MessageFactRef,
-    pub actor: Option<MessageParty>,
-    pub conversation: Option<MessageConversation>,
-    pub extension_data: MessageExtensionData,
-}
-
-pub struct MessageReactionAdded {
-    pub publisher_extension_id: MessagePublisherId,
-    pub agent_id: MessageAgentTarget,
-    pub target: MessageFactRef,
-    pub actor: Option<MessageParty>,
-    pub conversation: Option<MessageConversation>,
-    pub reaction: String,
-    pub extension_data: MessageExtensionData,
-}
-
-pub struct MessageReactionRemoved {
-    pub publisher_extension_id: MessagePublisherId,
-    pub agent_id: MessageAgentTarget,
-    pub target: MessageFactRef,
-    pub actor: Option<MessageParty>,
-    pub conversation: Option<MessageConversation>,
-    pub reaction: String,
-    pub extension_data: MessageExtensionData,
-}
-
-pub struct MessageSent {
-    pub publisher_extension_id: MessagePublisherId,
-    pub agent_id: MessageAgentTarget,
-    pub message_id: MessageFactId,
-    pub recipient: Option<MessageParty>,
-    pub conversation: Option<MessageConversation>,
-    pub text: String,
-    pub extension_data: MessageExtensionData,
-}
-```
+name, with no operation enum or envelope wrapper. Each report/canonical pair
+shares one payload shape. Reports carry a lossless raw top-level publisher
+claim; canonical facts carry the harness-stamped validated publisher identity.
+Delivered and sent facts identify a publisher-scoped base message. Edit,
+delete, and reaction facts instead carry a publisher/message reference. All
+facts also carry a raw agent target, bounded extension-private CBOR data, and
+the operation-specific party, conversation, text, or reaction fields.
 
 `extension_data` serializes as a CBOR value and defaults to CBOR null in client
 constructors. It is not flattened. The field is required in the wire
@@ -186,20 +98,31 @@ snapshots both that authority and the configured instance name when it admits a
 report.
 
 Configured publisher IDs are 1–128 ASCII bytes and contain only letters,
-digits, `_`, and `-`. Apply the same rule post-commit to
-`MessageFactRef.publisher_extension_id`. `MessagePublisherId` remains a raw
-wire string so a malformed reference can still be committed and diagnosed;
-the canonical event's own ID is always valid because downstream
-canonicalization stamps the validated configured name captured at report
-admission.
+digits, `_`, and `-`. `MessagePublisherId` owns and enforces that canonical
+grammar. `RawMessagePublisherId` remains an unrestricted, lossless wire string
+for report claims and `MessageFactRef.publisher_extension_id`, so malformed
+claims can still be committed, audited, and rejected deterministically. The
+canonical event's own ID is always valid because downstream canonicalization
+stamps the validated configured name captured at report admission.
 
-Report and canonical `Event` variants reuse the same payload DTOs, so an
-emitting extension supplies the publisher field for codec symmetry. The
-post-commit report consumer ignores that value and replaces it with the
-authenticated publishing connection's configured instance name when building
-the canonical fact. Report subscribers may observe the untrusted claimed value;
+Report and canonical `Event` variants reuse generic payload DTOs instantiated
+with `RawMessagePublisherId` and `MessagePublisherId`, respectively. The
+post-commit report consumer preserves the raw report for observers, ignores its
+publisher claim for authority, but requires that claim to be grammar-valid and
+exactly equal the authenticated publishing connection's configured instance
+name. A mismatch remains observable only as the committed transient report and
+does not create a canonical fact. For a match, the consumer replaces the claim
+with the captured authenticated name when building the canonical fact. Report
+subscribers may observe the untrusted claimed value;
 canonical-fact consumers only observe the harness-stamped value. The canonical
 stamp is persisted and replayed unchanged.
+
+Top-level and nested raw publisher fields have different validation points. The
+top-level report claim gates report-to-fact canonicalization as described above.
+A `MessageFactRef.publisher_extension_id` is instead an external reference
+claim: it remains lossless through admission and canonical append. Projection
+later rejects a reference whose publisher claim does not satisfy the canonical
+publisher grammar; that rejection does not erase the committed fact.
 
 Only configured extensions that declared the message-bridge capability may emit
 `message.*_reported`. No peer may emit
@@ -256,10 +179,13 @@ transport.
    snapshots the stable configured publisher identity, and passes the report
    through ordinary interception, runtime commit, and live broadcast. The
    transient report never enters cold-restart history.
-3. A live-only post-commit harness consumer replaces the claimed publisher with
-   the snapshotted stable configured extension name and selects the canonical
-   target journal from `agent_id`. Disconnect or replacement of the original
-   connection after admission does not change this identity.
+3. A live-only post-commit harness consumer requires the raw top-level publisher
+   claim to parse and exactly match the snapshotted stable configured extension
+   name. An invalid or mismatched claim remains observable in the transient
+   report but produces no canonical fact. A matching claim is replaced with the
+   captured authenticated name, and the consumer selects the canonical target
+   journal from `agent_id`. Disconnect or replacement of the original connection
+   after admission does not change this identity.
 4. The harness publishes the canonical `message.*` fact through ordinary
    interception. Canonical facts are immutable and must-pass: interceptors may
    observe them but cannot rewrite or drop them.

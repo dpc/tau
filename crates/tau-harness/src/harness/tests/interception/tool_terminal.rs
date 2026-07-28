@@ -679,7 +679,10 @@ fn pre_ready_terminal_report_preserves_retained_byte_accounting() {
     assert!(committed_terminal_events(&harness, "retained-result").is_empty());
 
     harness
-        .handle_extension_message("conn-owner", TestMessage::Ready(Default::default()))
+        .handle_extension_message(
+            &crate::test_connection_id("conn-owner"),
+            TestMessage::Ready(Default::default()),
+        )
         .expect("activate and drain report");
     assert!(matches!(
         committed_terminal_events(&harness, "retained-result").as_slice(),
@@ -876,7 +879,7 @@ fn failed_result_then_disconnect_commits_fresh_disconnected_classification() {
     std::fs::remove_dir(&journal).expect("remove blocker");
     std::fs::rename(&backup, &journal).expect("restore journal");
 
-    harness.fail_pending_tool_calls_for_connection("conn-owner");
+    harness.fail_pending_tool_calls_for_connection(&crate::test_connection_id("conn-owner"));
 
     let records = harness
         .agent_store

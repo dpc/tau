@@ -1,5 +1,5 @@
 use tau_proto::{
-    AgentStarted, CborValue, Event, ExtensionName, PromptOriginator, ProviderCacheMissDiagnostic,
+    AgentStarted, CborValue, Event, PromptOriginator, ProviderCacheMissDiagnostic,
     ProviderModelsDeclared, ProviderModelsUpdated, ProviderName, ProviderPromptSubmitted,
     ProviderQuotaClear, ProviderQuotaEpoch, ProviderQuotaPatch, ProviderQuotaReplace,
     ProviderResponseFinished, ProviderResponseUpdated, ProviderRetryPromptResult,
@@ -48,7 +48,8 @@ fn provider_model_state_never_enters_semantic_history() {
     for event in [
         Event::ProviderModelsDeclared(ProviderModelsDeclared { models: Vec::new() }),
         Event::ProviderModelsUpdated(ProviderModelsUpdated {
-            publisher_extension_id: ExtensionName::from("provider"),
+            publisher_extension_id: tau_proto::ExtensionName::parse("provider")
+                .expect("test extension name must satisfy the identifier grammar"),
             models: Vec::new(),
         }),
     ] {
@@ -345,7 +346,8 @@ fn tool_lifecycle_state_never_enters_semantic_history() {
     for event in [
         Event::ToolRegistrationDeclared(declaration.clone()),
         Event::ToolRegister(tau_proto::ToolRegister {
-            publisher_extension_id: ExtensionName::from("tool"),
+            publisher_extension_id: tau_proto::ExtensionName::parse("tool")
+                .expect("test extension name must satisfy the identifier grammar"),
             publisher_instance_id: 1.into(),
             tool: declaration.tool,
             tool_group: None,
@@ -355,7 +357,8 @@ fn tool_lifecycle_state_never_enters_semantic_history() {
             tool_name: ToolName::new("runtime_tool"),
         }),
         Event::ToolUnregister(tau_proto::ToolUnregister {
-            publisher_extension_id: ExtensionName::from("tool"),
+            publisher_extension_id: tau_proto::ExtensionName::parse("tool")
+                .expect("test extension name must satisfy the identifier grammar"),
             publisher_instance_id: 1.into(),
             tool_name: ToolName::new("runtime_tool"),
         }),
@@ -390,13 +393,15 @@ fn tool_progress_never_enters_semantic_history() {
 #[test]
 fn shell_reports_never_enter_semantic_history() {
     let progress = tau_proto::ShellCommandProgress {
-        command_id: tau_proto::ShellCommandId::parse("shell-route").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("shell-route")
+            .expect("test identifier must satisfy its grammar"),
         stream: tau_proto::ShellStream::Stdout,
         chunk: "chunk".to_owned(),
         target_agent_id: Some(parse_agent_id("agent-1")),
     };
     let finished = tau_proto::ShellCommandFinished {
-        command_id: tau_proto::ShellCommandId::parse("shell-route").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("shell-route")
+            .expect("test identifier must satisfy its grammar"),
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),

@@ -10,7 +10,8 @@ use super::*;
 /// Build the six representative valid facts used to compare distinct UI
 /// operations and live/replay-stable output.
 fn representative_facts() -> [Event; 6] {
-    let publisher = MessagePublisherId::new("bridge-main");
+    let publisher = tau_proto::MessagePublisherId::parse("bridge-main")
+        .expect("canonical publisher id must satisfy the identifier grammar");
     let agent = MessageAgentTarget::new("agent-1");
     let party = MessageParty {
         stable_id: "user-1".to_owned(),
@@ -23,7 +24,7 @@ fn representative_facts() -> [Event; 6] {
         alias: None,
     });
     let reference = MessageFactRef {
-        publisher_extension_id: MessagePublisherId::new("other-bridge"),
+        publisher_extension_id: tau_proto::RawMessagePublisherId::new("other-bridge"),
         message_id: MessageFactId::new("unknown-message"),
     };
     let mut delivered = MessageDelivered::new(
@@ -120,7 +121,8 @@ fn six_facts_render_distinct_safe_live_and_replay_output() {
 #[test]
 fn delivered_message_matches_compact_primary_shape() {
     let delivered = Event::MessageDelivered(MessageDelivered::new(
-        MessagePublisherId::new("fedi-slack"),
+        tau_proto::MessagePublisherId::parse("fedi-slack")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         MessageAgentTarget::new("agent-1"),
         MessageFactId::new("slack-message:opaque"),
         MessageParty {

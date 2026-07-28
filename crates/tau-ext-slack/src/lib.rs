@@ -27,9 +27,9 @@ use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauE
 use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, MessageAgentTarget, MessageConversation,
     MessageDeleted, MessageDelivered, MessageEdited, MessageFactId, MessageFactRef, MessageParty,
-    MessagePublisherId, MessageReactionAdded, MessageReactionRemoved, MessageSenderAuth,
-    MessageSent, NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
-    ToolStarted, ToolUseState, ToolUseStatus,
+    MessageReactionAdded, MessageReactionRemoved, MessageSenderAuth, MessageSent, NoticeLevel,
+    ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
+    ToolUseStatus,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -2452,7 +2452,10 @@ impl Extension {
             let Some(instance_name) = state.instance_name.as_ref() else {
                 return;
             };
-            (MessagePublisherId::new(instance_name.to_string()), owner)
+            (
+                tau_proto::RawMessagePublisherId::new(instance_name.to_string()),
+                owner,
+            )
         };
         let occurrence = delete
             .event_id
@@ -3325,7 +3328,7 @@ impl Extension {
                 return;
             };
             (
-                MessagePublisherId::new(instance_name.to_string()),
+                tau_proto::RawMessagePublisherId::new(instance_name.to_string()),
                 installation_team_id,
             )
         };

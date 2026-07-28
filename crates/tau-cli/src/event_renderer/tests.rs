@@ -56,7 +56,8 @@ fn watch_turn_state_event(
     state: tau_proto::AgentRuntimeState,
 ) -> tau_proto::Event {
     tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse(message_id).unwrap(),
+        message_id: tau_proto::AgentMessageId::parse(message_id)
+            .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("worker"),
         sender_session_id: None,
         recipient_id: agent_id("manager"),
@@ -384,7 +385,8 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
 
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::Event {
     tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: format!("msg-{sender_id}-{recipient}").into(),
+        message_id: tau_proto::AgentMessageId::parse(format!("msg-{sender_id}-{recipient}"))
+            .expect("test message id must satisfy the identifier grammar"),
         sender_id: agent_id(sender_id),
         recipient: if recipient == "user" {
             tau_proto::AgentMessageRecipient::User
@@ -529,7 +531,8 @@ fn agent_id_for_event_resolves_shell_progress_from_learned_metadata() {
         .insert("cmd-1".to_owned(), "shell-agent".to_owned());
 
     let progress = tau_proto::Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
-        command_id: tau_proto::ShellCommandId::parse("cmd-1").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("cmd-1")
+            .expect("test identifier must satisfy its grammar"),
         stream: tau_proto::ShellStream::Stdout,
         chunk: "output".to_owned(),
         target_agent_id: None,
@@ -743,7 +746,8 @@ fn peer_message_names_require_endpoint_authority() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.remember_agent_display_name("agent-b", "local worker");
     let event = tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: tau_proto::AgentMessageId::parse("peer-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("peer-message")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("agent-a"),
         recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
             session_id: "remote-session"
@@ -809,7 +813,8 @@ fn watch_content_summaries_preserve_wording_with_names() {
     ];
     for (kind, expected) in cases {
         let event = tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: format!("watch-{kind:?}").into(),
+            message_id: tau_proto::AgentMessageId::parse(format!("watch-{kind:?}"))
+                .expect("test message id must satisfy the identifier grammar"),
             sender_id: agent_id("worker"),
             recipient: tau_proto::AgentMessageRecipient::Agent {
                 agent_id: agent_id("manager"),
@@ -862,7 +867,8 @@ fn resumed_session_clears_agent_display_name_authority() {
 #[test]
 fn watch_turn_state_renders_as_compact_typed_status() {
     let mut event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse("watch-state-1").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("watch-state-1")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("researcher"),
         sender_session_id: None,
         recipient_id: agent_id("manager"),

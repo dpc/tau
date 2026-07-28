@@ -272,7 +272,8 @@ fn disconnect_frame(reason: Option<String>) -> HarnessOutputMessage {
 fn configure_frame(config: tau_proto::CborValue) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
         tool_prefix: None,
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         config,
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
@@ -1696,7 +1697,7 @@ fn agent_idle_all_summary_side_prompt_does_not_cancel_pending_notification() {
             "main",
             "summary side prompt",
             tau_proto::PromptOriginator::Extension {
-                name: "std-notifications".into(),
+                name: test_extension_name("std-notifications"),
                 query_id: query.query_id.clone(),
             },
         ))
@@ -2997,7 +2998,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
             originator: tau_proto::PromptOriginator::Extension {
-                name: "core-subagents".into(),
+                name: test_extension_name("core-subagents"),
                 query_id: "q1".into(),
             },
         }))
@@ -3006,7 +3007,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
         .write_event(&user_prompt_submitted(
             "side instruction",
             tau_proto::PromptOriginator::Extension {
-                name: "core-subagents".into(),
+                name: test_extension_name("core-subagents"),
                 query_id: "q1".into(),
             },
         ))
@@ -3017,7 +3018,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
                 "sp-side",
                 "delegated answer",
                 tau_proto::PromptOriginator::Extension {
-                    name: "core-subagents".into(),
+                    name: test_extension_name("core-subagents"),
                     query_id: "q1".into(),
                 },
             ),
@@ -3368,4 +3369,10 @@ fn unowned_provider_prompt_does_not_clear_other_agent_idle_timer() {
         panic!("expected main idle OSC, got {idle:?}");
     };
     assert_eq!(osc.value, "idle:main");
+}
+
+/// Builds a validated extension name used by this test module.
+fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
+    tau_proto::ExtensionName::parse(value.as_ref())
+        .expect("test extension name must satisfy the identifier grammar")
 }

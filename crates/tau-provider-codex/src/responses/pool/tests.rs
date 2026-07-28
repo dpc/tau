@@ -104,7 +104,8 @@ fn keys_ignore_prompt_originator_buckets() {
     let cfg = make_config("https://chatgpt.com/backend-api", Some("acc"));
     let user = pool_key_for(&cfg, "agent", tau_proto::PromptOriginator::User, false);
     let ext = tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("__harness__"),
+        name: tau_proto::ExtensionName::parse("__harness__")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "delegate-1".into(),
     };
     let default_ext = pool_key_for(&cfg, "agent", ext.clone(), false);

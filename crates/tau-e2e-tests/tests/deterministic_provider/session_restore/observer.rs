@@ -45,7 +45,8 @@ impl SessionRestoreObserver {
         };
         peer.send(&HarnessInputMessage::Hello(Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: "tau-e2e-session-restore".into(),
+            client_name: tau_proto::ExtensionName::parse("tau-e2e-session-restore")
+                .expect("test extension name must satisfy the identifier grammar"),
             client_kind: ClientKind::Ui,
             capabilities: Default::default(),
         }))?;

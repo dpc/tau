@@ -32,10 +32,11 @@ fn sender_auth_outcomes_round_trip_with_stable_spellings() {
 /// retaining each fact's distinct current wire shape.
 #[test]
 fn constructors_default_required_extension_data_to_null() {
-    let publisher = MessagePublisherId::new("bridge-main");
+    let publisher = crate::MessagePublisherId::parse("bridge-main")
+        .expect("canonical publisher id must satisfy the identifier grammar");
     let agent = MessageAgentTarget::new("agent");
     let target = MessageFactRef {
-        publisher_extension_id: publisher.clone(),
+        publisher_extension_id: RawMessagePublisherId::new(publisher.as_str()),
         message_id: MessageFactId::new("m1"),
     };
     let party = MessageParty {
@@ -114,10 +115,11 @@ fn constructors_default_required_extension_data_to_null() {
 /// activation behavior, without resolving operation references.
 #[test]
 fn all_message_facts_project_with_generic_roles_and_escaping() {
-    let publisher = MessagePublisherId::new("bridge-main");
+    let publisher = crate::MessagePublisherId::parse("bridge-main")
+        .expect("canonical publisher id must satisfy the identifier grammar");
     let agent = MessageAgentTarget::new("agent-1");
     let target = MessageFactRef {
-        publisher_extension_id: publisher.clone(),
+        publisher_extension_id: RawMessagePublisherId::new(publisher.as_str()),
         message_id: MessageFactId::new("m<&1"),
     };
     let party = MessageParty {
@@ -229,7 +231,8 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
 #[test]
 fn message_fact_body_uses_exact_close_framing() {
     let fact = Event::MessageDelivered(MessageDelivered::new(
-        MessagePublisherId::new("bridge-main"),
+        crate::MessagePublisherId::parse("bridge-main")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         MessageAgentTarget::new("agent-1"),
         MessageFactId::new("m1"),
         MessageParty {
@@ -256,7 +259,8 @@ fn message_fact_body_uses_exact_close_framing() {
 #[test]
 fn message_projection_failure_precedence_is_stable() {
     let mut fact = MessageDelivered::new(
-        MessagePublisherId::new("bridge-main"),
+        crate::MessagePublisherId::parse("bridge-main")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         MessageAgentTarget::new("invalid target"),
         MessageFactId::new(""),
         MessageParty {
@@ -313,14 +317,15 @@ fn message_projection_failure_precedence_is_stable() {
 fn message_projection_classifies_operation_metadata_failures() {
     let agent = MessageAgentTarget::new("agent");
     let valid_ref = MessageFactRef {
-        publisher_extension_id: MessagePublisherId::new("bridge"),
+        publisher_extension_id: RawMessagePublisherId::new("bridge"),
         message_id: MessageFactId::new("m1"),
     };
     let invalid_reference = Event::MessageDeleted(MessageDeleted::new(
-        MessagePublisherId::new("bridge"),
+        crate::MessagePublisherId::parse("bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         agent.clone(),
         MessageFactRef {
-            publisher_extension_id: MessagePublisherId::new("invalid publisher"),
+            publisher_extension_id: RawMessagePublisherId::new("invalid publisher"),
             message_id: MessageFactId::new("m1"),
         },
         None,
@@ -332,7 +337,8 @@ fn message_projection_classifies_operation_metadata_failures() {
     );
 
     let invalid_party = Event::MessageDeleted(MessageDeleted::new(
-        MessagePublisherId::new("bridge"),
+        crate::MessagePublisherId::parse("bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         agent.clone(),
         valid_ref.clone(),
         Some(MessageParty {
@@ -348,7 +354,8 @@ fn message_projection_classifies_operation_metadata_failures() {
     );
 
     let invalid_conversation = Event::MessageEdited(MessageEdited::new(
-        MessagePublisherId::new("bridge"),
+        crate::MessagePublisherId::parse("bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         agent.clone(),
         valid_ref.clone(),
         None,
@@ -365,7 +372,8 @@ fn message_projection_classifies_operation_metadata_failures() {
     );
 
     let invalid_reaction = Event::MessageReactionAdded(MessageReactionAdded::new(
-        MessagePublisherId::new("bridge"),
+        crate::MessagePublisherId::parse("bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         agent,
         valid_ref,
         None,
@@ -383,10 +391,11 @@ fn message_projection_classifies_operation_metadata_failures() {
 #[test]
 fn operation_message_projection_failure_precedence_is_stable() {
     let mut fact = MessageReactionAdded::new(
-        MessagePublisherId::new("bridge"),
+        crate::MessagePublisherId::parse("bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         MessageAgentTarget::new("invalid target"),
         MessageFactRef {
-            publisher_extension_id: MessagePublisherId::new("invalid publisher"),
+            publisher_extension_id: RawMessagePublisherId::new("invalid publisher"),
             message_id: MessageFactId::new(""),
         },
         Some(MessageParty {
@@ -411,7 +420,7 @@ fn operation_message_projection_failure_precedence_is_stable() {
         Some(Err(MessageProjectionFailure::InvalidReference))
     );
     fact.target = MessageFactRef {
-        publisher_extension_id: MessagePublisherId::new("bridge"),
+        publisher_extension_id: RawMessagePublisherId::new("bridge"),
         message_id: MessageFactId::new("m1"),
     };
     assert_eq!(
@@ -435,7 +444,7 @@ fn operation_message_projection_failure_precedence_is_stable() {
 #[test]
 fn publisher_id_grammar_is_bounded_ascii() {
     for valid in ["a", "Bridge_2", "bridge-main"] {
-        assert!(MessagePublisherId::new(valid).is_valid(), "{valid}");
+        assert!(MessagePublisherId::parse(valid).is_ok(), "{valid}");
     }
     for invalid in [
         "",
@@ -444,7 +453,9 @@ fn publisher_id_grammar_is_bounded_ascii() {
         "é",
         &"x".repeat(EXTENSION_NAME_MAX_BYTES + 1),
     ] {
-        assert!(!MessagePublisherId::new(invalid).is_valid(), "{invalid}");
+        assert!(MessagePublisherId::parse(invalid).is_err(), "{invalid}");
+        let raw = RawMessagePublisherId::new(invalid);
+        assert_eq!(raw.as_str(), invalid, "raw claims remain lossless");
     }
 }
 
@@ -454,7 +465,8 @@ fn publisher_id_grammar_is_bounded_ascii() {
 fn telegram_and_xmpp_fit_delivered_schema() {
     for fact in [
         MessageDelivered {
-            publisher_extension_id: MessagePublisherId::new("telegram-work"),
+            publisher_extension_id: crate::MessagePublisherId::parse("telegram-work")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent-a"),
             message_id: MessageFactId::new("chat:-100:message:42"),
             sender: MessageParty {
@@ -471,7 +483,8 @@ fn telegram_and_xmpp_fit_delivered_schema() {
             extension_data: MessageExtensionData::default(),
         },
         MessageDelivered {
-            publisher_extension_id: MessagePublisherId::new("xmpp-main"),
+            publisher_extension_id: crate::MessagePublisherId::parse("xmpp-main")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent-a"),
             message_id: MessageFactId::new("room@example.test:stanza-7"),
             sender: MessageParty {

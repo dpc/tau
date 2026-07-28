@@ -289,7 +289,9 @@ impl tau_client::TauExtension for PimExtension {
                     .map_err(tau_client::ClientError::handler)?;
                 cx.handle.emit(Event::ActionSchemaPublished(
                     tau_proto::ActionSchemaPublished {
-                        extension_name: tau_proto::ExtensionName::default(),
+                        extension_name: tau_proto::ExtensionName::parse("pim").expect(
+                            "authenticated pim extension name must satisfy the identifier grammar",
+                        ),
                         instance_id: 0.into(),
                         schema: cx.state.action_schema(),
                     },

@@ -24,7 +24,7 @@ fn publish_action_schema(h: &mut Harness, source_id: &str, action_id: &str) {
         source_id,
         TestProtocolItem::Event(Event::ActionSchemaPublished(
             tau_proto::ActionSchemaPublished {
-                extension_name: "spoofed".into(),
+                extension_name: crate::test_extension_name("spoofed"),
                 instance_id: 99.into(),
                 schema: action_schema(action_id),
             },
@@ -35,11 +35,11 @@ fn publish_action_schema(h: &mut Harness, source_id: &str, action_id: &str) {
 
 fn action_invoke(invocation_id: &str, extension_name: &str) -> tau_proto::ActionInvoke {
     tau_proto::ActionInvoke {
-        invocation_id: invocation_id.into(),
+        invocation_id: test_action_invocation_id(invocation_id),
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        extension_name: extension_name.into(),
+        extension_name: crate::test_extension_name(extension_name),
         instance_id: 0.into(),
         action_id: "email.list".to_owned(),
         raw_line: ":email list".to_owned(),
@@ -50,7 +50,7 @@ fn action_invoke(invocation_id: &str, extension_name: &str) -> tau_proto::Action
 
 fn action_result(invocation_id: &str, text: &str) -> tau_proto::ActionResult {
     tau_proto::ActionResult {
-        invocation_id: invocation_id.into(),
+        invocation_id: test_action_invocation_id(invocation_id),
         action_id: "email.list".to_owned(),
         output: tau_proto::ActionOutput::Text {
             text: text.to_owned(),
@@ -61,7 +61,7 @@ fn action_result(invocation_id: &str, text: &str) -> tau_proto::ActionResult {
 fn subscribe_to_actions(h: &mut Harness, client_id: &str) {
     h.bus
         .set_subscriptions(
-            client_id,
+            &crate::test_connection_id(client_id),
             Vec::new(),
             vec![EventSelector::Prefix("action.".to_owned())],
         )
@@ -97,7 +97,8 @@ fn action_schema_publish_is_owner_stamped_and_broadcast() {
         Some(Event::ActionSchemaPublished(published)) => {
             assert_eq!(
                 published.extension_name,
-                tau_proto::ExtensionName::from("email-ext")
+                tau_proto::ExtensionName::parse("email-ext")
+                    .expect("test extension name must satisfy the identifier grammar")
             );
             assert_eq!(
                 published.instance_id,
@@ -113,7 +114,10 @@ fn action_schema_publish_is_owner_stamped_and_broadcast() {
         }
         _ => unreachable!("matched above"),
     }
-    assert!(h.action_registry.has_schema_for_connection("email-ext"));
+    assert!(
+        h.action_registry
+            .has_schema_for_connection(&crate::test_connection_id("email-ext"))
+    );
 }
 
 #[test]
@@ -124,7 +128,10 @@ fn action_schema_replays_to_late_action_subscriber() {
     publish_action_schema(&mut h, "email-ext", "email.list");
     let late_ui = connect_test_client(&mut h, "late-ui", tau_proto::ClientKind::Ui);
 
-    h.replay_harness_notice("late-ui", &[EventSelector::Prefix("action.".to_owned())]);
+    h.replay_harness_notice(
+        &crate::test_connection_id("late-ui"),
+        &[EventSelector::Prefix("action.".to_owned())],
+    );
 
     let events = late_ui.lock().expect("late ui sink");
     assert!(events.iter().any(|routed| matches!(
@@ -148,7 +155,7 @@ fn action_invoke_routes_to_owner_and_result_returns_only_to_requester() {
     drain_sink(&other_ui);
 
     h.handle_client_event_inner(
-        "ui",
+        &crate::test_connection_id("ui"),
         Event::ActionInvoke(action_invoke("action-1", "email-ext")),
     )
     .expect("invoke should be handled");
@@ -201,12 +208,12 @@ fn duplicate_action_invocation_id_cannot_steal_result_routing() {
     drain_sink(&other_ui);
 
     h.handle_client_event_inner(
-        "ui",
+        &crate::test_connection_id("ui"),
         Event::ActionInvoke(action_invoke("shared-action", "email-ext")),
     )
     .expect("first invoke should be handled");
     h.handle_client_event_inner(
-        "other-ui",
+        &crate::test_connection_id("other-ui"),
         Event::ActionInvoke(action_invoke("shared-action", "email-ext")),
     )
     .expect("duplicate invoke should be rejected");
@@ -262,7 +269,7 @@ fn action_invoke_rejects_non_ui_source_wrong_session_and_invalid_arguments() {
     drain_sink(&ui);
 
     h.handle_client_event_inner(
-        "tool-client",
+        &crate::test_connection_id("tool-client"),
         Event::ActionInvoke(action_invoke("tool-action", "email-ext")),
     )
     .expect("non-ui invoke should be handled as rejection");
@@ -277,8 +284,11 @@ fn action_invoke_rejects_non_ui_source_wrong_session_and_invalid_arguments() {
     wrong_session.session_id = "other-session"
         .parse::<tau_proto::SessionId>()
         .expect("known-safe SessionId must be valid");
-    h.handle_client_event_inner("ui", Event::ActionInvoke(wrong_session))
-        .expect("wrong-session invoke should be handled as rejection");
+    h.handle_client_event_inner(
+        &crate::test_connection_id("ui"),
+        Event::ActionInvoke(wrong_session),
+    )
+    .expect("wrong-session invoke should be handled as rejection");
     assert!(ui.lock().expect("ui sink").iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
         Some(Event::ActionError(error))
@@ -291,8 +301,11 @@ fn action_invoke_rejects_non_ui_source_wrong_session_and_invalid_arguments() {
     let mut invalid = action_invoke("bad-args", "email-ext");
     invalid.raw_line = ":email list unexpected".to_owned();
     invalid.argv = vec!["unexpected".to_owned()];
-    h.handle_client_event_inner("ui", Event::ActionInvoke(invalid))
-        .expect("invalid invoke should be handled as rejection");
+    h.handle_client_event_inner(
+        &crate::test_connection_id("ui"),
+        Event::ActionInvoke(invalid),
+    )
+    .expect("invalid invoke should be handled as rejection");
     assert!(ui.lock().expect("ui sink").iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
         Some(Event::ActionError(error))
@@ -313,19 +326,28 @@ fn action_provider_disconnect_unregisters_and_fails_pending_invocations() {
     drain_sink(&ui);
 
     h.handle_client_event_inner(
-        "ui",
+        &crate::test_connection_id("ui"),
         Event::ActionInvoke(action_invoke("action-2", "email-ext")),
     )
     .expect("invoke should be handled");
     drain_sink(&ui);
 
-    h.handle_disconnect("email-ext");
+    h.handle_disconnect(&crate::test_connection_id("email-ext"));
 
-    assert!(!h.action_registry.has_schema_for_connection("email-ext"));
+    assert!(
+        !h.action_registry
+            .has_schema_for_connection(&crate::test_connection_id("email-ext"))
+    );
     let ui_events = ui.lock().expect("ui sink");
     assert!(ui_events.iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
         Some(Event::ActionError(error))
             if error.invocation_id.as_str() == "action-2"
     )));
+}
+
+/// Builds a validated action invocation id used by this test module.
+fn test_action_invocation_id(value: impl AsRef<str>) -> tau_proto::ActionInvocationId {
+    tau_proto::ActionInvocationId::parse(value.as_ref())
+        .expect("test identifier must satisfy its grammar")
 }

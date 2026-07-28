@@ -1275,7 +1275,8 @@ fn watch_response(
     content: &str,
 ) -> AgentMessageReceived {
     AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse("watch-response").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("watch-response")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: child.clone(),
         sender_session_id: None,
         recipient_id: parent.clone(),
@@ -1292,7 +1293,8 @@ fn watch_prompt(
     content: &str,
 ) -> AgentMessageReceived {
     AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse("watch-prompt").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("watch-prompt")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: child.clone(),
         sender_session_id: None,
         recipient_id: parent.clone(),
@@ -1310,7 +1312,8 @@ fn watch_turn(
     turn_generation: u64,
 ) -> AgentMessageReceived {
     AgentMessageReceived {
-        message_id: format!("watch-turn-{turn_generation}").into(),
+        message_id: tau_proto::AgentMessageId::parse(format!("watch-turn-{turn_generation}"))
+            .expect("test message id must satisfy the identifier grammar"),
         sender_id: child.clone(),
         sender_session_id: None,
         recipient_id: parent.clone(),

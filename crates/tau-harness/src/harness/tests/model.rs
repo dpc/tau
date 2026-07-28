@@ -551,7 +551,7 @@ fn provider_models_snapshot_from_ui_client_is_ignored() {
 
     let model_id: ModelId = "evil/ui-model".parse().expect("model id");
     h.handle_client_event_inner(
-        "ui-client",
+        &crate::test_connection_id("ui-client"),
         Event::ProviderModelsDeclared(ProviderModelsDeclared {
             models: vec![provider_model(model_id.clone(), 1)],
         }),
@@ -616,7 +616,8 @@ fn configured_provider_cannot_emit_canonical_model_state() {
     h.handle_extension_event(
         "provider-ext",
         TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
-            publisher_extension_id: tau_proto::ExtensionName::from("configured-provider"),
+            publisher_extension_id: tau_proto::ExtensionName::parse("configured-provider")
+                .expect("test extension name must satisfy the identifier grammar"),
             models: vec![provider_model(model_id.clone(), 1)],
         })),
     )
@@ -728,7 +729,7 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     .expect("handle provider snapshot");
 
     h.handle_client_event_inner(
-        "ui-client",
+        &crate::test_connection_id("ui-client"),
         Event::UiAgentModelSelect(tau_proto::UiAgentModelSelect {
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()
@@ -878,7 +879,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
     .expect("frozen skill");
     let make_skill =
         |path: std::path::PathBuf, description: &str| crate::discovery::DiscoveredSkill {
-            source_id: "test-source".into(),
+            source_id: crate::test_connection_id("test-source"),
             description: description.to_owned(),
             source: crate::discovery::DiscoveredSkillSource::File(path),
             add_to_prompt: true,
@@ -1007,7 +1008,7 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
     .expect("handle provider snapshot");
 
     h.handle_client_event_inner(
-        "ui-client",
+        &crate::test_connection_id("ui-client"),
         Event::UiAgentModelSelect(tau_proto::UiAgentModelSelect {
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()

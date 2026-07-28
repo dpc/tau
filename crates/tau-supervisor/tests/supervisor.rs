@@ -18,7 +18,7 @@ const FLOOD_MESSAGE_COUNT: usize = 128;
 /// Builds the command used to launch the real subprocess fixture.
 fn test_command(args: &[&str]) -> ExtensionCommand {
     ExtensionCommand {
-        name: "test-child".into(),
+        name: test_extension_name("test-child"),
         program: PathBuf::from(env!("CARGO_BIN_EXE_tau-supervisor-test-child")),
         args: args.iter().map(|arg| (*arg).to_owned()).collect(),
         working_dir: None,
@@ -43,7 +43,7 @@ fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegistrationDeclared
         hello,
         HarnessInputMessage::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
-            client_name: "test-child".into(),
+            client_name: test_extension_name("test-child"),
             client_kind: ClientKind::Tool,
             capabilities: Default::default(),
         })
@@ -263,7 +263,7 @@ fn pre_spawn_starting_event_has_no_pid() {
         command.pre_spawn_starting_event(7.into()),
         Event::ExtensionStarting(tau_proto::ExtensionStarting {
             instance_id: 7.into(),
-            extension_name: "test-child".into(),
+            extension_name: test_extension_name("test-child"),
             pid: None,
         })
     );
@@ -376,7 +376,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         child.starting_event(42.into()),
         Event::ExtensionStarting(tau_proto::ExtensionStarting {
             instance_id: 42.into(),
-            extension_name: "test-child".into(),
+            extension_name: test_extension_name("test-child"),
             pid: Some(child.pid()),
         })
     );
@@ -405,7 +405,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         child.ready_event(42.into()),
         Event::ExtensionReady(tau_proto::ExtensionReady {
             instance_id: 42.into(),
-            extension_name: "test-child".into(),
+            extension_name: test_extension_name("test-child"),
             pid: Some(child.pid()),
         })
     );
@@ -460,7 +460,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         child.exited_event(42.into(), &exit),
         Event::ExtensionExited(tau_proto::ExtensionExited {
             instance_id: 42.into(),
-            extension_name: "test-child".into(),
+            extension_name: test_extension_name("test-child"),
             pid: Some(child.pid()),
             exit_code: exit.exit_code(),
             signal: exit.signal(),
@@ -485,4 +485,10 @@ fn restarted_child_can_reregister_after_exit() {
             .expect("child should exit");
         assert_eq!(exit.exit_code(), Some(0));
     }
+}
+
+/// Builds a validated extension name used by this test module.
+fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
+    tau_proto::ExtensionName::parse(value.as_ref())
+        .expect("test extension name must satisfy the identifier grammar")
 }

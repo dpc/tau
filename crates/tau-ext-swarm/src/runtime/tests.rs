@@ -113,7 +113,8 @@ fn gates_publication_on_agent_replay_and_clears_invalid_projection() {
         &Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             session_id: "session".parse().expect("session ID"),
             agent_id: tau_proto::AgentId::parse("other").expect("agent ID"),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("init")
+                .expect("valid initialization id"),
             ephemeral: false,
         }),
     )
@@ -230,7 +231,8 @@ fn session_switch_clears_incarnation_state_before_replay() {
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             session_id: "old".parse().expect("session ID"),
             agent_id: tau_proto::AgentId::parse("stale").expect("agent ID"),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("stale"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("stale")
+                .expect("valid initialization id"),
             ephemeral: false,
         }),
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
@@ -288,7 +290,8 @@ fn stats_watches_and_unload_converge_projection() {
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             session_id: session_id.clone(),
             agent_id: agent_id.clone(),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("init")
+                .expect("valid initialization id"),
             ephemeral: false,
         }),
         Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
@@ -457,7 +460,8 @@ fn runner_subscribes_projection_for_restore_and_live_delivery() {
                 "credential_secret": "swarm",
                 "hostname": "host"
             })),
-            instance_name: tau_proto::ExtensionName::new("std-swarm"),
+            instance_name: tau_proto::ExtensionName::parse("std-swarm")
+                .expect("valid extension name"),
             state_dir: None,
             secrets: BTreeMap::from([("swarm".into(), SecretValue::new("secret"))]),
         }))
@@ -565,7 +569,8 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
                 "hostname": "host",
                 "command_timeout_ms": 1000
             })),
-            instance_name: tau_proto::ExtensionName::new("std-swarm"),
+            instance_name: tau_proto::ExtensionName::parse("std-swarm")
+                .expect("valid extension name"),
             state_dir: None,
             secrets: BTreeMap::from([("swarm".into(), SecretValue::new("secret"))]),
         }))
@@ -597,7 +602,8 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 session_id: session_id.clone(),
                 agent_id: agent_id.clone(),
-                agent_initialization_id: tau_proto::AgentInitializationId::new("init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("init")
+                    .expect("valid initialization id"),
                 ephemeral: false,
             }),
         ),

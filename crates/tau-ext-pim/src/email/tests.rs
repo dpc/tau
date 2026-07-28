@@ -366,7 +366,8 @@ fn spawn_extension_with_config(
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: tool_prefix
                 .map(|prefix| tau_proto::ToolNamePrefix::parse(prefix).expect("tool prefix")),
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config,
             state_dir: Some(state_dir),
             secrets,
@@ -568,7 +569,8 @@ fn email_action_invoke(invocation_id: &str) -> ActionInvoke {
             .expect("test identifier must be valid"),
         session_id: tau_proto::SessionId::parse("session-1")
             .expect("known-safe SessionId must be valid"),
-        extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
+        extension_name: tau_proto::ExtensionName::parse("tau-ext-pim")
+            .expect("test extension name must satisfy the identifier grammar"),
         instance_id: tau_proto::ExtensionInstanceId::from(1),
         action_id: "email.in.list".to_owned(),
         raw_line: ":email in list".to_owned(),
@@ -740,7 +742,8 @@ fn email_run_configures_storage_and_skips_replayed_tools() {
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: CborValue::Map(Vec::new()),
             state_dir: Some(temp.path().join("state")),
             secrets: BTreeMap::new(),
@@ -872,7 +875,8 @@ fn email_run_malformed_config_emits_config_error_and_continues() {
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: CborValue::Map(vec![(
                 CborValue::Text("unknown".to_owned()),
                 CborValue::Bool(true),
@@ -1078,7 +1082,8 @@ fn email_runner_republishes_effective_google_auth_accounts() {
             tool_prefix: Some(
                 tau_proto::ToolNamePrefix::parse("work").expect("unchanged tool prefix"),
             ),
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: email_config(&["current"]),
             state_dir: Some(state_dir.path().to_path_buf()),
             secrets,
@@ -3982,7 +3987,8 @@ fn runtime_action_invoke_returns_action_error_for_bad_id() {
             .expect("test identifier must be valid"),
         session_id: tau_proto::SessionId::parse("session-1")
             .expect("known-safe SessionId must be valid"),
-        extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
+        extension_name: tau_proto::ExtensionName::parse("tau-ext-pim")
+            .expect("test extension name must satisfy the identifier grammar"),
         instance_id: tau_proto::ExtensionInstanceId::from(1),
         action_id: "email.in.list".to_owned(),
         raw_line: ":email in list".to_owned(),
@@ -4556,7 +4562,8 @@ fn configure_requires_state_dir_and_rejected_config_is_reported() {
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: configure_secrets(),

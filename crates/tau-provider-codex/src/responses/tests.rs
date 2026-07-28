@@ -1207,7 +1207,8 @@ fn build_request_prompt_cache_key_ignores_originator() {
         ..chain_test_config()
     };
     let ext = tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("__harness__"),
+        name: tau_proto::ExtensionName::parse("__harness__")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "delegate-1".into(),
     };
     let user_request = PromptPayload {
@@ -1261,7 +1262,8 @@ fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
         ..chain_test_config()
     };
     let ext = tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("std-notifications"),
+        name: tau_proto::ExtensionName::parse("std-notifications")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "idle-0".into(),
     };
     let shared_request = PromptPayload {
@@ -1300,7 +1302,8 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
         ..chain_test_config()
     };
     let ext = tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("std-notifications"),
+        name: tau_proto::ExtensionName::parse("std-notifications")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "idle-0".into(),
     };
     let tool = tau_proto::ToolDefinition {

@@ -501,9 +501,14 @@ impl DeterministicFixture {
 
     /// Runs one synthetic interaction and performs clean embedded shutdown.
     pub fn run_turn(&self, prompt: &str) -> Result<InteractionOutcome, tau_harness::HarnessError> {
-        let mut allowed_extensions = BTreeSet::from(["e2e-fake-provider".into()]);
+        let mut allowed_extensions =
+            BTreeSet::from([tau_proto::ExtensionName::parse("e2e-fake-provider")
+                .expect("fake provider name must satisfy the extension identifier grammar")]);
         if self.dummy_enabled {
-            allowed_extensions.insert("e2e-test-dummy".into());
+            allowed_extensions.insert(
+                tau_proto::ExtensionName::parse("e2e-test-dummy")
+                    .expect("dummy extension name must satisfy the extension identifier grammar"),
+            );
         }
         let result = run_embedded_message_with_options(
             &self.harness_state_dir,

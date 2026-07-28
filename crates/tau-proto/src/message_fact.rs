@@ -95,40 +95,55 @@ impl MessageFactId {
     }
 }
 
-/// Raw wire-decodable publisher claim in a report or harness-stamped publisher
-/// identity in a canonical fact.
-#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct MessagePublisherId(
-    /// Untrusted publisher claim in a report or authenticated publisher
-    /// identity in a canonical fact.
-    String,
+crate::validated_string_newtype!(
+    /// Harness-authenticated canonical publisher identity.
+    ///
+    /// Values contain 1 through 128 bytes of ASCII letters, digits, `_`, or
+    /// `-`. Construction and deserialization validate this grammar.
+    MessagePublisherId,
+    MessagePublisherIdParseError,
+    "message publisher id",
+    128
 );
 
 impl MessagePublisherId {
-    /// Construct a raw publisher identifier.
+    /// Preserve a configured extension name's identical validated syntax as a
+    /// canonical publisher identifier.
+    ///
+    /// This conversion does not grant authority; callers must authenticate the
+    /// extension identity before using the result as canonical provenance.
+    #[must_use]
+    pub fn from_extension_name(name: &crate::ExtensionName) -> Self {
+        Self(name.to_string())
+    }
+}
+
+/// Lossless wire-decodable publisher claim supplied by an untrusted peer.
+#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RawMessagePublisherId(
+    /// Untrusted publisher claim retained exactly as decoded.
+    String,
+);
+
+impl RawMessagePublisherId {
+    /// Construct an opaque publisher claim without applying canonical grammar.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
-    /// Borrow the raw publisher identifier.
+    /// Borrow the opaque publisher claim.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    /// Return whether this identifier follows the configured publisher grammar.
-    #[must_use]
-    pub fn is_valid(&self) -> bool {
-        crate::valid_extension_name(&self.0)
     }
 }
 
 /// Opaque reference to a publisher-scoped base message fact.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MessageFactRef {
-    /// Extension publisher namespace containing the target identifier.
-    pub publisher_extension_id: MessagePublisherId,
+    /// Opaque claimed publisher namespace containing the target identifier.
+    pub publisher_extension_id: RawMessagePublisherId,
     /// Opaque target message identifier inside the publisher namespace.
     pub message_id: MessageFactId,
 }
@@ -195,9 +210,9 @@ impl MessageAgentTarget {
 /// Shared report/canonical payload describing an externally delivered text
 /// message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MessageDelivered {
-    /// Untrusted in a report; harness-stamped in a canonical fact.
-    pub publisher_extension_id: MessagePublisherId,
+pub struct MessageDelivered<Publisher = MessagePublisherId> {
+    /// Raw report claim or harness-stamped canonical publisher identity.
+    pub publisher_extension_id: Publisher,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
     /// Publisher-scoped opaque base-message identifier.
@@ -213,10 +228,10 @@ pub struct MessageDelivered {
     pub extension_data: MessageExtensionData,
 }
 
-impl MessageDelivered {
+impl<Publisher> MessageDelivered<Publisher> {
     /// Construct a delivered-message payload with CBOR null extension data.
     pub fn new(
-        publisher_extension_id: MessagePublisherId,
+        publisher_extension_id: Publisher,
         agent_id: MessageAgentTarget,
         message_id: MessageFactId,
         sender: MessageParty,
@@ -233,14 +248,30 @@ impl MessageDelivered {
             extension_data: MessageExtensionData::default(),
         }
     }
+
+    /// Replace the publisher field while preserving the report payload exactly.
+    pub fn with_publisher<Canonical>(
+        self,
+        publisher_extension_id: Canonical,
+    ) -> MessageDelivered<Canonical> {
+        MessageDelivered {
+            publisher_extension_id,
+            agent_id: self.agent_id,
+            message_id: self.message_id,
+            sender: self.sender,
+            conversation: self.conversation,
+            text: self.text,
+            extension_data: self.extension_data,
+        }
+    }
 }
 
 /// Shared report/canonical payload describing replacement text for a referenced
 /// message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MessageEdited {
+pub struct MessageEdited<Publisher = MessagePublisherId> {
     /// Untrusted in a report; harness-stamped in a canonical fact.
-    pub publisher_extension_id: MessagePublisherId,
+    pub publisher_extension_id: Publisher,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
     /// Opaque referenced base message.
@@ -257,10 +288,10 @@ pub struct MessageEdited {
     pub extension_data: MessageExtensionData,
 }
 
-impl MessageEdited {
+impl<Publisher> MessageEdited<Publisher> {
     /// Construct an edited-message payload with CBOR null extension data.
     pub fn new(
-        publisher_extension_id: MessagePublisherId,
+        publisher_extension_id: Publisher,
         agent_id: MessageAgentTarget,
         target: MessageFactRef,
         actor: Option<MessageParty>,
@@ -277,13 +308,29 @@ impl MessageEdited {
             extension_data: MessageExtensionData::default(),
         }
     }
+
+    /// Replace the publisher field while preserving the report payload exactly.
+    pub fn with_publisher<Canonical>(
+        self,
+        publisher_extension_id: Canonical,
+    ) -> MessageEdited<Canonical> {
+        MessageEdited {
+            publisher_extension_id,
+            agent_id: self.agent_id,
+            target: self.target,
+            actor: self.actor,
+            conversation: self.conversation,
+            text: self.text,
+            extension_data: self.extension_data,
+        }
+    }
 }
 
 /// Shared report/canonical payload describing deletion of a referenced message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MessageDeleted {
+pub struct MessageDeleted<Publisher = MessagePublisherId> {
     /// Untrusted in a report; harness-stamped in a canonical fact.
-    pub publisher_extension_id: MessagePublisherId,
+    pub publisher_extension_id: Publisher,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
     /// Opaque referenced base message.
@@ -298,10 +345,10 @@ pub struct MessageDeleted {
     pub extension_data: MessageExtensionData,
 }
 
-impl MessageDeleted {
+impl<Publisher> MessageDeleted<Publisher> {
     /// Construct a deleted-message payload with CBOR null extension data.
     pub fn new(
-        publisher_extension_id: MessagePublisherId,
+        publisher_extension_id: Publisher,
         agent_id: MessageAgentTarget,
         target: MessageFactRef,
         actor: Option<MessageParty>,
@@ -314,6 +361,21 @@ impl MessageDeleted {
             actor,
             conversation,
             extension_data: MessageExtensionData::default(),
+        }
+    }
+
+    /// Replace the publisher field while preserving the report payload exactly.
+    pub fn with_publisher<Canonical>(
+        self,
+        publisher_extension_id: Canonical,
+    ) -> MessageDeleted<Canonical> {
+        MessageDeleted {
+            publisher_extension_id,
+            agent_id: self.agent_id,
+            target: self.target,
+            actor: self.actor,
+            conversation: self.conversation,
+            extension_data: self.extension_data,
         }
     }
 }
@@ -321,9 +383,9 @@ impl MessageDeleted {
 /// Shared report/canonical payload describing a reaction added to a referenced
 /// message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MessageReactionAdded {
+pub struct MessageReactionAdded<Publisher = MessagePublisherId> {
     /// Untrusted in a report; harness-stamped in a canonical fact.
-    pub publisher_extension_id: MessagePublisherId,
+    pub publisher_extension_id: Publisher,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
     /// Opaque referenced base message.
@@ -340,10 +402,10 @@ pub struct MessageReactionAdded {
     pub extension_data: MessageExtensionData,
 }
 
-impl MessageReactionAdded {
+impl<Publisher> MessageReactionAdded<Publisher> {
     /// Construct a reaction-added payload with CBOR null extension data.
     pub fn new(
-        publisher_extension_id: MessagePublisherId,
+        publisher_extension_id: Publisher,
         agent_id: MessageAgentTarget,
         target: MessageFactRef,
         actor: Option<MessageParty>,
@@ -358,6 +420,22 @@ impl MessageReactionAdded {
             conversation,
             reaction: reaction.into(),
             extension_data: MessageExtensionData::default(),
+        }
+    }
+
+    /// Replace the publisher field while preserving the report payload exactly.
+    pub fn with_publisher<Canonical>(
+        self,
+        publisher_extension_id: Canonical,
+    ) -> MessageReactionAdded<Canonical> {
+        MessageReactionAdded {
+            publisher_extension_id,
+            agent_id: self.agent_id,
+            target: self.target,
+            actor: self.actor,
+            conversation: self.conversation,
+            reaction: self.reaction,
+            extension_data: self.extension_data,
         }
     }
 }
@@ -365,9 +443,9 @@ impl MessageReactionAdded {
 /// Shared report/canonical payload describing a reaction removed from a
 /// referenced message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MessageReactionRemoved {
+pub struct MessageReactionRemoved<Publisher = MessagePublisherId> {
     /// Untrusted in a report; harness-stamped in a canonical fact.
-    pub publisher_extension_id: MessagePublisherId,
+    pub publisher_extension_id: Publisher,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
     /// Opaque referenced base message.
@@ -384,10 +462,10 @@ pub struct MessageReactionRemoved {
     pub extension_data: MessageExtensionData,
 }
 
-impl MessageReactionRemoved {
+impl<Publisher> MessageReactionRemoved<Publisher> {
     /// Construct a reaction-removed payload with CBOR null extension data.
     pub fn new(
-        publisher_extension_id: MessagePublisherId,
+        publisher_extension_id: Publisher,
         agent_id: MessageAgentTarget,
         target: MessageFactRef,
         actor: Option<MessageParty>,
@@ -404,14 +482,30 @@ impl MessageReactionRemoved {
             extension_data: MessageExtensionData::default(),
         }
     }
+
+    /// Replace the publisher field while preserving the report payload exactly.
+    pub fn with_publisher<Canonical>(
+        self,
+        publisher_extension_id: Canonical,
+    ) -> MessageReactionRemoved<Canonical> {
+        MessageReactionRemoved {
+            publisher_extension_id,
+            agent_id: self.agent_id,
+            target: self.target,
+            actor: self.actor,
+            conversation: self.conversation,
+            reaction: self.reaction,
+            extension_data: self.extension_data,
+        }
+    }
 }
 
 /// Shared report/canonical payload describing publisher-defined remote send
 /// success.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MessageSent {
+pub struct MessageSent<Publisher = MessagePublisherId> {
     /// Untrusted in a report; harness-stamped in a canonical fact.
-    pub publisher_extension_id: MessagePublisherId,
+    pub publisher_extension_id: Publisher,
     /// Raw claimed Tau transcript target.
     pub agent_id: MessageAgentTarget,
     /// Publisher-scoped opaque base-message identifier.
@@ -428,10 +522,10 @@ pub struct MessageSent {
     pub extension_data: MessageExtensionData,
 }
 
-impl MessageSent {
+impl<Publisher> MessageSent<Publisher> {
     /// Construct a sent-message payload with CBOR null extension data.
     pub fn new(
-        publisher_extension_id: MessagePublisherId,
+        publisher_extension_id: Publisher,
         agent_id: MessageAgentTarget,
         message_id: MessageFactId,
         recipient: Option<MessageParty>,
@@ -446,6 +540,22 @@ impl MessageSent {
             conversation,
             text: text.into(),
             extension_data: MessageExtensionData::default(),
+        }
+    }
+
+    /// Replace the publisher field while preserving the report payload exactly.
+    pub fn with_publisher<Canonical>(
+        self,
+        publisher_extension_id: Canonical,
+    ) -> MessageSent<Canonical> {
+        MessageSent {
+            publisher_extension_id,
+            agent_id: self.agent_id,
+            message_id: self.message_id,
+            recipient: self.recipient,
+            conversation: self.conversation,
+            text: self.text,
+            extension_data: self.extension_data,
         }
     }
 }
@@ -470,7 +580,7 @@ pub fn project_message_fact(
         return Some(Err(MessageProjectionFailure::InvalidMessageId));
     }
     if let Some(reference) = view.reference()
-        && (!reference.publisher_extension_id.is_valid()
+        && (MessagePublisherId::parse(reference.publisher_extension_id.as_str()).is_err()
             || !valid_opaque_id(reference.message_id.as_str()))
     {
         return Some(Err(MessageProjectionFailure::InvalidReference));

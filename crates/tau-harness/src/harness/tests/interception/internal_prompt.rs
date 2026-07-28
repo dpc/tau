@@ -75,8 +75,11 @@ fn dropped_request_does_not_submit_prompt() {
     );
     connect_internal_prompt_interceptor(&mut h);
 
-    h.handle_extension_event_inner("requester", request(&agent_id, "drop me"))
-        .expect("park request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        request(&agent_id, &crate::test_connection_id("drop-me")),
+    )
+    .expect("park request");
     assert!(!event_log_contains_any_source(&h, |event| {
         matches!(event, Event::AgentPromptSubmitted(prompt) if prompt.text == "drop me")
     }));
@@ -112,8 +115,11 @@ fn replacement_submits_only_committed_payload() {
     );
     connect_internal_prompt_interceptor(&mut h);
 
-    h.handle_extension_event_inner("requester", request(&agent_id, "original"))
-        .expect("park request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        request(&agent_id, &crate::test_connection_id("original")),
+    )
+    .expect("park request");
     h.handle_extension_event(
         "internal-prompt-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -168,8 +174,11 @@ fn invalid_target_commits_before_rejection_diagnostic() {
     );
     let missing = tau_proto::AgentId::parse("missing-agent").expect("agent id");
 
-    h.handle_extension_event_inner("requester", request(&missing, "invalid"))
-        .expect("commit invalid request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        request(&missing, &crate::test_connection_id("invalid")),
+    )
+    .expect("commit invalid request");
 
     assert!(source_committed(&h, "requester", |event| {
         matches!(event, Event::ExtInternalPromptSubmitRequest(request) if request.text == "invalid")
@@ -196,7 +205,7 @@ fn invalid_target_commits_before_rejection_diagnostic() {
         )
     });
     assert_eq!(raw.source.as_deref(), Some("requester"));
-    assert_eq!(rejection.source.as_deref(), Some("harness"));
+    assert_eq!(rejection.source.as_deref(), Some(HARNESS_CONNECTION_ID));
     assert!(raw.seq < rejection.seq);
 }
 
@@ -220,8 +229,11 @@ fn configured_kinds_have_authority_but_unconfigured_and_socket_do_not() {
         let source = format!("configured-{index}");
         let text = format!("request-{index}");
         connect_ready_configured_extension(&mut h, &source, &source, kind);
-        h.handle_extension_event_inner(&source, request(&agent_id, &text))
-            .expect("publish configured request");
+        h.handle_extension_event_inner(
+            &crate::test_connection_id(&source),
+            request(&agent_id, &text),
+        )
+        .expect("publish configured request");
         assert!(source_committed(&h, &source, |event| {
             matches!(
                 event,
@@ -231,8 +243,11 @@ fn configured_kinds_have_authority_but_unconfigured_and_socket_do_not() {
     }
 
     connect_test_tool(&mut h, "unconfigured");
-    h.handle_extension_event_inner("unconfigured", request(&agent_id, "spoofed"))
-        .expect("reject unconfigured request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("unconfigured"),
+        request(&agent_id, &crate::test_connection_id("spoofed")),
+    )
+    .expect("reject unconfigured request");
     assert!(!source_committed(&h, "unconfigured", |event| {
         matches!(event, Event::ExtInternalPromptSubmitRequest(_))
     }));
@@ -246,11 +261,12 @@ fn configured_kinds_have_authority_but_unconfigured_and_socket_do_not() {
         "socket-origin",
         tau_proto::ClientKind::Tool,
     );
-    h.bus.disconnect("socket-origin");
+    h.bus
+        .disconnect(&crate::test_connection_id("socket-origin"));
     h.bus.connect(Connection::new(
-        ConnectionMetadata {
-            id: "socket-origin".into(),
-            name: "socket-origin".to_owned(),
+        PendingConnectionMetadata {
+            id: Some(crate::test_connection_id("socket-origin")),
+            name: crate::test_extension_name("socket-origin"),
             kind: tau_proto::ClientKind::Tool,
             origin: ConnectionOrigin::Socket,
         },
@@ -258,8 +274,11 @@ fn configured_kinds_have_authority_but_unconfigured_and_socket_do_not() {
             events: Arc::new(Mutex::new(Vec::new())),
         }),
     ));
-    h.handle_extension_event_inner("socket-origin", request(&agent_id, "socket"))
-        .expect("reject socket request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("socket-origin"),
+        request(&agent_id, &crate::test_connection_id("socket")),
+    )
+    .expect("reject socket request");
     assert!(!source_committed(&h, "socket-origin", |event| {
         matches!(event, Event::ExtInternalPromptSubmitRequest(_))
     }));
@@ -283,10 +302,13 @@ fn disconnected_generation_cannot_submit_parked_request() {
         tau_proto::ClientKind::Tool,
     );
     connect_internal_prompt_interceptor(&mut h);
-    h.handle_extension_event_inner("old-requester", request(&agent_id, "stale request"))
-        .expect("park request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("old-requester"),
+        request(&agent_id, &crate::test_connection_id("stale-request")),
+    )
+    .expect("park request");
 
-    h.handle_disconnect("old-requester");
+    h.handle_disconnect(&crate::test_connection_id("old-requester"));
     connect_ready_configured_extension(
         &mut h,
         "new-requester",
@@ -344,8 +366,11 @@ fn pre_ready_request_waits_behind_activation() {
         matches!(event, Event::AgentPromptSubmitted(prompt) if prompt.text == "after Ready")
     }));
 
-    h.handle_extension_message("requester", TestMessage::Ready(Default::default()))
-        .expect("activate requester");
+    h.handle_extension_message(
+        &crate::test_connection_id("requester"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("activate requester");
 
     assert!(source_committed(&h, "requester", |event| {
         matches!(event, Event::ExtInternalPromptSubmitRequest(request) if request.text == "after Ready")
@@ -388,8 +413,11 @@ fn pre_ready_request_after_rollover_is_observation_only() {
         tau_proto::SessionStartReason::New,
     )
     .expect("switch session");
-    h.handle_extension_message("requester", TestMessage::Ready(Default::default()))
-        .expect("activate requester");
+    h.handle_extension_message(
+        &crate::test_connection_id("requester"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("activate requester");
 
     assert!(source_committed(&h, "requester", |event| {
         matches!(

@@ -17,7 +17,7 @@ fn connect_notice_observer(
     harness
         .bus
         .set_subscriptions(
-            connection_id,
+            &crate::test_connection_id(connection_id),
             Vec::new(),
             vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
         )
@@ -83,7 +83,7 @@ fn every_configured_extension_kind_gets_harness_authored_sanitized_output() {
         connect_ready_configured_extension(&mut harness, &source, &source, kind);
         harness
             .handle_extension_message(
-                &source,
+                &crate::test_connection_id(&source),
                 notice_request(&format!("notice-{index}"), tau_proto::NoticeLevel::Critical),
             )
             .expect("request notice");
@@ -135,7 +135,7 @@ fn unauthorized_notice_requests_are_silently_denied() {
     connect_test_tool(&mut harness, "unconfigured");
     harness
         .handle_extension_message(
-            "unconfigured",
+            &crate::test_connection_id("unconfigured"),
             notice_request("unconfigured", tau_proto::NoticeLevel::Info),
         )
         .expect("silently deny unconfigured request");
@@ -154,7 +154,7 @@ fn unauthorized_notice_requests_are_silently_denied() {
         .state = crate::extension::ExtensionState::Disconnected;
     harness
         .handle_extension_message(
-            "disconnected",
+            &crate::test_connection_id("disconnected"),
             notice_request("disconnected", tau_proto::NoticeLevel::Info),
         )
         .expect("silently deny disconnected request");
@@ -175,7 +175,7 @@ fn unauthorized_notice_requests_are_silently_denied() {
     );
     harness
         .handle_client_message(
-            "socket-ui",
+            &crate::test_connection_id("socket-ui"),
             notice_request("socket", tau_proto::NoticeLevel::Info),
         )
         .expect("silently deny socket request");
@@ -209,7 +209,7 @@ fn legacy_extension_notice_emit_is_denied() {
 
     harness
         .handle_extension_message(
-            "publisher",
+            &crate::test_connection_id("publisher"),
             HarnessInputMessage::emit_with_persist(
                 Event::HarnessNotice(tau_proto::HarnessNotice {
                     kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
@@ -252,7 +252,7 @@ fn output_uses_ordinary_transient_interception_and_broadcast() {
 
     harness
         .handle_extension_message(
-            "publisher",
+            &crate::test_connection_id("publisher"),
             notice_request("original", tau_proto::NoticeLevel::Debug),
         )
         .expect("request notice");
@@ -327,7 +327,7 @@ fn pre_ready_request_is_quota_charged_and_released_only_after_activation() {
         .len();
 
     harness
-        .handle_extension_message("publisher", request)
+        .handle_extension_message(&crate::test_connection_id("publisher"), request)
         .expect("defer request");
     assert_eq!(
         harness.extensions.entries["publisher"]
@@ -343,7 +343,10 @@ fn pre_ready_request_is_quota_charged_and_released_only_after_activation() {
     assert!(committed_extension_notices(&harness).is_empty());
 
     harness
-        .handle_extension_message("publisher", TestMessage::Ready(Default::default()))
+        .handle_extension_message(
+            &crate::test_connection_id("publisher"),
+            TestMessage::Ready(Default::default()),
+        )
         .expect("activate publisher");
     assert!(matches!(
         committed_extension_notices(&harness).as_slice(),
@@ -370,11 +373,11 @@ fn pre_ready_request_is_dropped_on_disconnect() {
     connect_handshaking_configured_extension(&mut harness, "disconnecting");
     harness
         .handle_extension_message(
-            "disconnecting",
+            &crate::test_connection_id("disconnecting"),
             notice_request("must be dropped", tau_proto::NoticeLevel::Info),
         )
         .expect("defer disconnecting request");
-    harness.handle_disconnect("disconnecting");
+    harness.handle_disconnect(&crate::test_connection_id("disconnecting"));
     assert!(
         !committed_extension_notices(&harness)
             .iter()
@@ -397,30 +400,36 @@ fn ready_received_requests_wait_for_global_barrier_in_wire_order() {
 
     harness
         .handle_extension_message(
-            "first",
+            &crate::test_connection_id("first"),
             notice_request("first-before-ready", tau_proto::NoticeLevel::Info),
         )
         .expect("stage first request");
     harness
         .handle_extension_message(
-            "blocker",
+            &crate::test_connection_id("blocker"),
             notice_request("blocker-before-ready", tau_proto::NoticeLevel::Info),
         )
         .expect("stage blocker request");
     harness
-        .handle_extension_message("first", TestMessage::Ready(Default::default()))
+        .handle_extension_message(
+            &crate::test_connection_id("first"),
+            TestMessage::Ready(Default::default()),
+        )
         .expect("first Ready remains behind blocker");
     assert!(harness.extensions.ready_received.contains("first"));
     harness
         .handle_extension_message(
-            "first",
+            &crate::test_connection_id("first"),
             notice_request("first-after-ready", tau_proto::NoticeLevel::Info),
         )
         .expect("stage legal post-Ready request");
     assert!(committed_extension_notices(&harness).is_empty());
 
     harness
-        .handle_extension_message("blocker", TestMessage::Ready(Default::default()))
+        .handle_extension_message(
+            &crate::test_connection_id("blocker"),
+            TestMessage::Ready(Default::default()),
+        )
         .expect("release global barrier");
 
     let messages = committed_extension_notices(&harness)
@@ -478,7 +487,7 @@ fn pre_hello_request_follows_protocol_failure_path() {
 
     harness
         .handle_extension_message(
-            "spawning-requester",
+            &crate::test_connection_id("spawning-requester"),
             notice_request("too early", tau_proto::NoticeLevel::Info),
         )
         .expect("isolate out-of-phase requester");
@@ -489,7 +498,12 @@ fn pre_hello_request_follows_protocol_failure_path() {
         1
     );
     assert_eq!(entry.state, crate::extension::ExtensionState::Disconnected);
-    assert!(harness.bus.connection("spawning-requester").is_none());
+    assert!(
+        harness
+            .bus
+            .connection(&crate::test_connection_id("spawning-requester"))
+            .is_none()
+    );
     assert!(committed_extension_notices(&harness).is_empty());
 }
 
@@ -519,11 +533,11 @@ fn requester_disconnect_does_not_cancel_parked_harness_output() {
 
     harness
         .handle_extension_message(
-            "publisher",
+            &crate::test_connection_id("publisher"),
             notice_request("survives disconnect", tau_proto::NoticeLevel::Info),
         )
         .expect("request notice");
-    harness.handle_disconnect("publisher");
+    harness.handle_disconnect(&crate::test_connection_id("publisher"));
     harness
         .handle_extension_event(
             "interceptor",
@@ -582,7 +596,7 @@ fn interceptor_can_drop_requested_notice_output() {
 
     harness
         .handle_extension_message(
-            "publisher",
+            &crate::test_connection_id("publisher"),
             notice_request("drop me", tau_proto::NoticeLevel::Info),
         )
         .expect("request notice");
@@ -615,7 +629,7 @@ fn debug_jsonl_keeps_request_and_published_output_separate() {
         .enable_debug_log(&temp.path().join("debug"))
         .expect("enable debug log");
     let event = HarnessEvent::FromConnection {
-        connection_id: "publisher".into(),
+        connection_id: crate::test_connection_id("publisher"),
         message: Box::new(notice_request(
             "debug separation",
             tau_proto::NoticeLevel::Debug,
@@ -663,7 +677,7 @@ fn routine_notice_output_is_not_replayed() {
     );
     harness
         .handle_extension_message(
-            "publisher",
+            &crate::test_connection_id("publisher"),
             notice_request("live only", tau_proto::NoticeLevel::Warning),
         )
         .expect("request notice");
@@ -673,7 +687,7 @@ fn routine_notice_output_is_not_replayed() {
 
     let late = connect_test_client(&mut harness, "late", tau_proto::ClientKind::Ui);
     harness.replay_harness_notice(
-        "late",
+        &crate::test_connection_id("late"),
         &[EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
     );
     assert!(late.lock().expect("late").iter().all(|routed| {

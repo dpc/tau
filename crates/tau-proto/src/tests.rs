@@ -53,6 +53,188 @@ fn session_scoped_identifier_deserialization_fails_closed() {
     assert!(ciborium::from_reader::<AgentPromptId, _>(invalid_prompt.as_slice()).is_err());
 }
 
+/// Every approved ASCII-ID family enforces its independent byte cap and the
+/// complete shared lexical grammar at construction.
+#[test]
+fn controlled_identifier_families_enforce_all_boundaries() {
+    macro_rules! assert_family {
+        ($type:ty, $max:expr) => {{
+            let allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+            for character in allowed.chars() {
+                assert!(<$type>::parse(character.to_string()).is_ok());
+            }
+            assert!(<$type>::parse("x".repeat($max)).is_ok());
+            assert!(<$type>::parse("").is_err());
+            assert!(<$type>::parse("x".repeat($max + 1)).is_err());
+
+            for byte in 0_u8..=31 {
+                assert!(<$type>::parse(format!("a{}b", char::from(byte))).is_err());
+            }
+            assert!(<$type>::parse(format!("a{}b", char::from(127))).is_err());
+            for codepoint in 128_u32..=159 {
+                let character = char::from_u32(codepoint).expect("C1 codepoint");
+                assert!(<$type>::parse(format!("a{character}b")).is_err());
+            }
+            for invalid in ["é", "a/b", r"a\b", "a.b", "a b", "a:b", "a+b", "a=b", "a@b"] {
+                assert!(<$type>::parse(invalid).is_err(), "{invalid:?}");
+            }
+        }};
+    }
+
+    assert_family!(AgentMessageId, 128);
+    assert_family!(ActionInvocationId, 64);
+    assert_family!(ShellCommandId, 64);
+    assert_family!(AgentInitializationId, 64);
+    assert_family!(AccountingRuntimeId, 32);
+    assert_family!(AgentActivationCorrelationId, 128);
+    assert_family!(ConnectionId, 128);
+    assert_family!(ExtensionName, EXTENSION_NAME_MAX_BYTES);
+    assert_family!(MessagePublisherId, 128);
+}
+
+/// Every approved ASCII-ID family keeps transparent JSON/CBOR output and
+/// rejects malformed values through both deserializers.
+#[test]
+fn controlled_identifier_families_fail_closed_in_json_and_cbor() {
+    macro_rules! assert_serde {
+        ($type:ty, $valid:literal) => {{
+            let identifier = <$type>::parse($valid).expect("valid controlled identifier");
+            assert_eq!(
+                serde_json::to_string(&identifier).expect("encode identifier as JSON"),
+                concat!("\"", $valid, "\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<$type>(concat!("\"", $valid, "\""))
+                    .expect("decode valid identifier from JSON"),
+                identifier
+            );
+
+            let mut valid_cbor = Vec::new();
+            ciborium::into_writer($valid, &mut valid_cbor)
+                .expect("encode valid identifier as CBOR");
+            assert_eq!(
+                ciborium::from_reader::<$type, _>(valid_cbor.as_slice())
+                    .expect("decode valid identifier from CBOR"),
+                identifier
+            );
+
+            for invalid in ["", "bad.value", "bad/value", "bad value", "é"] {
+                let json = serde_json::to_string(invalid).expect("encode invalid JSON string");
+                assert!(serde_json::from_str::<$type>(&json).is_err());
+                let mut cbor = Vec::new();
+                ciborium::into_writer(invalid, &mut cbor)
+                    .expect("encode invalid identifier as CBOR text");
+                assert!(ciborium::from_reader::<$type, _>(cbor.as_slice()).is_err());
+            }
+        }};
+    }
+
+    assert_serde!(AgentMessageId, "message_1");
+    assert_serde!(ActionInvocationId, "action_1");
+    assert_serde!(ShellCommandId, "shell_1");
+    assert_serde!(AgentInitializationId, "initialization_1");
+    assert_serde!(AccountingRuntimeId, "runtime_1");
+    assert_serde!(AgentActivationCorrelationId, "activation_1");
+    assert_serde!(ConnectionId, "connection_1");
+    assert_serde!(ExtensionName, "extension_1");
+    assert_serde!(MessagePublisherId, "publisher_1");
+}
+
+/// Raw publisher claims remain unrestricted and lossless across both wire
+/// codecs so report admission can audit or reject the exact peer value.
+#[test]
+fn raw_message_publisher_claim_round_trips_without_validation() {
+    for claim in ["", "invalid publisher/☃", "control\u{1b}claim"] {
+        let raw = RawMessagePublisherId::new(claim);
+        let json = serde_json::to_string(&raw).expect("encode raw claim as JSON");
+        assert_eq!(
+            serde_json::from_str::<RawMessagePublisherId>(&json)
+                .expect("decode raw claim from JSON")
+                .as_str(),
+            claim
+        );
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&raw, &mut cbor).expect("encode raw claim as CBOR");
+        assert_eq!(
+            ciborium::from_reader::<RawMessagePublisherId, _>(cbor.as_slice())
+                .expect("decode raw claim from CBOR")
+                .as_str(),
+            claim
+        );
+    }
+}
+
+/// Outer-turn identity accepts only the exact derived `ot-{AgentPromptId}`
+/// representation, including the prompt family's complete boundary behavior.
+#[test]
+fn outer_turn_identifier_enforces_exact_derived_grammar() {
+    let max_prompt = "p".repeat(SESSION_SCOPED_ID_MAX_LEN);
+    let maximum = format!("ot-{max_prompt}");
+    assert_eq!(
+        &*AgentOuterTurnId::parse(&maximum).expect("maximum derived outer-turn id"),
+        maximum
+    );
+    for invalid in [
+        "",
+        "ot-",
+        "turn-prompt",
+        "ot-bad.prompt",
+        "ot-bad/prompt",
+        "ot-bad prompt",
+        "ot-é",
+    ] {
+        assert!(AgentOuterTurnId::parse(invalid).is_err(), "{invalid:?}");
+        let json = serde_json::to_string(invalid).expect("encode invalid outer-turn JSON");
+        assert!(serde_json::from_str::<AgentOuterTurnId>(&json).is_err());
+        let mut cbor = Vec::new();
+        ciborium::into_writer(invalid, &mut cbor).expect("encode invalid outer-turn CBOR");
+        assert!(ciborium::from_reader::<AgentOuterTurnId, _>(cbor.as_slice()).is_err());
+    }
+    assert!(
+        AgentOuterTurnId::parse(format!("ot-{}", "p".repeat(SESSION_SCOPED_ID_MAX_LEN + 1)))
+            .is_err()
+    );
+}
+
+/// Invalid controlled identifiers fail at representative protocol and durable
+/// event payload boundaries instead of entering routing or journal state.
+#[test]
+fn controlled_identifiers_fail_closed_at_protocol_and_journal_boundaries() {
+    let invalid_hello = serde_json::json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "client_name": "bad.extension",
+        "client_kind": "tool",
+        "capabilities": []
+    });
+    assert!(serde_json::from_value::<Hello>(invalid_hello.clone()).is_err());
+    let mut hello_cbor = Vec::new();
+    ciborium::into_writer(&invalid_hello, &mut hello_cbor)
+        .expect("encode malformed protocol payload");
+    assert!(ciborium::from_reader::<Hello, _>(hello_cbor.as_slice()).is_err());
+
+    let invalid_message = serde_json::json!({
+        "message_id": "bad.message",
+        "sender_id": "agent-sender",
+        "recipient": {"kind": "user"},
+        "message": "hello"
+    });
+    assert!(serde_json::from_value::<AgentMessageSent>(invalid_message.clone()).is_err());
+    let mut message_cbor = Vec::new();
+    ciborium::into_writer(&invalid_message, &mut message_cbor)
+        .expect("encode malformed journal payload");
+    assert!(ciborium::from_reader::<AgentMessageSent, _>(message_cbor.as_slice()).is_err());
+}
+
+/// Connection and extension identities cannot escape a path component because
+/// their owning parsers reject separators, traversal punctuation, and controls.
+#[test]
+fn routing_identifier_path_components_are_safe_by_construction() {
+    for invalid in [".", "..", "/", "\\", "a/b", r"a\b", "a\0b", "a\nb"] {
+        assert!(ConnectionId::parse(invalid).is_err(), "{invalid:?}");
+        assert!(ExtensionName::parse(invalid).is_err(), "{invalid:?}");
+    }
+}
+
 /// The transient internal-prompt request must preserve absent/default
 /// provenance and encode explicit timer provenance canonically.
 #[test]
@@ -710,7 +892,8 @@ fn representative_events() -> Vec<Event> {
             prompt_fragment: None,
         }),
         Event::ToolRegister(ToolRegister {
-            publisher_extension_id: ExtensionName::from("tool-extension"),
+            publisher_extension_id: crate::ExtensionName::parse("tool-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             publisher_instance_id: ExtensionInstanceId::new(7),
             tool: echo_tool_spec(),
             tool_group: None,
@@ -728,7 +911,8 @@ fn representative_events() -> Vec<Event> {
             tool_name: ToolName::new("old_echo"),
         }),
         Event::ToolUnregister(ToolUnregister {
-            publisher_extension_id: ExtensionName::from("tool-extension"),
+            publisher_extension_id: crate::ExtensionName::parse("tool-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             publisher_instance_id: ExtensionInstanceId::new(7),
             tool_name: ToolName::new("old_echo"),
         }),
@@ -844,14 +1028,15 @@ fn representative_events() -> Vec<Event> {
             display: None,
         }),
         Event::ActionSchemaPublished(ActionSchemaPublished {
-            extension_name: "std-email".into(),
+            extension_name: test_extension_name("std-email"),
             instance_id: 7.into(),
             schema: action_schema_fixture(),
         }),
         Event::ActionInvoke(ActionInvoke {
-            invocation_id: ActionInvocationId::parse("act-1").unwrap(),
+            invocation_id: ActionInvocationId::parse("act-1")
+                .expect("test identifier must satisfy its grammar"),
             session_id: test_session_id("s1"),
-            extension_name: "std-email".into(),
+            extension_name: test_extension_name("std-email"),
             instance_id: 7.into(),
             action_id: "email.out.list".to_owned(),
             raw_line: ":email out list".to_owned(),
@@ -859,20 +1044,23 @@ fn representative_events() -> Vec<Event> {
             arguments: CborValue::Map(Vec::new()),
         }),
         Event::ActionResult(ActionResult {
-            invocation_id: ActionInvocationId::parse("act-1").unwrap(),
+            invocation_id: ActionInvocationId::parse("act-1")
+                .expect("test identifier must satisfy its grammar"),
             action_id: "email.out.list".to_owned(),
             output: ActionOutput::Text {
                 text: "no queued mail".to_owned(),
             },
         }),
         Event::ActionError(ActionError {
-            invocation_id: ActionInvocationId::parse("act-2").unwrap(),
+            invocation_id: ActionInvocationId::parse("act-2")
+                .expect("test identifier must satisfy its grammar"),
             action_id: "email.out.list".to_owned(),
             message: "approval queue unavailable".to_owned(),
             details: None,
         }),
         Event::MessageDelivered(MessageDelivered {
-            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            publisher_extension_id: crate::MessagePublisherId::parse("bridge-main")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent"),
             message_id: MessageFactId::new("m1"),
             sender: MessageParty {
@@ -889,10 +1077,11 @@ fn representative_events() -> Vec<Event> {
             extension_data: MessageExtensionData::default(),
         }),
         Event::MessageEdited(MessageEdited {
-            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            publisher_extension_id: crate::MessagePublisherId::parse("bridge-main")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent"),
             target: MessageFactRef {
-                publisher_extension_id: MessagePublisherId::new("bridge-main"),
+                publisher_extension_id: RawMessagePublisherId::new("bridge-main"),
                 message_id: MessageFactId::new("m1"),
             },
             actor: Some(MessageParty {
@@ -905,10 +1094,11 @@ fn representative_events() -> Vec<Event> {
             extension_data: MessageExtensionData::default(),
         }),
         Event::MessageDeleted(MessageDeleted {
-            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            publisher_extension_id: crate::MessagePublisherId::parse("bridge-main")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent"),
             target: MessageFactRef {
-                publisher_extension_id: MessagePublisherId::new("other-bridge"),
+                publisher_extension_id: RawMessagePublisherId::new("other-bridge"),
                 message_id: MessageFactId::new("future"),
             },
             actor: Some(MessageParty {
@@ -920,10 +1110,11 @@ fn representative_events() -> Vec<Event> {
             extension_data: MessageExtensionData::default(),
         }),
         Event::MessageReactionAdded(MessageReactionAdded {
-            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            publisher_extension_id: crate::MessagePublisherId::parse("bridge-main")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent"),
             target: MessageFactRef {
-                publisher_extension_id: MessagePublisherId::new("bridge-main"),
+                publisher_extension_id: RawMessagePublisherId::new("bridge-main"),
                 message_id: MessageFactId::new("m1"),
             },
             actor: None,
@@ -932,10 +1123,11 @@ fn representative_events() -> Vec<Event> {
             extension_data: MessageExtensionData::default(),
         }),
         Event::MessageReactionRemoved(MessageReactionRemoved {
-            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            publisher_extension_id: crate::MessagePublisherId::parse("bridge-main")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent"),
             target: MessageFactRef {
-                publisher_extension_id: MessagePublisherId::new("bridge-main"),
+                publisher_extension_id: RawMessagePublisherId::new("bridge-main"),
                 message_id: MessageFactId::new("m1"),
             },
             actor: None,
@@ -944,7 +1136,8 @@ fn representative_events() -> Vec<Event> {
             extension_data: MessageExtensionData::default(),
         }),
         Event::MessageSent(MessageSent {
-            publisher_extension_id: MessagePublisherId::new("bridge-main"),
+            publisher_extension_id: crate::MessagePublisherId::parse("bridge-main")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             agent_id: MessageAgentTarget::new("agent"),
             message_id: MessageFactId::new("m2"),
             recipient: None,
@@ -963,14 +1156,16 @@ fn representative_events() -> Vec<Event> {
             ctx_id: None,
         }),
         Event::AgentMessageSent(AgentMessageSent {
-            message_id: AgentMessageId::parse("msg-1").unwrap(),
+            message_id: AgentMessageId::parse("msg-1")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("engineer_abcd1234"),
             recipient: AgentMessageRecipient::User,
             kind: AgentMessageKind::Message,
             message: "hello".to_owned(),
         }),
         Event::AgentMessageReceived(AgentMessageReceived {
-            message_id: AgentMessageId::parse("msg-2").unwrap(),
+            message_id: AgentMessageId::parse("msg-2")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("engineer_abcd1234"),
             sender_session_id: None,
             recipient_id: agent_id("reviewer_efgh5678"),
@@ -1261,24 +1456,24 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ExtensionStarting(ExtensionStarting {
             instance_id: 1.into(),
-            extension_name: "shell".into(),
+            extension_name: test_extension_name("shell"),
             pid: Some(1234),
         }),
         Event::ExtensionReady(ExtensionReady {
             instance_id: 1.into(),
-            extension_name: "shell".into(),
+            extension_name: test_extension_name("shell"),
             pid: Some(1234),
         }),
         Event::ExtensionExited(ExtensionExited {
             instance_id: 1.into(),
-            extension_name: "shell".into(),
+            extension_name: test_extension_name("shell"),
             pid: Some(1234),
             exit_code: Some(0),
             signal: None,
         }),
         Event::ExtensionRestarting(ExtensionRestarting {
             instance_id: 1.into(),
-            extension_name: "shell".into(),
+            extension_name: test_extension_name("shell"),
             pid: Some(1234),
             attempt: 2,
             reason: Some("hot reload".to_owned()),
@@ -1418,7 +1613,8 @@ fn representative_events() -> Vec<Event> {
         ),
         Event::ProviderModelsDeclared(ProviderModelsDeclared { models: Vec::new() }),
         Event::ProviderModelsUpdated(ProviderModelsUpdated {
-            publisher_extension_id: ExtensionName::from("provider"),
+            publisher_extension_id: crate::ExtensionName::parse("provider")
+                .expect("test extension name must satisfy the identifier grammar"),
             models: vec![ProviderModelInfo {
                 id: "openai/gpt-4.1".parse().expect("model id"),
                 display_name: Some("GPT-4.1".to_owned()),
@@ -1609,7 +1805,8 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::UiShellCommand(UiShellCommand {
             session_id: test_session_id("s1"),
-            command_id: ShellCommandId::parse("shell-1").unwrap(),
+            command_id: ShellCommandId::parse("shell-1")
+                .expect("test identifier must satisfy its grammar"),
             command: "pwd".to_owned(),
             include_in_context: true,
             target_agent_id: Some(agent_id("agent-1")),
@@ -1673,13 +1870,15 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::TermBell(TermBell {}),
         Event::ShellCommandProgress(ShellCommandProgress {
-            command_id: ShellCommandId::parse("shell-1").unwrap(),
+            command_id: ShellCommandId::parse("shell-1")
+                .expect("test identifier must satisfy its grammar"),
             stream: ShellStream::Stdout,
             chunk: "/tmp\n".to_owned(),
             target_agent_id: Some(agent_id("agent-1")),
         }),
         Event::ShellCommandFinished(ShellCommandFinished {
-            command_id: ShellCommandId::parse("shell-1").unwrap(),
+            command_id: ShellCommandId::parse("shell-1")
+                .expect("test identifier must satisfy its grammar"),
             session_id: test_session_id("s1"),
             command: "pwd".to_owned(),
             include_in_context: true,
@@ -1689,13 +1888,15 @@ fn representative_events() -> Vec<Event> {
             cancelled: false,
         }),
         Event::ShellCommandProgressReported(ShellCommandProgress {
-            command_id: ShellCommandId::parse("shell-report-1").unwrap(),
+            command_id: ShellCommandId::parse("shell-report-1")
+                .expect("test identifier must satisfy its grammar"),
             stream: ShellStream::Stderr,
             chunk: "working\n".to_owned(),
             target_agent_id: Some(agent_id("agent-1")),
         }),
         Event::ShellCommandFinishedReported(ShellCommandFinished {
-            command_id: ShellCommandId::parse("shell-report-1").unwrap(),
+            command_id: ShellCommandId::parse("shell-report-1")
+                .expect("test identifier must satisfy its grammar"),
             session_id: test_session_id("s1"),
             command: "pwd".to_owned(),
             include_in_context: true,
@@ -1708,14 +1909,24 @@ fn representative_events() -> Vec<Event> {
     let reports = events
         .iter()
         .filter_map(|event| match event.clone() {
-            Event::MessageDelivered(value) => Some(Event::MessageDeliveredReported(value)),
-            Event::MessageEdited(value) => Some(Event::MessageEditedReported(value)),
-            Event::MessageDeleted(value) => Some(Event::MessageDeletedReported(value)),
-            Event::MessageReactionAdded(value) => Some(Event::MessageReactionAddedReported(value)),
-            Event::MessageReactionRemoved(value) => {
-                Some(Event::MessageReactionRemovedReported(value))
-            }
-            Event::MessageSent(value) => Some(Event::MessageSentReported(value)),
+            Event::MessageDelivered(value) => Some(Event::MessageDeliveredReported(
+                value.with_publisher(RawMessagePublisherId::new("raw-claim")),
+            )),
+            Event::MessageEdited(value) => Some(Event::MessageEditedReported(
+                value.with_publisher(RawMessagePublisherId::new("raw-claim")),
+            )),
+            Event::MessageDeleted(value) => Some(Event::MessageDeletedReported(
+                value.with_publisher(RawMessagePublisherId::new("raw-claim")),
+            )),
+            Event::MessageReactionAdded(value) => Some(Event::MessageReactionAddedReported(
+                value.with_publisher(RawMessagePublisherId::new("raw-claim")),
+            )),
+            Event::MessageReactionRemoved(value) => Some(Event::MessageReactionRemovedReported(
+                value.with_publisher(RawMessagePublisherId::new("raw-claim")),
+            )),
+            Event::MessageSent(value) => Some(Event::MessageSentReported(
+                value.with_publisher(RawMessagePublisherId::new("raw-claim")),
+            )),
             Event::ProviderPromptSubmitted(value) => {
                 Some(Event::ProviderPromptSubmittedReported(value))
             }
@@ -1753,7 +1964,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
     vec![
         HarnessInputMessage::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
-            client_name: "provider".into(),
+            client_name: test_extension_name("provider"),
             client_kind: ClientKind::Provider,
             capabilities: Default::default(),
         }),
@@ -1835,7 +2046,8 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         }),
         HarnessInputMessage::ExternalAgentMessage(ExternalAgentMessageRequest {
             request_id: "external-1".to_owned(),
-            message_id: AgentMessageId::parse("msg-external-1").unwrap(),
+            message_id: AgentMessageId::parse("msg-external-1")
+                .expect("test identifier must satisfy its grammar"),
             capability: "capability-1".to_owned(),
             sender_session_id: test_session_id("sender-session"),
             sender_id: agent_id("sender_agent"),
@@ -1846,7 +2058,8 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         }),
         HarnessInputMessage::ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest {
             request_id: "external-auth-1".to_owned(),
-            message_id: AgentMessageId::parse("msg-external-1").unwrap(),
+            message_id: AgentMessageId::parse("msg-external-1")
+                .expect("test identifier must satisfy its grammar"),
             capability: "capability-1".to_owned(),
             sender_session_id: test_session_id("sender-session"),
             sender_id: agent_id("sender_agent"),
@@ -1861,7 +2074,8 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
 fn representative_output_messages() -> Vec<HarnessOutputMessage> {
     vec![
         HarnessOutputMessage::Configure(Configure {
-            instance_name: ExtensionName::new("test-extension"),
+            instance_name: crate::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             tool_prefix: None,
             config: CborValue::Null,
             state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
@@ -2049,25 +2263,68 @@ fn message_fact_events_have_distinct_required_v11_wire_shapes() {
 /// converts those reports into the existing canonical fact names.
 #[test]
 fn message_reports_are_transient_and_convert_to_canonical_facts() {
+    fn reported(fact: Event, claim: &str) -> Event {
+        let raw = || RawMessagePublisherId::new(claim);
+        match fact {
+            Event::MessageDelivered(value) => {
+                Event::MessageDeliveredReported(value.with_publisher(raw()))
+            }
+            Event::MessageEdited(value) => {
+                Event::MessageEditedReported(value.with_publisher(raw()))
+            }
+            Event::MessageDeleted(value) => {
+                Event::MessageDeletedReported(value.with_publisher(raw()))
+            }
+            Event::MessageReactionAdded(value) => {
+                Event::MessageReactionAddedReported(value.with_publisher(raw()))
+            }
+            Event::MessageReactionRemoved(value) => {
+                Event::MessageReactionRemovedReported(value.with_publisher(raw()))
+            }
+            Event::MessageSent(value) => Event::MessageSentReported(value.with_publisher(raw())),
+            _ => unreachable!("message fixture is canonical"),
+        }
+    }
+
     let canonical = representative_events()
         .into_iter()
         .filter(|event| event.message_agent_target().is_some())
         .collect::<Vec<_>>();
     assert_eq!(canonical.len(), 6);
     for fact in canonical {
-        let report = match fact.clone() {
-            Event::MessageDelivered(value) => Event::MessageDeliveredReported(value),
-            Event::MessageEdited(value) => Event::MessageEditedReported(value),
-            Event::MessageDeleted(value) => Event::MessageDeletedReported(value),
-            Event::MessageReactionAdded(value) => Event::MessageReactionAddedReported(value),
-            Event::MessageReactionRemoved(value) => Event::MessageReactionRemovedReported(value),
-            Event::MessageSent(value) => Event::MessageSentReported(value),
-            _ => unreachable!("message fixture is canonical"),
-        };
+        let report = reported(fact.clone(), "bridge-main");
         assert!(report.is_message_report());
         assert!(!report.defaults_to_persist());
         assert!(report.name().to_string().ends_with("_reported"));
-        assert_eq!(report.into_canonical_message_fact(), Some(fact));
+        assert_eq!(
+            report.into_stamped_canonical_message_fact(
+                MessagePublisherId::parse("bridge-main").expect("canonical publisher"),
+            ),
+            Some(fact.clone())
+        );
+
+        for invalid_claim in [
+            "other-bridge",
+            "bad publisher",
+            "control\u{1f}",
+            "c1\u{80}",
+            "unicode-☃",
+        ] {
+            let invalid = reported(fact.clone(), invalid_claim);
+            let json = serde_json::to_vec(&invalid).expect("encode raw report as JSON");
+            let decoded_json: Event =
+                serde_json::from_slice(&json).expect("decode raw report from JSON");
+            assert_eq!(decoded_json, invalid);
+
+            let mut cbor = Vec::new();
+            ciborium::into_writer(&invalid, &mut cbor).expect("encode raw report as CBOR");
+            let decoded_cbor: Event =
+                ciborium::from_reader(cbor.as_slice()).expect("decode raw report from CBOR");
+            assert_eq!(decoded_cbor, invalid);
+
+            let publisher = MessagePublisherId::parse("bridge-main").expect("canonical publisher");
+            assert_eq!(invalid.into_stamped_canonical_message_fact(publisher), None);
+        }
     }
 }
 
@@ -2426,7 +2683,8 @@ fn event_name_rejects_empty_segments() {
 #[test]
 fn agent_message_events_have_names_and_persistence_defaults() {
     let sent = Event::AgentMessageSent(AgentMessageSent {
-        message_id: AgentMessageId::parse("msg-1").unwrap(),
+        message_id: AgentMessageId::parse("msg-1")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("engineer_abcd1234"),
         recipient: AgentMessageRecipient::User,
         kind: AgentMessageKind::Message,
@@ -2437,7 +2695,8 @@ fn agent_message_events_have_names_and_persistence_defaults() {
     assert!(sent.defaults_to_persist());
 
     let received = Event::AgentMessageReceived(AgentMessageReceived {
-        message_id: AgentMessageId::parse("msg-2").unwrap(),
+        message_id: AgentMessageId::parse("msg-2")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("engineer_abcd1234"),
         sender_session_id: None,
         recipient_id: agent_id("reviewer_efgh5678"),
@@ -2465,7 +2724,8 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
     assert_eq!(legacy.kind, AgentMessageKind::Message);
 
     let explicit_message = AgentMessageReceived {
-        message_id: AgentMessageId::parse("msg-message").unwrap(),
+        message_id: AgentMessageId::parse("msg-message")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: agent_id("engineer_abcd1234"),
         sender_session_id: None,
         recipient_id: agent_id("reviewer_efgh5678"),
@@ -2960,7 +3220,7 @@ fn extension_notice_request_uses_dedicated_input_message() {
 #[test]
 fn ui_debug_event_stats_request_uses_dedicated_input_message() {
     let input = HarnessInputMessage::UiDebugEventStatsRequest(UiDebugEventStatsRequest {
-        extension_name: "std-shell".into(),
+        extension_name: test_extension_name("std-shell"),
     });
     let json = serde_json::to_value(&input).expect("serialize input");
     assert_eq!(json["message"], "ui_debug_event_stats_request");
@@ -3089,7 +3349,8 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     assert!(parsed.secrets.is_empty());
 
     let with_state = Configure {
-        instance_name: ExtensionName::new("test-extension"),
+        instance_name: crate::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         tool_prefix: None,
         config: CborValue::Null,
         state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
@@ -3104,7 +3365,8 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
     assert_eq!(decoded, with_state);
 
     let without_state = serde_json::to_value(Configure {
-        instance_name: ExtensionName::new("test-extension"),
+        instance_name: crate::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         tool_prefix: None,
         config: CborValue::Null,
         state_dir: None,
@@ -3123,7 +3385,8 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
     let mut secrets = std::collections::BTreeMap::new();
     secrets.insert("mail_password".to_owned(), SecretValue::new("super-secret"));
     let configure = Configure {
-        instance_name: ExtensionName::new("test-extension"),
+        instance_name: crate::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         tool_prefix: None,
         config: CborValue::Null,
         state_dir: None,
@@ -3152,7 +3415,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
 fn directional_message_wire_form_uses_flat_message_tag() {
     let input = HarnessInputMessage::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "provider".into(),
+        client_name: test_extension_name("provider"),
         client_kind: ClientKind::Provider,
         capabilities: Default::default(),
     });
@@ -3248,7 +3511,8 @@ fn provider_model_event_names_match_wire_family() {
         ),
         (
             Event::ProviderModelsUpdated(ProviderModelsUpdated {
-                publisher_extension_id: ExtensionName::from("provider"),
+                publisher_extension_id: crate::ExtensionName::parse("provider")
+                    .expect("test extension name must satisfy the identifier grammar"),
                 models: Vec::new(),
             }),
             "provider.models_updated",
@@ -3291,7 +3555,8 @@ fn tool_lifecycle_event_names_and_provenance_match_wire_family() {
         ),
         (
             Event::ToolRegister(ToolRegister {
-                publisher_extension_id: ExtensionName::from("tool-extension"),
+                publisher_extension_id: crate::ExtensionName::parse("tool-extension")
+                    .expect("test extension name must satisfy the identifier grammar"),
                 publisher_instance_id: ExtensionInstanceId::new(9),
                 tool: declaration.tool,
                 tool_group: None,
@@ -3301,7 +3566,8 @@ fn tool_lifecycle_event_names_and_provenance_match_wire_family() {
         ),
         (
             Event::ToolUnregister(ToolUnregister {
-                publisher_extension_id: ExtensionName::from("tool-extension"),
+                publisher_extension_id: crate::ExtensionName::parse("tool-extension")
+                    .expect("test extension name must satisfy the identifier grammar"),
                 publisher_instance_id: ExtensionInstanceId::new(9),
                 tool_name: ToolName::new("echo"),
             }),
@@ -3955,13 +4221,15 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             display: None,
         }),
         Event::ShellCommandProgressReported(ShellCommandProgress {
-            command_id: ShellCommandId::parse("shell-progress").unwrap(),
+            command_id: ShellCommandId::parse("shell-progress")
+                .expect("test identifier must satisfy its grammar"),
             stream: ShellStream::Stdout,
             chunk: "provider running".to_owned(),
             target_agent_id: Some(agent_id("worker")),
         }),
         Event::ShellCommandFinishedReported(ShellCommandFinished {
-            command_id: ShellCommandId::parse("shell-finished").unwrap(),
+            command_id: ShellCommandId::parse("shell-finished")
+                .expect("test identifier must satisfy its grammar"),
             session_id: test_session_id("s1"),
             command: "pwd".to_owned(),
             include_in_context: false,
@@ -3980,14 +4248,15 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             originator: PromptOriginator::User,
         }),
         Event::ActionSchemaPublished(ActionSchemaPublished {
-            extension_name: "std-email".into(),
+            extension_name: test_extension_name("std-email"),
             instance_id: 7.into(),
             schema: action_schema_fixture(),
         }),
         Event::ActionInvoke(ActionInvoke {
-            invocation_id: ActionInvocationId::parse("act-1").unwrap(),
+            invocation_id: ActionInvocationId::parse("act-1")
+                .expect("test identifier must satisfy its grammar"),
             session_id: test_session_id("s1"),
-            extension_name: "std-email".into(),
+            extension_name: test_extension_name("std-email"),
             instance_id: 7.into(),
             action_id: "email.out.list".to_owned(),
             raw_line: ":email out list".to_owned(),
@@ -3995,14 +4264,16 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             arguments: CborValue::Map(Vec::new()),
         }),
         Event::ActionResult(ActionResult {
-            invocation_id: ActionInvocationId::parse("act-1").unwrap(),
+            invocation_id: ActionInvocationId::parse("act-1")
+                .expect("test identifier must satisfy its grammar"),
             action_id: "email.out.list".to_owned(),
             output: ActionOutput::Text {
                 text: "ok".to_owned(),
             },
         }),
         Event::ActionError(ActionError {
-            invocation_id: ActionInvocationId::parse("act-2").unwrap(),
+            invocation_id: ActionInvocationId::parse("act-2")
+                .expect("test identifier must satisfy its grammar"),
             action_id: "email.out.list".to_owned(),
             message: "nope".to_owned(),
             details: None,
@@ -5393,4 +5664,10 @@ fn agent_navigation_mode_results_round_trip() {
             event
         );
     }
+}
+
+/// Builds a validated extension name used by this test module.
+fn test_extension_name(value: impl AsRef<str>) -> crate::ExtensionName {
+    crate::ExtensionName::parse(value.as_ref())
+        .expect("test extension name must satisfy the identifier grammar")
 }

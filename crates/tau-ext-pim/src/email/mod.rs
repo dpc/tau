@@ -131,7 +131,8 @@ impl tau_client::TauExtension for EmailExtension {
                     .map_err(tau_client::ClientError::handler)?;
                 cx.handle.emit(Event::ActionSchemaPublished(
                     tau_proto::ActionSchemaPublished {
-                        extension_name: tau_proto::ExtensionName::default(),
+                        extension_name: tau_proto::ExtensionName::parse("email")
+                            .expect("authenticated email extension name must satisfy the identifier grammar"),
                         instance_id: 0.into(),
                         schema: email_action_schema_with_accounts(
                             &cx.state.google_auth_account_ids(),

@@ -242,7 +242,8 @@ fn assert_callback_auth(
 fn callback_hello() -> tau_proto::Hello {
     tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
-        client_name: CALLBACK_CLIENT_NAME.into(),
+        client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)
+            .expect("callback client name must satisfy the identifier grammar"),
         client_kind: tau_proto::ClientKind::External,
         capabilities: Default::default(),
     }
@@ -282,7 +283,8 @@ fn post_hello_stall_is_bounded_and_cleans_metadata() -> Result<(), Box<dyn std::
 fn fixture_request(sender_session: &SessionId) -> tau_proto::ExternalAgentMessageRequest {
     tau_proto::ExternalAgentMessageRequest {
         request_id: REQUEST_ID.to_owned(),
-        message_id: tau_proto::AgentMessageId::parse("fixture-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("fixture-message")
+            .expect("test identifier must satisfy its grammar"),
         capability: "fixture-capability".to_owned(),
         sender_session_id: sender_session.clone(),
         sender_id: tau_proto::AgentId::parse("fixture-sender").expect("static agent id"),

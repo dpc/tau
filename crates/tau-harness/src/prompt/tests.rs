@@ -162,7 +162,7 @@ fn sourced_user_prompt(text: &str, source: tau_proto::PromptSubmissionSource) ->
 
 fn discovered_skill(description: &str, add_to_prompt: bool) -> DiscoveredSkill {
     DiscoveredSkill {
-        source_id: "test-extension".into(),
+        source_id: crate::test_connection_id("test-extension"),
         description: description.to_owned(),
         source: crate::discovery::DiscoveredSkillSource::BuiltIn {
             content: std::borrow::Cow::Borrowed(""),
@@ -181,7 +181,7 @@ fn system_prompt_excludes_disable_model_invocation_skills() {
     skills.insert(
         tau_proto::SkillName::new("manual-only"),
         DiscoveredSkill {
-            source_id: "test-extension".into(),
+            source_id: crate::test_connection_id("test-extension"),
             description: "Manual only".to_owned(),
             source: crate::discovery::DiscoveredSkillSource::BuiltIn {
                 content: std::borrow::Cow::Borrowed(""),
@@ -201,7 +201,7 @@ fn system_prompt_excludes_disable_model_invocation_skills() {
 #[test]
 fn render_effective_prompt_wraps_system_and_agents_context() {
     let agents = [DiscoveredAgentsFile {
-        source_id: "core-shell".into(),
+        source_id: crate::test_connection_id("core-shell"),
         file_path: "/repo/AGENTS.md".into(),
         content: "Read the docs.".to_owned(),
     }];
@@ -1443,7 +1443,8 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
             seq: tau_core::PersistedAgentEventSeq::new(0),
             source: None,
             event: Event::MessageDelivered(tau_proto::MessageDelivered::new(
-                tau_proto::MessagePublisherId::new("bridge"),
+                tau_proto::MessagePublisherId::parse("bridge")
+                    .expect("canonical publisher id must satisfy the identifier grammar"),
                 tau_proto::MessageAgentTarget::new(agent_id.as_str()),
                 tau_proto::MessageFactId::new("m1"),
                 tau_proto::MessageParty {
@@ -1703,7 +1704,8 @@ fn assemble_conversation_preserves_agent_phase() {
 fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: tau_proto::AgentMessageId::parse("msg-user").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("msg-user")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: tau_proto::AgentId::parse("main").expect("agent id"),
         recipient: tau_proto::AgentMessageRecipient::User,
         kind: tau_proto::AgentMessageKind::Message,
@@ -1711,7 +1713,8 @@ fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
     }));
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-agent").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-agent")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: tau_proto::AgentId::parse("manager").expect("agent id"),
             sender_session_id: None,
             recipient_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -1750,7 +1753,8 @@ fn assemble_conversation_escapes_authenticated_peer_message_envelope() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("peer-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("peer-message")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: tau_proto::AgentId::parse("peer_agent").expect("agent id"),
             sender_session_id: Some(
                 "peer-session"
@@ -1790,7 +1794,8 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
     let mut watcher_tree = tau_core::AgentTree::from_events(main.clone(), &[]);
     watcher_tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-watch").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-watch")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: watched.clone(),
             sender_session_id: None,
             recipient_id: main,
@@ -1816,7 +1821,8 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
 
     let mut watched_tree = tau_core::AgentTree::from_events(watched.clone(), &[]);
     watched_tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: tau_proto::AgentMessageId::parse("msg-watch").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("msg-watch")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: watched,
         recipient: tau_proto::AgentMessageRecipient::Agent {
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -1839,7 +1845,8 @@ fn assemble_conversation_replays_watch_turn_state_as_notification_only() {
     let mut tree = tau_core::AgentTree::from_events(watcher.clone(), &[]);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-watch-state").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-watch-state")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: watched,
             sender_session_id: None,
             recipient_id: watcher,
@@ -1877,7 +1884,8 @@ fn assemble_conversation_omits_initial_watch_turn_state() {
     let mut tree = tau_core::AgentTree::from_events(watcher.clone(), &[]);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-initial-watch-state").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-initial-watch-state")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: watched,
             sender_session_id: None,
             recipient_id: watcher,

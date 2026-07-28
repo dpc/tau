@@ -124,8 +124,11 @@ fn dropped_request_has_no_start_agent_effect() {
     );
     connect_start_agent_interceptor(&mut h);
 
-    h.handle_extension_event_inner("requester", request_event("q-drop", "drop me"))
-        .expect("park request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        request_event("q-drop", &crate::test_connection_id("drop-me")),
+    )
+    .expect("park request");
     h.handle_extension_event(
         "start-agent-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -159,8 +162,11 @@ fn replacement_payload_commits_before_acceptance_and_agent_creation() {
     );
     connect_start_agent_interceptor(&mut h);
 
-    h.handle_extension_event_inner("requester", request_event("q-original", "original"))
-        .expect("park request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        request_event("q-original", &crate::test_connection_id("original")),
+    )
+    .expect("park request");
     h.handle_extension_event(
         "start-agent-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -211,8 +217,11 @@ fn invalid_role_commits_before_directed_rejection() {
     let mut invalid = request("q-invalid-role", "invalid");
     invalid.role = Some("missing-role".to_owned());
 
-    h.handle_extension_event_inner("requester", Event::StartAgentRequest(invalid))
-        .expect("process invalid request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        Event::StartAgentRequest(invalid),
+    )
+    .expect("process invalid request");
 
     assert!(source_committed(&h, "requester", |event| {
         matches!(
@@ -247,8 +256,11 @@ fn invalid_parent_commits_before_directed_rejection() {
     invalid.parent_agent =
         Some(tau_proto::AgentId::parse("missing-parent").expect("parent agent id"));
 
-    h.handle_extension_event_inner("requester", Event::StartAgentRequest(invalid))
-        .expect("process invalid request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        Event::StartAgentRequest(invalid),
+    )
+    .expect("process invalid request");
 
     assert!(source_committed(&h, "requester", |event| {
         matches!(
@@ -286,8 +298,11 @@ fn configured_kinds_have_authority_but_unconfigured_and_socket_do_not() {
         connect_ready_configured_extension(&mut h, &source, &source, kind);
         let mut invalid = request(&query_id, "authority");
         invalid.role = Some("missing-role".to_owned());
-        h.handle_extension_event_inner(&source, Event::StartAgentRequest(invalid))
-            .expect("publish configured request");
+        h.handle_extension_event_inner(
+            &crate::test_connection_id(&source),
+            Event::StartAgentRequest(invalid),
+        )
+        .expect("publish configured request");
         assert!(source_committed(&h, &source, |event| {
             matches!(
                 event,
@@ -297,8 +312,11 @@ fn configured_kinds_have_authority_but_unconfigured_and_socket_do_not() {
     }
 
     let unconfigured = connect_test_tool(&mut h, "unconfigured");
-    h.handle_extension_event_inner("unconfigured", request_event("q-unconfigured", "spoofed"))
-        .expect("reject unconfigured");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("unconfigured"),
+        request_event("q-unconfigured", &crate::test_connection_id("spoofed")),
+    )
+    .expect("reject unconfigured");
     assert!(!source_committed(&h, "unconfigured", |event| {
         matches!(event, Event::StartAgentRequest(_))
     }));
@@ -310,11 +328,12 @@ fn configured_kinds_have_authority_but_unconfigured_and_socket_do_not() {
         "socket-origin",
         tau_proto::ClientKind::Tool,
     );
-    h.bus.disconnect("socket-origin");
+    h.bus
+        .disconnect(&crate::test_connection_id("socket-origin"));
     h.bus.connect(Connection::new(
-        ConnectionMetadata {
-            id: "socket-origin".into(),
-            name: "socket-origin".to_owned(),
+        PendingConnectionMetadata {
+            id: Some(crate::test_connection_id("socket-origin")),
+            name: crate::test_extension_name("socket-origin"),
             kind: tau_proto::ClientKind::Tool,
             origin: ConnectionOrigin::Socket,
         },
@@ -322,8 +341,11 @@ fn configured_kinds_have_authority_but_unconfigured_and_socket_do_not() {
             events: Arc::clone(&socket_sink),
         }),
     ));
-    h.handle_extension_event_inner("socket-origin", request_event("q-socket", "socket"))
-        .expect("reject socket");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("socket-origin"),
+        request_event("q-socket", &crate::test_connection_id("socket")),
+    )
+    .expect("reject socket");
     assert!(!source_committed(&h, "socket-origin", |event| {
         matches!(event, Event::StartAgentRequest(_))
     }));
@@ -343,10 +365,13 @@ fn stale_generation_is_observation_only() {
         tau_proto::ClientKind::Tool,
     );
     connect_start_agent_interceptor(&mut h);
-    h.handle_extension_event_inner("old-requester", request_event("q-stale", "stale"))
-        .expect("park request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("old-requester"),
+        request_event("q-stale", &crate::test_connection_id("stale")),
+    )
+    .expect("park request");
 
-    h.handle_disconnect("old-requester");
+    h.handle_disconnect(&crate::test_connection_id("old-requester"));
     let new_sink = connect_ready_configured_extension(
         &mut h,
         "new-requester",
@@ -399,7 +424,7 @@ fn stale_session_request_is_observation_only() {
     .expect("register rollover blocker");
     h.publish_event(None, draft_event("block deferred start request"));
     h.handle_extension_event_inner(
-        "requester",
+        &crate::test_connection_id("requester"),
         request_event("q-stale-session", "session A work"),
     )
     .expect("defer request behind parked observation");
@@ -473,8 +498,11 @@ fn pre_ready_request_keeps_original_admission_session() {
         tau_proto::SessionStartReason::New,
     )
     .expect("switch session");
-    h.handle_extension_message("requester", TestMessage::Ready(Default::default()))
-        .expect("activate requester");
+    h.handle_extension_message(
+        &crate::test_connection_id("requester"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("activate requester");
 
     assert!(source_committed(&h, "requester", |event| {
         matches!(
@@ -500,8 +528,11 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
         "stable-requester",
         tau_proto::ClientKind::Tool,
     );
-    h.handle_extension_event_inner("old-requester", request_event("q-duplicate", "first"))
-        .expect("start first request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("old-requester"),
+        request_event("q-duplicate", &crate::test_connection_id("first")),
+    )
+    .expect("start first request");
     let side_cid = h
         .agents
         .iter()
@@ -526,7 +557,7 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
         tau_proto::ClientKind::Tool,
     );
     h.handle_extension_event_inner(
-        "new-requester",
+        &crate::test_connection_id("new-requester"),
         request_event("q-duplicate", "ignored duplicate"),
     )
     .expect("rebind duplicate");
@@ -551,7 +582,8 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
     }));
     h.deliver_finished_side_conversation_result(
         &side_cid,
-        &tau_proto::ExtensionName::from("stable-requester"),
+        &tau_proto::ExtensionName::parse("stable-requester")
+            .expect("test extension name must satisfy the identifier grammar"),
         "q-duplicate",
         tau_proto::StartAgentResult {
             query_id: "q-duplicate".to_owned(),
@@ -582,7 +614,10 @@ fn pending_duplicate_rebinds_without_minting_or_dispatching() {
         tau_proto::ClientKind::Tool,
     );
     let pending = h
-        .prepare_start_agent_request("old-requester", request("q-pending", "first"))
+        .prepare_start_agent_request(
+            &crate::test_connection_id("old-requester"),
+            request("q-pending", &crate::test_connection_id("first")),
+        )
         .expect("prepare")
         .expect("new pending request");
     let expected_agent_id = pending.agent_id.clone();
@@ -595,7 +630,7 @@ fn pending_duplicate_rebinds_without_minting_or_dispatching() {
         tau_proto::ClientKind::Tool,
     );
     h.handle_extension_event_inner(
-        "new-requester",
+        &crate::test_connection_id("new-requester"),
         request_event("q-pending", "ignored duplicate"),
     )
     .expect("rebind pending duplicate");
@@ -623,7 +658,8 @@ fn pending_duplicate_rebinds_without_minting_or_dispatching() {
         .expect("dispatched side agent");
     h.deliver_finished_side_conversation_result(
         &side_cid,
-        &tau_proto::ExtensionName::from("stable-requester"),
+        &tau_proto::ExtensionName::parse("stable-requester")
+            .expect("test extension name must satisfy the identifier grammar"),
         "q-pending",
         tau_proto::StartAgentResult {
             query_id: "q-pending".to_owned(),

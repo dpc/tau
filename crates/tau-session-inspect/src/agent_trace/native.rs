@@ -44,8 +44,8 @@ struct Occurrence<'a> {
     observation_id: tau_proto::ObservationId,
     /// Durable wall-clock append timestamp.
     recorded_at_unix_micros: tau_proto::UnixMicros,
-    /// Publishing connection, when known.
-    source: &'a Option<tau_proto::ConnectionId>,
+    /// Typed publishing provenance, when known.
+    source: &'a Option<tau_core::PersistedEventSource>,
     /// Explicit transcript fold parent.
     parent: &'a tau_core::AgentEventParent,
     /// Complete typed durable event in lossless tagged-CBOR JSON form.

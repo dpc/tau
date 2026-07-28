@@ -72,6 +72,65 @@ fn message_delivery_sources(
         .collect()
 }
 
+/// Stable extension provenance in restore records never becomes a live replay
+/// route, whether or not its spelling collides with a connected client.
+#[test]
+fn restore_replay_does_not_project_extension_provenance_as_connection_source() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let colliding = "publisher-route";
+    let sink = connect_test_client(&mut h, colliding, tau_proto::ClientKind::Ui);
+
+    for (index, publisher) in [colliding, "different-publisher"].into_iter().enumerate() {
+        let event = Event::ToolRequest(tau_proto::ToolRequest {
+            call_id: format!("call-{index}").into(),
+            tool_name: tau_proto::ToolName::new("tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: ciborium::Value::Null,
+            agent_id: crate::parse_agent_id("agent-1"),
+            originator: tau_proto::PromptOriginator::Extension {
+                name: crate::test_extension_name(publisher),
+                query_id: format!("query-{index}"),
+            },
+        });
+        h.store
+            .append_session_restore_event_at(
+                "s1",
+                Some(tau_core::PersistedEventSource::Extension(
+                    crate::test_extension_name(publisher),
+                )),
+                event,
+                tau_proto::UnixMicros::new(index as u64),
+            )
+            .expect("append restore event");
+    }
+
+    h.handle_client_event(
+        colliding,
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_REQUEST)],
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("subscribe");
+
+    let replayed = sink
+        .lock()
+        .expect("sink")
+        .iter()
+        .filter(|routed| {
+            matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if delivery.replay
+                        && matches!(delivery.event.as_ref(), Event::ToolRequest(_))
+            )
+        })
+        .map(|routed| routed.source_id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(replayed, [None, None]);
+}
+
 /// Subscribe-time provider current-state catch-up emits canonical harness state
 /// only and does not replay declarations or reapply the snapshot.
 #[test]
@@ -86,7 +145,10 @@ fn provider_model_catch_up_replays_canonical_state_only() {
         "empty-provider",
         tau_proto::ClientKind::Provider,
     );
-    h.set_provider_models("empty-provider-connection", Vec::new());
+    h.set_provider_models(
+        &crate::test_connection_id("empty-provider-connection"),
+        Vec::new(),
+    );
     let before_routes = h.provider_model_routes.clone();
     let before_log = event_log_events(&h).len();
     let sink = connect_test_client(&mut h, "model-replay-ui", tau_proto::ClientKind::Ui);
@@ -132,7 +194,7 @@ fn provider_model_catch_up_replays_canonical_state_only() {
     assert!(deliveries.iter().any(|(_, _, event)| matches!(
         event,
         Event::ProviderModelsUpdated(update)
-            if update.publisher_extension_id.as_str() == existing_publisher
+            if update.publisher_extension_id == existing_publisher
                 && update.models.iter().any(|model| model.id == "test/model".into())
     )));
     assert!(deliveries.iter().any(|(_, _, event)| matches!(
@@ -148,7 +210,8 @@ fn provider_model_catch_up_replays_canonical_state_only() {
 /// Construct one stamped fallback message fact for persistence/replay tests.
 fn replay_message_fact() -> Event {
     Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessagePublisherId::parse("configured-bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new("unknown-agent"),
         tau_proto::MessageFactId::new("m1"),
         tau_proto::MessageParty {
@@ -167,12 +230,12 @@ fn replay_message_fact() -> Event {
 fn fallback_message_fact_live_and_restart_replay_are_exact() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
-    let mut report_payload = replay_message_fact();
-    report_payload.stamp_message_publisher(tau_proto::MessagePublisherId::new("forged"));
-    let Event::MessageDelivered(report_payload) = report_payload else {
+    let Event::MessageDelivered(report_payload) = replay_message_fact() else {
         unreachable!("fixture is delivered fact");
     };
-    let emitted_report = Event::MessageDeliveredReported(report_payload);
+    let emitted_report = Event::MessageDeliveredReported(
+        report_payload.with_publisher(tau_proto::RawMessagePublisherId::new("configured-bridge")),
+    );
     let fact = replay_message_fact();
     {
         let mut h = quiet_provider_harness(&state_dir).expect("start");
@@ -213,8 +276,8 @@ fn fallback_message_fact_live_and_restart_replay_are_exact() {
         assert_eq!(
             message_delivery_sources(&live_sink, false),
             vec![
-                Some(HARNESS_CONNECTION_ID.into()),
-                Some(HARNESS_CONNECTION_ID.into()),
+                Some(crate::test_connection_id(HARNESS_CONNECTION_ID)),
+                Some(crate::test_connection_id(HARNESS_CONNECTION_ID)),
             ]
         );
         let records = h.store.session_events("s1").expect("fallback records");
@@ -246,8 +309,8 @@ fn fallback_message_fact_live_and_restart_replay_are_exact() {
     assert_eq!(
         message_delivery_sources(&replay_sink, true),
         vec![
-            Some(HARNESS_CONNECTION_ID.into()),
-            Some(HARNESS_CONNECTION_ID.into()),
+            Some(crate::test_connection_id(HARNESS_CONNECTION_ID)),
+            Some(crate::test_connection_id(HARNESS_CONNECTION_ID)),
         ]
     );
     resumed.shutdown().expect("shutdown");
@@ -261,7 +324,10 @@ fn ephemeral_fallback_message_fact_replays_in_same_daemon() {
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness_ephemeral(&state_dir).expect("start ephemeral");
     let fact = replay_message_fact();
-    h.commit_message_fact(Some("bridge-connection"), fact.clone());
+    h.commit_message_fact(
+        Some(&crate::test_connection_id("bridge-connection")),
+        fact.clone(),
+    );
 
     let replay_sink = connect_test_client(&mut h, "late-ui", tau_proto::ClientKind::Ui);
     h.handle_client_event(
@@ -335,7 +401,8 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
     });
     h.publish_for_agent(&cid, prompt.clone());
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessagePublisherId::parse("configured-bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new(agent_id.as_str()),
         tau_proto::MessageFactId::new("ephemeral-message"),
         tau_proto::MessageParty {
@@ -456,7 +523,8 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
         .expect("target agent");
     assert!(h.agent_routes.contains_key(agent_id.as_str()));
     let delivered = Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("bridge"),
+        tau_proto::MessagePublisherId::parse("bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new(agent_id.as_str()),
         tau_proto::MessageFactId::new("m1"),
         tau_proto::MessageParty {
@@ -522,7 +590,8 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     h.commit_message_fact(
         None,
         Event::MessageSent(tau_proto::MessageSent::new(
-            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessagePublisherId::parse("bridge")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             tau_proto::MessageAgentTarget::new(agent_id.as_str()),
             tau_proto::MessageFactId::new("m2"),
             None,
@@ -542,7 +611,8 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     h.commit_message_fact(
         None,
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
-            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessagePublisherId::parse("bridge")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             tau_proto::MessageAgentTarget::new(agent_id.as_str()),
             tau_proto::MessageFactId::new("m3"),
             tau_proto::MessageParty {
@@ -572,7 +642,8 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     h.commit_message_fact(
         None,
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
-            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessagePublisherId::parse("bridge")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             tau_proto::MessageAgentTarget::new(agent_id.as_str()),
             tau_proto::MessageFactId::new("m4"),
             tau_proto::MessageParty {
@@ -625,7 +696,8 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
     h.commit_message_fact(
         None,
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
-            tau_proto::MessagePublisherId::new("bridge"),
+            tau_proto::MessagePublisherId::parse("bridge")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             tau_proto::MessageAgentTarget::new(agent_id.as_str()),
             tau_proto::MessageFactId::new("m1"),
             tau_proto::MessageParty {
@@ -731,7 +803,8 @@ fn metadata_only_offline_agent_message_fact_uses_session_journal() {
     )
     .expect("seed legacy metadata-only ghost");
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessagePublisherId::parse("configured-bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new("offline-agent"),
         tau_proto::MessageFactId::new("m1"),
         tau_proto::MessageParty {
@@ -743,7 +816,10 @@ fn metadata_only_offline_agent_message_fact_uses_session_journal() {
         "hello",
     ));
 
-    h.commit_message_fact(Some("bridge-connection"), fact.clone());
+    h.commit_message_fact(
+        Some(&crate::test_connection_id("bridge-connection")),
+        fact.clone(),
+    );
 
     assert!(!ghost_dir.join("events.cbor").exists());
     assert!(
@@ -791,7 +867,8 @@ fn agent_message_fact_replay_projects_without_wake() {
         h.commit_message_fact(
             None,
             Event::MessageDelivered(tau_proto::MessageDelivered::new(
-                tau_proto::MessagePublisherId::new("bridge"),
+                tau_proto::MessagePublisherId::parse("bridge")
+                    .expect("canonical publisher id must satisfy the identifier grammar"),
                 tau_proto::MessageAgentTarget::new(agent_id.as_str()),
                 tau_proto::MessageFactId::new("m1"),
                 tau_proto::MessageParty {
@@ -871,9 +948,10 @@ fn received_agent_message_replay_restores_context_without_wake() {
                 .expect("known-safe AgentPromptId must be valid"),
         };
         h.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-                message_id: tau_proto::AgentMessageId::parse("replay-agent-message").unwrap(),
+                message_id: tau_proto::AgentMessageId::parse("replay-agent-message")
+                    .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("manager"),
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(&agent_id),
@@ -964,7 +1042,8 @@ fn member_agent_message_fact_uses_agent_journal() {
         .expect("seed membership");
     append_agent_creation(&mut h.agent_store, agent_id.as_str());
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessagePublisherId::parse("configured-bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new(agent_id.as_str()),
         tau_proto::MessageFactId::new("m1"),
         tau_proto::MessageParty {
@@ -976,7 +1055,10 @@ fn member_agent_message_fact_uses_agent_journal() {
         "hello",
     ));
 
-    h.commit_message_fact(Some("bridge-connection"), fact.clone());
+    h.commit_message_fact(
+        Some(&crate::test_connection_id("bridge-connection")),
+        fact.clone(),
+    );
 
     assert_eq!(
         h.agent_store
@@ -1011,7 +1093,8 @@ fn live_route_only_message_fact_uses_agent_journal() {
         AgentStore::open(td.path().join("isolated-agent-store")).expect("empty agent store");
     assert!(!h.agent_store.agent_exists(agent_id.as_str()));
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessagePublisherId::parse("configured-bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new(agent_id.as_str()),
         tau_proto::MessageFactId::new("m1"),
         tau_proto::MessageParty {
@@ -1023,7 +1106,10 @@ fn live_route_only_message_fact_uses_agent_journal() {
         "hello",
     ));
 
-    h.commit_message_fact(Some("bridge-connection"), fact.clone());
+    h.commit_message_fact(
+        Some(&crate::test_connection_id("bridge-connection")),
+        fact.clone(),
+    );
 
     assert_eq!(
         h.agent_store
@@ -1058,7 +1144,10 @@ fn fallback_message_fact_storage_failure_prevents_delivery() {
     }
     std::fs::create_dir_all(&event_path).expect("block event stream with directory");
 
-    h.commit_message_fact(Some("bridge-connection"), replay_message_fact());
+    h.commit_message_fact(
+        Some(&crate::test_connection_id("bridge-connection")),
+        replay_message_fact(),
+    );
 
     assert!(message_deliveries(&live_sink, false).is_empty());
     assert!(
@@ -1109,7 +1198,8 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
     std::fs::remove_file(&event_path).expect("remove agent stream");
     std::fs::create_dir_all(&event_path).expect("block agent stream with directory");
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessagePublisherId::parse("configured-bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new("offline-agent"),
         tau_proto::MessageFactId::new("m1"),
         tau_proto::MessageParty {
@@ -1121,7 +1211,7 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
         "hello",
     ));
 
-    h.commit_message_fact(Some("bridge-connection"), fact);
+    h.commit_message_fact(Some(&crate::test_connection_id("bridge-connection")), fact);
 
     assert!(message_deliveries(&live_sink, false).is_empty());
     assert!(
@@ -1162,9 +1252,10 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
         .record_agent_meta(agent_id.as_str())
         .expect("reserve agent");
     h.commit_message_fact(
-        Some("bridge-connection"),
+        Some(&crate::test_connection_id("bridge-connection")),
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
-            tau_proto::MessagePublisherId::new("configured-bridge"),
+            tau_proto::MessagePublisherId::parse("configured-bridge")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             tau_proto::MessageAgentTarget::new(agent_id.as_str()),
             tau_proto::MessageFactId::new("agent-message"),
             tau_proto::MessageParty {
@@ -1176,7 +1267,10 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
             "agent history",
         )),
     );
-    h.commit_message_fact(Some("bridge-connection"), replay_message_fact());
+    h.commit_message_fact(
+        Some(&crate::test_connection_id("bridge-connection")),
+        replay_message_fact(),
+    );
     append_persisted_record(
         &state_dir.join("sessions").join("s1").join("events.cbor"),
         &tau_core::PersistedSessionEvent {
@@ -1260,7 +1354,8 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
         )
         .expect("cache agent metadata");
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("configured-bridge"),
+        tau_proto::MessagePublisherId::parse("configured-bridge")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new("agent-1"),
         tau_proto::MessageFactId::new("m1"),
         tau_proto::MessageParty {
@@ -1271,7 +1366,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
         None,
         "hello",
     ));
-    h.commit_message_fact(Some("bridge-connection"), fact);
+    h.commit_message_fact(Some(&crate::test_connection_id("bridge-connection")), fact);
     append_persisted_record(
         &state_dir.join("agents").join("agent-1").join("events.cbor"),
         &tau_core::PersistedAgentEvent {
@@ -1279,7 +1374,8 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
             seq: tau_core::PersistedAgentEventSeq::new(3),
             source: None,
             event: Event::MessageDelivered(tau_proto::MessageDelivered::new(
-                tau_proto::MessagePublisherId::new("configured-bridge"),
+                tau_proto::MessagePublisherId::parse("configured-bridge")
+                    .expect("canonical publisher id must satisfy the identifier grammar"),
                 tau_proto::MessageAgentTarget::new("agent-2"),
                 tau_proto::MessageFactId::new("m2"),
                 tau_proto::MessageParty {
@@ -1582,9 +1678,10 @@ fn restore_rejects_membership_without_committed_agent_creation() {
         );
         assert!(!h.agents.contains_key(&crate::parse_agent_id("orphan")));
         h.commit_message_fact(
-            Some("bridge"),
+            Some(&crate::test_connection_id("bridge")),
             Event::MessageDelivered(tau_proto::MessageDelivered::new(
-                tau_proto::MessagePublisherId::new("bridge"),
+                tau_proto::MessagePublisherId::parse("bridge")
+                    .expect("canonical publisher id must satisfy the identifier grammar"),
                 tau_proto::MessageAgentTarget::new("orphan"),
                 tau_proto::MessageFactId::new("must-fallback"),
                 tau_proto::MessageParty {
@@ -1819,7 +1916,9 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
     h.store
         .append_session_event(
             "s1",
-            Some(HARNESS_CONNECTION_ID.into()),
+            Some(tau_core::PersistedEventSource::Connection(
+                crate::test_connection_id(HARNESS_CONNECTION_ID),
+            )),
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                     .expect("test identifier must be valid"),
@@ -1835,9 +1934,12 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
     h.agent_store
         .append_agent_event(
             "agent-1",
-            Some(HARNESS_CONNECTION_ID.into()),
+            Some(tau_core::PersistedEventSource::Connection(
+                crate::test_connection_id(HARNESS_CONNECTION_ID),
+            )),
             Event::AgentMessageSent(tau_proto::AgentMessageSent {
-                message_id: tau_proto::AgentMessageId::parse("test-message").unwrap(),
+                message_id: tau_proto::AgentMessageId::parse("test-message")
+                    .expect("test identifier must satisfy its grammar"),
                 sender_id: crate::parse_agent_id("agent-1"),
                 recipient: tau_proto::AgentMessageRecipient::User,
                 kind: tau_proto::AgentMessageKind::Message,
@@ -2047,7 +2149,7 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
 
     let extension_events = connect_test_tool(&mut h, "late-extension");
     h.handle_extension_message(
-        "late-extension",
+        &crate::test_connection_id("late-extension"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
@@ -2219,7 +2321,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
     let mut h = quiet_provider_harness(&sp).expect("start");
     let sink = connect_test_tool(&mut h, "restore-ext");
     h.handle_extension_message(
-        "restore-ext",
+        &crate::test_connection_id("restore-ext"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: vec![
                 EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
@@ -2354,7 +2456,7 @@ fn session_replay_complete_reports_restore_log_errors() {
     let mut h = quiet_provider_harness(&sp).expect("start");
     let sink = connect_test_tool(&mut h, "restore-ext");
     h.handle_extension_message(
-        "restore-ext",
+        &crate::test_connection_id("restore-ext"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
             live_selectors: Vec::new(),
@@ -2429,7 +2531,7 @@ fn replay_complete_boundaries_report_agent_log_errors() {
     let mut h = quiet_provider_harness(&sp).expect("start");
     let sink = connect_test_tool(&mut h, "restore-ext");
     h.handle_extension_message(
-        "restore-ext",
+        &crate::test_connection_id("restore-ext"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
             live_selectors: Vec::new(),
@@ -2497,7 +2599,7 @@ fn extension_subscribe_announces_current_session_snapshot() {
 
     let extension_events = connect_test_tool(&mut h, "respawned-extension");
     h.handle_extension_message(
-        "respawned-extension",
+        &crate::test_connection_id("respawned-extension"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: vec![
@@ -3321,7 +3423,7 @@ fn resumed_session_init_catches_up_subscribers_that_joined_before_init() {
     let mut h = echo_harness_for("s2", &sp).expect("start");
     let extension_events = connect_test_tool(&mut h, "early-extension");
     h.handle_extension_message(
-        "early-extension",
+        &crate::test_connection_id("early-extension"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: vec![
@@ -3395,7 +3497,7 @@ fn resumed_session_repair_errors_are_not_duplicated_for_pre_init_subscribers() {
     let mut h = echo_harness_for("s2", &sp).expect("start");
     let extension_events = connect_test_tool(&mut h, "early-extension");
     h.handle_extension_message(
-        "early-extension",
+        &crate::test_connection_id("early-extension"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_ERROR)],

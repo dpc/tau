@@ -40,7 +40,7 @@ fn connect_liveness_observer(h: &mut Harness, id: &str) -> Arc<Mutex<Vec<RoutedF
     let sink = connect_test_client(h, id, tau_proto::ClientKind::Tool);
     h.bus
         .set_subscriptions(
-            id,
+            &crate::test_connection_id(id),
             Vec::new(),
             vec![
                 EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT),
@@ -66,8 +66,12 @@ fn attached_socket_ui_can_publish_liveness_events() {
     let observer = connect_liveness_observer(&mut h, "observer");
 
     for event in [draft("typing"), focus(true)] {
-        h.handle_client_event_inner_with_persist("ui", event, Some(true))
-            .expect("publish UI liveness event");
+        h.handle_client_event_inner_with_persist(
+            &crate::test_connection_id("ui"),
+            event,
+            Some(true),
+        )
+        .expect("publish UI liveness event");
     }
 
     let routed = observer.lock().expect("observer");
@@ -107,8 +111,9 @@ fn other_client_sources_cannot_publish_liveness_events() {
         tau_proto::ClientKind::Ui,
         ConnectionOrigin::Socket,
     );
-    h.external_message_peers.insert("external".into());
-    h.handle_client_event_inner("external", draft("denied"))
+    h.external_message_peers
+        .insert(crate::test_connection_id("external"));
+    h.handle_client_event_inner(&crate::test_connection_id("external"), draft("denied"))
         .expect("reject external-message peer");
     assert!(!source_committed(&h, "external", |_| true));
 
@@ -118,11 +123,11 @@ fn other_client_sources_cannot_publish_liveness_events() {
         tau_proto::ClientKind::Tool,
         ConnectionOrigin::Socket,
     );
-    h.handle_client_event_inner("socket-tool", focus(true))
+    h.handle_client_event_inner(&crate::test_connection_id("socket-tool"), focus(true))
         .expect("reject non-UI socket");
     assert!(!source_committed(&h, "socket-tool", |_| true));
 
-    h.handle_client_event_inner("missing", draft("missing"))
+    h.handle_client_event_inner(&crate::test_connection_id("missing"), draft("missing"))
         .expect("reject missing client");
     assert!(!source_committed(&h, "missing", |_| true));
 
@@ -132,8 +137,8 @@ fn other_client_sources_cannot_publish_liveness_events() {
         tau_proto::ClientKind::Ui,
         ConnectionOrigin::Socket,
     );
-    h.bus.disconnect("disconnected");
-    h.handle_client_event_inner("disconnected", focus(false))
+    h.bus.disconnect(&crate::test_connection_id("disconnected"));
+    h.handle_client_event_inner(&crate::test_connection_id("disconnected"), focus(false))
         .expect("reject disconnected client");
     assert!(!source_committed(&h, "disconnected", |_| true));
 }
@@ -156,15 +161,15 @@ fn extensions_cannot_publish_ui_liveness_events() {
     for (index, kind) in kinds.into_iter().enumerate() {
         let source = format!("configured-{index}");
         connect_ready_configured_extension(&mut h, &source, &source, kind);
-        h.handle_extension_event_inner(&source, draft(&source))
+        h.handle_extension_event_inner(&crate::test_connection_id(&source), draft(&source))
             .expect("reject configured extension draft");
-        h.handle_extension_event_inner(&source, focus(true))
+        h.handle_extension_event_inner(&crate::test_connection_id(&source), focus(true))
             .expect("reject configured extension focus");
         assert!(!source_committed(&h, &source, |_| true));
     }
 
     connect_test_tool(&mut h, "unconfigured");
-    h.handle_extension_event_inner("unconfigured", draft("denied"))
+    h.handle_extension_event_inner(&crate::test_connection_id("unconfigured"), draft("denied"))
         .expect("reject unconfigured extension");
     assert!(!source_committed(&h, "unconfigured", |_| true));
 }
@@ -196,7 +201,7 @@ fn interception_preserves_false_metadata_and_controls_publication() {
     .expect("register interceptor");
 
     h.handle_client_message(
-        "ui",
+        &crate::test_connection_id("ui"),
         HarnessInputMessage::Emit(tau_proto::Emit::new(draft("drop"))),
     )
     .expect("park draft");
@@ -221,7 +226,7 @@ fn interception_preserves_false_metadata_and_controls_publication() {
     .expect("drop draft");
 
     h.handle_client_message(
-        "ui",
+        &crate::test_connection_id("ui"),
         HarnessInputMessage::Emit(tau_proto::Emit::new(focus(false))),
     )
     .expect("park focus");
@@ -287,10 +292,18 @@ fn liveness_events_are_no_store_for_both_persistence_values() {
     );
     let live = connect_liveness_observer(&mut h, "live");
 
-    h.handle_client_event_inner_with_persist("ui", draft("false"), Some(true))
-        .expect("publish persist=true draft");
-    h.handle_client_event_inner_with_persist("ui", focus(true), Some(false))
-        .expect("publish persist=false focus");
+    h.handle_client_event_inner_with_persist(
+        &crate::test_connection_id("ui"),
+        draft("false"),
+        Some(true),
+    )
+    .expect("publish persist=true draft");
+    h.handle_client_event_inner_with_persist(
+        &crate::test_connection_id("ui"),
+        focus(true),
+        Some(false),
+    )
+    .expect("publish persist=false focus");
     assert_eq!(
         live.lock()
             .expect("live observer")
@@ -310,7 +323,7 @@ fn liveness_events_are_no_store_for_both_persistence_values() {
 
     let historical = connect_test_client(&mut h, "historical", tau_proto::ClientKind::Ui);
     h.complete_subscription(
-        "historical",
+        &crate::test_connection_id("historical"),
         vec![
             EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT),
             EventSelector::Exact(tau_proto::EventName::UI_FOCUS_CHANGED),

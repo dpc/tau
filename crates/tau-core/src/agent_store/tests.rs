@@ -474,8 +474,8 @@ fn rollback_failure_poisons_agent_journal() {
     );
 }
 
-/// Read-only replay rejects a partial frame, while the next locked append keeps
-/// the valid prefix and removes the torn frame plus valid-looking suffix.
+/// Read-only replay rejects a partial payload at EOF, while the next locked
+/// append keeps the valid prefix and removes only that incomplete crash tail.
 #[test]
 fn strict_replay_rejects_partial_frame_before_valid_suffix() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -494,19 +494,7 @@ fn strict_replay_rejects_partial_frame_before_valid_suffix() {
             .expect("baseline appends");
         journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
     }
-    let record = PersistedAgentEvent {
-        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
-        seq: PersistedAgentEventSeq::new(1),
-        source: None,
-        event: display_name_event(&agent_id, "suffix"),
-        parent: AgentEventParent::InheritHead,
-        recorded_at: UnixMicros::new(42),
-    };
-    let mut encoded = Vec::new();
-    ciborium::into_writer(&record, &mut encoded).expect("encode suffix");
-    let mut suffix = vec![1, 2, 3];
-    suffix.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
-    suffix.extend_from_slice(&encoded);
+    let suffix = [5_u64.to_le_bytes().as_slice(), &[1, 2]].concat();
     OpenOptions::new()
         .append(true)
         .open(&journal_path)
@@ -536,6 +524,76 @@ fn strict_replay_rejects_partial_frame_before_valid_suffix() {
         &events[1].event,
         Event::AgentDisplayNameSet(name) if name.display_name == "recovered"
     ));
+}
+
+/// A complete framed record with a malformed durable controlled identifier is
+/// a decode failure, not a repairable incomplete crash tail.
+#[test]
+fn strict_replay_rejects_framed_record_with_malformed_agent_message_id() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    let journal_path;
+    {
+        let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                AgentEventParent::InheritHead,
+                started_event(&agent_id),
+                UnixMicros::new(41),
+            )
+            .expect("baseline appends");
+        journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
+    }
+    let valid = PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([1_u8; 16]),
+        seq: PersistedAgentEventSeq::new(1),
+        source: None,
+        event: Event::AgentMessageSent(tau_proto::AgentMessageSent {
+            message_id: tau_proto::AgentMessageId::parse("message-1").expect("message id"),
+            sender_id: agent_id.clone(),
+            recipient: tau_proto::AgentMessageRecipient::User,
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "hello".to_owned(),
+        }),
+        parent: AgentEventParent::InheritHead,
+        recorded_at: UnixMicros::new(42),
+    };
+    let mut malformed = serde_json::to_value(valid).expect("serialize record value");
+    *malformed
+        .pointer_mut("/event/payload/message_id")
+        .expect("message id field") = serde_json::Value::String("bad.message".to_owned());
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&malformed, &mut encoded).expect("encode malformed framed record");
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(&journal_path)
+        .expect("open journal");
+    file.write_all(&(encoded.len() as u64).to_le_bytes())
+        .expect("write frame length");
+    file.write_all(&encoded).expect("write complete frame");
+    drop(file);
+    let bytes_before = fs::read(&journal_path).expect("read malformed journal");
+
+    let error = AgentStore::open(temp.path()).expect_err("malformed identifier must fail replay");
+
+    assert!(matches!(error, AgentStoreError::Decode { .. }));
+    let mut lazy = AgentStore::open_lazy(temp.path()).expect("lazy store opens");
+    let append_error = lazy
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            AgentEventParent::InheritHead,
+            display_name_event(&agent_id, "must-not-append"),
+            UnixMicros::new(43),
+        )
+        .expect_err("locked writer must reject complete malformed frame");
+    assert!(matches!(append_error, AgentStoreError::Read { .. }));
+    assert_eq!(
+        fs::read(&journal_path).expect("read unchanged malformed journal"),
+        bytes_before
+    );
 }
 
 /// Builds the immutable first event used by durable append tests.

@@ -24,7 +24,7 @@ fn seed_routed_call(harness: &mut Harness, call_id: &str, source: &str) {
     );
     harness
         .pending_tool_providers
-        .insert(call_id.into(), source.into());
+        .insert(call_id.into(), crate::test_connection_id(source));
 }
 
 /// Collect committed progress reports and facts for one call in sequence order.
@@ -237,7 +237,10 @@ fn pre_ready_progress_report_preserves_retained_byte_accounting() {
     assert!(committed_progress(&harness, "call-retained").is_empty());
 
     harness
-        .handle_extension_message("tool-owner", TestMessage::Ready(Default::default()))
+        .handle_extension_message(
+            &crate::test_connection_id("tool-owner"),
+            TestMessage::Ready(Default::default()),
+        )
         .expect("activate and drain report");
     assert_eq!(
         harness.extensions.entries["tool-owner"].state,

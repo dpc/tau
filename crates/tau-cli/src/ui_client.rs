@@ -19,7 +19,7 @@ pub(crate) type UiOutputWriter = PeerOutputWriter<BufWriter<Box<dyn Write + Send
 
 pub(crate) fn connect_ui_client(
     socket_path: &Path,
-    client_name: impl Into<tau_proto::ExtensionName>,
+    client_name: impl AsRef<str>,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
     let stream = UnixStream::connect(socket_path)?;
     let read_stream = stream.try_clone()?;
@@ -28,7 +28,7 @@ pub(crate) fn connect_ui_client(
 
 pub(crate) fn connect_ui_client_until(
     socket_path: &Path,
-    client_name: impl Into<tau_proto::ExtensionName>,
+    client_name: impl AsRef<str>,
     deadline: std::time::Instant,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
     let timeout = deadline.saturating_duration_since(std::time::Instant::now());
@@ -117,7 +117,7 @@ impl Write for DeadlineUnixWriter {
 pub(crate) fn connect_ui_streams<R, W>(
     reader: R,
     writer: W,
-    client_name: impl Into<tau_proto::ExtensionName>,
+    client_name: impl AsRef<str>,
 ) -> io::Result<(UiInputReader, UiOutputWriter)>
 where
     R: Read + Send + 'static,
@@ -132,7 +132,7 @@ where
 
 pub(crate) fn connect_daemon_ui_client(
     daemon: &mut DaemonHandle,
-    client_name: impl Into<tau_proto::ExtensionName>,
+    client_name: impl AsRef<str>,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
     if let Some(initial_ui) = daemon.take_initial_ui_stdio() {
         connect_ui_streams(initial_ui.stdout, initial_ui.stdin, client_name)
@@ -143,7 +143,7 @@ pub(crate) fn connect_daemon_ui_client(
 
 pub(crate) fn connect_ui_writer(
     socket_path: &Path,
-    client_name: impl Into<tau_proto::ExtensionName>,
+    client_name: impl AsRef<str>,
 ) -> io::Result<UiOutputWriter> {
     let stream = UnixStream::connect(socket_path)?;
     let mut writer =
@@ -152,12 +152,10 @@ pub(crate) fn connect_ui_writer(
     Ok(writer)
 }
 
-pub(crate) fn hello_message(
-    client_name: impl Into<tau_proto::ExtensionName>,
-) -> HarnessInputMessage {
+pub(crate) fn hello_message(client_name: tau_proto::ExtensionName) -> HarnessInputMessage {
     HarnessInputMessage::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: client_name.into(),
+        client_name,
         client_kind: ClientKind::Ui,
         capabilities: Default::default(),
     })
@@ -282,8 +280,10 @@ pub(crate) fn chat_subscribe_message() -> HarnessInputMessage {
 
 pub(crate) fn send_hello(
     writer: &mut UiOutputWriter,
-    client_name: impl Into<tau_proto::ExtensionName>,
+    client_name: impl AsRef<str>,
 ) -> io::Result<()> {
+    let client_name = tau_proto::ExtensionName::parse(client_name.as_ref().to_owned())
+        .map_err(io::Error::other)?;
     send_message(writer, &hello_message(client_name))
 }
 

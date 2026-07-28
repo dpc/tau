@@ -355,7 +355,8 @@ fn prompt_cache_key_separates_responses_modes() {
 #[test]
 fn prompt_cache_key_ignores_originator_bucket() {
     let ext = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("__harness__"),
+        name: tau_proto::ExtensionName::parse("__harness__")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "delegate-1".into(),
     };
     let user_key = cache_key(&PromptOriginator::User, false);
@@ -369,11 +370,13 @@ fn prompt_cache_key_ignores_originator_bucket() {
 #[test]
 fn prompt_cache_key_ignores_extension_identity_and_query_id() {
     let delegate = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("__harness__"),
+        name: tau_proto::ExtensionName::parse("__harness__")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "q-1".into(),
     };
     let websearch = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("websearch"),
+        name: tau_proto::ExtensionName::parse("websearch")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "q-2".into(),
     };
     assert_eq!(cache_key(&delegate, false), cache_key(&websearch, false));
@@ -384,7 +387,8 @@ fn prompt_cache_key_ignores_extension_identity_and_query_id() {
 #[test]
 fn prompt_cache_key_ignores_share_user_bucket_flag() {
     let ext = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("std-notifications"),
+        name: tau_proto::ExtensionName::parse("std-notifications")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "idle-0".into(),
     };
     let ext_shared_key = cache_key(&ext, true);

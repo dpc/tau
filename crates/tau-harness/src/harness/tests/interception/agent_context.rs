@@ -59,8 +59,11 @@ fn dropped_context_value_has_no_projection() {
     connect_agent_context_interceptor(&mut h);
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
 
-    h.handle_extension_event_inner("context-owner", context("agent-1", "dropped"))
-        .expect("park context");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("context-owner"),
+        context("agent-1", &crate::test_connection_id("dropped")),
+    )
+    .expect("park context");
     assert_eq!(
         h.agent_context.template_value(Some(&agent_id)),
         serde_json::json!({})
@@ -97,8 +100,11 @@ fn uncorrelated_context_replacement_is_observable_but_not_projected() {
     connect_agent_context_interceptor(&mut h);
     let agent_id = tau_proto::AgentId::parse("agent-unloaded").expect("agent id");
 
-    h.handle_extension_event_inner("context-owner", context("agent-unloaded", "original"))
-        .expect("park context");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("context-owner"),
+        context("agent-unloaded", &crate::test_connection_id("original")),
+    )
+    .expect("park context");
     h.handle_extension_event(
         "agent-context-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -136,15 +142,19 @@ fn parked_context_value_prevents_readiness_overtake() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        [tau_proto::ConnectionId::from("context-owner")]
-            .into_iter()
-            .collect(),
+        [tau_proto::ConnectionId::parse("context-owner")
+            .expect("test connection id must satisfy the identifier grammar")]
+        .into_iter()
+        .collect(),
     );
 
-    h.handle_extension_event_inner("context-owner", context("agent-1", "ordered"))
-        .expect("park context");
     h.handle_extension_event_inner(
-        "context-owner",
+        &crate::test_connection_id("context-owner"),
+        context("agent-1", &crate::test_connection_id("ordered")),
+    )
+    .expect("park context");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("context-owner"),
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
@@ -209,8 +219,11 @@ fn configured_kinds_cannot_publish_context_for_arbitrary_agents() {
         let source = format!("configured-{index}");
         let agent = format!("agent-{}", index + 10);
         connect_ready_configured_extension(&mut h, &source, &source, kind);
-        h.handle_extension_event_inner(&source, context(&agent, &source))
-            .expect("publish configured context");
+        h.handle_extension_event_inner(
+            &crate::test_connection_id(&source),
+            context(&agent, &source),
+        )
+        .expect("publish configured context");
         assert_eq!(
             h.agent_context
                 .template_value(Some(&tau_proto::AgentId::parse(&agent).expect("agent id"))),
@@ -226,8 +239,11 @@ fn configured_kinds_cannot_publish_context_for_arbitrary_agents() {
     }
 
     connect_test_tool(&mut h, "unconfigured");
-    h.handle_extension_event_inner("unconfigured", context("agent-99", "spoofed"))
-        .expect("reject unconfigured context");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("unconfigured"),
+        context("agent-99", &crate::test_connection_id("spoofed")),
+    )
+    .expect("reject unconfigured context");
     assert_eq!(
         h.agent_context.template_value(Some(
             &tau_proto::AgentId::parse("agent-99").expect("agent id")
@@ -244,11 +260,12 @@ fn configured_kinds_cannot_publish_context_for_arbitrary_agents() {
         "socket-origin",
         tau_proto::ClientKind::Tool,
     );
-    h.bus.disconnect("socket-origin");
+    h.bus
+        .disconnect(&crate::test_connection_id("socket-origin"));
     h.bus.connect(Connection::new(
-        ConnectionMetadata {
-            id: "socket-origin".into(),
-            name: "socket-origin".to_owned(),
+        PendingConnectionMetadata {
+            id: Some(crate::test_connection_id("socket-origin")),
+            name: crate::test_extension_name("socket-origin"),
             kind: tau_proto::ClientKind::Tool,
             origin: ConnectionOrigin::Socket,
         },
@@ -256,8 +273,11 @@ fn configured_kinds_cannot_publish_context_for_arbitrary_agents() {
             events: Arc::new(Mutex::new(Vec::new())),
         }),
     ));
-    h.handle_extension_event_inner("socket-origin", context("agent-100", "socket"))
-        .expect("reject socket-origin context");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("socket-origin"),
+        context("agent-100", &crate::test_connection_id("socket")),
+    )
+    .expect("reject socket-origin context");
     assert_eq!(
         h.agent_context.template_value(Some(
             &tau_proto::AgentId::parse("agent-100").expect("agent id")
@@ -295,15 +315,20 @@ fn parked_registration_blocks_ready_activation() {
         )),
     )
     .expect("park registration");
-    h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
-        .expect("record Ready");
+    h.handle_extension_message(
+        &crate::test_connection_id("context-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("record Ready");
     assert_eq!(
         h.extensions.entries["context-owner"].state,
         crate::extension::ExtensionState::Handshaking
     );
     assert!(
-        !h.agent_context_providers
-            .contains(&tau_proto::ConnectionId::from("context-owner")),
+        !h.agent_context_providers.contains(
+            &tau_proto::ConnectionId::parse("context-owner")
+                .expect("test connection id must satisfy the identifier grammar")
+        ),
         "registration must remain effect-free while interception is pending"
     );
     assert_eq!(
@@ -325,8 +350,10 @@ fn parked_registration_blocks_ready_activation() {
         crate::extension::ExtensionState::Ready
     );
     assert!(
-        h.agent_context_providers
-            .contains(&tau_proto::ConnectionId::from("context-owner"))
+        h.agent_context_providers.contains(
+            &tau_proto::ConnectionId::parse("context-owner")
+                .expect("test connection id must satisfy the identifier grammar")
+        )
     );
 }
 
@@ -356,8 +383,11 @@ fn rollover_releases_stale_context_registration_reservation() {
         )),
     )
     .expect("park registration");
-    h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
-        .expect("record Ready");
+    h.handle_extension_message(
+        &crate::test_connection_id("context-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("record Ready");
     let stage = &h.extensions.activation_staging["context-owner"];
     assert_eq!(stage.retained_message_count, 1);
     assert!(stage.retained_message_bytes > 0);
@@ -388,8 +418,10 @@ fn rollover_releases_stale_context_registration_reservation() {
             .contains_key("context-owner")
     );
     assert!(
-        !h.agent_context_providers
-            .contains(&tau_proto::ConnectionId::from("context-owner"))
+        !h.agent_context_providers.contains(
+            &tau_proto::ConnectionId::parse("context-owner")
+                .expect("test connection id must satisfy the identifier grammar")
+        )
     );
 }
 
@@ -437,8 +469,11 @@ fn rollover_rejects_already_staged_context_declarations_on_ready() {
         tau_proto::SessionStartReason::New,
     )
     .expect("switch session");
-    h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
-        .expect("activate owner");
+    h.handle_extension_message(
+        &crate::test_connection_id("context-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("activate owner");
 
     assert!(source_committed(&h, "context-owner", |event| {
         matches!(event, Event::ExtensionContextProviderRegister(_))
@@ -447,8 +482,10 @@ fn rollover_rejects_already_staged_context_declarations_on_ready() {
         matches!(event, Event::ExtAgentContextPublish(publish) if publish.agent_id == agent_id)
     }));
     assert!(
-        !h.agent_context_providers
-            .contains(&tau_proto::ConnectionId::from("context-owner"))
+        !h.agent_context_providers.contains(
+            &tau_proto::ConnectionId::parse("context-owner")
+                .expect("test connection id must satisfy the identifier grammar")
+        )
     );
     assert_eq!(
         h.agent_context.template_value(Some(&agent_id)),
@@ -481,10 +518,16 @@ fn dropped_startup_context_releases_reservation_and_ready() {
         .state = crate::extension::ExtensionState::Handshaking;
     connect_agent_context_interceptor(&mut h);
 
-    h.handle_extension_event_inner("context-owner", context("agent-1", "dropped"))
-        .expect("park context");
-    h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
-        .expect("record Ready");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("context-owner"),
+        context("agent-1", &crate::test_connection_id("dropped")),
+    )
+    .expect("park context");
+    h.handle_extension_message(
+        &crate::test_connection_id("context-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("record Ready");
     h.handle_extension_event(
         "agent-context-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -555,12 +598,16 @@ fn pre_ready_context_readiness_after_rollover_is_observation_only() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        [tau_proto::ConnectionId::from("context-owner")]
-            .into_iter()
-            .collect(),
+        [tau_proto::ConnectionId::parse("context-owner")
+            .expect("test connection id must satisfy the identifier grammar")]
+        .into_iter()
+        .collect(),
     );
-    h.handle_extension_message("context-owner", TestMessage::Ready(Default::default()))
-        .expect("activate owner");
+    h.handle_extension_message(
+        &crate::test_connection_id("context-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("activate owner");
 
     assert!(source_committed(&h, "context-owner", |event| {
         matches!(
@@ -573,9 +620,10 @@ fn pre_ready_context_readiness_after_rollover_is_observation_only() {
     assert_eq!(
         test_agent_context_waits(&h, &agent_id),
         Some(
-            &[tau_proto::ConnectionId::from("context-owner")]
-                .into_iter()
-                .collect()
+            &[tau_proto::ConnectionId::parse("context-owner")
+                .expect("test connection id must satisfy the identifier grammar")]
+            .into_iter()
+            .collect()
         )
     );
 }
@@ -591,7 +639,8 @@ fn context_ready_does_not_release_session_wait() {
         "configured-context-owner",
         tau_proto::ClientKind::Tool,
     );
-    let source = tau_proto::ConnectionId::from("context-owner");
+    let source = tau_proto::ConnectionId::parse("context-owner")
+        .expect("test connection id must satisfy the identifier grammar");
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
     h.initialized_sessions.remove("s1");
     h.turn_state = TurnState::InitializingSession {
@@ -604,7 +653,7 @@ fn context_ready_does_not_release_session_wait() {
     set_test_agent_context_wait(&mut h, agent_id.clone(), [source].into_iter().collect());
 
     h.handle_extension_event_inner(
-        "context-owner",
+        &crate::test_connection_id("context-owner"),
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
@@ -634,7 +683,8 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
         tau_proto::ClientKind::Tool,
     );
     connect_agent_context_interceptor(&mut h);
-    let source = tau_proto::ConnectionId::from("context-owner");
+    let source = tau_proto::ConnectionId::parse("context-owner")
+        .expect("test connection id must satisfy the identifier grammar");
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
     h.turn_state = TurnState::InitializingSession {
         session_id: "s1"
@@ -660,7 +710,7 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
         })
     };
 
-    h.handle_extension_event_inner("context-owner", ready("s1"))
+    h.handle_extension_event_inner(&crate::test_connection_id("context-owner"), ready("s1"))
         .expect("park readiness");
     h.handle_extension_event(
         "agent-context-interceptor",
@@ -679,8 +729,11 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
         TurnState::InitializingSession { waiting_on, .. } if waiting_on.contains(&source)
     ));
 
-    h.handle_extension_event_inner("context-owner", ready("other-session"))
-        .expect("park mismatched readiness");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("context-owner"),
+        ready("other-session"),
+    )
+    .expect("park mismatched readiness");
     h.handle_extension_event(
         "agent-context-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -712,9 +765,12 @@ fn disconnected_generation_cannot_project_parked_context() {
         tau_proto::ClientKind::Tool,
     );
     connect_agent_context_interceptor(&mut h);
-    h.handle_extension_event_inner("old-owner", context("agent-1", "stale"))
-        .expect("park stale context");
-    h.handle_disconnect("old-owner");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("old-owner"),
+        context("agent-1", &crate::test_connection_id("stale")),
+    )
+    .expect("park stale context");
+    h.handle_disconnect(&crate::test_connection_id("old-owner"));
     connect_ready_configured_extension(
         &mut h,
         "new-owner",
@@ -755,7 +811,7 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
     h.selected_model = Some("test/model".into());
     connect_ready_configured_extension(&mut h, "waiter", "waiter", tau_proto::ClientKind::Tool);
     h.handle_extension_message(
-        "waiter",
+        &crate::test_connection_id("waiter"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: vec![EventSelector::Exact(
@@ -765,7 +821,7 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
     )
     .expect("subscribe waiter");
     h.handle_extension_event_inner(
-        "waiter",
+        &crate::test_connection_id("waiter"),
         Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
     )
     .expect("register waiter");
@@ -792,7 +848,7 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
         tau_proto::ClientKind::Core,
     );
     h.handle_extension_event_inner(
-        "fragment-owner",
+        &crate::test_connection_id("fragment-owner"),
         Event::ExtPromptFragmentPublish(tau_proto::ExtPromptFragmentPublish {
             fragment: tau_proto::PromptFragment::new(
                 "stale-context-check",
@@ -829,15 +885,18 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
             value: tau_proto::AgentContextValue(serde_json::json!(value)),
         })
     };
-    h.handle_extension_event_inner("fragment-owner", correlated_context("SAFE CONTEXT"))
-        .expect("publish stable context");
     h.handle_extension_event_inner(
-        "stale-owner",
+        &crate::test_connection_id("fragment-owner"),
+        correlated_context("SAFE CONTEXT"),
+    )
+    .expect("publish stable context");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("stale-owner"),
         correlated_context("STALE DISCONNECTING CONTEXT"),
     )
     .expect("publish stale context");
     h.handle_extension_event_inner(
-        "waiter",
+        &crate::test_connection_id("waiter"),
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
             agent_initialization_id: initialization_id,
 
@@ -851,7 +910,7 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
     assert!(h.pending_intercept.is_some());
     assert!(h.pending_agent_discovery.contains_key(&agent_id));
 
-    h.handle_disconnect("stale-owner");
+    h.handle_disconnect(&crate::test_connection_id("stale-owner"));
 
     assert!(!h.pending_agent_discovery.contains_key(&agent_id));
     assert!(h.pending_intercept.is_none());

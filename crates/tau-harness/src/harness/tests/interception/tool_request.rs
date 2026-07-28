@@ -47,7 +47,8 @@ impl crate::InternalToolHandler for PeerBackgroundTool {
 /// Construct non-default extension-originated correlation metadata.
 fn extension_originator() -> tau_proto::PromptOriginator {
     tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::from("request-origin"),
+        name: tau_proto::ExtensionName::parse("request-origin")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "query-7".to_owned(),
     }
 }
@@ -279,7 +280,9 @@ fn request_preserves_persistence_and_stable_restore_publisher() {
         .collect::<Vec<_>>();
     assert!(matches!(
         peer_requests.as_slice(),
-        [record] if record.source.as_deref() == Some("stable-requester")
+        [record] if record.source == Some(tau_core::PersistedEventSource::Extension(
+            crate::test_extension_name("stable-requester")
+        ))
             && matches!(
                 &record.event,
                 Event::ToolRequest(request) if request.call_id.as_str() == "durable-request"
@@ -517,7 +520,7 @@ fn unloaded_agent_restore_failure_aborts_request_commit() {
     let routed = connect_test_client(&mut harness, "observer", tau_proto::ClientKind::Ui);
     harness
         .complete_subscription(
-            "observer",
+            &crate::test_connection_id("observer"),
             Vec::new(),
             vec![EventSelector::Exact(tau_proto::EventName::TOOL_REQUEST)],
         )
@@ -609,7 +612,10 @@ fn pre_ready_request_preserves_retained_accounting() {
     assert!(committed_request_family(&harness, "retained-request").is_empty());
 
     harness
-        .handle_extension_message("requester", TestMessage::Ready(Default::default()))
+        .handle_extension_message(
+            &crate::test_connection_id("requester"),
+            TestMessage::Ready(Default::default()),
+        )
         .expect("activate requester");
     assert!(matches!(
         committed_request_family(&harness, "retained-request").first(),
@@ -627,7 +633,7 @@ fn internal_request_publication_does_not_route_as_peer_input() {
     let agent_id = durable_agent_id_for_conversation(&harness, &cid);
 
     harness.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         request("internal-observation", "missing", agent_id),
     );
 
@@ -876,7 +882,7 @@ fn routed_peer_request_owner_disconnect_closes_and_cleans_up() {
         )
         .expect("route request");
 
-    harness.handle_disconnect("tool-owner");
+    harness.handle_disconnect(&crate::test_connection_id("tool-owner"));
 
     assert!(
         committed_request_family(&harness, "disconnect-request")
@@ -1313,14 +1319,14 @@ fn durable_request_replay_is_observation_only() {
     let routed = connect_test_client(&mut harness, "late-ui", tau_proto::ClientKind::Ui);
     harness
         .complete_subscription(
-            "late-ui",
+            &crate::test_connection_id("late-ui"),
             vec![EventSelector::Exact(tau_proto::EventName::TOOL_REQUEST)],
             Vec::new(),
         )
         .expect("subscribe to request history");
     let routed = routed.lock().expect("routed events");
     assert!(routed.iter().any(|routed| {
-        routed.source_id.as_deref() == Some("stable-requester")
+        routed.source_id.is_none()
             && matches!(
                 &routed.frame,
                 HarnessOutputMessage::Deliver(delivery)
@@ -1350,7 +1356,7 @@ fn ui_cannot_publish_tool_request() {
 
     harness
         .handle_client_message(
-            "ui",
+            &crate::test_connection_id("ui"),
             tau_proto::HarnessInputMessage::emit_with_persist(
                 request("ui-request", "missing", agent_id),
                 false,

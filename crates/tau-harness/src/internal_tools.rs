@@ -11,7 +11,7 @@ use tau_proto::{
 
 use crate::discovery::DiscoveredSkillSource;
 use crate::error::HarnessError;
-use crate::harness::{HARNESS_CONNECTION_ID, Harness};
+use crate::harness::Harness;
 use crate::{AgentId, AgentToolCall};
 
 /// A handler for tools implemented inside the harness process.
@@ -114,7 +114,7 @@ impl<'a> InternalToolHost<'a> {
     pub fn register_internal_tool(&mut self, spec: ToolSpec, group: Option<tau_proto::ToolGroup>) {
         if let Some(group) = group {
             let _ = self.harness.registry.register_internal_with_group(
-                HARNESS_CONNECTION_ID,
+                crate::harness::harness_connection_id(),
                 spec,
                 group,
             );
@@ -122,7 +122,7 @@ impl<'a> InternalToolHost<'a> {
             let _ = self
                 .harness
                 .registry
-                .register_internal(HARNESS_CONNECTION_ID, spec);
+                .register_internal(crate::harness::harness_connection_id(), spec);
         }
     }
 

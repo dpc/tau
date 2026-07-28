@@ -1412,7 +1412,7 @@ impl ToolRegistry {
 
     /// Registers one tool for a live provider connection without a prompt
     /// fragment.
-    pub fn register(&mut self, connection_id: &str, tool: ToolSpec) -> RegisterToolReport {
+    pub fn register(&mut self, connection_id: &ConnectionId, tool: ToolSpec) -> RegisterToolReport {
         self.register_provider(
             connection_id,
             ToolRegistration {
@@ -1425,7 +1425,11 @@ impl ToolRegistry {
     }
 
     /// Registers one harness-owned tool without a prompt fragment.
-    pub fn register_internal(&mut self, connection_id: &str, tool: ToolSpec) -> RegisterToolReport {
+    pub fn register_internal(
+        &mut self,
+        connection_id: &ConnectionId,
+        tool: ToolSpec,
+    ) -> RegisterToolReport {
         self.register_provider(
             connection_id,
             ToolRegistration {
@@ -1440,7 +1444,7 @@ impl ToolRegistry {
     /// Registers one harness-owned tool in an independently configurable group.
     pub fn register_internal_with_group(
         &mut self,
-        connection_id: &str,
+        connection_id: &ConnectionId,
         tool: ToolSpec,
         tool_group: tau_proto::ToolGroup,
     ) -> RegisterToolReport {
@@ -1459,7 +1463,7 @@ impl ToolRegistry {
     /// fragment attached to the registration.
     pub fn register_with_prompt_fragment(
         &mut self,
-        connection_id: &str,
+        connection_id: &ConnectionId,
         registration: ToolRegistration,
     ) -> RegisterToolReport {
         self.register_provider(connection_id, registration, ToolProviderKind::Extension)
@@ -1467,7 +1471,7 @@ impl ToolRegistry {
 
     fn register_provider(
         &mut self,
-        connection_id: &str,
+        connection_id: &ConnectionId,
         registration: ToolRegistration,
         kind: ToolProviderKind,
     ) -> RegisterToolReport {
@@ -1488,7 +1492,7 @@ impl ToolRegistry {
                 .get(&tool_name)
                 .into_iter()
                 .flatten()
-                .filter(|provider| provider.connection_id != connection_id)
+                .filter(|provider| &provider.connection_id != connection_id)
                 .map(|provider| provider.connection_id.clone())
                 .collect::<Vec<_>>();
             for displaced_id in displaced {
@@ -1497,14 +1501,14 @@ impl ToolRegistry {
                 }
             }
             if let Some(providers) = self.providers_by_tool.get_mut(&tool_name) {
-                providers.retain(|provider| provider.connection_id == connection_id);
+                providers.retain(|provider| &provider.connection_id == connection_id);
             }
         }
         let providers = self.providers_by_tool.entry(tool_name.clone()).or_default();
 
         let existing_provider_ids = providers
             .iter()
-            .filter(|provider| provider.connection_id != connection_id)
+            .filter(|provider| &provider.connection_id != connection_id)
             .map(|provider| provider.connection_id.clone())
             .collect::<Vec<_>>();
         if !existing_provider_ids.is_empty() {
@@ -1517,7 +1521,7 @@ impl ToolRegistry {
 
         if let Some(existing_provider) = providers
             .iter_mut()
-            .find(|provider| provider.connection_id == connection_id)
+            .find(|provider| &provider.connection_id == connection_id)
         {
             existing_provider.tool = tool;
             existing_provider.tool_group = tool_group;
@@ -1525,7 +1529,7 @@ impl ToolRegistry {
             existing_provider.prompt_fragment = prompt_fragment;
         } else {
             providers.push(ToolProvider {
-                connection_id: connection_id.into(),
+                connection_id: connection_id.clone(),
                 kind,
                 tool,
                 tool_group,
@@ -1535,7 +1539,7 @@ impl ToolRegistry {
 
         let connection_tools = self
             .tools_by_connection
-            .entry(connection_id.into())
+            .entry(connection_id.clone())
             .or_default();
         if !connection_tools.contains(&tool_name) {
             connection_tools.push(tool_name);
@@ -1545,12 +1549,12 @@ impl ToolRegistry {
     }
 
     /// Unregisters one tool from one provider connection.
-    pub fn unregister(&mut self, connection_id: &str, tool_name: &str) -> bool {
+    pub fn unregister(&mut self, connection_id: &ConnectionId, tool_name: &str) -> bool {
         let mut removed = false;
 
         if let Some(providers) = self.providers_by_tool.get_mut(tool_name) {
             let initial_len = providers.len();
-            providers.retain(|provider| provider.connection_id != connection_id);
+            providers.retain(|provider| &provider.connection_id != connection_id);
             removed = providers.len() != initial_len;
             if providers.is_empty() {
                 self.providers_by_tool.remove(tool_name);
@@ -1565,14 +1569,14 @@ impl ToolRegistry {
     }
 
     /// Unregisters all tools owned by one disconnected provider connection.
-    pub fn unregister_connection(&mut self, connection_id: &str) -> Vec<ToolName> {
+    pub fn unregister_connection(&mut self, connection_id: &ConnectionId) -> Vec<ToolName> {
         let Some(tool_names) = self.tools_by_connection.remove(connection_id) else {
             return Vec::new();
         };
 
         for tool_name in &tool_names {
             if let Some(providers) = self.providers_by_tool.get_mut(tool_name) {
-                providers.retain(|provider| provider.connection_id != connection_id);
+                providers.retain(|provider| &provider.connection_id != connection_id);
                 if providers.is_empty() {
                     self.providers_by_tool.remove(tool_name);
                 }
@@ -1662,7 +1666,7 @@ impl ToolRegistry {
         })
     }
 
-    fn remove_tool_from_connection(&mut self, connection_id: &str, tool_name: &str) {
+    fn remove_tool_from_connection(&mut self, connection_id: &ConnectionId, tool_name: &str) {
         if let Some(tool_names) = self.tools_by_connection.get_mut(connection_id) {
             tool_names.retain(|name| name != tool_name);
             if tool_names.is_empty() {

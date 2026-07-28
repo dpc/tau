@@ -38,7 +38,8 @@ fn invoke(action_id: &str, instance_id: u64) -> ActionInvoke {
     ActionInvoke {
         invocation_id: ActionInvocationId::parse("act-1").expect("test identifier must be valid"),
         session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
-        extension_name: ExtensionName::from("std-email"),
+        extension_name: tau_proto::ExtensionName::parse("std-email")
+            .expect("test extension name must satisfy the identifier grammar"),
         instance_id: ExtensionInstanceId::from(instance_id),
         action_id: action_id.to_owned(),
         raw_line: ":email out approve 123".to_owned(),
@@ -55,8 +56,8 @@ fn register_schema_routes_invocations_to_owner() {
     let mut registry = ActionRegistry::new();
     registry
         .register_schema(
-            "conn-a",
-            "std-email".into(),
+            &test_connection_id("conn-a"),
+            test_extension_name("std-email"),
             1.into(),
             schema("email.out.approve"),
         )
@@ -64,7 +65,8 @@ fn register_schema_routes_invocations_to_owner() {
 
     assert_eq!(
         registry.route_action_invoke(&invoke("email.out.approve", 1)),
-        Ok(ConnectionId::from("conn-a"))
+        Ok(tau_proto::ConnectionId::parse("conn-a")
+            .expect("test connection id must satisfy the identifier grammar"))
     );
 }
 
@@ -72,10 +74,20 @@ fn register_schema_routes_invocations_to_owner() {
 fn replacing_schema_removes_old_action_ids_for_connection() {
     let mut registry = ActionRegistry::new();
     registry
-        .register_schema("conn-a", "std-email".into(), 1.into(), schema("email.old"))
+        .register_schema(
+            &test_connection_id("conn-a"),
+            test_extension_name("std-email"),
+            1.into(),
+            schema("email.old"),
+        )
         .expect("old schema should register");
     registry
-        .register_schema("conn-a", "std-email".into(), 1.into(), schema("email.new"))
+        .register_schema(
+            &test_connection_id("conn-a"),
+            test_extension_name("std-email"),
+            1.into(),
+            schema("email.new"),
+        )
         .expect("new schema should register");
 
     assert!(
@@ -85,7 +97,8 @@ fn replacing_schema_removes_old_action_ids_for_connection() {
     );
     assert_eq!(
         registry.route_action_invoke(&invoke("email.new", 1)),
-        Ok(ConnectionId::from("conn-a"))
+        Ok(tau_proto::ConnectionId::parse("conn-a")
+            .expect("test connection id must satisfy the identifier grammar"))
     );
 }
 
@@ -94,8 +107,8 @@ fn invocation_payload_must_match_owner_schema_parse() {
     let mut registry = ActionRegistry::new();
     registry
         .register_schema(
-            "conn-a",
-            "std-email".into(),
+            &test_connection_id("conn-a"),
+            test_extension_name("std-email"),
             1.into(),
             schema("email.out.approve"),
         )
@@ -121,8 +134,8 @@ fn duplicate_owner_action_routes_are_rejected_without_replacing_existing_owner()
     let mut registry = ActionRegistry::new();
     registry
         .register_schema(
-            "conn-a",
-            "std-email".into(),
+            &test_connection_id("conn-a"),
+            test_extension_name("std-email"),
             1.into(),
             schema("email.out.approve"),
         )
@@ -130,8 +143,8 @@ fn duplicate_owner_action_routes_are_rejected_without_replacing_existing_owner()
 
     let error = registry
         .register_schema(
-            "conn-b",
-            "std-email".into(),
+            &test_connection_id("conn-b"),
+            test_extension_name("std-email"),
             1.into(),
             schema("email.out.approve"),
         )
@@ -139,7 +152,8 @@ fn duplicate_owner_action_routes_are_rejected_without_replacing_existing_owner()
     assert!(error.message().contains("action route collision"));
     assert_eq!(
         registry.route_action_invoke(&invoke("email.out.approve", 1)),
-        Ok(ConnectionId::from("conn-a"))
+        Ok(tau_proto::ConnectionId::parse("conn-a")
+            .expect("test connection id must satisfy the identifier grammar"))
     );
 }
 
@@ -148,14 +162,18 @@ fn disconnect_unregisters_actions() {
     let mut registry = ActionRegistry::new();
     registry
         .register_schema(
-            "conn-a",
-            "std-email".into(),
+            &test_connection_id("conn-a"),
+            test_extension_name("std-email"),
             1.into(),
             schema("email.out.approve"),
         )
         .expect("schema should register");
 
-    assert!(registry.unregister_connection("conn-a").is_some());
+    assert!(
+        registry
+            .unregister_connection(&test_connection_id("conn-a"))
+            .is_some()
+    );
     assert!(
         registry
             .route_action_invoke(&invoke("email.out.approve", 1))
@@ -168,8 +186,8 @@ fn invalid_schema_is_rejected_without_replacing_previous_schema() {
     let mut registry = ActionRegistry::new();
     registry
         .register_schema(
-            "conn-a",
-            "std-email".into(),
+            &test_connection_id("conn-a"),
+            test_extension_name("std-email"),
             1.into(),
             schema("email.out.approve"),
         )
@@ -187,11 +205,29 @@ fn invalid_schema_is_rejected_without_replacing_previous_schema() {
 
     assert!(
         registry
-            .register_schema("conn-a", "std-email".into(), 1.into(), invalid)
+            .register_schema(
+                &test_connection_id("conn-a"),
+                test_extension_name("std-email"),
+                1.into(),
+                invalid
+            )
             .is_err()
     );
     assert_eq!(
         registry.route_action_invoke(&invoke("email.out.approve", 1)),
-        Ok(ConnectionId::from("conn-a"))
+        Ok(tau_proto::ConnectionId::parse("conn-a")
+            .expect("test connection id must satisfy the identifier grammar"))
     );
+}
+
+/// Builds a validated extension name used by this test module.
+fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
+    tau_proto::ExtensionName::parse(value.as_ref())
+        .expect("test extension name must satisfy the identifier grammar")
+}
+
+/// Builds a validated connection identifier used by this test module.
+fn test_connection_id(value: impl AsRef<str>) -> tau_proto::ConnectionId {
+    tau_proto::ConnectionId::parse(value.as_ref())
+        .expect("test connection id must satisfy the identifier grammar")
 }

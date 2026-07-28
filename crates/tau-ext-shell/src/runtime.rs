@@ -830,7 +830,8 @@ mod tests {
                 session_id: "session-1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
-                command_id: tau_proto::ShellCommandId::parse("command-1").unwrap(),
+                command_id: tau_proto::ShellCommandId::parse("command-1")
+                    .expect("test identifier must satisfy its grammar"),
                 command: "pwd".to_owned(),
                 include_in_context: false,
                 target_agent_id: Some(agent_id),
@@ -867,7 +868,8 @@ mod tests {
                 session_id: "session-1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
-                command_id: tau_proto::ShellCommandId::parse("command-pending").unwrap(),
+                command_id: tau_proto::ShellCommandId::parse("command-pending")
+                    .expect("test identifier must satisfy its grammar"),
                 command: "touch must-not-exist".to_owned(),
                 include_in_context: false,
                 target_agent_id: Some(agent_id),

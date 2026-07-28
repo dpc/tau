@@ -215,7 +215,8 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
                 .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
                     tool_prefix: None,
                     config: tau_proto::CborValue::Map(Vec::new()),
-                    instance_name: tau_proto::ExtensionName::new("test-extension"),
+                    instance_name: tau_proto::ExtensionName::parse("test-extension")
+                        .expect("test extension name must satisfy the identifier grammar"),
                     state_dir: None,
                     secrets: std::collections::BTreeMap::new(),
                 }))

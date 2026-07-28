@@ -102,7 +102,8 @@ fn semantic_items_share_global_journal_timing_and_order() {
         2,
         20,
         Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: tau_proto::AgentMessageId::parse("message-1").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("message-1")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: AgentId::parse("agent-a").expect("agent"),
             recipient: AgentMessageRecipient::Agent {
                 agent_id: AgentId::parse("agent-b").expect("agent"),
@@ -117,7 +118,8 @@ fn semantic_items_share_global_journal_timing_and_order() {
         0,
         15,
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("message-1").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("message-1")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: AgentId::parse("agent-a").expect("agent"),
             sender_session_id: None,
             recipient_id: AgentId::parse("agent-b").expect("agent"),
@@ -1933,7 +1935,8 @@ fn toon_frames_control_bearing_payload_fields() {
     let arguments = serde_json::json!({"nested": "arg\u{1b}[31m"});
     let semantic = semantic::project_message_event(
         &Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: tau_proto::AgentMessageId::parse("message\u{1b}").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("message-control")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: root_agent_id.clone(),
             recipient: AgentMessageRecipient::User,
             kind: AgentMessageKind::Message,
@@ -2063,14 +2066,9 @@ fn toon_frames_control_bearing_payload_fields() {
     );
     assert_eq!(decoded["items"][2]["output"], "line1\nline2");
     let semantic = &decoded["items"][3];
-    assert!(semantic.get("message_id").is_none());
+    assert_eq!(semantic["message_id"], "message-control");
+    assert!(semantic.get("message_id_base64").is_none());
     assert!(semantic.get("text").is_none());
-    assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(semantic["message_id_base64"].as_str().expect("message id"))
-            .expect("Base64"),
-        b"message\x1b"
-    );
     assert_eq!(
         base64::engine::general_purpose::STANDARD
             .decode(semantic["text_base64"].as_str().expect("text"))

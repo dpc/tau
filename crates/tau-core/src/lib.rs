@@ -35,15 +35,16 @@ pub use agent_store::{
 pub use bus::EventBus;
 pub use connection::{
     AllowAll, Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError,
-    ConnectionSink, DeliveryFailure, RouteError, RouteReport, RoutedFrame, VisibilityFilter,
+    ConnectionSink, DeliveryFailure, PendingConnectionMetadata, RouteError, RouteReport,
+    RoutedFrame, VisibilityFilter,
 };
 pub use memory::{MemoryInbox, memory_connection};
 pub use session::{
     AgentEntry, AgentEventParent, AgentEventValidationError, AgentMessageDirection, AgentMeta,
     AgentMetadataEntry, AgentNode, AgentTree, BackgroundToolCallState, BackgroundToolCompletion,
     BackgroundToolPlaceholder, InferenceDispatchRecovery, ManualCompactionOutcome,
-    ManualCompactionRecovery, NodeId, PersistedAgentEvent, PersistedAgentEventSeq, SessionMeta,
-    StandaloneCompactionRecovery,
+    ManualCompactionRecovery, NodeId, PersistedAgentEvent, PersistedAgentEventSeq,
+    PersistedEventSource, SessionMeta, StandaloneCompactionRecovery,
 };
 pub use session_store::{
     AppendOutcome, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,

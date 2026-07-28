@@ -1,7 +1,6 @@
 use tau_proto::{
-    CborValue, MessageAgentTarget, MessageDelivered, MessageFactId, MessageParty,
-    MessagePublisherId, PromptOriginator, SessionAgentLoaded, ToolCallId, ToolName, ToolRequest,
-    ToolStarted, ToolType,
+    CborValue, MessageAgentTarget, MessageDelivered, MessageFactId, MessageParty, PromptOriginator,
+    SessionAgentLoaded, ToolCallId, ToolName, ToolRequest, ToolStarted, ToolType,
 };
 
 use super::*;
@@ -18,6 +17,129 @@ fn loaded_event(session_id: &str, agent_id: &str) -> Event {
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         ephemeral: false,
     })
+}
+
+/// Stable configured publisher provenance survives a real framed journal
+/// close/reopen cycle.
+#[test]
+fn extension_provenance_round_trips_through_framed_session_journal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = PersistedEventSource::Extension(
+        tau_proto::ExtensionName::parse("stable-publisher").expect("extension name"),
+    );
+    {
+        let mut store = SessionStore::open(temp.path()).expect("store opens");
+        store
+            .append_session_event_at(
+                "session-1",
+                Some(source.clone()),
+                loaded_event("session-1", "agent-1"),
+                UnixMicros::new(41),
+            )
+            .expect("append session event");
+    }
+
+    let reopened = SessionStore::open(temp.path()).expect("store reopens");
+    let events = reopened
+        .session_events("session-1")
+        .expect("read session journal");
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].source, Some(source));
+}
+
+fn append_legacy_source_frame(path: &Path, record: PersistedSessionEvent) {
+    let mut value = serde_json::to_value(record).expect("serialize record value");
+    value["source"] = serde_json::Value::String("legacy-source".to_owned());
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&value, &mut encoded).expect("encode malformed source record");
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open journal");
+    file.write_all(&(encoded.len() as u64).to_le_bytes())
+        .expect("write frame length");
+    file.write_all(&encoded).expect("write complete frame");
+}
+
+/// A locked ordinary-session writer rejects a complete old source shape and
+/// leaves the journal byte-for-byte unchanged.
+#[test]
+fn locked_session_writer_preserves_complete_invalid_source_frame() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("session-1/events.cbor");
+    {
+        let mut store = SessionStore::open(temp.path()).expect("store opens");
+        store
+            .append_session_event_at(
+                "session-1",
+                None,
+                loaded_event("session-1", "agent-1"),
+                UnixMicros::new(41),
+            )
+            .expect("baseline append");
+    }
+    append_legacy_source_frame(
+        &path,
+        PersistedSessionEvent {
+            seq: PersistedSessionEventSeq::new(1),
+            source: None,
+            event: loaded_event("session-1", "agent-2"),
+            recorded_at: UnixMicros::new(42),
+        },
+    );
+    let before = fs::read(&path).expect("read malformed journal");
+    let mut lazy = SessionStore::open_lazy(temp.path()).expect("lazy store opens");
+
+    lazy.append_session_event_at(
+        "session-1",
+        None,
+        loaded_event("session-1", "agent-3"),
+        UnixMicros::new(43),
+    )
+    .expect_err("complete invalid source must fail locked load");
+
+    assert_eq!(fs::read(&path).expect("read unchanged journal"), before);
+}
+
+/// A locked restore writer applies the same fail-closed rule to complete old
+/// source shapes.
+#[test]
+fn locked_restore_writer_preserves_complete_invalid_source_frame() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("session-1/restore-events.cbor");
+    {
+        let mut store = SessionStore::open(temp.path()).expect("store opens");
+        store
+            .append_session_restore_event_at(
+                "session-1",
+                None,
+                restore_request("call-1"),
+                UnixMicros::new(41),
+            )
+            .expect("baseline append");
+    }
+    append_legacy_source_frame(
+        &path,
+        PersistedSessionEvent {
+            seq: PersistedSessionEventSeq::new(1),
+            source: None,
+            event: restore_started("call-1"),
+            recorded_at: UnixMicros::new(42),
+        },
+    );
+    let before = fs::read(&path).expect("read malformed restore journal");
+    let mut lazy = SessionStore::open_lazy(temp.path()).expect("lazy store opens");
+
+    lazy.append_session_restore_event_at(
+        "session-1",
+        None,
+        restore_started("call-1"),
+        UnixMicros::new(43),
+    )
+    .expect_err("complete invalid source must fail locked restore load");
+
+    assert_eq!(fs::read(&path).expect("read unchanged journal"), before);
 }
 
 /// A later writable lifetime re-covers the complete session-store ancestor
@@ -67,7 +189,8 @@ fn writable_reopen_recovers_session_root_and_branch_boundaries() {
 /// Builds one valid fallback message fact.
 fn delivered_message(body: &str) -> Event {
     Event::MessageDelivered(MessageDelivered::new(
-        MessagePublisherId::new("bridge-main"),
+        tau_proto::MessagePublisherId::parse("bridge-main")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         MessageAgentTarget::new("missing-agent"),
         MessageFactId::new("message-1"),
         MessageParty {

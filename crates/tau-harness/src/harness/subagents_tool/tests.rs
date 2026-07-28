@@ -11,7 +11,8 @@ fn peer_io_admission_is_non_queued_and_bounded() {
     drop(outbound);
     assert!(PeerIoPermit::outbound().is_some());
 
-    let connection = tau_proto::ConnectionId::from("bounded-peer");
+    let connection = tau_proto::ConnectionId::parse("bounded-peer")
+        .expect("test connection id must satisfy the identifier grammar");
     let inbound = (0..MAX_INBOUND_PEER_AUTH_JOBS_PER_CONNECTION)
         .map(|_| PeerIoPermit::inbound(connection.clone()).expect("inbound slot"))
         .collect::<Vec<_>>();
@@ -94,4 +95,18 @@ fn generated_agent_message_ids_are_unique_for_same_sender_and_timestamp() {
         let id = build_agent_message_id(&sender_id, timestamp, sequence);
         assert!(seen.insert(id), "message id must be unique");
     }
+}
+
+/// The largest producer inputs remain below the validated message-ID cap and
+/// preserve the complete sender/timestamp/sequence representation.
+#[test]
+fn generated_agent_message_id_accepts_maximum_producer_inputs() {
+    let sender = crate::parse_agent_id("a".repeat(tau_proto::AGENT_ID_MAX_LEN));
+    let id = build_agent_message_id(&sender, tau_proto::UnixMicros::new(u64::MAX), u64::MAX);
+
+    assert_eq!(
+        id.as_str(),
+        format!("msg-{}-{}-{}", sender.as_str(), u64::MAX, u64::MAX)
+    );
+    assert!(id.as_str().len() <= tau_proto::SESSION_SCOPED_ID_MAX_LEN);
 }

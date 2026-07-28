@@ -163,9 +163,13 @@ fn agent_id(text: &str) -> AgentId {
 
 /// Stamp a bridge-produced delivered report payload as the harness would, then
 /// prove its projection is identical after a serde round trip.
-fn assert_delivered_live_replay_parity(mut report: MessageDelivered) {
-    report.publisher_extension_id = MessagePublisherId::new("std-xmpp");
-    let live = Event::MessageDelivered(report);
+fn assert_delivered_live_replay_parity(report: MessageDelivered<tau_proto::RawMessagePublisherId>) {
+    assert_eq!(report.publisher_extension_id.as_str(), "std-xmpp");
+    let live = Event::MessageDeliveredReported(report)
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse("std-xmpp").expect("canonical publisher"),
+        )
+        .expect("delivered report converts to a canonical fact");
     let encoded = serde_json::to_value(&live).expect("encode fact");
     let replay: Event = serde_json::from_value(encoded).expect("decode replay fact");
     assert_eq!(
@@ -291,7 +295,8 @@ fn configure_from_json(config: serde_json::Value) -> tau_proto::Configure {
     tau_proto::Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&config),
-        instance_name: tau_proto::ExtensionName::new("std-xmpp"),
+        instance_name: tau_proto::ExtensionName::parse("std-xmpp")
+            .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: secrets(),
     }
@@ -983,6 +988,7 @@ fn xmpp_send_uses_registered_conversation_without_destination_arg() {
     let Event::MessageSentReported(report) = *emit.event else {
         panic!("message.sent_reported report")
     };
+    assert_eq!(report.publisher_extension_id.as_str(), "std-xmpp");
     assert_eq!(report.agent_id.as_str(), "agent-1");
     assert_eq!(report.text, "hello");
     assert_eq!(
@@ -2030,6 +2036,7 @@ fn allowed_muc_message_submits_replay_stable_report() {
     let Event::MessageDeliveredReported(report) = *emit.event else {
         panic!("message.delivered_reported event")
     };
+    assert_eq!(report.publisher_extension_id.as_str(), "std-xmpp");
     assert_eq!(report.agent_id.as_str(), "agent-1");
     assert_eq!(report.text, "hello");
     assert_eq!(report.sender.stable_id, xmpp_sender_ref("me@example.org"));

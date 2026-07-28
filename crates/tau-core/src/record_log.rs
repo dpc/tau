@@ -50,11 +50,13 @@ pub(crate) struct FrameAppend {
     pub end_offset: u64,
 }
 
-/// Records retained by prefix recovery and whether it truncated a suffix.
+/// Records retained by recovery and whether it truncated an incomplete EOF
+/// tail.
 pub(crate) struct RecoveredRecords<T> {
-    /// Fully decoded and caller-validated prefix.
+    /// Fully decoded and caller-validated records; complete invalid frames
+    /// instead return an error before this value is produced.
     pub records: Vec<T>,
-    /// Whether recovery removed an invalid suffix.
+    /// Whether recovery removed an incomplete EOF crash tail.
     pub repaired: bool,
 }
 
@@ -193,8 +195,8 @@ impl FramedAppendState {
         self.sync_worker.mark_dirty(path, end_offset, directories);
     }
 
-    /// Recovers the longest decoded and caller-validated prefix, truncating the
-    /// first invalid frame and its complete suffix.
+    /// Loads the decoded and caller-validated stream, truncating only an
+    /// incomplete frame header or payload at EOF.
     pub(crate) fn recover<T, F>(
         &mut self,
         path: &Path,
@@ -350,9 +352,10 @@ fn append_frame(io: &mut impl FrameIo, payload: &[u8]) -> Result<FrameAppend, Fr
     })
 }
 
-/// Internal result from strict framed-prefix recovery.
+/// Internal result from strict framed-stream recovery.
 struct PrefixRecovery<T> {
-    /// Records retained before the first invalid frame.
+    /// Validated records through clean EOF or before a repaired incomplete EOF
+    /// tail.
     records: Vec<T>,
     /// Exact repaired EOF, or `None` when no repair was needed.
     truncated_to: Option<u64>,
@@ -378,12 +381,13 @@ where
                     truncated_to: None,
                 });
             }
-            Ok(Some(_)) => {
-                file.set_len(frame_start)?;
-                return Ok(PrefixRecovery {
-                    records,
-                    truncated_to: Some(frame_start),
-                });
+            Ok(Some(length)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "complete frame declares {length} bytes; maximum is {MAX_RECORD_BYTES}"
+                    ),
+                ));
             }
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
                 file.set_len(frame_start)?;
@@ -407,19 +411,23 @@ where
             Err(error) => return Err(error),
         }
         let mut cursor = io::Cursor::new(bytes.as_slice());
-        let Ok(record) = ciborium::from_reader(&mut cursor) else {
-            file.set_len(frame_start)?;
-            return Ok(PrefixRecovery {
-                records,
-                truncated_to: Some(frame_start),
-            });
-        };
-        if cursor.position() != length || !validate(&record) {
-            file.set_len(frame_start)?;
-            return Ok(PrefixRecovery {
-                records,
-                truncated_to: Some(frame_start),
-            });
+        let record = ciborium::from_reader(&mut cursor).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("complete frame failed typed decode: {error}"),
+            )
+        })?;
+        if cursor.position() != length {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "complete frame contains trailing payload bytes",
+            ));
+        }
+        if !validate(&record) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "complete frame failed semantic validation",
+            ));
         }
         records.push(record);
     }

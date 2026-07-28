@@ -1,5 +1,77 @@
 use super::*;
 
+/// Stable extension provenance never becomes a run-local route, including when
+/// its spelling collides with a live connection identifier.
+#[test]
+fn persisted_extension_source_never_projects_to_connection_route() {
+    let colliding = "same-spelling";
+    let connection = PersistedEventSource::Connection(
+        tau_proto::ConnectionId::parse(colliding).expect("connection id"),
+    );
+
+    for extension_name in [colliding, "different-spelling"] {
+        let extension = PersistedEventSource::Extension(
+            tau_proto::ExtensionName::parse(extension_name).expect("extension name"),
+        );
+        assert_eq!(extension.connection_id(), None);
+    }
+    assert_eq!(
+        connection
+            .connection_id()
+            .map(tau_proto::ConnectionId::as_str),
+        Some(colliding)
+    );
+}
+
+/// Persisted provenance keeps its externally tagged JSON/CBOR shape for both
+/// source domains.
+#[test]
+fn persisted_event_source_wire_shapes_round_trip() {
+    let cases = [
+        (
+            PersistedEventSource::Connection(
+                tau_proto::ConnectionId::parse("route-1").expect("connection id"),
+            ),
+            serde_json::json!({"connection": "route-1"}),
+            ("connection", "route-1"),
+        ),
+        (
+            PersistedEventSource::Extension(
+                tau_proto::ExtensionName::parse("publisher-1").expect("extension name"),
+            ),
+            serde_json::json!({"extension": "publisher-1"}),
+            ("extension", "publisher-1"),
+        ),
+    ];
+
+    for (source, expected_json, (tag, value)) in cases {
+        assert_eq!(
+            serde_json::to_value(&source).expect("serialize source"),
+            expected_json
+        );
+        assert_eq!(
+            serde_json::from_value::<PersistedEventSource>(expected_json)
+                .expect("deserialize source"),
+            source
+        );
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&source, &mut cbor).expect("serialize source as CBOR");
+        assert_eq!(
+            ciborium::from_reader::<ciborium::Value, _>(cbor.as_slice())
+                .expect("decode source CBOR shape"),
+            ciborium::Value::Map(vec![(
+                ciborium::Value::Text(tag.to_owned()),
+                ciborium::Value::Text(value.to_owned()),
+            )])
+        );
+        assert_eq!(
+            ciborium::from_reader::<PersistedEventSource, _>(cbor.as_slice())
+                .expect("deserialize source from CBOR"),
+            source
+        );
+    }
+}
+
 /// Applies one contiguous durable record through the sole canonical fold path.
 fn apply_persisted_test_record(
     tree: &mut AgentTree,
@@ -1324,7 +1396,8 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
         (AgentMessageKind::Message, Some(payload)),
     ] {
         let event = Event::AgentMessageReceived(AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-invalid-watch-state").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-invalid-watch-state")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: other_agent_id(),
             sender_session_id: None,
             recipient_id: id.clone(),
@@ -1361,7 +1434,7 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
     ] {
         let event = Event::AgentMessageReceived(AgentMessageReceived {
             message_id: tau_proto::AgentMessageId::parse("msg-invalid-watch-provider-status")
-                .unwrap(),
+                .expect("test message id must satisfy its grammar"),
             sender_id: other_agent_id(),
             sender_session_id: None,
             recipient_id: id.clone(),
@@ -1486,7 +1559,8 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         &mut tree,
         AgentEventParent::InheritHead,
         Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: tau_proto::AgentMessageId::parse("agent-sent-during-tool").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("agent-sent-during-tool")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id.clone(),
             recipient: tau_proto::AgentMessageRecipient::Agent {
                 agent_id: other_agent_id(),
@@ -1503,7 +1577,8 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         &mut tree,
         AgentEventParent::InheritHead,
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
-            tau_proto::MessagePublisherId::new("test-publisher"),
+            tau_proto::MessagePublisherId::parse("test-publisher")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             tau_proto::MessageAgentTarget::new(agent_id.as_str()),
             tau_proto::MessageFactId::new("during-tool-fact"),
             tau_proto::MessageParty {
@@ -1523,7 +1598,8 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         &mut tree,
         AgentEventParent::InheritHead,
         Event::AgentMessageReceived(AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("agent-received-during-tool").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("agent-received-during-tool")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: other_agent_id(),
             sender_session_id: None,
             recipient_id: agent_id.clone(),
@@ -1673,7 +1749,8 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
     assert!(error.to_string().contains("already has an open"));
 
     let sibling_message = Event::AgentMessageReceived(AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse("sibling-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("sibling-message")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: other_agent_id(),
         sender_session_id: None,
         recipient_id: agent_id.clone(),
@@ -1696,7 +1773,8 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
     );
 
     let descendant_message = Event::AgentMessageReceived(AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::parse("descendant-message").unwrap(),
+        message_id: tau_proto::AgentMessageId::parse("descendant-message")
+            .expect("test identifier must satisfy its grammar"),
         sender_id: other_agent_id(),
         sender_session_id: None,
         recipient_id: agent_id,
@@ -1749,7 +1827,8 @@ fn synthetic_agent_message_folds_advance_occurrence_sequence() {
     let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
     for (message_id, message) in [("sent-one", "one"), ("sent-two", "two")] {
         tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: tau_proto::AgentMessageId::parse(message_id).unwrap(),
+            message_id: tau_proto::AgentMessageId::parse(message_id)
+                .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id.clone(),
             recipient: AgentMessageRecipient::Agent {
                 agent_id: other_agent_id(),
@@ -2094,7 +2173,9 @@ fn prompt_started_requires_unique_matching_owner() {
         .apply_persisted_record(&PersistedAgentEvent {
             observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
             seq: tree.next_event_seq(),
-            source: Some("external-author".into()),
+            source: Some(PersistedEventSource::Connection(test_connection_id(
+                "external-author",
+            ))),
             event: Event::AgentPromptStarted(started.clone()),
             parent: AgentEventParent::InheritHead,
             recorded_at: tau_proto::UnixMicros::new(1),
@@ -2249,4 +2330,10 @@ fn manual_completion_notification_lookup_is_branch_specific() {
     assert!(tree.has_user_input_text_on_branch(caller_head, "caller notification"));
     assert!(!tree.has_user_input_text_on_branch(caller_head, "other branch notification"));
     assert!(tree.has_user_input_text_on_branch(tree.head(), "other branch notification"));
+}
+
+/// Builds a validated connection identifier used by this test module.
+fn test_connection_id(value: impl AsRef<str>) -> tau_proto::ConnectionId {
+    tau_proto::ConnectionId::parse(value.as_ref())
+        .expect("test connection id must satisfy the identifier grammar")
 }

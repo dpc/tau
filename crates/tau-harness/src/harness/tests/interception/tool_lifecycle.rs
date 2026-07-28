@@ -78,7 +78,7 @@ fn dropping_tool_registration_declaration_prevents_canonical_state() {
     .expect("register interceptor");
 
     h.handle_extension_event_inner_with_persist(
-        "tool-provider",
+        &crate::test_connection_id("tool-provider"),
         tool_registration_declaration("declared_drop", "original"),
         Some(false),
     )
@@ -128,8 +128,11 @@ fn parked_startup_tool_declaration_blocks_ready_until_commit() {
         TestProtocolItem::Event(tool_registration_declaration("declared_startup", "startup")),
     )
     .expect("park declaration");
-    h.handle_extension_message("tool-provider", TestMessage::Ready(Default::default()))
-        .expect("Ready waits");
+    h.handle_extension_message(
+        &crate::test_connection_id("tool-provider"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("Ready waits");
     assert_eq!(
         h.extensions.entries["tool-provider"].state,
         crate::extension::ExtensionState::Handshaking
@@ -197,8 +200,11 @@ fn startup_register_then_unregister_exposes_no_intermediate_tool_state() {
         )),
     )
     .expect("cancel staged registration");
-    h.handle_extension_message("tool-provider", TestMessage::Ready(Default::default()))
-        .expect("activate empty stage");
+    h.handle_extension_message(
+        &crate::test_connection_id("tool-provider"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("activate empty stage");
 
     assert!(h.registry.providers_for("declared_cancelled").is_empty());
     let events = committed_tool_lifecycle_events(&h, "declared_cancelled");
@@ -325,8 +331,11 @@ fn intercepted_tool_resolution_propagates_initial_tool_collision() {
     )
     .expect("park second owner");
     for source in ["required-a", "required-b"] {
-        h.handle_extension_message(source, TestMessage::Ready(Default::default()))
-            .expect("Ready waits on parked declaration");
+        h.handle_extension_message(
+            &crate::test_connection_id(source),
+            TestMessage::Ready(Default::default()),
+        )
+        .expect("Ready waits on parked declaration");
     }
 
     let error = h
@@ -378,12 +387,12 @@ fn parked_tool_declaration_cannot_mutate_after_disconnect() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "tool-provider",
+        &crate::test_connection_id("tool-provider"),
         tool_registration_declaration("declared_stale", "stale"),
         Some(false),
     )
     .expect("park declaration");
-    h.handle_disconnect("tool-provider");
+    h.handle_disconnect(&crate::test_connection_id("tool-provider"));
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -423,7 +432,7 @@ fn rollover_applies_deferred_tool_declaration_for_current_generation() {
     .expect("register rollover blocker");
     h.publish_event(None, draft_event("block tool declaration"));
     h.handle_extension_event_inner_with_persist(
-        "tool-provider",
+        &crate::test_connection_id("tool-provider"),
         tool_registration_declaration("rollover_tool", "survives rollover"),
         Some(false),
     )
@@ -479,7 +488,7 @@ fn replaced_tool_registration_declaration_drives_canonical_state() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "tool-provider",
+        &crate::test_connection_id("tool-provider"),
         tool_registration_declaration("declared_replace", "original"),
         Some(false),
     )
@@ -546,7 +555,7 @@ fn replaced_tool_registration_is_revalidated_against_assigned_prefix() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "tool-provider",
+        &crate::test_connection_id("tool-provider"),
         tool_registration_declaration("work_valid", "valid"),
         Some(false),
     )
@@ -599,7 +608,7 @@ fn tool_prefix_interception_protects_canonical_registration() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "tool-provider",
+        &crate::test_connection_id("tool-provider"),
         tool_registration_declaration("declared_protected", "protected"),
         Some(false),
     )
@@ -638,7 +647,7 @@ fn tool_prefix_interception_protects_canonical_registration() {
     ));
 
     h.handle_extension_event_inner_with_persist(
-        "tool-provider",
+        &crate::test_connection_id("tool-provider"),
         tool_registration_declaration("declared_drop_protected", "drop protected"),
         Some(false),
     )
@@ -679,7 +688,7 @@ fn committed_tool_unregistration_enforces_ownership_and_canonicalizes() {
         tau_proto::ClientKind::Tool,
     );
     h.handle_extension_event_inner_with_persist(
-        "tool-provider",
+        &crate::test_connection_id("tool-provider"),
         tool_registration_declaration("declared_withdraw", "registered"),
         Some(false),
     )
@@ -694,16 +703,24 @@ fn committed_tool_unregistration_enforces_ownership_and_canonicalizes() {
         tau_proto::ClientKind::Tool,
     );
     h.handle_extension_event_inner_with_persist(
-        "other-tool-provider",
+        &crate::test_connection_id("other-tool-provider"),
         declaration.clone(),
         Some(false),
     )
     .expect("reject non-owner unregistration");
     assert!(!h.registry.providers_for("declared_withdraw").is_empty());
-    h.handle_extension_event_inner_with_persist("tool-provider", declaration.clone(), Some(false))
-        .expect("unregister tool");
-    h.handle_extension_event_inner_with_persist("tool-provider", declaration, Some(false))
-        .expect("repeat unknown unregistration");
+    h.handle_extension_event_inner_with_persist(
+        &crate::test_connection_id("tool-provider"),
+        declaration.clone(),
+        Some(false),
+    )
+    .expect("unregister tool");
+    h.handle_extension_event_inner_with_persist(
+        &crate::test_connection_id("tool-provider"),
+        declaration,
+        Some(false),
+    )
+    .expect("repeat unknown unregistration");
 
     assert!(h.registry.providers_for("declared_withdraw").is_empty());
     let events = committed_tool_lifecycle_events(&h, "declared_withdraw");
@@ -763,7 +780,7 @@ fn canonical_tool_unregistration_is_immutable_and_must_pass() {
     );
     for tool_name in ["withdraw_rewrite", "withdraw_drop"] {
         h.handle_extension_event_inner_with_persist(
-            "tool-provider",
+            &crate::test_connection_id("tool-provider"),
             tool_registration_declaration(tool_name, tool_name),
             Some(false),
         )
@@ -780,7 +797,7 @@ fn canonical_tool_unregistration_is_immutable_and_must_pass() {
     .expect("register interceptor");
 
     h.handle_extension_event_inner_with_persist(
-        "tool-provider",
+        &crate::test_connection_id("tool-provider"),
         Event::ToolUnregistrationDeclared(tau_proto::ToolUnregistrationDeclared {
             tool_name: tau_proto::ToolName::new("withdraw_rewrite"),
         }),
@@ -804,7 +821,7 @@ fn canonical_tool_unregistration_is_immutable_and_must_pass() {
     .expect("reject canonical withdrawal rewrite");
 
     h.handle_extension_event_inner_with_persist(
-        "tool-provider",
+        &crate::test_connection_id("tool-provider"),
         Event::ToolUnregistrationDeclared(tau_proto::ToolUnregistrationDeclared {
             tool_name: tau_proto::ToolName::new("withdraw_drop"),
         }),
@@ -853,7 +870,7 @@ fn tool_declaration_and_canonical_authorship_fail_closed() {
     ] {
         connect_ready_configured_extension(&mut h, source, source, kind);
         h.handle_extension_event_inner_with_persist(
-            source,
+            &crate::test_connection_id(source),
             tool_registration_declaration(tool_name, "forged"),
             Some(false),
         )
@@ -862,7 +879,7 @@ fn tool_declaration_and_canonical_authorship_fail_closed() {
     }
     connect_test_tool(&mut h, "unconfigured-tool");
     h.handle_extension_event_inner_with_persist(
-        "unconfigured-tool",
+        &crate::test_connection_id("unconfigured-tool"),
         tool_registration_declaration("unconfigured_tool", "forged"),
         Some(false),
     )
@@ -875,9 +892,9 @@ fn tool_declaration_and_canonical_authorship_fail_closed() {
         tau_proto::ClientKind::Tool,
     );
     h.handle_extension_event_inner_with_persist(
-        "authorized-tool",
+        &crate::test_connection_id("authorized-tool"),
         Event::ToolRegister(tau_proto::ToolRegister {
-            publisher_extension_id: "forged".into(),
+            publisher_extension_id: crate::test_extension_name("forged"),
             publisher_instance_id: 999.into(),
             tool: declaration_tool_spec("forged_canonical", "forged"),
             tool_group: None,
@@ -887,9 +904,9 @@ fn tool_declaration_and_canonical_authorship_fail_closed() {
     )
     .expect("reject peer canonical state");
     h.handle_extension_event_inner_with_persist(
-        "authorized-tool",
+        &crate::test_connection_id("authorized-tool"),
         Event::ToolUnregister(tau_proto::ToolUnregister {
-            publisher_extension_id: "forged".into(),
+            publisher_extension_id: crate::test_extension_name("forged"),
             publisher_instance_id: 999.into(),
             tool_name: tau_proto::ToolName::new("forged_canonical_unregistration"),
         }),

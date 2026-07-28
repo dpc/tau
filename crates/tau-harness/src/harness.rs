@@ -15,9 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rand::rngs::StdRng;
 use rand::{RngCore as _, SeedableRng as _};
 use tau_core::{
-    ActionRegistry, AgentStore, Connection, ConnectionMetadata, ConnectionOrigin, EventBus, NodeId,
-    RouteError, SessionStore, ToolRegistry, ToolRouteError, ToolRouteTarget, repair_tool_arguments,
-    tool_example_hint, validate_tool_arguments,
+    ActionRegistry, AgentStore, Connection, ConnectionOrigin, EventBus, NodeId,
+    PendingConnectionMetadata, RouteError, SessionStore, ToolRegistry, ToolRouteError,
+    ToolRouteTarget, repair_tool_arguments, tool_example_hint, validate_tool_arguments,
 };
 use tau_proto::{
     ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished,
@@ -155,7 +155,7 @@ const MAX_SESSION_AGENT_LIST_FIRST_RECORD_BYTES: u64 = 256 * 1024;
 const MAX_SESSION_AGENT_LIST_ENRICHMENT_BYTES: u64 = 4 * 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const SLOW_COMMIT_EVENT_CYCLE: Duration = Duration::from_millis(500);
-const BUILT_IN_SKILLS_SOURCE_ID: &str = "harness:built-in-skills";
+const BUILT_IN_SKILLS_SOURCE_ID: &str = "harness-built-in-skills";
 const SELF_KNOWLEDGE_VERSION_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_VERSION__";
 const SELF_KNOWLEDGE_HASH_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_HASH__";
 const SELF_KNOWLEDGE_BUILD_DATE_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_BUILD_DATE__";
@@ -798,8 +798,8 @@ impl PromptFragmentSource {
             // deterministic without pretending they came from a magic string
             // connection.
             Self::RoleConfig { role_name } => (role_name.as_str(), 0),
-            Self::Extension { connection_id } => (connection_id.as_str(), 1),
-            Self::Tool { connection_id } => (connection_id.as_str(), 2),
+            Self::Extension { connection_id } => (connection_id, 1),
+            Self::Tool { connection_id } => (connection_id, 2),
         }
     }
 }
@@ -1338,7 +1338,9 @@ fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill
             (
                 tau_proto::SkillName::from(skill.name),
                 DiscoveredSkill {
-                    source_id: BUILT_IN_SKILLS_SOURCE_ID.into(),
+                    source_id: tau_proto::ConnectionId::parse(BUILT_IN_SKILLS_SOURCE_ID).expect(
+                        "built-in skills source id must satisfy the connection identifier grammar",
+                    ),
                     description: skill.description,
                     source: DiscoveredSkillSource::BuiltIn { content },
                     add_to_prompt: skill.add_to_prompt,
@@ -1408,7 +1410,7 @@ fn replace_discovery_source(
     candidates: &mut HashMap<tau_proto::SkillName, Vec<DiscoveredSkill>>,
     winners: &mut HashMap<tau_proto::SkillName, DiscoveredSkill>,
     agents_files: &mut Vec<DiscoveredAgentsFile>,
-    source_id: &str,
+    source_id: &tau_proto::ConnectionId,
     new_skills: Vec<(tau_proto::SkillName, DiscoveredSkill)>,
     new_agents_files: Vec<DiscoveredAgentsFile>,
 ) {
@@ -1416,7 +1418,7 @@ fn replace_discovery_source(
     for (name, slots) in candidates.iter_mut() {
         let mut replaced = false;
         slots.retain_mut(|slot| {
-            if slot.source_id.as_str() != source_id {
+            if slot.source_id != *source_id {
                 return true;
             }
             if !replaced && let Some(replacement) = incoming.remove(name) {
@@ -1443,9 +1445,9 @@ fn replace_discovery_source(
     // producer's broad-to-specific order at that slot.
     let insertion_index = agents_files
         .iter()
-        .position(|slot| slot.source_id.as_str() == source_id)
+        .position(|slot| slot.source_id == *source_id)
         .unwrap_or(agents_files.len());
-    agents_files.retain(|slot| slot.source_id.as_str() != source_id);
+    agents_files.retain(|slot| slot.source_id != *source_id);
     agents_files.splice(insertion_index..insertion_index, new_agents_files);
 }
 
@@ -1687,6 +1689,46 @@ pub(crate) use subagents_tool::ExternalMessageToolCompletion;
 /// Connection ID used for harness-owned tools and their side-query
 /// [`PromptOriginator`] name (e.g. `skill`, `agent_start`, and `wait`).
 pub(crate) const HARNESS_CONNECTION_ID: &str = "__harness__";
+
+/// Returns the validated identifier for the harness-owned connection.
+pub(crate) fn harness_connection_id() -> &'static tau_proto::ConnectionId {
+    static ID: std::sync::OnceLock<tau_proto::ConnectionId> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        tau_proto::ConnectionId::parse(HARNESS_CONNECTION_ID)
+            .expect("the harness connection id must satisfy the connection identifier grammar")
+    })
+}
+
+/// Returns the validated extension identity for harness-owned originators.
+pub(crate) fn harness_extension_name() -> &'static tau_proto::ExtensionName {
+    static NAME: std::sync::OnceLock<tau_proto::ExtensionName> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        tau_proto::ExtensionName::parse(HARNESS_CONNECTION_ID)
+            .expect("the harness name must satisfy the extension identifier grammar")
+    })
+}
+
+fn accounting_runtime_id(random: u64) -> tau_proto::AccountingRuntimeId {
+    tau_proto::AccountingRuntimeId::parse(format!("{random:016x}"))
+        .expect("Tau-generated accounting runtime id must be valid")
+}
+
+fn agent_initialization_id(
+    runtime_id: &tau_proto::AccountingRuntimeId,
+    session_generation: u64,
+    sequence: u64,
+) -> tau_proto::AgentInitializationId {
+    tau_proto::AgentInitializationId::parse(format!(
+        "{}-{session_generation:016x}-{sequence:016x}",
+        runtime_id.as_str(),
+    ))
+    .expect("Tau-generated agent initialization id must be valid")
+}
+
+fn shell_route_id(first: u64, second: u64) -> tau_proto::ShellCommandId {
+    tau_proto::ShellCommandId::parse(format!("harness-shell-{first:016x}{second:016x}"))
+        .expect("Tau-generated shell command id must be valid")
+}
 pub(crate) const EXTERNAL_AGENT_MESSAGE_CLIENT_NAME: &str = "tau-external-agent-message";
 
 /// Agent creation accepted by the harness but not yet installed as a live
@@ -1694,9 +1736,9 @@ pub(crate) const EXTERNAL_AGENT_MESSAGE_CLIENT_NAME: &str = "tau-external-agent-
 #[derive(Debug)]
 struct PendingStartAgentRequest {
     /// Connection that owns the accepted start request.
-    source_id: String,
+    source_id: tau_proto::ConnectionId,
     /// Stable extension name used for lifecycle and result correlation.
-    extension_name: String,
+    extension_name: tau_proto::ExtensionName,
     /// Canonical accepted request payload.
     query: tau_proto::StartAgentRequest,
     /// Resolved role captured at admission.
@@ -1988,8 +2030,6 @@ impl Borrow<tau_proto::ShellCommandId> for UiShellRouteId {
     }
 }
 
-const MAX_UI_SHELL_COMMAND_ID_BYTES: usize = 256;
-
 /// Central harness event loop and runtime state.
 ///
 /// Owns the event bus, live connections, durable stores, and provider/tool
@@ -2142,9 +2182,10 @@ pub struct Harness {
     /// Correlated manual retry requests awaiting their exact provider owner.
     pending_retry_prompts: HashMap<tau_proto::RetryPromptRequestId, PendingRetryPrompt>,
     /// Process-lifetime replay guard for UI-chosen retry correlation ids.
-    seen_retry_prompt_requests: HashSet<(String, tau_proto::RetryPromptRequestId)>,
+    seen_retry_prompt_requests: HashSet<(tau_proto::ConnectionId, tau_proto::RetryPromptRequestId)>,
     /// FIFO order for the bounded retry replay guard.
-    seen_retry_prompt_request_order: VecDeque<(String, tau_proto::RetryPromptRequestId)>,
+    seen_retry_prompt_request_order:
+        VecDeque<(tau_proto::ConnectionId, tau_proto::RetryPromptRequestId)>,
     /// Runtime event sequencer. Replay for reconnecting clients is rebuilt from
     /// semantic state instead of retained event payloads.
     pub(crate) event_log: std::sync::Arc<EventLog>,
@@ -2306,7 +2347,8 @@ pub struct Harness {
     pub(crate) available_models: Vec<ModelId>,
     /// Model snapshots published by provider extensions, keyed by sender
     /// connection.
-    pub(crate) provider_models_by_extension: HashMap<String, Vec<ProviderModelInfo>>,
+    pub(crate) provider_models_by_extension:
+        HashMap<tau_proto::ConnectionId, Vec<ProviderModelInfo>>,
     /// Flattened provider model metadata keyed by model id. Rebuilt from
     /// [`Self::provider_models_by_extension`] whenever a provider snapshot
     /// changes.
@@ -2540,7 +2582,8 @@ where
 
     writer.write_message(&HarnessInputMessage::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-echo-provider".into(),
+        client_name: tau_proto::ExtensionName::parse("tau-echo-provider")
+            .expect("built-in echo provider name must satisfy the extension identifier grammar"),
         client_kind: ClientKind::Provider,
         capabilities: Default::default(),
     }))?;
@@ -3028,11 +3071,7 @@ impl Harness {
             current_session_generation: 0,
             next_agent_runtime_incarnation: 1,
             next_agent_initialization_id: 1,
-            accounting_runtime_id: tau_proto::AccountingRuntimeId::parse(format!(
-                "{:016x}",
-                rand::random::<u64>()
-            ))
-            .expect("Tau-generated accounting runtime id must be valid"),
+            accounting_runtime_id: accounting_runtime_id(rand::random::<u64>()),
             current_session_start_reason: parts.current_session_start_reason,
             agent_id_rng: StdRng::from_entropy(),
             ui_shell_route_rng: StdRng::from_entropy(),
@@ -3248,7 +3287,8 @@ impl Harness {
         let provider_conn_id = provider_spawn.connection_id.clone();
         extension_connects.push(ExtensionConnectCommand {
             entry: ExtensionEntry {
-                name: "provider".to_owned(),
+                name: tau_proto::ExtensionName::parse("provider")
+                    .expect("built-in provider name must satisfy the extension identifier grammar"),
                 instance_id: next_iid(),
                 connection_id: provider_conn_id,
                 kind: ClientKind::Provider,
@@ -3277,7 +3317,8 @@ impl Harness {
             let conn_id = tool_spawn.connection_id.clone();
             extension_connects.push(ExtensionConnectCommand {
                 entry: ExtensionEntry {
-                    name: tool.name.to_owned(),
+                    name: tau_proto::ExtensionName::parse(tool.name)
+                        .expect("built-in tool name must satisfy the extension identifier grammar"),
                     instance_id: next_iid(),
                     connection_id: conn_id,
                     kind: ClientKind::Tool,
@@ -3909,7 +3950,8 @@ impl Harness {
 
             extension_connects.push(ExtensionConnectCommand {
                 entry: ExtensionEntry {
-                    name: ext_config.name.clone(),
+                    name: tau_proto::ExtensionName::parse(ext_config.name.clone())
+                        .expect("validated extension config name must remain canonical"),
                     instance_id: next_iid(),
                     connection_id: conn_id,
                     kind: kind.clone(),
@@ -4017,7 +4059,7 @@ impl Harness {
 
     fn handle_startup_from_connection(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         message: HarnessInputMessage,
     ) -> Result<bool, HarnessError> {
         if matches!(&message, HarnessInputMessage::UiDebugEventStatsRequest(_))
@@ -4060,12 +4102,18 @@ impl Harness {
         Ok(subscribed)
     }
 
-    fn handle_startup_disconnect(&mut self, connection_id: &str) -> Result<(), HarnessError> {
+    fn handle_startup_disconnect(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+    ) -> Result<(), HarnessError> {
         let name = self
             .bus
             .connection(connection_id)
             .map(|m| m.name.clone())
-            .unwrap_or_else(|| connection_id.to_string());
+            .unwrap_or_else(|| {
+                tau_proto::ExtensionName::parse(connection_id.to_string())
+                    .expect("allocated connection id must satisfy the extension-name grammar")
+            });
         let was_socket = self
             .bus
             .connection(connection_id)
@@ -4086,7 +4134,7 @@ impl Harness {
                 connection_id,
                 &format!("optional extension {name} did not initialize"),
             );
-            self.maybe_finish_extension_activation(connection_id)?;
+            self.maybe_finish_extension_activation(Some(connection_id))?;
             return Ok(());
         }
         self.handle_disconnect(connection_id);
@@ -4101,13 +4149,13 @@ impl Harness {
         if was_provider {
             return Err(provider_disconnected_error());
         }
-        self.maybe_finish_extension_activation(connection_id)?;
+        self.maybe_finish_extension_activation(Some(connection_id))?;
         Ok(())
     }
 
     fn handle_startup_read_failure(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         error: String,
     ) -> Result<(), HarnessError> {
         if self.extensions.entries.contains_key(connection_id) {
@@ -4163,7 +4211,7 @@ impl Harness {
                 let Some(pending) = self
                     .pending_intercept
                     .as_ref()
-                    .filter(|pending| pending.conn_id == connection_id.as_str())
+                    .filter(|pending| pending.conn_id == *connection_id)
                 else {
                     return false;
                 };
@@ -4226,7 +4274,7 @@ impl Harness {
                         if command.publish_sent {
                             self.publish_for_agent_from(
                                 &command.conversation_id,
-                                Some(HARNESS_CONNECTION_ID),
+                                Some(crate::harness::harness_connection_id()),
                                 Event::AgentMessageSent(tau_proto::AgentMessageSent {
                                     message_id: command.auth_message_id,
                                     sender_id: command.sender_id,
@@ -4292,7 +4340,7 @@ impl Harness {
                     command.result,
                 ) {
                     let _ = self.bus.send_to(
-                        client_id.as_str(),
+                        &client_id,
                         None,
                         HarnessOutputMessage::ExternalAgentMessageResult(result),
                     );
@@ -4337,8 +4385,8 @@ impl Harness {
         let kind = entry.kind.clone();
 
         let connected_id = self.bus.connect(Connection::new(
-            ConnectionMetadata {
-                id: connection_id.clone(),
+            PendingConnectionMetadata {
+                id: Some(connection_id.clone()),
                 name: name.clone(),
                 kind,
                 origin,
@@ -4672,7 +4720,7 @@ impl Harness {
     fn publish_terminal_tool_result(
         &mut self,
         cid: Option<&AgentId>,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         result: ToolResult,
     ) -> bool {
         if result.kind == ToolResultKind::Final
@@ -4715,7 +4763,7 @@ impl Harness {
     fn publish_terminal_tool_error(
         &mut self,
         cid: Option<&AgentId>,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         error: ToolError,
     ) -> bool {
         self.publish_terminal_tool_error_with_cause(
@@ -4730,7 +4778,7 @@ impl Harness {
     fn publish_terminal_tool_error_with_cause(
         &mut self,
         cid: Option<&AgentId>,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         error: ToolError,
         cause: tau_proto::ToolTerminalCause,
     ) -> bool {
@@ -4781,7 +4829,7 @@ impl Harness {
     fn publish_terminal_background_error(
         &mut self,
         cid: &AgentId,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         error: ToolBackgroundError,
     ) {
         self.publish_for_agent_from(cid, source, Event::ToolBackgroundError(error.clone()));
@@ -4795,7 +4843,12 @@ impl Harness {
     /// folding onto the wrong tree branch — without it, a sibling side conv
     /// that just navigated `tree.head` would steal the parent of the next
     /// tree-folding event.
-    fn publish_for_agent_from(&mut self, cid: &AgentId, source: Option<&str>, event: Event) {
+    fn publish_for_agent_from(
+        &mut self,
+        cid: &AgentId,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+    ) {
         // Stamp the publish with `cid`. The fold reads the
         // agent's `head` as the explicit parent node in
         // `commit_event`, so cross-conversation publishes no longer
@@ -4821,15 +4874,18 @@ impl Harness {
     /// Publishes an event to both the event bus and the event log.
     /// Convenience wrapper that uses the event's default persistence metadata
     /// and never marks the publish as `must_pass`.
-    pub(crate) fn publish_event(&mut self, source: Option<&str>, event: Event) {
+    pub(crate) fn publish_event(&mut self, source: Option<&tau_proto::ConnectionId>, event: Event) {
         let source = self.resolved_publish_source(source);
         let persist = event.defaults_to_persist();
-        self.enqueue_publish(source.as_deref(), event, persist, false, None);
+        self.enqueue_publish(source.as_ref(), event, persist, false, None);
     }
 
-    fn resolved_publish_source(&self, source: Option<&str>) -> Option<ConnectionId> {
+    fn resolved_publish_source(
+        &self,
+        source: Option<&tau_proto::ConnectionId>,
+    ) -> Option<ConnectionId> {
         source
-            .map(ConnectionId::from)
+            .cloned()
             .or_else(|| self.derived_publish_source.clone())
     }
 
@@ -4862,14 +4918,19 @@ impl Harness {
     /// freshly-folded `tree.head()` — so callers don't need to read
     /// the tree themselves (which would race the interception chain
     /// when a publish parks).
-    fn publish_event_for_agent(&mut self, cid: &AgentId, source: Option<&str>, event: Event) {
+    fn publish_event_for_agent(
+        &mut self,
+        cid: &AgentId,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+    ) {
         self.publish_event_for_agent_with_completion(cid, source, event, None, false);
     }
 
     fn publish_event_for_agent_with_completion(
         &mut self,
         cid: &AgentId,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         event: Event,
         completion: Option<AgentPublishCompletion>,
         notify_watchers: bool,
@@ -4920,7 +4981,7 @@ impl Harness {
                 .map(PostCommitContinuation::AgentPublish),
             notify_watchers,
         });
-        self.enqueue_publish(source.as_deref(), event, persist, false, sync);
+        self.enqueue_publish(source.as_ref(), event, persist, false, sync);
     }
 
     fn note_agent_prompt_created(&mut self, prompt: &AgentPromptCreated) {
@@ -4944,7 +5005,7 @@ impl Harness {
         };
         let rates = self
             .provider_models_by_extension
-            .get(provider_connection_id.as_str())
+            .get(&provider_connection_id)
             .and_then(|models| {
                 models
                     .iter()
@@ -5222,10 +5283,14 @@ impl Harness {
     ///
     /// The ordinary publication path has already resolved interception before
     /// calling this canonical-fact commit path.
-    pub(crate) fn commit_message_fact(&mut self, source: Option<&str>, event: Event) {
+    pub(crate) fn commit_message_fact(
+        &mut self,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+    ) {
         debug_assert_eq!(event.name().category(), &tau_proto::EventCategory::Message);
         let recorded_at = tau_proto::UnixMicros::now();
-        let source_id = source.map(tau_proto::ConnectionId::from);
+        let source_id = source.cloned();
         let skip_debug_log = self.event_targets_ephemeral_agent(&event, None);
         if !skip_debug_log && let Some(log) = &mut self.debug_log {
             let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
@@ -5259,7 +5324,7 @@ impl Harness {
         if let Some((agent_id, outcome)) = persisted_agent {
             self.activate_projected_message_fact(&agent_id, outcome, &event);
         }
-        self.with_derived_publish_source(source.map(Into::into), |harness| {
+        self.with_derived_publish_source(source.cloned(), |harness| {
             harness.react_to_committed_event(source, &event, true, None);
         });
     }
@@ -5279,11 +5344,13 @@ impl Harness {
     /// Select and append the canonical journal record for one stamped fact.
     fn persist_message_fact_record(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         event: &Event,
         recorded_at: tau_proto::UnixMicros,
     ) -> Result<Option<(tau_proto::AgentId, tau_core::AgentAppendOutcome)>, HarnessError> {
-        let source = source.map(tau_proto::ConnectionId::from);
+        let source = source
+            .cloned()
+            .map(tau_core::PersistedEventSource::Connection);
         let known_agent = event.message_agent_target().and_then(|target| {
             let agent_id = tau_proto::AgentId::parse(target.as_str()).ok()?;
             let has_live_route = self
@@ -5382,7 +5449,7 @@ impl Harness {
     /// and per-publish conversation `head` synchronization.
     pub(crate) fn commit_event(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         peer_context: &interception::PeerPublicationContext,
         event: Event,
         persist: bool,
@@ -5453,7 +5520,7 @@ impl Harness {
         // record on disk, the debug JSONL line, and the wire delivery.
         // Sampling the clock separately would let timing analyses
         // disagree with what live subscribers saw.
-        let source_id = source.map(tau_proto::ConnectionId::from);
+        let source_id = source.cloned();
         let (seq, recorded_at) = self.event_log.append();
         #[cfg(test)]
         self.event_log
@@ -5487,9 +5554,17 @@ impl Harness {
             Event::ToolRequest(_) => peer_context
                 .extension
                 .as_ref()
-                .map(|extension| extension.publisher.as_str())
-                .or(source),
-            _ => source,
+                .map(|extension| {
+                    tau_core::PersistedEventSource::Extension(extension.publisher.clone())
+                })
+                .or_else(|| {
+                    source
+                        .cloned()
+                        .map(tau_core::PersistedEventSource::Connection)
+                }),
+            _ => source
+                .cloned()
+                .map(tau_core::PersistedEventSource::Connection),
         };
         let semantic_persist_started = Instant::now();
         let append_result = self.persist_semantic_event(
@@ -5690,7 +5765,7 @@ impl Harness {
             let provider_frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
             match self
                 .bus
-                .send_to(provider_connection_id.as_str(), source, provider_frame)
+                .send_to(&provider_connection_id, source, provider_frame)
             {
                 Ok(report) if !report.delivered_to.is_empty() => {
                     self.track_provider_prompt_request(&event, provider_connection_id);
@@ -5734,7 +5809,8 @@ impl Harness {
             let _ = self
                 .bus
                 .publish_from_excluding_kinds(source, observer_frame, &execution_kinds);
-            let unavailable_route = tau_proto::ConnectionId::from("unavailable-model-route");
+            let unavailable_route = tau_proto::ConnectionId::parse("unavailable-model-route")
+                .expect("fixed unavailable route must satisfy the connection identifier grammar");
             self.recover_failed_provider_prompt_route(
                 &event,
                 &unavailable_route,
@@ -5774,7 +5850,7 @@ impl Harness {
             self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
         }
         self.process_committed_peer_event(source, peer_context, &event);
-        self.with_derived_publish_source(source.map(Into::into), |harness| {
+        self.with_derived_publish_source(source.cloned(), |harness| {
             harness.react_to_committed_event(source, &event, persist, append_outcome.as_ref());
         });
         if sync_head_for
@@ -5978,7 +6054,7 @@ impl Harness {
             .insert((agent_id.clone(), transaction_id.clone()));
         self.publish_for_agent_from(
             cid,
-            source.as_deref(),
+            source.as_ref(),
             Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
                 agent_id,
                 transaction_id: Some(transaction_id),
@@ -6301,7 +6377,10 @@ impl Harness {
             .insert(message_id.clone(), pending);
         self.cleanup_uncommitted_peer_auto_start(&old_recipient);
         debug_assert!(matches!(event, Event::AgentMessageReceived(_)));
-        self.publish_event(Some(HARNESS_CONNECTION_ID), replacement_event);
+        self.publish_event(
+            Some(crate::harness::harness_connection_id()),
+            replacement_event,
+        );
         true
     }
 
@@ -6323,7 +6402,7 @@ impl Harness {
                 request_id,
             } => {
                 let _ = self.bus.send_to(
-                    client_id.as_str(),
+                    &client_id,
                     None,
                     HarnessOutputMessage::ExternalAgentMessageResult(
                         tau_proto::ExternalAgentMessageResult {
@@ -6368,7 +6447,7 @@ impl Harness {
                 request_id,
             } => {
                 let _ = self.bus.send_to(
-                    client_id.as_str(),
+                    &client_id,
                     None,
                     HarnessOutputMessage::ExternalAgentMessageResult(
                         tau_proto::ExternalAgentMessageResult {
@@ -6390,7 +6469,7 @@ impl Harness {
             } => {
                 self.publish_for_agent_from(
                     &conversation_id,
-                    Some(HARNESS_CONNECTION_ID),
+                    Some(crate::harness::harness_connection_id()),
                     Event::AgentMessageSent(tau_proto::AgentMessageSent {
                         message_id: message_id.clone(),
                         sender_id,
@@ -6451,7 +6530,7 @@ impl Harness {
     /// authoritative tool terminal.
     fn react_to_committed_tool_terminal(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         event: &Event,
         append_outcome: Option<&tau_core::AgentAppendOutcome>,
     ) {
@@ -6593,7 +6672,7 @@ impl Harness {
     /// delivery. Agent dispatch therefore sees the just-folded semantic state.
     fn react_to_committed_event(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         event: &Event,
         persist: bool,
         append_outcome: Option<&tau_core::AgentAppendOutcome>,
@@ -6837,7 +6916,7 @@ impl Harness {
                         .get(&cid)
                         .and_then(|agent| agent.head)
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                    source: source.map(str::to_owned),
+                    source: source.cloned(),
                     retry_prompts: Vec::new(),
                     complete_on_commit: true,
                     approved_retry_event: None,
@@ -7039,7 +7118,7 @@ impl Harness {
     ) {
         if passive && self.tool_turn.is_backgrounded(&call_id) {
             self.handle_background_tool_error_inner(
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 ToolError {
                     call_id,
                     tool_name,
@@ -7446,7 +7525,7 @@ impl Harness {
     /// terminalizes.
     fn persist_semantic_event(
         &mut self,
-        source: Option<&str>,
+        source: Option<tau_core::PersistedEventSource>,
         event: &Event,
         persist: bool,
         parent: tau_core::AgentEventParent,
@@ -7476,7 +7555,6 @@ impl Harness {
         if !semantic_event_router::should_persist_event(event, persist) {
             return Ok(None);
         }
-        let source = source.map(tau_proto::ConnectionId::from);
         if matches!(event, Event::ToolRequest(_) | Event::ToolStarted(_)) {
             if !self.session_restore_event_targets_loaded_agent(event) {
                 return Err(HarnessError::Participant(format!(
@@ -8049,7 +8127,7 @@ impl Harness {
     /// state transitions are tracked per-extension so the same predicate
     /// can also gate runtime dispatch in `dispatch_blocked_for`.
     fn wait_for_extensions_ready(&mut self) -> Result<(), HarnessError> {
-        self.maybe_finish_extension_activation("")?;
+        self.maybe_finish_extension_activation(None)?;
         if self.extensions.pending_connects == 0 && self.extensions_all_ready() {
             return Ok(());
         }
@@ -8113,7 +8191,7 @@ impl Harness {
                 ) && !self.extensions.ready_received.contains(*connection_id)
             })
             .map(|(connection_id, entry)| {
-                (connection_id.to_string(), entry.name.clone(), entry.require)
+                (connection_id.clone(), entry.name.clone(), entry.require)
             })
             .collect();
         let required_blockers: Vec<_> = blockers
@@ -8138,11 +8216,11 @@ impl Harness {
                 "optional extension did not initialize: timed out before becoming ready"
             );
             self.disable_optional_extension(
-                connection_id.as_str(),
+                &connection_id,
                 &format!("optional extension {name} did not initialize"),
             );
         }
-        self.maybe_finish_extension_activation("")?;
+        self.maybe_finish_extension_activation(None)?;
 
         if self.extensions.pending_connects == 0 && self.extensions_all_ready() {
             Ok(())
@@ -8305,7 +8383,7 @@ impl Harness {
             if let Err(error) = self.try_respawn_supervised_extension(&connection_id) {
                 tracing::warn!(
                     target: "tau_harness::startup",
-                    extension_connection_id = %connection_id,
+                    connection_id = %connection_id,
                     error = %error,
                     "automatic extension restart failed"
                 );
@@ -8400,7 +8478,7 @@ impl Harness {
 
     fn is_authorized_ui_detach_request(
         &self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         message: &HarnessInputMessage,
     ) -> bool {
         matches!(message, HarnessInputMessage::UiDetachRequest(_))
@@ -8456,9 +8534,10 @@ impl Harness {
         let writer_tx = spawn_writer_thread(write, None);
         let writer_tx_for_follower = writer_tx.clone();
         let conn_id = self.bus.connect(Connection::new(
-            ConnectionMetadata {
-                id: tau_proto::ConnectionId::default(),
-                name: "socket-ui".to_owned(),
+            PendingConnectionMetadata {
+                id: None,
+                name: tau_proto::ExtensionName::parse("socket-ui")
+                    .expect("socket UI name must satisfy the extension identifier grammar"),
                 kind: ClientKind::Ui,
                 origin,
             },
@@ -8479,7 +8558,7 @@ impl Harness {
             return;
         };
         let _ = self.bus.send_to(
-            client_id.as_str(),
+            client_id,
             None,
             HarnessOutputMessage::Disconnect(Disconnect {
                 reason: Some(format!("harness startup failed: {error}")),
@@ -8504,7 +8583,7 @@ impl Harness {
 
     fn send_agent_prompt_created_result(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         request: tau_proto::GetAgentPromptCreated,
     ) {
         let _ = self.bus.send_to(
@@ -8521,7 +8600,7 @@ impl Harness {
 
     fn send_rendered_system_prompt_result(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         request: tau_proto::GetRenderedSystemPrompt,
     ) {
         let (prompt, error) = if !self.available_roles.contains_key(&request.role) {
@@ -8550,7 +8629,7 @@ impl Harness {
 
     fn send_rendered_prompt_result(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         request: tau_proto::GetRenderedPrompt,
     ) {
         let (prompt, error) = if !self.available_roles.contains_key(&request.role) {
@@ -8601,7 +8680,7 @@ impl Harness {
 
     fn send_rendered_tool_definitions_result(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         request: tau_proto::GetRenderedToolDefinitions,
     ) {
         let (tools, error) = if !self.available_roles.contains_key(&request.role) {
@@ -8639,7 +8718,7 @@ impl Harness {
 
     fn send_session_agent_list_result(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         request: tau_proto::GetSessionAgentList,
     ) {
         let request_id = request.request_id;
@@ -8796,7 +8875,7 @@ impl Harness {
 
     fn send_extension_data_result(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         request_id: String,
         result: tau_proto::ExtensionDataResultPayload,
     ) {
@@ -8812,7 +8891,7 @@ impl Harness {
 
     fn handle_extension_data_request(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         request: tau_proto::ExtensionDataRequest,
     ) {
         let request_id = request.request_id;
@@ -8829,7 +8908,7 @@ impl Harness {
 
     fn run_extension_data_request(
         &self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         scope: tau_proto::ExtensionDataScope,
         op: tau_proto::ExtensionDataRequestOp,
     ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
@@ -8861,7 +8940,7 @@ impl Harness {
 
     fn extension_data_scope_root(
         &self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         scope: tau_proto::ExtensionDataScope,
     ) -> Result<PathBuf, ExtensionDataError> {
         let name = self
@@ -8913,23 +8992,26 @@ impl Harness {
         }
     }
 
-    fn should_stage_extension_capabilities(&self, source_id: &str) -> bool {
+    fn should_stage_extension_capabilities(&self, source_id: &tau_proto::ConnectionId) -> bool {
         self.extensions
             .entries
             .get(source_id)
             .is_some_and(|entry| entry.state != ExtensionState::Ready)
     }
 
-    fn extension_activation_stage_mut(&mut self, source_id: &str) -> &mut ExtensionActivationStage {
+    fn extension_activation_stage_mut(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+    ) -> &mut ExtensionActivationStage {
         self.extensions
             .activation_staging
-            .entry(source_id.into())
+            .entry(source_id.clone())
             .or_default()
     }
 
     fn stage_extension_tool_registration(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         registration: ToolRegistrationDeclared,
     ) {
         self.extension_activation_stage_mut(source_id)
@@ -8941,7 +9023,7 @@ impl Harness {
     /// registration identifier inside that prefix envelope.
     fn validate_or_reject_assigned_prefix(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         registration: &ToolRegistrationDeclared,
     ) -> bool {
         let Some(entry) = self.extensions.entries.get(source_id) else {
@@ -8985,7 +9067,11 @@ impl Harness {
         false
     }
 
-    fn remove_staged_tool_registration(&mut self, source_id: &str, tool_name: &ToolName) -> bool {
+    fn remove_staged_tool_registration(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        tool_name: &ToolName,
+    ) -> bool {
         let Some(stage) = self.extensions.activation_staging.get_mut(source_id) else {
             return false;
         };
@@ -8998,7 +9084,7 @@ impl Harness {
 
     fn stage_provider_models_update(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         update: tau_proto::ProviderModelsUpdated,
     ) {
         self.extension_activation_stage_mut(source_id)
@@ -9008,7 +9094,7 @@ impl Harness {
 
     fn stage_session_discovery_snapshot(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         snapshot: tau_proto::ExtensionSessionDiscoverySnapshotDeclared,
         admission: ExtensionFrameAdmission,
     ) {
@@ -9021,7 +9107,7 @@ impl Harness {
 
     fn stage_agent_discovery_snapshot(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         snapshot: tau_proto::ExtensionAgentDiscoverySnapshotDeclared,
         admission: ExtensionFrameAdmission,
     ) {
@@ -9042,7 +9128,7 @@ impl Harness {
 
     fn stage_agent_context_provider_register(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         admission: ExtensionFrameAdmission,
     ) {
         self.extension_activation_stage_mut(source_id)
@@ -9051,7 +9137,7 @@ impl Harness {
 
     fn stage_session_context_provider_register(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         admission: ExtensionFrameAdmission,
     ) {
         self.extension_activation_stage_mut(source_id)
@@ -9060,7 +9146,7 @@ impl Harness {
 
     fn stage_agent_context_publish(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         publish: tau_proto::ExtAgentContextPublish,
         admission: ExtensionFrameAdmission,
     ) {
@@ -9074,7 +9160,7 @@ impl Harness {
 
     fn stage_extension_prompt_fragment(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         publish: tau_proto::ExtPromptFragmentPublish,
     ) {
         self.extension_activation_stage_mut(source_id)
@@ -9082,23 +9168,36 @@ impl Harness {
             .insert(publish.fragment.name.clone(), publish.fragment);
     }
 
-    fn stage_extension_intercept(&mut self, source_id: &str, intercept: tau_proto::Intercept) {
+    fn stage_extension_intercept(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        intercept: tau_proto::Intercept,
+    ) {
         self.extension_activation_stage_mut(source_id).intercept = Some(intercept);
     }
 
-    fn stage_extension_publish(&mut self, source_id: &str, event: Event, persist: bool) {
+    fn stage_extension_publish(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        event: Event,
+        persist: bool,
+    ) {
         self.extension_activation_stage_mut(source_id)
             .emitted_events
             .push(StagedExtensionPublish { event, persist });
     }
 
-    fn stage_action_schema(&mut self, source_id: &str, schema: tau_actions::ActionSchema) {
+    fn stage_action_schema(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        schema: tau_actions::ActionSchema,
+    ) {
         self.extension_activation_stage_mut(source_id).action_schema = Some(schema);
     }
 
     fn register_extension_tool(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         publisher_extension_id: ExtensionName,
         publisher_instance_id: tau_proto::ExtensionInstanceId,
         registration: ToolRegistrationDeclared,
@@ -9139,7 +9238,7 @@ impl Harness {
             self.mark_tool_available_for_notice(internal_name, visible_name);
         }
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::ToolRegister(ToolRegister {
                 publisher_extension_id,
                 publisher_instance_id,
@@ -9150,7 +9249,7 @@ impl Harness {
         );
     }
 
-    fn ensure_tool_started_subscription(&mut self, source_id: &str) {
+    fn ensure_tool_started_subscription(&mut self, source_id: &tau_proto::ConnectionId) {
         let selector = EventSelector::Exact(tau_proto::EventName::TOOL_STARTED);
         let mut selectors = self
             .bus
@@ -9174,12 +9273,14 @@ impl Harness {
         }
     }
 
-    fn register_extension_interceptor(&mut self, source_id: &str, intercept: tau_proto::Intercept) {
+    fn register_extension_interceptor(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        intercept: tau_proto::Intercept,
+    ) {
         let component_name = self
-            .bus
-            .connection(source_id)
-            .map(|m| ExtensionName::from(m.name.clone()))
-            .unwrap_or_else(|| ExtensionName::from(source_id.to_owned()));
+            .authenticated_source_name(source_id)
+            .expect("authenticated extension source must retain its canonical name");
         self.interceptors.replace_for_connection(
             source_id,
             component_name,
@@ -9190,10 +9291,10 @@ impl Harness {
 
     fn apply_extension_prompt_fragment(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         publish: tau_proto::ExtPromptFragmentPublish,
     ) {
-        let contributor = tau_proto::ConnectionId::from(source_id);
+        let contributor = source_id.clone();
         self.extension_prompt_fragments
             .entry(contributor)
             .or_default()
@@ -9202,7 +9303,7 @@ impl Harness {
 
     fn validate_discovery_snapshot(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         skills: Vec<tau_proto::DiscoverySkillCandidate>,
         agents_files: Vec<tau_proto::DiscoveryAgentsFile>,
     ) -> Option<ValidatedDiscoverySnapshot> {
@@ -9271,7 +9372,7 @@ impl Harness {
             validated_skills.push((
                 skill.name,
                 DiscoveredSkill {
-                    source_id: source_id.into(),
+                    source_id: source_id.clone(),
                     description,
                     source: DiscoveredSkillSource::File(skill.file_path),
                     add_to_prompt: skill.add_to_prompt,
@@ -9331,7 +9432,7 @@ impl Harness {
                 continue;
             }
             validated_files.push(DiscoveredAgentsFile {
-                source_id: source_id.into(),
+                source_id: source_id.clone(),
                 file_path: path,
                 content: file.content,
             });
@@ -9341,7 +9442,7 @@ impl Harness {
 
     fn apply_session_discovery_snapshot(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         snapshot: tau_proto::ExtensionSessionDiscoverySnapshotDeclared,
     ) {
         if snapshot.session_id != self.current_session_id {
@@ -9365,7 +9466,7 @@ impl Harness {
 
     fn apply_agent_discovery_snapshot(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         snapshot: tau_proto::ExtensionAgentDiscoverySnapshotDeclared,
     ) {
         if snapshot.session_id != self.current_session_id {
@@ -9402,14 +9503,14 @@ impl Harness {
         };
         self.session_skills_available = snapshot.clone();
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::HarnessSessionSkillsAvailable(snapshot),
         );
     }
 
     fn publish_provider_models_update(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         publisher_extension_id: tau_proto::ExtensionName,
         declaration: tau_proto::ProviderModelsDeclared,
     ) {
@@ -9418,7 +9519,7 @@ impl Harness {
             models: declaration.models,
         };
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::ProviderModelsUpdated(update.clone()),
         );
         self.apply_provider_models_snapshot(source_id, update.models);
@@ -9426,7 +9527,11 @@ impl Harness {
 
     /// Applies one authoritative snapshot from a ready provider and reconciles
     /// restored work against models explicitly removed by that provider.
-    fn apply_provider_models_snapshot(&mut self, source_id: &str, models: Vec<ProviderModelInfo>) {
+    fn apply_provider_models_snapshot(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        models: Vec<ProviderModelInfo>,
+    ) {
         let previous_model_info = self
             .provider_models_by_extension
             .get(source_id)
@@ -9474,7 +9579,7 @@ impl Harness {
             .provider_quota
             .iter()
             .filter(|(provider, current)| {
-                !self.source_owns_quota_provider(current.source_id.as_str(), provider)
+                !self.source_owns_quota_provider(&current.source_id, provider)
             })
             .map(|(provider, _)| provider.clone())
             .collect::<Vec<_>>();
@@ -9483,14 +9588,18 @@ impl Harness {
         }
     }
 
-    fn clear_changed_quota_bindings(&mut self, source_id: &str, changed_models: &HashSet<ModelId>) {
+    fn clear_changed_quota_bindings(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        changed_models: &HashSet<ModelId>,
+    ) {
         if changed_models.is_empty() {
             return;
         }
         let providers = self
             .provider_quota
             .iter()
-            .filter(|(_, current)| current.source_id.as_str() == source_id)
+            .filter(|(_, current)| current.source_id == *source_id)
             .filter(|(_, current)| {
                 current
                     .snapshot
@@ -9510,7 +9619,7 @@ impl Harness {
                 .retain(|binding| !changed_models.contains(&binding.model));
             let changed = current.snapshot.clone();
             self.publish_event(
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 Event::HarnessProviderQuotaChanged(changed),
             );
         }
@@ -9593,21 +9702,23 @@ impl Harness {
 
     fn extension_action_owner(
         &self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
     ) -> (ExtensionName, tau_proto::ExtensionInstanceId) {
         if let Some(extension) = self.extensions.entries.get(source_id) {
-            return (
-                ExtensionName::from(extension.name.clone()),
-                extension.instance_id,
-            );
+            return (extension.name.clone(), extension.instance_id);
         }
-        self.bus.connection(source_id).map_or_else(
-            || (ExtensionName::from(source_id.to_owned()), 0.into()),
-            |metadata| (ExtensionName::from(metadata.name.clone()), 0.into()),
+        (
+            self.authenticated_source_name(source_id)
+                .expect("authenticated extension source must retain its canonical name"),
+            0.into(),
         )
     }
 
-    fn publish_action_schema(&mut self, source_id: &str, schema: tau_actions::ActionSchema) {
+    fn publish_action_schema(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        schema: tau_actions::ActionSchema,
+    ) {
         let (extension_name, instance_id) = self.extension_action_owner(source_id);
         if let Err(error) = self.action_registry.register_schema(
             source_id,
@@ -9630,19 +9741,17 @@ impl Harness {
         );
     }
 
-    fn apply_agent_context_provider_registration(&mut self, source_id: &str) {
-        self.agent_context_providers
-            .insert(tau_proto::ConnectionId::from(source_id));
+    fn apply_agent_context_provider_registration(&mut self, source_id: &tau_proto::ConnectionId) {
+        self.agent_context_providers.insert(source_id.clone());
     }
 
-    fn apply_session_context_provider_registration(&mut self, source_id: &str) {
-        self.session_context_providers
-            .insert(tau_proto::ConnectionId::from(source_id));
+    fn apply_session_context_provider_registration(&mut self, source_id: &tau_proto::ConnectionId) {
+        self.session_context_providers.insert(source_id.clone());
     }
 
     fn apply_agent_context_publish(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         publish: tau_proto::ExtAgentContextPublish,
     ) {
         let tau_proto::ExtAgentContextPublish {
@@ -9663,20 +9772,22 @@ impl Harness {
         if session_id != self.current_session_id || !(matches_pending || matches_frozen) {
             return;
         }
-        let contributor = tau_proto::ConnectionId::from(source_id);
+        let contributor = source_id.clone();
         let extension_name = self
-            .extensions
-            .entries
-            .get(&contributor)
-            .map(|entry| entry.name.clone())
-            .unwrap_or_else(|| source_id.to_owned());
-        self.agent_context
-            .publish(agent_id, key, contributor, extension_name, value);
+            .authenticated_source_name(&contributor)
+            .expect("authenticated extension source must retain its canonical name");
+        self.agent_context.publish(
+            agent_id,
+            key,
+            contributor,
+            extension_name.to_string(),
+            value,
+        );
     }
 
     fn apply_extension_context_ready(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         ready: tau_proto::ExtensionContextReady,
     ) -> Result<(), HarnessError> {
         self.handle_extension_context_ready(source_id, ready)
@@ -9684,7 +9795,7 @@ impl Harness {
 
     fn apply_extension_session_context_ready(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         ready: tau_proto::ExtensionSessionContextReady,
     ) -> Result<(), HarnessError> {
         self.handle_extension_session_context_ready(source_id, ready)
@@ -9697,7 +9808,7 @@ impl Harness {
 
     fn activate_staged_extension_capabilities(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
     ) -> Vec<DeferredExtensionMessage> {
         let Some(stage) = self.extensions.activation_staging.remove(source_id) else {
             return Vec::new();
@@ -9709,7 +9820,7 @@ impl Harness {
             .extensions
             .entries
             .get(source_id)
-            .map(|entry| (ExtensionName::from(entry.name.clone()), entry.instance_id));
+            .map(|entry| (entry.name.clone(), entry.instance_id));
         for registration in stage.tool_registrations {
             if let Some((publisher_extension_id, publisher_instance_id)) = tool_publisher.clone() {
                 self.register_extension_tool(
@@ -9725,7 +9836,7 @@ impl Harness {
         for update in stage.provider_model_updates {
             staged_model_ids.extend(update.models.iter().map(|model| model.id.clone()));
             self.publish_event(
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 Event::ProviderModelsUpdated(update.clone()),
             );
             final_provider_models = Some(update.models);
@@ -9791,7 +9902,7 @@ impl Harness {
     /// Release one ready extension's deferred operational messages.
     fn finish_staged_extension_activation(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         deferred_messages: Vec<DeferredExtensionMessage>,
     ) -> Result<(), HarnessError> {
         for deferred in deferred_messages {
@@ -9895,7 +10006,7 @@ impl Harness {
                 )));
             }
             self.disable_optional_extension(
-                connection_id.as_str(),
+                &connection_id,
                 &format!(
                     "optional extension `{name}` disabled after invalid tool registration: {error}"
                 ),
@@ -9919,7 +10030,7 @@ impl Harness {
                 }
                 owners.push(Owner {
                     connection_id: connection_id.clone(),
-                    instance_name: entry.name.clone(),
+                    instance_name: entry.name.to_string(),
                     required: entry.require,
                     prefix: entry.tool_prefix.clone(),
                 });
@@ -10019,14 +10130,17 @@ impl Harness {
         }
 
         for (connection_id, message) in disabled_optional {
-            self.disable_optional_extension(connection_id.as_str(), &message);
+            self.disable_optional_extension(&connection_id, &message);
         }
         Ok(())
     }
 
     /// Activate one extension that has sent Ready, then publish its lifecycle
     /// readiness only after its complete staged batch succeeds.
-    fn finish_ready_extension_activation(&mut self, source_id: &str) -> Result<(), HarnessError> {
+    fn finish_ready_extension_activation(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+    ) -> Result<(), HarnessError> {
         if !self.extensions.ready_received.contains(source_id) {
             return Ok(());
         }
@@ -10062,9 +10176,14 @@ impl Harness {
 
     /// Complete the global initial stage barrier, or activate one post-startup
     /// respawn stage without winner selection.
-    fn maybe_finish_extension_activation(&mut self, source_id: &str) -> Result<(), HarnessError> {
+    fn maybe_finish_extension_activation(
+        &mut self,
+        source_id: Option<&tau_proto::ConnectionId>,
+    ) -> Result<(), HarnessError> {
         if self.initial_extension_tool_preflight_complete {
-            return self.finish_ready_extension_activation(source_id);
+            return source_id.map_or(Ok(()), |source_id| {
+                self.finish_ready_extension_activation(source_id)
+            });
         }
         if !self.initial_extension_preflight_ready() {
             return Ok(());
@@ -10087,15 +10206,15 @@ impl Harness {
         for connection_id in &ready {
             deferred_by_connection.push((
                 connection_id.clone(),
-                self.activate_staged_extension_capabilities(connection_id.as_str()),
+                self.activate_staged_extension_capabilities(connection_id),
             ));
         }
         for connection_id in &ready {
             self.extensions.ready_received.remove(connection_id);
-            self.set_extension_state(connection_id.as_str(), ExtensionState::Ready);
+            self.set_extension_state(connection_id, ExtensionState::Ready);
         }
         for connection_id in &ready {
-            self.emit_extension_ready(connection_id.as_str());
+            self.emit_extension_ready(connection_id);
         }
         let mut deferred_messages = Vec::new();
         for (connection_id, messages) in deferred_by_connection {
@@ -10108,7 +10227,7 @@ impl Harness {
         deferred_messages.sort_by_key(|(order, _, _)| *order);
         for (_, connection_id, deferred) in deferred_messages {
             self.handle_extension_message_with_admission(
-                connection_id.as_str(),
+                &connection_id,
                 deferred.message,
                 deferred.admission,
             )?;
@@ -10124,7 +10243,7 @@ impl Harness {
     /// normal respawn policy.
     fn handle_extension_protocol_failure(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         message: String,
     ) -> Result<(), HarnessError> {
         let lifecycle = self
@@ -10159,14 +10278,14 @@ impl Harness {
             );
             self.handle_disconnect(source_id);
         }
-        self.maybe_finish_extension_activation(source_id)
+        self.maybe_finish_extension_activation(Some(source_id))
     }
 
     /// Charge one retained pre-activation frame to bounded per-connection
     /// quotas.
     fn reserve_extension_activation_message(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         message: &HarnessInputMessage,
     ) -> Result<bool, HarnessError> {
         struct BoundedCounter {
@@ -10226,7 +10345,7 @@ impl Harness {
     /// Retain one operational frame behind activation with global wire order.
     fn defer_extension_activation_message(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         message: HarnessInputMessage,
         admission: ExtensionFrameAdmission,
     ) {
@@ -10244,7 +10363,7 @@ impl Harness {
 
     fn handle_extension_message(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         message: impl Into<HarnessInputMessage>,
     ) -> Result<(), HarnessError> {
         let message = message.into();
@@ -10264,7 +10383,7 @@ impl Harness {
 
     fn handle_extension_message_with_admission(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         message: HarnessInputMessage,
         admission: ExtensionFrameAdmission,
     ) -> Result<(), HarnessError> {
@@ -10423,7 +10542,11 @@ impl Harness {
                     .entries
                     .get(source_id)
                     .map(|e| e.name.clone())
-                    .unwrap_or_else(|| "extension".to_owned());
+                    .unwrap_or_else(|| {
+                        tau_proto::ExtensionName::parse("extension").expect(
+                            "fallback extension name must satisfy the extension identifier grammar",
+                        )
+                    });
                 let optional = self
                     .extensions
                     .entries
@@ -10460,7 +10583,7 @@ impl Harness {
                         source_id,
                         &format!("optional extension {name} did not initialize"),
                     );
-                    self.maybe_finish_extension_activation(source_id)?;
+                    self.maybe_finish_extension_activation(Some(source_id))?;
                 } else {
                     self.handle_disconnect(source_id);
                 }
@@ -10489,8 +10612,8 @@ impl Harness {
                 }
             }
             HarnessInputMessage::Ready(_ready) => {
-                self.extensions.ready_received.insert(source_id.into());
-                self.maybe_finish_extension_activation(source_id)?;
+                self.extensions.ready_received.insert(source_id.clone());
+                self.maybe_finish_extension_activation(Some(source_id))?;
                 self.drain_pending_tool_invocations()?;
                 self.try_advance_queue();
             }
@@ -10541,7 +10664,7 @@ impl Harness {
     #[cfg(test)]
     fn handle_extension_event_inner(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         event: Event,
     ) -> Result<(), HarnessError> {
         self.handle_extension_event_inner_with_persist(source_id, event, None)
@@ -10549,7 +10672,7 @@ impl Harness {
 
     fn handle_extension_event_inner_with_persist(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         event: Event,
         persist_override: Option<bool>,
     ) -> Result<(), HarnessError> {
@@ -10563,7 +10686,7 @@ impl Harness {
 
     fn handle_extension_event_inner_with_admission(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         event: Event,
         persist_override: Option<bool>,
         admission: ExtensionFrameAdmission,
@@ -10578,7 +10701,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "extension lacks message-bridge report authority"
                 );
@@ -10607,7 +10730,7 @@ impl Harness {
             // publish `tool.progress_reported` observations instead.
             return Ok(());
         }
-        if source_id != HARNESS_CONNECTION_ID
+        if source_id != harness_connection_id()
             && matches!(
                 event,
                 Event::ToolResult(_) | Event::ToolError(_) | Event::ToolCancelled(_)
@@ -10632,7 +10755,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "extension lacks tool declaration authority"
                 );
@@ -10642,7 +10765,7 @@ impl Harness {
                 *self
                     .extensions
                     .pending_tool_lifecycle_declarations
-                    .entry(source_id.into())
+                    .entry(source_id.clone())
                     .or_default() += 1;
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
@@ -10675,7 +10798,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "extension lacks tool report authority"
                 );
@@ -10711,7 +10834,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "extension lacks shell command report authority"
                 );
@@ -10739,7 +10862,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "extension lacks tool request authority"
                 );
@@ -10799,7 +10922,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "extension lacks provider execution report authority"
                 );
@@ -10830,7 +10953,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "extension lacks provider quota report authority"
                 );
@@ -10858,7 +10981,7 @@ impl Harness {
                 *self
                     .extensions
                     .pending_provider_model_declarations
-                    .entry(source_id.into())
+                    .entry(source_id.clone())
                     .or_default() += 1;
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
@@ -10887,7 +11010,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "peer lacks prompt-fragment declaration authority"
                 );
@@ -10897,7 +11020,7 @@ impl Harness {
                 *self
                     .extensions
                     .pending_prompt_fragment_declarations
-                    .entry(source_id.into())
+                    .entry(source_id.clone())
                     .or_default() += 1;
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
@@ -10927,7 +11050,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "peer lacks internal-prompt request authority"
                 );
@@ -10960,7 +11083,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "peer lacks start-agent request authority"
                 );
@@ -10993,7 +11116,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "peer lacks terminal-output event authority"
                 );
@@ -11026,7 +11149,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "peer lacks custom-event authority"
                 );
@@ -11065,7 +11188,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "peer lacks per-agent context event authority"
                 );
@@ -11081,7 +11204,7 @@ impl Harness {
                 *self
                     .extensions
                     .pending_agent_context_declarations
-                    .entry(source_id.into())
+                    .entry(source_id.clone())
                     .or_default() += 1;
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
@@ -11117,7 +11240,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "peer lacks session-discovery event authority"
                 );
@@ -11132,7 +11255,7 @@ impl Harness {
                 *self
                     .extensions
                     .pending_session_discovery_declarations
-                    .entry(source_id.into())
+                    .entry(source_id.clone())
                     .or_default() += 1;
             }
             let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
@@ -11164,7 +11287,7 @@ impl Harness {
             if !authorized {
                 tracing::warn!(
                     target: "tau_harness",
-                    connection_id = source_id,
+                    connection_id = %source_id,
                     event = %event_name,
                     "peer lacks agent metadata request authority"
                 );
@@ -11228,7 +11351,7 @@ impl Harness {
     /// architectural problem that decision prohibits.
     fn process_committed_peer_event(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         peer_context: &interception::PeerPublicationContext,
         event: &Event,
     ) {
@@ -11245,13 +11368,17 @@ impl Harness {
             self.discard_peer_activation_reservation(peer_context);
             return;
         }
-        if let Some(publisher) = peer_context
-            .extension
-            .as_ref()
-            .map(|extension| tau_proto::MessagePublisherId::new(extension.publisher.to_string()))
-            && let Some(canonical) = event.clone().into_stamped_canonical_message_fact(publisher)
+        if let Some(publisher) = peer_context.extension.as_ref().map(|extension| {
+            tau_proto::MessagePublisherId::from_extension_name(&extension.publisher)
+        }) && let Some(canonical) = event.clone().into_stamped_canonical_message_fact(publisher)
         {
-            self.enqueue_publish(Some(HARNESS_CONNECTION_ID), canonical, true, true, None);
+            self.enqueue_publish(
+                Some(crate::harness::harness_connection_id()),
+                canonical,
+                true,
+                true,
+                None,
+            );
             return;
         }
         if matches!(
@@ -11358,7 +11485,7 @@ impl Harness {
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
             entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
-                && entry.name == extension.publisher.as_str()
+                && entry.name == extension.publisher
                 && entry.kind == ClientKind::Provider
                 && entry.state != ExtensionState::Disconnected
         });
@@ -11370,16 +11497,16 @@ impl Harness {
             return;
         }
         if let Some(reservation) = extension.activation_reservation
-            && !self.reaccount_activation_reservation(source_id.as_str(), reservation, event)
+            && !self.reaccount_activation_reservation(source_id, reservation, event)
         {
-            self.finish_pending_provider_model_declaration(source_id.as_str());
+            self.finish_pending_provider_model_declaration(source_id);
             return;
         }
-        if self.should_stage_extension_capabilities(source_id.as_str())
+        if self.should_stage_extension_capabilities(source_id)
             && extension.activation_reservation.is_some()
         {
             self.stage_provider_models_update(
-                source_id.as_str(),
+                source_id,
                 tau_proto::ProviderModelsUpdated {
                     publisher_extension_id,
                     models: declaration.models.clone(),
@@ -11387,13 +11514,13 @@ impl Harness {
             );
         } else {
             self.publish_provider_models_update(
-                source_id.as_str(),
+                source_id,
                 publisher_extension_id,
                 declaration.clone(),
             );
         }
         if extension.activation_reservation.is_some() {
-            self.finish_pending_provider_model_declaration(source_id.as_str());
+            self.finish_pending_provider_model_declaration(source_id);
         }
     }
 
@@ -11413,7 +11540,7 @@ impl Harness {
                 && extension.admission.session_generation == self.current_session_generation
                 && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
-                && entry.name == extension.publisher.as_str()
+                && entry.name == extension.publisher
                 && entry.kind == extension.kind
                 && entry.state != ExtensionState::Disconnected
         });
@@ -11442,14 +11569,14 @@ impl Harness {
                 && extension.admission.session_generation == self.current_session_generation
                 && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
-                && entry.name == extension.publisher.as_str()
+                && entry.name == extension.publisher
                 && entry.kind == extension.kind
                 && entry.state != ExtensionState::Disconnected
         });
         if !source_is_current {
             return;
         }
-        if let Err(error) = self.handle_start_agent_request(source_id.as_str(), request.clone()) {
+        if let Err(error) = self.handle_start_agent_request(source_id, request.clone()) {
             self.pending_publish_error.get_or_insert(error);
         }
     }
@@ -11463,7 +11590,7 @@ impl Harness {
     /// canonical successor; canonical store failure likewise prevents an echo.
     fn process_committed_agent_metadata_request(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         peer_context: &interception::PeerPublicationContext,
         event: &Event,
     ) {
@@ -11474,13 +11601,13 @@ impl Harness {
                 .is_some_and(|entry| {
                     entry.connection_id == extension.source
                         && entry.instance_id == extension.instance_id
-                        && entry.name == extension.publisher.as_str()
+                        && entry.name == extension.publisher
                         && entry.kind == extension.kind
                         && entry.state != ExtensionState::Disconnected
                 })
                 && self
                     .bus
-                    .connection(extension.source.as_str())
+                    .connection(&extension.source)
                     .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket)
         } else {
             source.is_some_and(|source_id| self.is_attached_socket_ui(source_id))
@@ -11503,7 +11630,13 @@ impl Harness {
             }
             _ => return,
         };
-        self.enqueue_publish(Some(HARNESS_CONNECTION_ID), canonical, true, false, None);
+        self.enqueue_publish(
+            Some(crate::harness::harness_connection_id()),
+            canonical,
+            true,
+            false,
+            None,
+        );
     }
 
     /// Apply one per-agent context declaration, value, or readiness
@@ -11523,7 +11656,7 @@ impl Harness {
                 && extension.admission.session_generation == self.current_session_generation
                 && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
-                && entry.name == extension.publisher.as_str()
+                && entry.name == extension.publisher
                 && entry.kind == extension.kind
                 && entry.state != ExtensionState::Disconnected
         });
@@ -11532,49 +11665,47 @@ impl Harness {
             return;
         }
         if let Some(reservation) = extension.activation_reservation
-            && !self.reaccount_activation_reservation(source_id.as_str(), reservation, event)
+            && !self.reaccount_activation_reservation(source_id, reservation, event)
         {
-            self.finish_pending_agent_context_declaration(source_id.as_str());
+            self.finish_pending_agent_context_declaration(source_id);
             return;
         }
 
         match event {
             Event::ExtensionContextProviderRegister(_) => {
-                if self.should_stage_extension_capabilities(source_id.as_str()) {
+                if self.should_stage_extension_capabilities(source_id) {
                     self.stage_agent_context_provider_register(
-                        source_id.as_str(),
+                        source_id,
                         extension.admission.clone(),
                     );
                 } else {
-                    self.apply_agent_context_provider_registration(source_id.as_str());
+                    self.apply_agent_context_provider_registration(source_id);
                 }
             }
             Event::ExtAgentContextPublish(publish) => {
-                if self.should_stage_extension_capabilities(source_id.as_str()) {
+                if self.should_stage_extension_capabilities(source_id) {
                     self.stage_agent_context_publish(
-                        source_id.as_str(),
+                        source_id,
                         publish.clone(),
                         extension.admission.clone(),
                     );
                 } else {
-                    self.apply_agent_context_publish(source_id.as_str(), publish.clone());
+                    self.apply_agent_context_publish(source_id, publish.clone());
                 }
             }
             Event::ExtensionAgentDiscoverySnapshotDeclared(snapshot) => {
-                if self.should_stage_extension_capabilities(source_id.as_str()) {
+                if self.should_stage_extension_capabilities(source_id) {
                     self.stage_agent_discovery_snapshot(
-                        source_id.as_str(),
+                        source_id,
                         snapshot.clone(),
                         extension.admission.clone(),
                     );
                 } else {
-                    self.apply_agent_discovery_snapshot(source_id.as_str(), snapshot.clone());
+                    self.apply_agent_discovery_snapshot(source_id, snapshot.clone());
                 }
             }
             Event::ExtensionContextReady(ready) => {
-                if let Err(error) =
-                    self.apply_extension_context_ready(source_id.as_str(), ready.clone())
-                {
+                if let Err(error) = self.apply_extension_context_ready(source_id, ready.clone()) {
                     self.pending_publish_error.get_or_insert(error);
                 }
             }
@@ -11582,7 +11713,7 @@ impl Harness {
         }
 
         if extension.activation_reservation.is_some() {
-            self.finish_pending_agent_context_declaration(source_id.as_str());
+            self.finish_pending_agent_context_declaration(source_id);
         }
     }
 
@@ -11612,7 +11743,7 @@ impl Harness {
                 .is_some_and(|entry| {
                     entry.connection_id == extension.source
                         && entry.instance_id == extension.instance_id
-                        && entry.name == extension.publisher.as_str()
+                        && entry.name == extension.publisher
                         && entry.kind == extension.kind
                         && entry.state != ExtensionState::Disconnected
                 });
@@ -11668,7 +11799,7 @@ impl Harness {
                     }
                 }
                 let event = Event::ToolStarted(route.invoke);
-                self.publish_event(Some(HARNESS_CONNECTION_ID), event);
+                self.publish_event(Some(crate::harness::harness_connection_id()), event);
             }
             Err(ToolRouteError::NoProvider { tool_name }) => {
                 self.reject_unroutable_extension_tool_request(request.clone(), tool_name);
@@ -11705,7 +11836,7 @@ impl Harness {
                 .is_some_and(|entry| {
                     entry.connection_id == extension.source
                         && entry.instance_id == extension.instance_id
-                        && entry.name == extension.publisher.as_str()
+                        && entry.name == extension.publisher
                         && entry.kind == ClientKind::Provider
                         && entry.state != ExtensionState::Disconnected
                 });
@@ -11716,13 +11847,13 @@ impl Harness {
         }
         match event {
             Event::ProviderQuotaReplaceReported(replace) => {
-                self.handle_provider_quota_replace(extension.source.as_str(), replace.clone());
+                self.handle_provider_quota_replace(&extension.source, replace.clone());
             }
             Event::ProviderQuotaPatchReported(patch) => {
-                self.handle_provider_quota_patch(extension.source.as_str(), patch.clone());
+                self.handle_provider_quota_patch(&extension.source, patch.clone());
             }
             Event::ProviderQuotaClearReported(clear) => {
-                self.handle_provider_quota_clear(extension.source.as_str(), clear.clone());
+                self.handle_provider_quota_clear(&extension.source, clear.clone());
             }
             _ => unreachable!("caller filters provider quota reports"),
         }
@@ -11754,7 +11885,7 @@ impl Harness {
                 .is_some_and(|entry| {
                     entry.connection_id == extension.source
                         && entry.instance_id == extension.instance_id
-                        && entry.name == extension.publisher.as_str()
+                        && entry.name == extension.publisher
                         && entry.kind == ClientKind::Provider
                         && entry.state != ExtensionState::Disconnected
                 });
@@ -11763,7 +11894,7 @@ impl Harness {
             // cannot mutate prompt, retry, recovery, tool, or turn state.
             return;
         }
-        let source_id = extension.source.as_str();
+        let source_id = &extension.source;
         match event {
             Event::ProviderRetryPromptResultReported(result) => {
                 self.process_provider_retry_prompt_result_report(source_id, result);
@@ -11786,18 +11917,18 @@ impl Harness {
 
     fn process_provider_retry_prompt_result_report(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         result: &tau_proto::ProviderRetryPromptResult,
     ) {
         let Some(pending) = self.pending_retry_prompts.get(&result.request_id).cloned() else {
             return;
         };
-        if pending.provider_connection_id.as_str() != source_id
+        if pending.provider_connection_id != *source_id
             || pending.agent_prompt_id != result.agent_prompt_id
         {
             tracing::warn!(
                 target: "tau_harness",
-                source_id,
+                source_id = %source_id,
                 agent_prompt_id = %result.agent_prompt_id,
                 "discarding mismatched provider retry result report"
             );
@@ -11818,8 +11949,8 @@ impl Harness {
             ),
         };
         let _ = self.bus.send_to(
-            pending.requester_client_id.as_str(),
-            Some(HARNESS_CONNECTION_ID),
+            &pending.requester_client_id,
+            Some(crate::harness::harness_connection_id()),
             HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
                 tau_proto::UiRetryPromptResult {
                     request_id: pending.ui_request_id,
@@ -11834,7 +11965,7 @@ impl Harness {
 
     fn process_provider_prompt_submitted_report(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         submitted: &tau_proto::ProviderPromptSubmitted,
     ) {
         if !self.canceled_prompts.contains(&submitted.agent_prompt_id)
@@ -11845,7 +11976,7 @@ impl Harness {
             )
         {
             self.publish_event(
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 Event::ProviderPromptSubmitted(submitted.clone()),
             );
         }
@@ -11853,7 +11984,7 @@ impl Harness {
 
     fn process_provider_response_updated_report(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         updated: &tau_proto::ProviderResponseUpdated,
     ) {
         if self.canceled_prompts.contains(&updated.agent_prompt_id)
@@ -11907,7 +12038,7 @@ impl Harness {
         }
         if provider_response_update_has_public_content(&updated) {
             self.publish_event(
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 Event::ProviderResponseUpdated(updated),
             );
         }
@@ -11915,7 +12046,7 @@ impl Harness {
 
     fn process_provider_response_finished_report(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         response: &tau_proto::ProviderResponseFinished,
     ) {
         if self.provider_prompt_owner_matches(
@@ -11923,13 +12054,15 @@ impl Harness {
             &response.agent_prompt_id,
             tau_proto::EventName::PROVIDER_RESPONSE_FINISHED_REPORTED,
         ) {
-            let result =
-                self.with_derived_publish_source(Some(HARNESS_CONNECTION_ID.into()), |harness| {
+            let result = self.with_derived_publish_source(
+                Some(crate::harness::harness_connection_id().clone()),
+                |harness| {
                     harness.handle_provider_response_finished_from(
-                        Some(HARNESS_CONNECTION_ID),
+                        Some(crate::harness::harness_connection_id()),
                         response.clone(),
                     )
-                });
+                },
+            );
             if let Err(error) = result {
                 self.pending_publish_error.get_or_insert(error);
             }
@@ -11938,7 +12071,7 @@ impl Harness {
 
     fn process_provider_cache_miss_diagnostic_report(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         diagnostic: &tau_proto::ProviderCacheMissDiagnostic,
     ) {
         if self.provider_prompt_owner_matches(
@@ -11947,7 +12080,7 @@ impl Harness {
             tau_proto::EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC_REPORTED,
         ) {
             self.publish_event(
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 Event::ProviderCacheMissDiagnostic(diagnostic.clone()),
             );
         }
@@ -11978,7 +12111,7 @@ impl Harness {
                 .get(&extension.source)
                 .is_some_and(|entry| {
                     entry.instance_id == extension.instance_id
-                        && entry.name == extension.publisher.as_str()
+                        && entry.name == extension.publisher
                         && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
                         && entry.state != ExtensionState::Disconnected
                 });
@@ -11999,7 +12132,7 @@ impl Harness {
             progress.tool_name = tool.name.clone();
         }
         self.enqueue_publish(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::ToolProgress(progress),
             false,
             true,
@@ -12033,7 +12166,7 @@ impl Harness {
                 .get(&extension.source)
                 .is_some_and(|entry| {
                     entry.instance_id == extension.instance_id
-                        && entry.name == extension.publisher.as_str()
+                        && entry.name == extension.publisher
                         && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
                         && entry.state != ExtensionState::Disconnected
                 });
@@ -12054,7 +12187,7 @@ impl Harness {
         {
             return;
         }
-        let source_id = extension.source.as_str();
+        let source_id = &extension.source;
         match event {
             Event::ToolResultReported(result) => {
                 self.handle_extension_tool_result(source_id, result.clone());
@@ -12086,7 +12219,7 @@ impl Harness {
                 && extension.admission.session_generation == self.current_session_generation
                 && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
-                && entry.name == extension.publisher.as_str()
+                && entry.name == extension.publisher
                 && entry.kind == extension.kind
                 && entry.state != ExtensionState::Disconnected
         });
@@ -12095,37 +12228,37 @@ impl Harness {
             return;
         }
         if let Some(reservation) = extension.activation_reservation
-            && !self.reaccount_activation_reservation(source_id.as_str(), reservation, event)
+            && !self.reaccount_activation_reservation(source_id, reservation, event)
         {
-            self.finish_pending_session_discovery_declaration(source_id.as_str());
+            self.finish_pending_session_discovery_declaration(source_id);
             return;
         }
 
         match event {
             Event::ExtensionSessionContextProviderRegister(_) => {
-                if self.should_stage_extension_capabilities(source_id.as_str()) {
+                if self.should_stage_extension_capabilities(source_id) {
                     self.stage_session_context_provider_register(
-                        source_id.as_str(),
+                        source_id,
                         extension.admission.clone(),
                     );
                 } else {
-                    self.apply_session_context_provider_registration(source_id.as_str());
+                    self.apply_session_context_provider_registration(source_id);
                 }
             }
             Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot) => {
-                if self.should_stage_extension_capabilities(source_id.as_str()) {
+                if self.should_stage_extension_capabilities(source_id) {
                     self.stage_session_discovery_snapshot(
-                        source_id.as_str(),
+                        source_id,
                         snapshot.clone(),
                         extension.admission.clone(),
                     );
                 } else {
-                    self.apply_session_discovery_snapshot(source_id.as_str(), snapshot.clone());
+                    self.apply_session_discovery_snapshot(source_id, snapshot.clone());
                 }
             }
             Event::ExtensionSessionContextReady(ready) => {
                 if let Err(error) =
-                    self.apply_extension_session_context_ready(source_id.as_str(), ready.clone())
+                    self.apply_extension_session_context_ready(source_id, ready.clone())
                 {
                     self.pending_publish_error.get_or_insert(error);
                 }
@@ -12134,7 +12267,7 @@ impl Harness {
         }
 
         if extension.activation_reservation.is_some() {
-            self.finish_pending_session_discovery_declaration(source_id.as_str());
+            self.finish_pending_session_discovery_declaration(source_id);
         }
     }
 
@@ -12155,7 +12288,7 @@ impl Harness {
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
             entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
-                && entry.name == extension.publisher.as_str()
+                && entry.name == extension.publisher
                 && entry.kind == extension.kind
                 && entry.state != ExtensionState::Disconnected
         });
@@ -12163,18 +12296,18 @@ impl Harness {
             return;
         }
         if let Some(reservation) = extension.activation_reservation
-            && !self.reaccount_activation_reservation(source_id.as_str(), reservation, event)
+            && !self.reaccount_activation_reservation(source_id, reservation, event)
         {
-            self.finish_pending_prompt_fragment_declaration(source_id.as_str());
+            self.finish_pending_prompt_fragment_declaration(source_id);
             return;
         }
-        if self.should_stage_extension_capabilities(source_id.as_str()) {
-            self.stage_extension_prompt_fragment(source_id.as_str(), publish.clone());
+        if self.should_stage_extension_capabilities(source_id) {
+            self.stage_extension_prompt_fragment(source_id, publish.clone());
         } else {
-            self.apply_extension_prompt_fragment(source_id.as_str(), publish.clone());
+            self.apply_extension_prompt_fragment(source_id, publish.clone());
         }
         if extension.activation_reservation.is_some() {
-            self.finish_pending_prompt_fragment_declaration(source_id.as_str());
+            self.finish_pending_prompt_fragment_declaration(source_id);
         }
     }
 
@@ -12195,7 +12328,7 @@ impl Harness {
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
             entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
-                && entry.name == extension.publisher.as_str()
+                && entry.name == extension.publisher
                 && matches!(entry.kind, ClientKind::Tool | ClientKind::Core)
                 && entry.state != ExtensionState::Disconnected
         });
@@ -12206,25 +12339,22 @@ impl Harness {
             return;
         }
         if let Some(reservation) = extension.activation_reservation
-            && !self.reaccount_activation_reservation(source_id.as_str(), reservation, event)
+            && !self.reaccount_activation_reservation(source_id, reservation, event)
         {
-            self.finish_pending_tool_lifecycle_declaration(source_id.as_str());
+            self.finish_pending_tool_lifecycle_declaration(source_id);
             return;
         }
 
         match event {
             Event::ToolRegistrationDeclared(registration) => {
-                if self.validate_or_reject_assigned_prefix(source_id.as_str(), registration) {
-                    if self.should_stage_extension_capabilities(source_id.as_str())
+                if self.validate_or_reject_assigned_prefix(source_id, registration) {
+                    if self.should_stage_extension_capabilities(source_id)
                         && extension.activation_reservation.is_some()
                     {
-                        self.stage_extension_tool_registration(
-                            source_id.as_str(),
-                            registration.clone(),
-                        );
+                        self.stage_extension_tool_registration(source_id, registration.clone());
                     } else {
                         self.register_extension_tool(
-                            source_id.as_str(),
+                            source_id,
                             extension.publisher.clone(),
                             extension.instance_id,
                             registration.clone(),
@@ -12234,7 +12364,7 @@ impl Harness {
             }
             Event::ToolUnregistrationDeclared(unregister) => {
                 self.handle_extension_tool_unregister(
-                    source_id.as_str(),
+                    source_id,
                     extension.publisher.clone(),
                     extension.instance_id,
                     unregister.clone(),
@@ -12244,14 +12374,14 @@ impl Harness {
         }
 
         if extension.activation_reservation.is_some() {
-            self.finish_pending_tool_lifecycle_declaration(source_id.as_str());
+            self.finish_pending_tool_lifecycle_declaration(source_id);
         }
     }
 
     /// Resize a pre-activation frame reservation to its committed replacement.
     fn reaccount_activation_reservation(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         reservation: interception::ActivationReservation,
         event: &Event,
     ) -> bool {
@@ -12315,25 +12445,25 @@ impl Harness {
         }
         match reservation.declaration_family {
             interception::ActivationDeclarationFamily::ProviderModels => {
-                self.finish_pending_provider_model_declaration(extension.source.as_str());
+                self.finish_pending_provider_model_declaration(&extension.source);
             }
             interception::ActivationDeclarationFamily::ToolLifecycle => {
-                self.finish_pending_tool_lifecycle_declaration(extension.source.as_str());
+                self.finish_pending_tool_lifecycle_declaration(&extension.source);
             }
             interception::ActivationDeclarationFamily::PromptFragment => {
-                self.finish_pending_prompt_fragment_declaration(extension.source.as_str());
+                self.finish_pending_prompt_fragment_declaration(&extension.source);
             }
             interception::ActivationDeclarationFamily::SessionDiscovery => {
-                self.finish_pending_session_discovery_declaration(extension.source.as_str());
+                self.finish_pending_session_discovery_declaration(&extension.source);
             }
             interception::ActivationDeclarationFamily::AgentContext => {
-                self.finish_pending_agent_context_declaration(extension.source.as_str());
+                self.finish_pending_agent_context_declaration(&extension.source);
             }
         }
     }
 
     /// Release one admitted pre-`Ready` declaration and retry activation.
-    fn finish_pending_provider_model_declaration(&mut self, source_id: &str) {
+    fn finish_pending_provider_model_declaration(&mut self, source_id: &tau_proto::ConnectionId) {
         self.finish_pending_activation_declaration(
             source_id,
             interception::ActivationDeclarationFamily::ProviderModels,
@@ -12341,7 +12471,7 @@ impl Harness {
     }
 
     /// Release one admitted pre-`Ready` tool declaration and retry activation.
-    fn finish_pending_tool_lifecycle_declaration(&mut self, source_id: &str) {
+    fn finish_pending_tool_lifecycle_declaration(&mut self, source_id: &tau_proto::ConnectionId) {
         self.finish_pending_activation_declaration(
             source_id,
             interception::ActivationDeclarationFamily::ToolLifecycle,
@@ -12350,7 +12480,7 @@ impl Harness {
 
     /// Release one admitted pre-`Ready` prompt-fragment declaration and retry
     /// activation.
-    fn finish_pending_prompt_fragment_declaration(&mut self, source_id: &str) {
+    fn finish_pending_prompt_fragment_declaration(&mut self, source_id: &tau_proto::ConnectionId) {
         self.finish_pending_activation_declaration(
             source_id,
             interception::ActivationDeclarationFamily::PromptFragment,
@@ -12359,7 +12489,10 @@ impl Harness {
 
     /// Release one admitted pre-`Ready` session-discovery declaration and retry
     /// activation.
-    fn finish_pending_session_discovery_declaration(&mut self, source_id: &str) {
+    fn finish_pending_session_discovery_declaration(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+    ) {
         self.finish_pending_activation_declaration(
             source_id,
             interception::ActivationDeclarationFamily::SessionDiscovery,
@@ -12368,7 +12501,7 @@ impl Harness {
 
     /// Release one admitted pre-`Ready` per-agent context declaration and retry
     /// activation.
-    fn finish_pending_agent_context_declaration(&mut self, source_id: &str) {
+    fn finish_pending_agent_context_declaration(&mut self, source_id: &tau_proto::ConnectionId) {
         self.finish_pending_activation_declaration(
             source_id,
             interception::ActivationDeclarationFamily::AgentContext,
@@ -12379,10 +12512,10 @@ impl Harness {
     /// activation.
     fn finish_pending_activation_declaration(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         declaration_family: interception::ActivationDeclarationFamily,
     ) {
-        let source_id = tau_proto::ConnectionId::from(source_id);
+        let source_id = source_id.clone();
         let pending = match declaration_family {
             interception::ActivationDeclarationFamily::ProviderModels => {
                 &mut self.extensions.pending_provider_model_declarations
@@ -12410,7 +12543,7 @@ impl Harness {
             pending.remove(&source_id);
         }
         if self.pending_publish_error.is_none()
-            && let Err(error) = self.maybe_finish_extension_activation(source_id.as_str())
+            && let Err(error) = self.maybe_finish_extension_activation(Some(&source_id))
         {
             self.pending_publish_error = Some(error);
         }
@@ -12424,7 +12557,11 @@ impl Harness {
         }
     }
 
-    fn handle_extension_action_event(&mut self, source_id: &str, event: Event) -> Option<Event> {
+    fn handle_extension_action_event(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        event: Event,
+    ) -> Option<Event> {
         match event {
             Event::ActionSchemaPublished(published) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -12449,7 +12586,7 @@ impl Harness {
 
     fn handle_extension_tool_unregister(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         publisher_extension_id: ExtensionName,
         publisher_instance_id: tau_proto::ExtensionInstanceId,
         unregister: tau_proto::ToolUnregistrationDeclared,
@@ -12464,7 +12601,7 @@ impl Harness {
                 .registry
                 .providers_for(unregister.tool_name.as_str())
                 .into_iter()
-                .find(|provider| provider.connection_id.as_str() == source_id)
+                .find(|provider| provider.connection_id == *source_id)
                 .map(|provider| self.tool_model_visible_name(&provider.tool).clone())
                 .unwrap_or_else(|| unregister.tool_name.clone());
             let removed = self
@@ -12482,7 +12619,7 @@ impl Harness {
                     );
                 }
                 self.publish_event(
-                    Some(HARNESS_CONNECTION_ID),
+                    Some(crate::harness::harness_connection_id()),
                     Event::ToolUnregister(tau_proto::ToolUnregister {
                         publisher_extension_id,
                         publisher_instance_id,
@@ -12532,9 +12669,13 @@ impl Harness {
         let event = Event::ToolRejected(rejected);
         match owning_cid.as_ref() {
             Some(cid) => {
-                self.publish_for_agent_from(cid, Some(HARNESS_CONNECTION_ID), event);
+                self.publish_for_agent_from(
+                    cid,
+                    Some(crate::harness::harness_connection_id()),
+                    event,
+                );
             }
-            None => self.publish_event(Some(HARNESS_CONNECTION_ID), event),
+            None => self.publish_event(Some(crate::harness::harness_connection_id()), event),
         }
         let error = ToolError {
             call_id: request.call_id,
@@ -12546,7 +12687,11 @@ impl Harness {
 
             display: None,
         };
-        self.publish_terminal_tool_error(owning_cid.as_ref(), Some(HARNESS_CONNECTION_ID), error);
+        self.publish_terminal_tool_error(
+            owning_cid.as_ref(),
+            Some(crate::harness::harness_connection_id()),
+            error,
+        );
         if owning_cid.is_none() {
             self.clear_tool_call_tracking(&call_id);
         }
@@ -12554,19 +12699,19 @@ impl Harness {
 
     fn handle_extension_tool_terminal_event(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         event: Event,
     ) -> Option<Event> {
         match event {
-            Event::ToolResult(result) if source_id == HARNESS_CONNECTION_ID => {
+            Event::ToolResult(result) if source_id == harness_connection_id() => {
                 self.handle_extension_tool_result(source_id, result);
                 None
             }
-            Event::ToolError(error) if source_id == HARNESS_CONNECTION_ID => {
+            Event::ToolError(error) if source_id == harness_connection_id() => {
                 self.handle_extension_tool_error(source_id, error);
                 None
             }
-            Event::ToolCancelled(cancelled) if source_id == HARNESS_CONNECTION_ID => {
+            Event::ToolCancelled(cancelled) if source_id == harness_connection_id() => {
                 self.handle_extension_tool_cancelled(source_id, cancelled);
                 None
             }
@@ -12586,7 +12731,7 @@ impl Harness {
             | Event::AgentMessageSent(_)
             | Event::AgentMessageReceived(_) => None,
             Event::ToolBackgroundResult(_) | Event::ToolBackgroundError(_)
-                if source_id != HARNESS_CONNECTION_ID =>
+                if source_id != harness_connection_id() =>
             {
                 None
             }
@@ -12594,12 +12739,16 @@ impl Harness {
         }
     }
 
-    fn handle_extension_tool_result(&mut self, source_id: &str, mut result: ToolResult) {
+    fn handle_extension_tool_result(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        mut result: ToolResult,
+    ) {
         if !self.validate_tool_event_source(&result.call_id, source_id) {
             return;
         }
         if self.tool_turn.is_backgrounded(&result.call_id) {
-            self.handle_background_tool_result(HARNESS_CONNECTION_ID, result);
+            self.handle_background_tool_result(crate::harness::harness_connection_id(), result);
         } else if let Some(cid) = self.tool_agents.get(&result.call_id).cloned() {
             let call_id = result.call_id.clone();
             let mut allows_provider_image = false;
@@ -12627,7 +12776,9 @@ impl Harness {
                         self.agent_store
                             .validate_agent_event_at(
                                 &agent_id,
-                                Some(HARNESS_CONNECTION_ID.into()),
+                                Some(tau_core::PersistedEventSource::Connection(
+                                    crate::harness::harness_connection_id().clone(),
+                                )),
                                 parent,
                                 &Event::ProviderToolResult(result.clone()),
                                 tau_proto::UnixMicros::now(),
@@ -12644,7 +12795,7 @@ impl Harness {
                 );
                 let journal_backed = self.publish_terminal_tool_error(
                     Some(&cid),
-                    Some(HARNESS_CONNECTION_ID),
+                    Some(crate::harness::harness_connection_id()),
                     ToolError {
                         call_id: result.call_id,
                         tool_name: result.tool_name,
@@ -12674,8 +12825,11 @@ impl Harness {
             // (during its teardown) leaves `tree.head` on the *parent* branch —
             // folding the result there misplaces it and produces orphan ToolUse
             // blocks when the parent conv is later re-prompted.
-            let journal_backed =
-                self.publish_terminal_tool_result(Some(&cid), Some(HARNESS_CONNECTION_ID), result);
+            let journal_backed = self.publish_terminal_tool_result(
+                Some(&cid),
+                Some(crate::harness::harness_connection_id()),
+                result,
+            );
             if !journal_backed {
                 self.on_tool_call_complete(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
@@ -12689,7 +12843,7 @@ impl Harness {
             if !result.provider_content.is_empty() {
                 self.publish_terminal_tool_error(
                     None,
-                    Some(HARNESS_CONNECTION_ID),
+                    Some(crate::harness::harness_connection_id()),
                     ToolError {
                         call_id: result.call_id,
                         tool_name: result.tool_name,
@@ -12701,7 +12855,11 @@ impl Harness {
                     },
                 );
             } else {
-                self.publish_terminal_tool_result(None, Some(HARNESS_CONNECTION_ID), result);
+                self.publish_terminal_tool_result(
+                    None,
+                    Some(crate::harness::harness_connection_id()),
+                    result,
+                );
             }
             self.clear_tool_call_tracking(&call_id);
         } else {
@@ -12712,12 +12870,16 @@ impl Harness {
         }
     }
 
-    fn handle_extension_tool_error(&mut self, source_id: &str, mut error: ToolError) {
+    fn handle_extension_tool_error(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        mut error: ToolError,
+    ) {
         if !self.validate_tool_event_source(&error.call_id, source_id) {
             return;
         }
         if self.tool_turn.is_backgrounded(&error.call_id) {
-            self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), error);
+            self.handle_background_tool_error(Some(crate::harness::harness_connection_id()), error);
         } else if let Some(cid) = self.tool_agents.get(&error.call_id).cloned() {
             let call_id = error.call_id.clone();
             if let Some(tool) = self.pending_tools.get(&error.call_id) {
@@ -12725,8 +12887,11 @@ impl Harness {
                 error.tool_type = tool.tool_type;
             }
             self.dedup_tool_error(&cid, &mut error);
-            let journal_backed =
-                self.publish_terminal_tool_error(Some(&cid), Some(HARNESS_CONNECTION_ID), error);
+            let journal_backed = self.publish_terminal_tool_error(
+                Some(&cid),
+                Some(crate::harness::harness_connection_id()),
+                error,
+            );
             if !journal_backed {
                 self.on_tool_call_complete(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
@@ -12737,7 +12902,11 @@ impl Harness {
             let call_id = error.call_id.to_string();
             error.tool_name = tool.name;
             error.tool_type = tool.tool_type;
-            self.publish_terminal_tool_error(None, Some(HARNESS_CONNECTION_ID), error);
+            self.publish_terminal_tool_error(
+                None,
+                Some(crate::harness::harness_connection_id()),
+                error,
+            );
             self.clear_tool_call_tracking(&call_id);
         } else {
             self.emit_info(&format!(
@@ -12747,12 +12916,19 @@ impl Harness {
         }
     }
 
-    fn handle_extension_tool_cancelled(&mut self, source_id: &str, mut cancelled: ToolCancelled) {
+    fn handle_extension_tool_cancelled(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        mut cancelled: ToolCancelled,
+    ) {
         if !self.validate_tool_event_source(&cancelled.call_id, source_id) {
             return;
         }
         if self.tool_turn.is_backgrounded(&cancelled.call_id) {
-            self.handle_background_tool_cancelled(HARNESS_CONNECTION_ID, cancelled);
+            self.handle_background_tool_cancelled(
+                crate::harness::harness_connection_id(),
+                cancelled,
+            );
         } else if let Some(cid) = self.tool_agents.get(&cancelled.call_id).cloned() {
             let call_id = cancelled.call_id.clone();
             if let Some(tool) = self.pending_tools.get(&cancelled.call_id) {
@@ -12770,11 +12946,14 @@ impl Harness {
                 self.observe_tool_terminal(&cid, &call_id, cause);
                 self.publish_for_agent_from(
                     &cid,
-                    Some(HARNESS_CONNECTION_ID),
+                    Some(crate::harness::harness_connection_id()),
                     Event::ToolCancelled(cancelled),
                 );
             } else {
-                self.publish_event(Some(HARNESS_CONNECTION_ID), Event::ToolCancelled(cancelled));
+                self.publish_event(
+                    Some(crate::harness::harness_connection_id()),
+                    Event::ToolCancelled(cancelled),
+                );
                 self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]), None);
                 self.on_tool_call_complete(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
@@ -12785,7 +12964,10 @@ impl Harness {
             let call_id = cancelled.call_id.to_string();
             cancelled.tool_name = tool.name;
             cancelled.tool_type = tool.tool_type;
-            self.publish_event(Some(HARNESS_CONNECTION_ID), Event::ToolCancelled(cancelled));
+            self.publish_event(
+                Some(crate::harness::harness_connection_id()),
+                Event::ToolCancelled(cancelled),
+            );
             self.clear_tool_call_tracking(&call_id);
         }
     }
@@ -12813,18 +12995,22 @@ impl Harness {
                         && extension.admission.session_id == self.current_session_id
                         && extension.admission.session_generation == self.current_session_generation
                         && entry.instance_id == extension.instance_id
-                        && entry.name == extension.publisher.as_str()
+                        && entry.name == extension.publisher
                         && entry.kind == extension.kind
                         && entry.state != ExtensionState::Disconnected
                 });
         if !source_is_current {
             return;
         }
-        self.canonicalize_committed_shell_command_report(extension.source.as_str(), event.clone());
+        self.canonicalize_committed_shell_command_report(&extension.source, event.clone());
     }
 
     /// Validate routed-command ownership and publish one canonical shell fact.
-    fn canonicalize_committed_shell_command_report(&mut self, source_id: &str, event: Event) {
+    fn canonicalize_committed_shell_command_report(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        event: Event,
+    ) {
         match event {
             Event::ShellCommandProgressReported(progress) => {
                 let mut progress = progress;
@@ -12833,18 +13019,18 @@ impl Harness {
                     tracing::warn!(
                         target: "tau_harness",
                         command_id = %progress.command_id,
-                        source_id,
+                        source_id = %source_id,
                         "discarding stale or unknown shell command progress"
                     );
                     return;
                 };
-                if pending.provider_id.as_str() != source_id
+                if &pending.provider_id != source_id
                     || progress.target_agent_id != pending.command.target_agent_id
                 {
                     tracing::warn!(
                         target: "tau_harness",
                         command_id = %progress.command_id,
-                        source_id,
+                        source_id = %source_id,
                         expected_provider = %pending.provider_id,
                         "discarding shell command progress with invalid ownership or identity"
                     );
@@ -12856,7 +13042,7 @@ impl Harness {
                     self.mark_pending_ephemeral_shell_canonical(progress.command_id.clone());
                 }
                 self.publish_event(
-                    Some(HARNESS_CONNECTION_ID),
+                    Some(crate::harness::harness_connection_id()),
                     Event::ShellCommandProgress(progress),
                 );
             }
@@ -12867,13 +13053,13 @@ impl Harness {
                     tracing::warn!(
                         target: "tau_harness",
                         command_id = %finished.command_id,
-                        source_id,
+                        source_id = %source_id,
                         "discarding stale or duplicate shell command completion"
                     );
                     return;
                 };
                 let command = &pending.command;
-                if pending.provider_id.as_str() != source_id
+                if &pending.provider_id != source_id
                     || finished.session_id != command.session_id
                     || finished.command != command.command
                     || finished.include_in_context != command.include_in_context
@@ -12882,7 +13068,7 @@ impl Harness {
                     tracing::warn!(
                         target: "tau_harness",
                         command_id = %finished.command_id,
-                        source_id,
+                        source_id = %source_id,
                         expected_provider = %pending.provider_id,
                         "discarding shell command completion with invalid ownership or identity"
                     );
@@ -12904,7 +13090,7 @@ impl Harness {
                 // The canonical completion commits before any transcript
                 // injection, so the UI always finalizes its render block first.
                 self.publish_event(
-                    Some(HARNESS_CONNECTION_ID),
+                    Some(crate::harness::harness_connection_id()),
                     Event::ShellCommandFinished(finished),
                 );
             }
@@ -12916,7 +13102,7 @@ impl Harness {
     /// session across activation staging.
     fn handle_extension_fallback_event_with_admission(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         event: Event,
         persist_override: Option<bool>,
         admission: ExtensionFrameAdmission,
@@ -12933,7 +13119,7 @@ impl Harness {
     /// frame-admission metadata.
     fn handle_extension_fallback_event_with_optional_admission(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         event: Event,
         persist_override: Option<bool>,
         admission: Option<ExtensionFrameAdmission>,
@@ -12962,7 +13148,7 @@ impl Harness {
     /// harness-authored live publication.
     fn handle_extension_notice_request(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         request: tau_proto::ExtensionNoticeRequest,
     ) {
         let authorized = self
@@ -12979,7 +13165,7 @@ impl Harness {
             request.level
         };
         self.enqueue_publish(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::HarnessNotice(tau_proto::HarnessNotice {
                 kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
                 message: request.message,
@@ -12992,13 +13178,13 @@ impl Harness {
         );
     }
 
-    fn is_ui_client(&self, client_id: &str) -> bool {
+    fn is_ui_client(&self, client_id: &tau_proto::ConnectionId) -> bool {
         self.bus
             .connection(client_id)
             .is_some_and(|connection| connection.kind == ClientKind::Ui)
     }
 
-    fn is_attached_socket_ui(&self, client_id: &str) -> bool {
+    fn is_attached_socket_ui(&self, client_id: &tau_proto::ConnectionId) -> bool {
         self.bus.connection(client_id).is_some_and(|connection| {
             connection.kind == ClientKind::Ui && connection.origin == ConnectionOrigin::Socket
         }) && !self.external_message_peers.contains(client_id)
@@ -13006,7 +13192,7 @@ impl Harness {
 
     fn enqueue_attached_socket_ui_publish(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         event: Event,
         persist_override: Option<bool>,
     ) {
@@ -13018,7 +13204,7 @@ impl Harness {
 
     fn handle_client_message(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         message: HarnessInputMessage,
     ) -> Result<bool, HarnessError> {
         match message {
@@ -13036,8 +13222,7 @@ impl Harness {
                 if hello.client_kind == ClientKind::External
                     && hello.client_name.as_str() == EXTERNAL_AGENT_MESSAGE_CLIENT_NAME
                 {
-                    self.external_message_peers
-                        .insert(tau_proto::ConnectionId::from(client_id));
+                    self.external_message_peers.insert(client_id.clone());
                 }
                 Ok(true)
             }
@@ -13112,16 +13297,12 @@ impl Harness {
                 Ok(true)
             }
             HarnessInputMessage::ExternalAgentMessage(request) => {
-                if !self
-                    .external_message_peers
-                    .contains(&tau_proto::ConnectionId::from(client_id))
-                {
+                if !self.external_message_peers.contains(&client_id.clone()) {
                     return Ok(true);
                 }
-                if let Some(result) = self.start_external_agent_message_auth(
-                    tau_proto::ConnectionId::from(client_id),
-                    request,
-                ) {
+                if let Some(result) =
+                    self.start_external_agent_message_auth(client_id.clone(), request)
+                {
                     let _ = self.bus.send_to(
                         client_id,
                         None,
@@ -13131,10 +13312,7 @@ impl Harness {
                 Ok(true)
             }
             HarnessInputMessage::ExternalAgentMessageAuth(request) => {
-                if !self
-                    .external_message_peers
-                    .contains(&tau_proto::ConnectionId::from(client_id))
-                {
+                if !self.external_message_peers.contains(&client_id.clone()) {
                     return Ok(true);
                 }
                 let result = self.handle_external_agent_message_auth_request(request);
@@ -13146,10 +13324,7 @@ impl Harness {
                 Ok(true)
             }
             HarnessInputMessage::PeerSessionProbe(request) => {
-                if !self
-                    .external_message_peers
-                    .contains(&tau_proto::ConnectionId::from(client_id))
-                {
+                if !self.external_message_peers.contains(&client_id.clone()) {
                     return Ok(true);
                 }
                 let result = tau_proto::PeerSessionProbeResult {
@@ -13188,7 +13363,7 @@ impl Harness {
     #[cfg(test)]
     fn handle_client_event_inner(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         event: Event,
     ) -> Result<bool, HarnessError> {
         self.handle_client_event_inner_with_persist(client_id, event, None)
@@ -13196,7 +13371,7 @@ impl Harness {
 
     fn handle_client_event_inner_with_persist(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         event: Event,
         persist_override: Option<bool>,
     ) -> Result<bool, HarnessError> {
@@ -13238,7 +13413,7 @@ impl Harness {
 
     fn handle_client_ui_event(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         event: Event,
     ) -> Result<(bool, Option<Event>), HarnessError> {
         match event {
@@ -13294,12 +13469,11 @@ impl Harness {
             }
             Event::UiSetAgentNavigationMode(req) => {
                 let is_ui = self.bus.connections().iter().any(|connection| {
-                    connection.id.as_str() == client_id
-                        && connection.kind == tau_proto::ClientKind::Ui
+                    connection.id == **client_id && connection.kind == tau_proto::ClientKind::Ui
                 }) && !self
                     .external_message_peers
                     .iter()
-                    .any(|connection_id| connection_id.as_str() == client_id);
+                    .any(|connection_id| connection_id == client_id);
                 if is_ui {
                     self.handle_set_agent_navigation_mode(client_id, req);
                 }
@@ -13315,14 +13489,10 @@ impl Harness {
 
     fn next_ui_shell_route_id(&mut self) -> UiShellRouteId {
         loop {
-            let route_id = UiShellRouteId::new(
-                tau_proto::ShellCommandId::parse(format!(
-                    "harness-shell-{:016x}{:016x}",
-                    self.ui_shell_route_rng.next_u64(),
-                    self.ui_shell_route_rng.next_u64()
-                ))
-                .expect("Tau-generated shell command id must be valid"),
-            );
+            let route_id = UiShellRouteId::new(shell_route_id(
+                self.ui_shell_route_rng.next_u64(),
+                self.ui_shell_route_rng.next_u64(),
+            ));
             if !self.pending_ui_shell_commands.contains_key(&route_id)
                 && !self.ephemeral_ui_shell_route_ids.contains(&route_id)
             {
@@ -13331,12 +13501,11 @@ impl Harness {
         }
     }
 
-    fn handle_ui_shell_command(&mut self, client_id: &str, mut command: tau_proto::UiShellCommand) {
-        let command_id_len = command.command_id.as_str().len();
-        if command_id_len == 0 || command_id_len > MAX_UI_SHELL_COMMAND_ID_BYTES {
-            self.emit_info("discarding empty or oversized shell command id");
-            return;
-        }
+    fn handle_ui_shell_command(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        mut command: tau_proto::UiShellCommand,
+    ) {
         if self
             .active_ui_shell_command_ids
             .contains(&command.command_id)
@@ -13353,7 +13522,7 @@ impl Harness {
             .filter(|connection| connection.kind == ClientKind::Ui)
         {
             let _ = self.bus.send_to(
-                ui.id.as_str(),
+                &ui.id,
                 Some(client_id),
                 HarnessOutputMessage::deliver(Event::UiShellCommand(command.clone())),
             );
@@ -13407,7 +13576,7 @@ impl Harness {
         let mut provider_command = command.clone();
         provider_command.command_id = route_id.as_protocol_id().clone();
         let delivered = self.bus.send_to(
-            provider.as_str(),
+            &provider,
             Some(client_id),
             HarnessOutputMessage::deliver(Event::UiShellCommand(provider_command)),
         );
@@ -13432,11 +13601,15 @@ impl Harness {
         );
     }
 
-    fn fail_pending_ui_shell_commands_for_provider(&mut self, provider_id: &str, reason: &str) {
+    fn fail_pending_ui_shell_commands_for_provider(
+        &mut self,
+        provider_id: &tau_proto::ConnectionId,
+        reason: &str,
+    ) {
         let failed = self
             .pending_ui_shell_commands
             .iter()
-            .filter(|(_, pending)| pending.provider_id.as_str() == provider_id)
+            .filter(|(_, pending)| &pending.provider_id == provider_id)
             .map(|(command_id, _)| command_id.clone())
             .collect::<Vec<_>>();
         for command_id in failed {
@@ -13468,7 +13641,7 @@ impl Harness {
             self.mark_pending_ephemeral_shell_canonical(command.command_id.clone());
         }
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
                 command_id: command.command_id,
                 session_id: command.session_id,
@@ -13484,7 +13657,7 @@ impl Harness {
 
     fn handle_ui_debug_event_stats_request(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         request: tau_proto::UiDebugEventStatsRequest,
     ) {
         if !self.is_attached_socket_ui(client_id) {
@@ -13547,7 +13720,7 @@ impl Harness {
 
     fn send_direct_harness_notice(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         kind: &str,
         level: tau_proto::NoticeLevel,
         always_show: bool,
@@ -13565,7 +13738,7 @@ impl Harness {
 
     fn handle_client_fallback_event(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         event: Event,
         persist_override: Option<bool>,
     ) {
@@ -14023,7 +14196,7 @@ impl Harness {
 
     fn handle_ui_switch_session(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         req: tau_proto::UiSwitchSession,
     ) -> Result<bool, HarnessError> {
         self.publish_event(Some(client_id), Event::UiSwitchSession(req.clone()));
@@ -14138,7 +14311,7 @@ impl Harness {
 
     fn handle_ui_tree_request(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         tau_proto::UiTreeRequest {
             session_id,
             target_agent_id,
@@ -14159,7 +14332,7 @@ impl Harness {
 
     fn handle_ui_navigate_tree(
         &mut self,
-        _client_id: &str,
+        _client_id: &tau_proto::ConnectionId,
         req: tau_proto::UiNavigateTree,
     ) -> Result<bool, HarnessError> {
         // Validate the requested target against *this* harness's bound
@@ -14182,7 +14355,7 @@ impl Harness {
 
     fn handle_ui_compact_request(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         req: tau_proto::UiCompactRequest,
     ) -> Result<bool, HarnessError> {
         self.publish_event(Some(client_id), Event::UiCompactRequest(req.clone()));
@@ -14388,7 +14561,11 @@ impl Harness {
         self.apply_pending_cancel_for_agent(&cid);
     }
 
-    fn handle_retry_prompt(&mut self, client_id: &str, req: tau_proto::UiRetryPrompt) {
+    fn handle_retry_prompt(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        req: tau_proto::UiRetryPrompt,
+    ) {
         const RETRY_TOMBSTONE_LIMIT: usize = 1024;
         const PENDING_RETRY_LIMIT: usize = 1024;
         let reject = |this: &mut Self, target_agent_id, label: String, message: &str| {
@@ -14476,7 +14653,7 @@ impl Harness {
         };
         if self.pending_retry_prompts.len() >= PENDING_RETRY_LIMIT
             || self.pending_retry_prompts.values().any(|pending| {
-                pending.requester_client_id.as_str() == client_id
+                pending.requester_client_id == **client_id
                     && pending.agent_prompt_id == agent_prompt_id
             })
         {
@@ -14498,7 +14675,7 @@ impl Harness {
         let delivered = self
             .bus
             .send_to(
-                provider_connection_id.as_str(),
+                &provider_connection_id,
                 Some(client_id),
                 HarnessOutputMessage::deliver(targeted),
             )
@@ -14521,7 +14698,7 @@ impl Harness {
             PendingRetryPrompt {
                 ui_request_id: req.request_id,
                 provider_connection_id,
-                requester_client_id: client_id.into(),
+                requester_client_id: client_id.clone(),
                 agent_prompt_id,
                 target_agent_id,
                 target_label,
@@ -14746,7 +14923,7 @@ impl Harness {
         let mut foreground_call_ids = Vec::new();
         for target in to_cancel {
             self.publish_event(
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 Event::ToolCancelRequest(tau_proto::ToolCancelRequest {
                     target_call_id: target.call_id.clone(),
                 }),
@@ -14797,7 +14974,10 @@ impl Harness {
                 );
                 self.publish_for_agent(cid, Event::ToolCancelled(cancelled));
             } else {
-                self.publish_event(Some(HARNESS_CONNECTION_ID), Event::ToolCancelled(cancelled));
+                self.publish_event(
+                    Some(crate::harness::harness_connection_id()),
+                    Event::ToolCancelled(cancelled),
+                );
                 self.record_wait_tool_cancelled(&HashSet::from([call_id.clone()]), None);
                 self.finish_tool_call_runtime_state(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
@@ -14884,7 +15064,7 @@ impl Harness {
             originator: PromptOriginator::User,
         };
         self.handle_background_tool_error_inner(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             error,
             completion_prompt_mode,
             tau_proto::ToolTerminalCause::LifecycleTeardown,
@@ -14938,7 +15118,7 @@ impl Harness {
             );
         }
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::ToolCancelRequest(tau_proto::ToolCancelRequest { target_call_id }),
         );
         Ok(())
@@ -14968,7 +15148,7 @@ impl Harness {
                 if conv.parent_tool_call_id.as_ref() != Some(target_call_id) {
                     return None;
                 }
-                conv.source_connection.as_ref().map(|id| id.to_string())
+                conv.source_connection.clone()
             });
         }
         let Some(source_id) = source_id else {
@@ -14985,11 +15165,14 @@ impl Harness {
             text: String::new(),
             error: Some("Tool call canceled".to_owned()),
         };
-        if source_id == HARNESS_CONNECTION_ID {
-            self.publish_event(Some(HARNESS_CONNECTION_ID), Event::StartAgentResult(result));
+        if &source_id == harness_connection_id() {
+            self.publish_event(
+                Some(crate::harness::harness_connection_id()),
+                Event::StartAgentResult(result),
+            );
         } else {
             let _ = self.bus.send_to(
-                source_id.as_str(),
+                &source_id,
                 None,
                 HarnessOutputMessage::deliver(Event::StartAgentResult(result)),
             );
@@ -15074,8 +15257,8 @@ impl Harness {
         self.try_advance_queue();
     }
 
-    fn remove_extension_context_for_connection(&mut self, connection_id: &str) {
-        let disconnected = tau_proto::ConnectionId::from(connection_id);
+    fn remove_extension_context_for_connection(&mut self, connection_id: &tau_proto::ConnectionId) {
+        let disconnected = connection_id.clone();
         self.extension_prompt_fragments.remove(&disconnected);
         self.agent_context.remove_contributor(&disconnected);
         self.agent_context_providers.remove(&disconnected);
@@ -15110,7 +15293,11 @@ impl Harness {
         self.agent_context_initialized.clear();
     }
 
-    fn disable_optional_extension(&mut self, connection_id: &str, message: &str) {
+    fn disable_optional_extension(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+        message: &str,
+    ) {
         if let Some(entry) = self.extensions.entries.get_mut(connection_id) {
             entry.respawn_allowed = false;
         }
@@ -15118,12 +15305,12 @@ impl Harness {
         self.handle_disconnect(connection_id);
     }
 
-    fn handle_disconnect(&mut self, connection_id: &str) {
+    fn handle_disconnect(&mut self, connection_id: &tau_proto::ConnectionId) {
         self.handle_disconnect_at(connection_id, Instant::now());
     }
 
     /// Stop routing immediately and begin supervised cleanup against `now`.
-    fn handle_disconnect_at(&mut self, connection_id: &str, now: Instant) {
+    fn handle_disconnect_at(&mut self, connection_id: &tau_proto::ConnectionId, now: Instant) {
         let meta = self.bus.connection(connection_id).cloned();
         let is_extension = meta.as_ref().is_some_and(|meta| {
             meta.origin == ConnectionOrigin::Supervised || meta.origin == ConnectionOrigin::InMemory
@@ -15145,7 +15332,7 @@ impl Harness {
             .entries
             .get(connection_id)
             .filter(|entry| entry.kind == ClientKind::Provider)
-            .map(|entry| tau_proto::ExtensionName::from(entry.name.clone()));
+            .map(|entry| entry.name.clone());
         if let Some(publisher_extension_id) = disconnected_provider
             && self
                 .provider_models_by_extension
@@ -15153,7 +15340,7 @@ impl Harness {
             && !self.clear_parked_provider_model_updates(&publisher_extension_id)
         {
             self.publish_event(
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 Event::ProviderModelsUpdated(tau_proto::ProviderModelsUpdated {
                     publisher_extension_id,
                     models: Vec::new(),
@@ -15184,7 +15371,7 @@ impl Harness {
         // readiness and dispatch a prompt snapshot.
         self.remove_extension_context_for_connection(connection_id);
         self.suspended_interceptor_connections
-            .remove(&tau_proto::ConnectionId::from(connection_id));
+            .remove(&connection_id.clone());
         self.interceptors.remove_connection(connection_id);
         self.fail_pending_intercept_for_disconnect(connection_id);
         if is_extension {
@@ -15196,13 +15383,13 @@ impl Harness {
         let failed_retries: Vec<_> = self
             .pending_retry_prompts
             .iter()
-            .filter(|(_, pending)| pending.provider_connection_id.as_str() == connection_id)
+            .filter(|(_, pending)| pending.provider_connection_id == *connection_id)
             .map(|(id, pending)| (id.clone(), pending.clone()))
             .collect();
         for (request_id, pending) in failed_retries {
             self.pending_retry_prompts.remove(&request_id);
             let _ = self.bus.send_to(
-                pending.requester_client_id.as_str(),
+                &pending.requester_client_id,
                 None,
                 HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
                     tau_proto::UiRetryPromptResult {
@@ -15216,18 +15403,16 @@ impl Harness {
             );
         }
         self.pending_retry_prompts
-            .retain(|_, pending| pending.requester_client_id.as_str() != connection_id);
+            .retain(|_, pending| &pending.requester_client_id != connection_id);
         self.fail_pending_ui_shell_commands_for_provider(
             connection_id,
             "the shell extension instance disconnected before the command completed",
         );
         let completed_foreground_calls = self.fail_pending_tool_calls_for_connection(connection_id);
         self.pending_provider_prompts
-            .retain(|_, provider_id| provider_id.as_str() != connection_id);
-        self.client_writers
-            .remove(&tau_proto::ConnectionId::from(connection_id));
-        self.external_message_peers
-            .remove(&tau_proto::ConnectionId::from(connection_id));
+            .retain(|_, provider_id| provider_id != connection_id);
+        self.client_writers.remove(&connection_id.clone());
+        self.external_message_peers.remove(&connection_id.clone());
         let canceled_peer_receives = self
             .pending_external_receive_acks
             .iter()
@@ -15235,7 +15420,7 @@ impl Harness {
                 matches!(
                     &pending.completion,
                     PendingPeerReceiveCompletion::Remote { client_id, .. }
-                        if client_id.as_str() == connection_id
+                        if client_id == connection_id
                 )
                 .then_some((
                     message_id.clone(),
@@ -15260,7 +15445,7 @@ impl Harness {
             .retain(|message_id, _| !canceled_message_ids.contains(message_id));
         if let Some(cancellations) = self
             .inbound_peer_io_cancellations
-            .remove(&tau_proto::ConnectionId::from(connection_id))
+            .remove(&connection_id.clone())
         {
             for cancellation in cancellations {
                 if let Some(cancellation) = cancellation.upgrade() {
@@ -15271,7 +15456,7 @@ impl Harness {
         let removed_providers = self
             .provider_quota
             .iter()
-            .filter(|(_, quota)| quota.source_id.as_str() == connection_id)
+            .filter(|(_, quota)| quota.source_id == *connection_id)
             .map(|(provider, _)| provider.clone())
             .collect::<Vec<_>>();
         for provider in removed_providers {
@@ -15312,8 +15497,12 @@ impl Harness {
     }
 
     /// Arm one absolute disconnect-to-kill deadline for a retained writer.
-    fn begin_supervised_cleanup_at(&mut self, connection_id: &str, now: Instant) {
-        let connection_id = tau_proto::ConnectionId::from(connection_id);
+    fn begin_supervised_cleanup_at(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+        now: Instant,
+    ) {
+        let connection_id = connection_id.clone();
         if let Some(writer) = self.extensions.supervised_writers.get(&connection_id) {
             let deadline = now + SUPERVISED_CLEANUP_GRACE;
             writer.arm_cleanup_deadline(deadline);
@@ -15327,10 +15516,10 @@ impl Harness {
     /// Join a reaped writer and make its disconnected tool eligible for delay.
     fn handle_supervised_writer_cleanup_complete_at(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         now: Instant,
     ) -> Result<(), HarnessError> {
-        let connection_id = tau_proto::ConnectionId::from(connection_id);
+        let connection_id = connection_id.clone();
         self.extensions.cleanup_deadlines.remove(&connection_id);
         let Some(mut writer) = self.extensions.supervised_writers.remove(&connection_id) else {
             return Ok(());
@@ -15339,9 +15528,11 @@ impl Harness {
             .extensions
             .entries
             .get(&connection_id)
-            .map(|entry| entry.name.clone())
+            .map(|entry| entry.name.to_string())
             .unwrap_or_else(|| connection_id.to_string());
-        writer.join().map_err(|_| HarnessError::ThreadJoin(name))?;
+        writer
+            .join()
+            .map_err(|_| HarnessError::ThreadJoin(name.to_string()))?;
         if self
             .extensions
             .entries
@@ -15354,8 +15545,12 @@ impl Harness {
     }
 
     /// Schedule one session-budgeted tool replacement, or disable it at cap.
-    fn schedule_extension_restart_at(&mut self, connection_id: &str, now: Instant) {
-        let connection_id = tau_proto::ConnectionId::from(connection_id);
+    fn schedule_extension_restart_at(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+        now: Instant,
+    ) {
+        let connection_id = connection_id.clone();
         let Some(entry) = self.extensions.entries.get_mut(&connection_id) else {
             return;
         };
@@ -15423,7 +15618,10 @@ impl Harness {
         }
     }
 
-    fn unregister_connection_tools_for_disconnect(&mut self, connection_id: &str) {
+    fn unregister_connection_tools_for_disconnect(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+    ) {
         let removing_tools: Vec<(ToolName, ToolName)> = self
             .registry
             .all_tool_names()
@@ -15432,7 +15630,7 @@ impl Harness {
                 self.registry
                     .providers_for(tool_name.as_str())
                     .into_iter()
-                    .find(|provider| provider.connection_id.as_str() == connection_id)
+                    .find(|provider| provider.connection_id == *connection_id)
                     .map(|provider| {
                         (
                             tool_name.clone(),
@@ -15454,7 +15652,7 @@ impl Harness {
         }
     }
 
-    fn is_provider_extension(&self, connection_id: &str) -> bool {
+    fn is_provider_extension(&self, connection_id: &tau_proto::ConnectionId) -> bool {
         self.extensions
             .entries
             .get(connection_id)
@@ -15463,7 +15661,7 @@ impl Harness {
 
     fn accepts_provider_event_from(
         &self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         event_name: &tau_proto::EventName,
     ) -> bool {
         match self.bus.connection(source_id) {
@@ -15472,7 +15670,7 @@ impl Harness {
                 tracing::warn!(
                     target: "tau_harness",
                     event = %event_name,
-                    source_id,
+                    source_id = %source_id,
                     kind = ?metadata.kind,
                     "discarding provider event from non-provider connection"
                 );
@@ -15482,7 +15680,7 @@ impl Harness {
                 tracing::warn!(
                     target: "tau_harness",
                     event = %event_name,
-                    source_id,
+                    source_id = %source_id,
                     "discarding provider event from unknown connection"
                 );
                 false
@@ -15492,19 +15690,19 @@ impl Harness {
 
     fn provider_prompt_owner_matches(
         &self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         agent_prompt_id: &AgentPromptId,
         event_name: tau_proto::EventName,
     ) -> bool {
         match self.pending_provider_prompts.get(agent_prompt_id) {
-            Some(expected) if expected.as_str() == source_id => true,
+            Some(expected) if *expected.as_str() == **source_id => true,
             Some(expected) => {
                 tracing::warn!(
                     target: "tau_harness",
                     event = %event_name,
                     agent_prompt_id = %agent_prompt_id,
                     expected_provider = %expected,
-                    source_id,
+                    source_id = %source_id,
                     "discarding provider event from non-owning provider"
                 );
                 false
@@ -15514,7 +15712,7 @@ impl Harness {
                     target: "tau_harness",
                     event = %event_name,
                     agent_prompt_id = %agent_prompt_id,
-                    source_id,
+                    source_id = %source_id,
                     "discarding provider event for prompt without a pending provider route"
                 );
                 false
@@ -15524,13 +15722,13 @@ impl Harness {
 
     fn fail_pending_tool_calls_for_connection(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
     ) -> Vec<(ToolCallId, AgentId)> {
         let mut failed_call_ids: Vec<ToolCallId> = self
             .pending_tool_providers
             .iter()
             .filter_map(|(call_id, provider_id)| {
-                if provider_id.as_str() == connection_id {
+                if provider_id == connection_id {
                     Some(call_id.clone())
                 } else {
                     None
@@ -15575,13 +15773,17 @@ impl Harness {
                 error.message = extension_disconnected_background_tool_call_error_message(&call_id);
                 if self.tool_agents.contains_key(call_id.as_str()) {
                     self.handle_background_tool_error_inner(
-                        Some(HARNESS_CONNECTION_ID),
+                        Some(crate::harness::harness_connection_id()),
                         error,
                         BackgroundCompletionPromptMode::QueueOnly,
                         tau_proto::ToolTerminalCause::ProviderDisconnected,
                     );
                 } else {
-                    self.publish_terminal_tool_error(None, Some(HARNESS_CONNECTION_ID), error);
+                    self.publish_terminal_tool_error(
+                        None,
+                        Some(crate::harness::harness_connection_id()),
+                        error,
+                    );
                     self.tool_turn.mark_complete(&call_id);
                     self.clear_tool_call_tracking(call_id.as_str());
                 }
@@ -15601,7 +15803,7 @@ impl Harness {
             if let Some(cid) = owner.as_ref() {
                 let journal_backed = self.publish_terminal_tool_error_with_cause(
                     Some(cid),
-                    Some(HARNESS_CONNECTION_ID),
+                    Some(crate::harness::harness_connection_id()),
                     error,
                     tau_proto::ToolTerminalCause::ProviderDisconnected,
                 );
@@ -15614,7 +15816,11 @@ impl Harness {
                 // No conversation attribution — fall back to the
                 // unsnapped publish so the error still reaches the
                 // bus / log.
-                self.publish_terminal_tool_error(None, Some(HARNESS_CONNECTION_ID), error);
+                self.publish_terminal_tool_error(
+                    None,
+                    Some(crate::harness::harness_connection_id()),
+                    error,
+                );
                 self.tool_turn.mark_complete(&call_id);
                 self.clear_tool_call_tracking(call_id.as_str());
             }
@@ -15625,14 +15831,14 @@ impl Harness {
 
     fn send_action_error_to_client(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         invocation_id: ActionInvocationId,
         action_id: String,
         message: String,
     ) {
         let _ = self.bus.send_to(
             client_id,
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             HarnessOutputMessage::deliver(Event::ActionError(ActionError {
                 invocation_id,
                 action_id,
@@ -15644,7 +15850,7 @@ impl Harness {
 
     fn handle_action_invoke(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         invoke: ActionInvoke,
     ) -> Result<bool, HarnessError> {
         if self
@@ -15699,7 +15905,7 @@ impl Harness {
         };
 
         match self.bus.send_to(
-            provider_connection_id.as_str(),
+            &provider_connection_id,
             Some(client_id),
             HarnessOutputMessage::deliver(Event::ActionInvoke(invoke.clone())),
         ) {
@@ -15708,7 +15914,7 @@ impl Harness {
                     invoke.invocation_id.clone(),
                     PendingActionInvocation {
                         provider_connection_id,
-                        requester_client_id: client_id.into(),
+                        requester_client_id: client_id.clone(),
                         action_id: invoke.action_id,
                     },
                 );
@@ -15745,7 +15951,7 @@ impl Harness {
         Ok(true)
     }
 
-    fn handle_action_result(&mut self, source_id: &str, result: ActionResult) {
+    fn handle_action_result(&mut self, source_id: &tau_proto::ConnectionId, result: ActionResult) {
         let Some(pending) = self
             .pending_action_invocations
             .get(&result.invocation_id)
@@ -15753,13 +15959,11 @@ impl Harness {
         else {
             return;
         };
-        if pending.provider_connection_id.as_str() != source_id
-            || pending.action_id != result.action_id
-        {
+        if pending.provider_connection_id != *source_id || pending.action_id != result.action_id {
             tracing::warn!(
                 target: "tau_harness",
                 invocation_id = %result.invocation_id,
-                source_id,
+                source_id = %source_id,
                 expected_provider = %pending.provider_connection_id,
                 expected_action = %pending.action_id,
                 action_id = %result.action_id,
@@ -15770,13 +15974,13 @@ impl Harness {
         self.pending_action_invocations
             .remove(&result.invocation_id);
         let _ = self.bus.send_to(
-            pending.requester_client_id.as_str(),
+            &pending.requester_client_id,
             Some(source_id),
             HarnessOutputMessage::deliver(Event::ActionResult(result)),
         );
     }
 
-    fn handle_action_error(&mut self, source_id: &str, error: ActionError) {
+    fn handle_action_error(&mut self, source_id: &tau_proto::ConnectionId, error: ActionError) {
         let Some(pending) = self
             .pending_action_invocations
             .get(&error.invocation_id)
@@ -15784,13 +15988,11 @@ impl Harness {
         else {
             return;
         };
-        if pending.provider_connection_id.as_str() != source_id
-            || pending.action_id != error.action_id
-        {
+        if pending.provider_connection_id != *source_id || pending.action_id != error.action_id {
             tracing::warn!(
                 target: "tau_harness",
                 invocation_id = %error.invocation_id,
-                source_id,
+                source_id = %source_id,
                 expected_provider = %pending.provider_connection_id,
                 expected_action = %pending.action_id,
                 action_id = %error.action_id,
@@ -15800,29 +16002,32 @@ impl Harness {
         }
         self.pending_action_invocations.remove(&error.invocation_id);
         let _ = self.bus.send_to(
-            pending.requester_client_id.as_str(),
+            &pending.requester_client_id,
             Some(source_id),
             HarnessOutputMessage::deliver(Event::ActionError(error)),
         );
     }
 
-    fn fail_pending_action_invocations_for_connection(&mut self, connection_id: &str) {
+    fn fail_pending_action_invocations_for_connection(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+    ) {
         let mut failed: Vec<_> = self
             .pending_action_invocations
             .iter()
             .filter_map(|(invocation_id, pending)| {
-                (pending.provider_connection_id.as_str() == connection_id)
+                (pending.provider_connection_id == *connection_id)
                     .then_some((invocation_id.clone(), pending.clone()))
             })
             .collect();
         failed.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
         for (invocation_id, pending) in failed {
             self.pending_action_invocations.remove(&invocation_id);
-            if pending.requester_client_id.as_str() == connection_id {
+            if &pending.requester_client_id == connection_id {
                 continue;
             }
             self.send_action_error_to_client(
-                pending.requester_client_id.as_str(),
+                &pending.requester_client_id,
                 invocation_id,
                 pending.action_id.clone(),
                 format!(
@@ -15832,12 +16037,12 @@ impl Harness {
             );
         }
         self.pending_action_invocations
-            .retain(|_, pending| pending.requester_client_id.as_str() != connection_id);
+            .retain(|_, pending| &pending.requester_client_id != connection_id);
     }
 
     fn try_respawn_supervised_extension(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
     ) -> Result<(), HarnessError> {
         let Some(entry) = self.extensions.entries.get_mut(connection_id) else {
             return Ok(());
@@ -15857,10 +16062,10 @@ impl Harness {
         let secrets = entry.secrets.clone();
         let tool_prefix = entry.tool_prefix.clone();
         self.publish_event(
-            Some("harness"),
+            Some(crate::harness::harness_connection_id()),
             Event::ExtensionRestarting(tau_proto::ExtensionRestarting {
                 instance_id,
-                extension_name: name.clone().into(),
+                extension_name: name.clone(),
                 pid: None,
                 attempt,
                 reason: Some("unexpected disconnect".to_owned()),
@@ -15889,7 +16094,7 @@ impl Harness {
             "extension respawned",
         );
 
-        let old_key = tau_proto::ConnectionId::from(connection_id);
+        let old_key = connection_id.clone();
         self.connect_extension(ExtensionConnectCommand {
             entry: ExtensionEntry {
                 name,
@@ -16005,10 +16210,16 @@ impl Harness {
         }
     }
 
-    fn validate_tool_event_source(&self, call_id: &ToolCallId, source_id: &str) -> bool {
+    fn validate_tool_event_source(
+        &self,
+        call_id: &ToolCallId,
+        source_id: &tau_proto::ConnectionId,
+    ) -> bool {
         match self.pending_tool_providers.get(call_id) {
-            Some(provider_id) => provider_id.as_str() == source_id,
-            None if self.is_harness_owned_tool_call(call_id) => source_id == HARNESS_CONNECTION_ID,
+            Some(provider_id) => provider_id == source_id,
+            None if self.is_harness_owned_tool_call(call_id) => {
+                source_id == harness_connection_id()
+            }
             None => true,
         }
     }
@@ -16105,19 +16316,40 @@ impl Harness {
     // Lifecycle helpers
     // -----------------------------------------------------------------------
 
-    fn find_extension_by_name(&self, name: &str) -> Option<&ExtensionEntry> {
-        self.extensions.entries.values().find(|e| e.name == name)
+    fn authenticated_source_name(
+        &self,
+        source_id: &tau_proto::ConnectionId,
+    ) -> Option<tau_proto::ExtensionName> {
+        if source_id == harness_connection_id() {
+            return Some(harness_extension_name().clone());
+        }
+        self.extensions
+            .entries
+            .get(source_id)
+            .map(|entry| entry.name.clone())
+            .or_else(|| {
+                self.bus
+                    .connection(source_id)
+                    .map(|metadata| metadata.name.clone())
+            })
     }
 
-    fn find_extension_by_connection(&self, connection_id: &str) -> Option<&ExtensionEntry> {
+    fn find_extension_by_name(&self, name: &tau_proto::ExtensionName) -> Option<&ExtensionEntry> {
+        self.extensions.entries.values().find(|e| &e.name == name)
+    }
+
+    fn find_extension_by_connection(
+        &self,
+        connection_id: &tau_proto::ConnectionId,
+    ) -> Option<&ExtensionEntry> {
         self.extensions.entries.get(connection_id)
     }
 
     fn publish_lifecycle_event(&mut self, event: Event) {
-        self.publish_event(Some("harness"), event);
+        self.publish_event(Some(crate::harness::harness_connection_id()), event);
     }
 
-    fn emit_extension_starting(&mut self, extension_name: &str) {
+    fn emit_extension_starting(&mut self, extension_name: &tau_proto::ExtensionName) {
         let (iid, pid) = self
             .find_extension_by_name(extension_name)
             .map(|e| (e.instance_id, e.pid))
@@ -16126,12 +16358,12 @@ impl Harness {
             .push(format!("extension {extension_name} starting"));
         self.publish_lifecycle_event(Event::ExtensionStarting(tau_proto::ExtensionStarting {
             instance_id: iid,
-            extension_name: extension_name.into(),
+            extension_name: extension_name.clone(),
             pid,
         }));
     }
 
-    fn emit_extension_ready(&mut self, connection_id: &str) {
+    fn emit_extension_ready(&mut self, connection_id: &tau_proto::ConnectionId) {
         let Some(ext) = self.find_extension_by_connection(connection_id) else {
             return;
         };
@@ -16142,12 +16374,12 @@ impl Harness {
             .push(format!("extension {name} ready"));
         self.publish_lifecycle_event(Event::ExtensionReady(tau_proto::ExtensionReady {
             instance_id: iid,
-            extension_name: name.into(),
+            extension_name: name,
             pid,
         }));
     }
 
-    fn emit_extension_exited(&mut self, extension_name: &str) {
+    fn emit_extension_exited(&mut self, extension_name: &tau_proto::ExtensionName) {
         let (iid, pid) = self
             .find_extension_by_name(extension_name)
             .map(|e| (e.instance_id, e.pid))
@@ -16156,7 +16388,7 @@ impl Harness {
             .push(format!("extension {extension_name} exited"));
         self.publish_lifecycle_event(Event::ExtensionExited(tau_proto::ExtensionExited {
             instance_id: iid,
-            extension_name: extension_name.into(),
+            extension_name: extension_name.clone(),
             pid,
             exit_code: None,
             signal: None,
@@ -16215,7 +16447,7 @@ impl Harness {
     /// `lifecycle` category yet. In-process extensions don't carry
     /// a `supervised_config` so they get the empty default — they
     /// already accept configuration via constructor parameters.
-    fn send_lifecycle_configure(&mut self, source_id: &str) {
+    fn send_lifecycle_configure(&mut self, source_id: &tau_proto::ConnectionId) {
         let Some(entry) = self.extensions.entries.get(source_id) else {
             return;
         };
@@ -16262,7 +16494,7 @@ impl Harness {
                     .extensions
                     .entries
                     .get(source_id)
-                    .map(|entry| entry.name.clone().into())
+                    .map(|entry| entry.name.clone())
                     .expect("configured extension has a stable instance name"),
                 tool_prefix,
                 state_dir: Some(state_dir),
@@ -16338,7 +16570,7 @@ impl Harness {
             self.replayable_harness_notices.push(notice.clone());
         }
         self.enqueue_publish(
-            Some("harness"),
+            Some(crate::harness::harness_connection_id()),
             Event::HarnessNotice(notice),
             true,
             always_show,
@@ -16362,7 +16594,7 @@ impl Harness {
         agent_prompt_id: AgentPromptId,
         reason: AgentPromptTerminationReason,
         originator: PromptOriginator,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         let cid = self.prompt_agents.get(&agent_prompt_id).cloned();
         let agent_id = crate::parse_agent_id(
@@ -16382,7 +16614,7 @@ impl Harness {
         );
     }
 
-    fn remove_discovered_context(&mut self, source_id: &str) {
+    fn remove_discovered_context(&mut self, source_id: &tau_proto::ConnectionId) {
         let affected_names = self
             .discovered_skill_candidates
             .iter_mut()
@@ -16390,7 +16622,7 @@ impl Harness {
                 let old_len = candidates.len();
                 candidates.retain(|skill| {
                     matches!(skill.source, DiscoveredSkillSource::BuiltIn { .. })
-                        || skill.source_id != source_id
+                        || skill.source_id != *source_id
                 });
                 (candidates.len() != old_len).then(|| name.clone())
             })
@@ -16401,7 +16633,7 @@ impl Harness {
             self.recompute_discovered_skill_winner(&name);
         }
         self.discovered_agents_files
-            .retain(|file| file.source_id != source_id);
+            .retain(|file| file.source_id != *source_id);
     }
 
     fn recompute_discovered_skill_winner(&mut self, name: &tau_proto::SkillName) {
@@ -16447,13 +16679,11 @@ impl Harness {
     fn mint_agent_initialization_id(&mut self) -> tau_proto::AgentInitializationId {
         let next = self.next_agent_initialization_id;
         self.next_agent_initialization_id = self.next_agent_initialization_id.saturating_add(1);
-        tau_proto::AgentInitializationId::parse(format!(
-            "{}-{:016x}-{:016x}",
-            self.accounting_runtime_id.as_str(),
+        agent_initialization_id(
+            &self.accounting_runtime_id,
             self.current_session_generation,
-            next
-        ))
-        .expect("Tau-generated agent initialization id must be valid")
+            next,
+        )
     }
 
     fn tool_connections_subscribed_to(&self, event: &Event) -> HashSet<tau_proto::ConnectionId> {
@@ -16465,7 +16695,7 @@ impl Harness {
                     && connection.origin != ConnectionOrigin::Socket
                     && self
                         .bus
-                        .live_subscriptions(connection.id.as_str())
+                        .live_subscriptions(&connection.id)
                         .is_some_and(|selectors| selector_matches_event(selectors, event))
             })
             .map(|connection| connection.id)
@@ -16563,14 +16793,22 @@ impl Harness {
         ))
     }
 
-    fn fail_start_agent_request(&mut self, source_id: &str, query_id: String, error: String) {
+    fn fail_start_agent_request(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        query_id: String,
+        error: String,
+    ) {
         let result = tau_proto::StartAgentResult {
             query_id,
             text: String::new(),
             error: Some(error),
         };
-        if source_id == HARNESS_CONNECTION_ID {
-            self.publish_event(Some(HARNESS_CONNECTION_ID), Event::StartAgentResult(result));
+        if source_id == harness_connection_id() {
+            self.publish_event(
+                Some(crate::harness::harness_connection_id()),
+                Event::StartAgentResult(result),
+            );
         } else {
             let _ = self.bus.send_to(
                 source_id,
@@ -16583,7 +16821,7 @@ impl Harness {
     /// Queue and dispatch an extension-started sub-agent request.
     fn handle_start_agent_request(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         query: tau_proto::StartAgentRequest,
     ) -> Result<(), HarnessError> {
         let query_id = query.query_id.clone();
@@ -16600,7 +16838,7 @@ impl Harness {
             agent_id: crate::parse_agent_id(&pending.agent_id),
         };
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::StartAgentAccepted(accepted.clone()),
         );
         let _ = self.bus.send_to(
@@ -16614,7 +16852,7 @@ impl Harness {
 
     fn accept_duplicate_start_agent_request(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         query_id: &str,
         agent_id: &str,
     ) {
@@ -16623,7 +16861,7 @@ impl Harness {
             agent_id: crate::parse_agent_id(agent_id),
         };
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::StartAgentAccepted(accepted.clone()),
         );
         let _ = self.bus.send_to(
@@ -16638,7 +16876,9 @@ impl Harness {
         &mut self,
         query: tau_proto::StartAgentRequest,
     ) -> Result<String, String> {
-        let Some(pending) = self.prepare_start_agent_request(HARNESS_CONNECTION_ID, query)? else {
+        let Some(pending) =
+            self.prepare_start_agent_request(crate::harness::harness_connection_id(), query)?
+        else {
             return Err("duplicate tool-backed start-agent request".to_owned());
         };
         let agent_id = pending.agent_id.clone();
@@ -16647,11 +16887,11 @@ impl Harness {
             agent_id: crate::parse_agent_id(&agent_id),
         };
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::StartAgentAccepted(accepted.clone()),
         );
         let _ = self.bus.send_to(
-            HARNESS_CONNECTION_ID,
+            crate::harness::harness_connection_id(),
             None,
             HarnessOutputMessage::deliver(Event::StartAgentAccepted(accepted)),
         );
@@ -16808,22 +17048,19 @@ impl Harness {
 
     fn prepare_start_agent_request(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         query: tau_proto::StartAgentRequest,
     ) -> Result<Option<PendingStartAgentRequest>, String> {
         let extension_name = self
-            .extensions
-            .entries
-            .get(source_id)
-            .map(|e| e.name.clone())
-            .unwrap_or_else(|| source_id.to_owned());
+            .authenticated_source_name(source_id)
+            .ok_or_else(|| "the requesting extension connection is unavailable".to_owned())?;
         let role = self.resolve_start_agent_request_role(&query)?;
         let duplicate_active = self.agents.iter().find_map(|(cid, conv)| {
             let matches_query = conv.source_connection.is_some()
                 && matches!(
                     &conv.originator,
                     tau_proto::PromptOriginator::Extension { name, query_id }
-                        if name.as_str() == extension_name && query_id == &query.query_id
+                        if *name.as_str() == *extension_name && query_id == &query.query_id
                 );
             matches_query.then(|| {
                 conv.agent_id
@@ -16833,7 +17070,7 @@ impl Harness {
         });
         if let Some((cid, agent_id)) = duplicate_active {
             if let Some(conv) = self.agents.get_mut(&cid) {
-                conv.source_connection = Some(source_id.into());
+                conv.source_connection = Some(source_id.clone());
             }
             self.accept_duplicate_start_agent_request(source_id, &query.query_id, &agent_id);
             self.emit_info(&format!(
@@ -16846,7 +17083,8 @@ impl Harness {
             .pending_start_agent_requests
             .iter()
             .position(|pending| {
-                pending.extension_name == extension_name && pending.query.query_id == query.query_id
+                *pending.extension_name == *extension_name
+                    && pending.query.query_id == query.query_id
             })
         {
             let agent_id = self.pending_start_agent_requests[idx].agent_id.clone();
@@ -17029,7 +17267,7 @@ impl Harness {
         let initial_head = None;
 
         let originator = tau_proto::PromptOriginator::Extension {
-            name: extension_name.clone().into(),
+            name: extension_name.clone(),
             query_id: query.query_id.clone(),
         };
         let initial_metadata: Vec<_> = peer_entrypoint_endpoint
@@ -17069,7 +17307,7 @@ impl Harness {
             session_id.clone(),
             originator,
             initial_head,
-            Some(source_id.into()),
+            Some(source_id.clone()),
         );
         // Record parent request state and task metadata for teardown/background
         // ownership and child display metadata. Explicit-parent typed starts have
@@ -17225,7 +17463,11 @@ impl Harness {
         self.emit_agent_stats_updated_from(cid, None);
     }
 
-    fn emit_agent_stats_updated_from(&mut self, cid: &AgentId, source: Option<&str>) {
+    fn emit_agent_stats_updated_from(
+        &mut self,
+        cid: &AgentId,
+        source: Option<&tau_proto::ConnectionId>,
+    ) {
         if let Some(stats) = self.agent_stats_snapshot(cid) {
             self.publish_event(source, Event::AgentStatsUpdated(stats));
         }
@@ -17258,7 +17500,7 @@ impl Harness {
 
     fn handle_set_agent_navigation_mode(
         &mut self,
-        client_id: &str,
+        client_id: &tau_proto::ConnectionId,
         request: tau_proto::UiSetAgentNavigationMode,
     ) {
         let mode = match request.action {
@@ -18176,7 +18418,7 @@ impl Harness {
             let Some(models) = self.provider_models_by_extension.get(source_id) else {
                 continue;
             };
-            let connection_id = tau_proto::ConnectionId::from(source_id.as_str());
+            let connection_id = source_id.clone();
             for model in models {
                 if provider_model_info
                     .insert(model.id.clone(), model.clone())
@@ -18541,7 +18783,11 @@ impl Harness {
         );
     }
 
-    fn set_provider_models(&mut self, source_id: &str, models: Vec<ProviderModelInfo>) {
+    fn set_provider_models(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        models: Vec<ProviderModelInfo>,
+    ) {
         self.provider_models_by_extension
             .insert(source_id.to_owned(), models);
         self.refresh_provider_models_and_publish_state();
@@ -18549,21 +18795,21 @@ impl Harness {
 
     fn source_owns_quota_provider(
         &self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         provider: &tau_proto::ProviderName,
     ) -> bool {
         let owners = self
             .provider_model_routes
             .iter()
             .filter(|(model, _)| &model.provider == provider)
-            .map(|(_, route)| route.as_str())
+            .map(|(_, route)| route)
             .collect::<HashSet<_>>();
         owners.len() == 1 && owners.contains(source_id)
     }
 
     fn quota_event_is_valid(
         &self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         provider: &tau_proto::ProviderName,
         windows: &[tau_proto::ProviderQuotaWindow],
         bindings: &[tau_proto::ProviderQuotaRouteBinding],
@@ -18572,14 +18818,14 @@ impl Harness {
             && bindings.iter().all(|binding| {
                 self.provider_model_routes
                     .get(&binding.model)
-                    .is_some_and(|route| route.as_str() == source_id)
+                    .is_some_and(|route| route == source_id)
             })
             && tau_proto::validate_provider_quota_state(provider, windows, bindings).is_ok()
     }
 
     fn handle_provider_quota_replace(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         replace: tau_proto::ProviderQuotaReplace,
     ) {
         if !self.quota_event_is_valid(
@@ -18590,7 +18836,7 @@ impl Harness {
         ) {
             tracing::warn!(
                 target: "tau_harness",
-                source_id,
+                source_id = %source_id,
                 provider = %replace.provider,
                 "discarding invalid or unowned provider quota replacement"
             );
@@ -18603,12 +18849,12 @@ impl Harness {
                 .get(&replace.provider)
                 .is_some_and(|epochs| epochs.contains(&replace.profile_epoch))
                 && current.is_none_or(|current| {
-                    current.source_id.as_str() != source_id
+                    current.source_id != *source_id
                         || current.snapshot.profile_epoch != replace.profile_epoch
                 })
         } else {
             current.is_some_and(|current| {
-                current.source_id.as_str() == source_id
+                current.source_id == *source_id
                     && current.snapshot.profile_epoch == replace.profile_epoch
                     && replace.sequence > current.snapshot.sequence
             }) || (current.is_none()
@@ -18616,7 +18862,7 @@ impl Harness {
                     .provider_quota_tombstones
                     .get(&replace.provider)
                     .is_some_and(|tombstone| {
-                        tombstone.source_id.as_str() == source_id
+                        tombstone.source_id == *source_id
                             && tombstone.profile_epoch == replace.profile_epoch
                             && replace.sequence > tombstone.sequence
                     }))
@@ -18646,19 +18892,19 @@ impl Harness {
         self.provider_quota.insert(
             replace.provider,
             CurrentProviderQuota {
-                source_id: source_id.into(),
+                source_id: source_id.clone(),
                 snapshot: changed.clone(),
             },
         );
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::HarnessProviderQuotaChanged(changed),
         );
     }
 
     fn handle_provider_quota_patch(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         patch: tau_proto::ProviderQuotaPatch,
     ) {
         let patch_window_keys = patch
@@ -18688,7 +18934,7 @@ impl Harness {
         let Some(current) = self.provider_quota.get(&patch.provider) else {
             return;
         };
-        if current.source_id.as_str() != source_id
+        if current.source_id != *source_id
             || current.snapshot.profile_epoch != patch.profile_epoch
             || patch.sequence <= current.snapshot.sequence
         {
@@ -18736,26 +18982,26 @@ impl Harness {
         self.provider_quota.insert(
             patch.provider,
             CurrentProviderQuota {
-                source_id: source_id.into(),
+                source_id: source_id.clone(),
                 snapshot: changed.clone(),
             },
         );
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::HarnessProviderQuotaChanged(changed),
         );
     }
 
     fn handle_provider_quota_clear(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         clear: tau_proto::ProviderQuotaClear,
     ) {
         let matches = self
             .provider_quota
             .get(&clear.provider)
             .is_some_and(|current| {
-                current.source_id.as_str() == source_id
+                current.source_id == *source_id
                     && current.snapshot.profile_epoch == clear.profile_epoch
                     && clear.sequence > current.snapshot.sequence
             });
@@ -18767,7 +19013,7 @@ impl Harness {
             .provider_quota_tombstones
             .get(&clear.provider)
             .is_some_and(|tombstone| {
-                tombstone.source_id.as_str() == source_id
+                tombstone.source_id == *source_id
                     && tombstone.profile_epoch == clear.profile_epoch
                     && clear.sequence > tombstone.sequence
             });
@@ -18817,7 +19063,7 @@ impl Harness {
         self.provider_quota_capabilities
             .insert(provider.clone(), changed.clone());
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::HarnessProviderQuotaChanged(changed),
         );
     }
@@ -19280,7 +19526,7 @@ impl Harness {
         // scheduler-owned old-session jobs.
         for (_, pending) in std::mem::take(&mut self.pending_retry_prompts) {
             let _ = self.bus.send_to(
-                pending.requester_client_id.as_str(),
+                &pending.requester_client_id,
                 None,
                 HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
                     tau_proto::UiRetryPromptResult {
@@ -19372,7 +19618,7 @@ impl Harness {
             } = &pending.completion
             {
                 let _ = self.bus.send_to(
-                    client_id.as_str(),
+                    client_id,
                     None,
                     HarnessOutputMessage::ExternalAgentMessageResult(
                         tau_proto::ExternalAgentMessageResult {
@@ -19831,7 +20077,7 @@ impl Harness {
                 }
                 self.publish_terminal_tool_error_with_cause(
                     Some(&cid),
-                    Some(HARNESS_CONNECTION_ID),
+                    Some(crate::harness::harness_connection_id()),
                     error,
                     tau_proto::ToolTerminalCause::RestartRepair,
                 );
@@ -19976,7 +20222,11 @@ impl Harness {
                     call.call_id.clone(),
                     BackgroundCompletionPromptMode::DoNotQueue,
                 );
-                self.publish_terminal_background_error(&cid, Some(HARNESS_CONNECTION_ID), error);
+                self.publish_terminal_background_error(
+                    &cid,
+                    Some(crate::harness::harness_connection_id()),
+                    error,
+                );
             }
         }
         count
@@ -20040,13 +20290,13 @@ impl Harness {
 
     fn handle_extension_context_ready(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         ready: tau_proto::ExtensionContextReady,
     ) -> Result<(), HarnessError> {
         if ready.session_id != self.current_session_id {
             return Ok(());
         }
-        let source_id = tau_proto::ConnectionId::from(source_id);
+        let source_id = source_id.clone();
         let should_finalize = self
             .pending_agent_discovery
             .get_mut(&ready.agent_id)
@@ -20062,13 +20312,13 @@ impl Harness {
 
     fn handle_extension_session_context_ready(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         ready: tau_proto::ExtensionSessionContextReady,
     ) -> Result<(), HarnessError> {
         if ready.session_id != self.current_session_id {
             return Ok(());
         }
-        let source_id = tau_proto::ConnectionId::from(source_id);
+        let source_id = source_id.clone();
         let completed_session = match &mut self.turn_state {
             TurnState::InitializingSession {
                 session_id,
@@ -20090,7 +20340,10 @@ impl Harness {
         Ok(())
     }
 
-    fn maybe_complete_session_init_for_disconnect(&mut self, connection_id: &str) {
+    fn maybe_complete_session_init_for_disconnect(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+    ) {
         let completed_session = match &mut self.turn_state {
             TurnState::InitializingSession {
                 session_id,
@@ -20381,7 +20634,7 @@ impl Harness {
         self.agent_context_initialized
             .insert(context.agent_id.clone(), projection.clone());
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::HarnessAgentContextInitialized(projection),
         );
         self.drain_publish_idle_dispatches();
@@ -20495,7 +20748,7 @@ impl Harness {
             }
         }
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::AgentState(tau_proto::AgentStateChanged {
                 agent_id: crate::parse_agent_id(&agent_id),
                 state: new_state,
@@ -21336,7 +21589,7 @@ impl Harness {
             match outcome.map(|outcome| *outcome) {
                 Some(tau_core::ManualCompactionOutcome::Succeeded(_)) => {
                     self.handle_background_tool_result_without_advancing(
-                        HARNESS_CONNECTION_ID,
+                        crate::harness::harness_connection_id(),
                         ToolResult {
                             call_id: request.initiating_tool_call_id,
                             tool_name: request.visible_tool_name.clone(),
@@ -21564,7 +21817,7 @@ impl Harness {
                 _ => None,
             })
             .unwrap_or_else(|| tau_proto::PromptOriginator::Extension {
-                name: HARNESS_CONNECTION_ID.into(),
+                name: harness_extension_name().clone(),
                 query_id: format!("restored-{agent_id}"),
             });
         let completed_worker = Self::journal_proves_completed_start_agent_worker(
@@ -22965,13 +23218,13 @@ impl Harness {
                     self.extensions
                         .entries
                         .values()
-                        .map(|entry| entry.name.clone()),
+                        .map(|entry| entry.name.to_string()),
                 ),
                 self.extensions
                     .entries
                     .values()
                     .filter(|entry| entry.state == crate::extension::ExtensionState::Ready)
-                    .map(|entry| entry.name.clone()),
+                    .map(|entry| entry.name.to_string()),
             )
             .with_parallel_tool_calls(
                 model
@@ -23519,7 +23772,7 @@ impl Harness {
 
     fn handle_provider_response_finished_from(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         mut response: ProviderResponseFinished,
     ) -> Result<(), HarnessError> {
         // Recovery authorization belongs exclusively to the harness. Provider
@@ -23939,7 +24192,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         response: &mut ProviderResponseFinished,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) -> bool {
         if response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
             || response.stop_reason != ProviderStopReason::Error
@@ -24173,7 +24426,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         checkpoint: &tau_proto::AgentInferenceDispatchStarted,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         let Some(model) = checkpoint.model.clone() else {
             return;
@@ -24232,7 +24485,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         let Some((transaction_id, cut, model, compact_prompt_id)) =
             self.agents
@@ -24341,7 +24594,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         self.emit_info(&format!(
             "provider returned an invalid standalone compaction window for agent_prompt_id={}",
@@ -24360,7 +24613,7 @@ impl Harness {
         cid: &AgentId,
         response: &ProviderResponseFinished,
         reason: tau_proto::StandaloneCompactionFailureReason,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         let transaction = self
             .agents
@@ -24437,7 +24690,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         if let Some((session_id, originator)) = self
             .agents
@@ -24515,7 +24768,7 @@ impl Harness {
         agent_prompt_id: &AgentPromptId,
         input_tokens: Option<u64>,
         cached_tokens: Option<u64>,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         // Per-conversation usage: separate from the global tracker because side
         // agents shouldn't clobber the user's status bar, but generic agent
@@ -24601,7 +24854,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) -> bool {
         if !self.is_finished_response_stale(cid, &response.agent_prompt_id) {
             return false;
@@ -24700,7 +24953,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         response: &mut ProviderResponseFinished,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         let captured_rates = self
             .prompt_estimated_cost_rates
@@ -24875,7 +25128,7 @@ impl Harness {
     fn publish_finished_response_for_agent(
         &mut self,
         cid: &AgentId,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         response: &ProviderResponseFinished,
     ) {
         // Publish via the owning agent's branch — when text is
@@ -24900,7 +25153,7 @@ impl Harness {
         cid: &AgentId,
         side: FinishedSideConversation<'_>,
         normalized_tool_calls: &mut NormalizedFinishedToolCalls,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) -> bool {
         if self
             .agents
@@ -24973,7 +25226,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         normalized_tool_calls: &mut NormalizedFinishedToolCalls,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         let remaining_calls: Vec<ToolCallId> = normalized_tool_calls
             .calls
@@ -25033,18 +25286,21 @@ impl Harness {
         name: &ExtensionName,
         query_id: &str,
         result: tau_proto::StartAgentResult,
-        result_source: Option<&str>,
+        result_source: Option<&tau_proto::ConnectionId>,
     ) {
         let source = self
             .agents
             .get(cid)
             .and_then(|c| c.source_connection.clone());
         if let Some(source) = source {
-            if source.as_str() == HARNESS_CONNECTION_ID {
-                self.publish_event(Some(HARNESS_CONNECTION_ID), Event::StartAgentResult(result));
+            if &source == harness_connection_id() {
+                self.publish_event(
+                    Some(crate::harness::harness_connection_id()),
+                    Event::StartAgentResult(result),
+                );
             } else {
                 let _ = self.bus.send_to(
-                    source.as_str(),
+                    &source,
                     result_source,
                     HarnessOutputMessage::deliver(Event::StartAgentResult(result)),
                 );
@@ -25067,7 +25323,7 @@ impl Harness {
     fn complete_failed_compaction_side_conversation(
         &mut self,
         cid: &AgentId,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) -> bool {
         if self
             .agents
@@ -25135,7 +25391,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         mut normalized_tool_calls: NormalizedFinishedToolCalls,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) -> Result<(), HarnessError> {
         // Tool calls to execute — agent stays busy. After all
         // tools complete, maybe_complete_agent_turn drains any
@@ -25182,7 +25438,7 @@ impl Harness {
                     cid.clone(),
                     call,
                     entry.background_support,
-                    source.map(Into::into),
+                    source.cloned(),
                 );
             }
         }
@@ -25272,7 +25528,7 @@ impl Harness {
         model: Option<&ModelId>,
         input_tokens: Option<u64>,
         cached_tokens: Option<u64>,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         let context_window =
             model.and_then(|m| context_window_for_model(&self.provider_model_info, m));
@@ -25325,7 +25581,11 @@ impl Harness {
 
     /// Update an extension's lifecycle state, looked up by connection id.
     /// No-op if no entry matches (e.g. for socket clients).
-    fn set_extension_state(&mut self, connection_id: &str, new_state: ExtensionState) {
+    fn set_extension_state(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+        new_state: ExtensionState,
+    ) {
         if let Some(entry) = self.extensions.entries.get_mut(connection_id) {
             entry.state = new_state;
         }
@@ -25376,7 +25636,7 @@ impl Harness {
             // entry so a retry or clean-up is not wedged on a phantom
             // slot.
             if let Err(error) =
-                self.execute_agent_tool_call_from(&conversation_id, &invocation, source.as_deref())
+                self.execute_agent_tool_call_from(&conversation_id, &invocation, source.as_ref())
             {
                 self.tool_turn.rollback_dispatch(&call_id);
                 return Err(error);
@@ -25454,7 +25714,7 @@ impl Harness {
             // Peer-internal agent correlation is runtime-only: publish the
             // placeholder without transcript ownership.
             self.publish_event(
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 Event::ProviderToolResult(result.clone()),
             );
         } else {
@@ -25521,13 +25781,17 @@ impl Harness {
         }
     }
 
-    fn handle_background_tool_result(&mut self, source_id: &str, result: ToolResult) {
+    fn handle_background_tool_result(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        result: ToolResult,
+    ) {
         self.handle_background_tool_result_inner(source_id, result, true);
     }
 
     fn handle_background_tool_result_without_advancing(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         result: ToolResult,
     ) {
         self.handle_background_tool_result_inner(source_id, result, false);
@@ -25535,7 +25799,7 @@ impl Harness {
 
     fn handle_background_tool_result_inner(
         &mut self,
-        source_id: &str,
+        source_id: &tau_proto::ConnectionId,
         mut result: ToolResult,
         advance_queue: bool,
     ) {
@@ -25588,7 +25852,11 @@ impl Harness {
         );
     }
 
-    fn handle_background_tool_error(&mut self, source: Option<&str>, error: ToolError) {
+    fn handle_background_tool_error(
+        &mut self,
+        source: Option<&tau_proto::ConnectionId>,
+        error: ToolError,
+    ) {
         self.handle_background_tool_error_inner(
             source,
             error,
@@ -25610,7 +25878,11 @@ impl Harness {
         }
     }
 
-    fn handle_background_tool_cancelled(&mut self, source_id: &str, cancelled: ToolCancelled) {
+    fn handle_background_tool_cancelled(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        cancelled: ToolCancelled,
+    ) {
         let cause = self
             .pending_cancellation_observations
             .get(&cancelled.call_id)
@@ -25636,7 +25908,7 @@ impl Harness {
     }
     fn handle_background_tool_error_inner(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         mut error: ToolError,
         completion_prompt_mode: BackgroundCompletionPromptMode,
         cause: tau_proto::ToolTerminalCause,
@@ -26134,7 +26406,7 @@ impl Harness {
         call: &AgentToolCall,
         tool_name: ToolName,
         message: String,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         self.reject_agent_tool_call_before_dispatch_inner(
             cid, call, tool_name, message, true, source,
@@ -26148,7 +26420,7 @@ impl Harness {
         tool_name: ToolName,
         message: String,
         complete_turn: bool,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         let call_id: ToolCallId = call.id.clone();
         self.tool_agents.insert(call_id.clone(), cid.clone());
@@ -26372,7 +26644,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         call: &AgentToolCall,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
     ) -> Result<(), HarnessError> {
         let tool_name = call.name.clone();
         let role_name = self.role_name_for_agent_id(cid).to_owned();
@@ -26603,7 +26875,7 @@ impl Harness {
         &mut self,
         session_id: &str,
         text: &str,
-        _source_id: Option<&str>,
+        _source_id: Option<&tau_proto::ConnectionId>,
     ) -> Result<InteractionOutcome, HarnessError> {
         // Synchronous test entrypoint: dispatch directly without going
         // through `submit_user_prompt`'s queue. The embedded test harness
@@ -26618,19 +26890,21 @@ impl Harness {
             text.to_owned(),
         )?;
 
-        let committed_observer_id = tau_proto::ConnectionId::from("__embedded_committed_observer");
+        let committed_observer_id = tau_proto::ConnectionId::parse("__embedded_committed_observer")
+            .expect("embedded observer id must satisfy the connection identifier grammar");
         let (observer_tx, observer_rx) = mpsc::channel();
         self.bus.connect(Connection::new(
-            ConnectionMetadata {
-                id: committed_observer_id.clone(),
-                name: "embedded committed-event observer".to_owned(),
+            PendingConnectionMetadata {
+                id: Some(committed_observer_id.clone()),
+                name: tau_proto::ExtensionName::parse("embedded_committed_event_observer")
+                    .expect("embedded observer name must satisfy the extension identifier grammar"),
                 kind: ClientKind::Ui,
                 origin: ConnectionOrigin::InMemory,
             },
             Box::new(ChannelSink { tx: observer_tx }),
         ));
         if let Err(error) = self.bus.set_subscriptions(
-            committed_observer_id.as_str(),
+            &committed_observer_id,
             Vec::new(),
             vec![
                 EventSelector::Exact(tau_proto::EventName::TOOL_PROGRESS),
@@ -26638,7 +26912,7 @@ impl Harness {
                 EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
             ],
         ) {
-            self.bus.disconnect(committed_observer_id.as_str());
+            self.bus.disconnect(&committed_observer_id);
             return Err(HarnessError::Route(error));
         }
         let started_at = Instant::now();
@@ -26755,7 +27029,7 @@ impl Harness {
                 }
             }
         };
-        self.bus.disconnect(committed_observer_id.as_str());
+        self.bus.disconnect(&committed_observer_id);
         result
     }
 
@@ -26907,9 +27181,9 @@ impl Harness {
                     .extensions
                     .entries
                     .get(id)
-                    .map(|entry| entry.name.clone())
+                    .map(|entry| entry.name.to_string())
                     .unwrap_or_else(|| id.to_string());
-                first_error = Some(HarnessError::ThreadJoin(name));
+                first_error = Some(HarnessError::ThreadJoin(name.to_string()));
             }
         }
         for (id, watchdog) in watchdogs {
@@ -26918,9 +27192,9 @@ impl Harness {
                     .extensions
                     .entries
                     .get(&id)
-                    .map(|entry| entry.name.clone())
+                    .map(|entry| entry.name.to_string())
                     .unwrap_or_else(|| id.to_string());
-                first_error = Some(HarnessError::ThreadJoin(name));
+                first_error = Some(HarnessError::ThreadJoin(name.to_string()));
             }
         }
 
@@ -26938,7 +27212,7 @@ impl Harness {
                         first_error = Some(HarnessError::Participant(error));
                     }
                     Err(_) if first_error.is_none() => {
-                        first_error = Some(HarnessError::ThreadJoin(name.clone()));
+                        first_error = Some(HarnessError::ThreadJoin(name.to_string()));
                     }
                     Ok(Err(_)) | Err(_) => {}
                 }
@@ -26951,12 +27225,12 @@ impl Harness {
     }
 
     #[cfg(test)]
-    fn extension_connection_id(&self, name: &str) -> Option<&str> {
+    fn extension_connection_id(&self, name: &str) -> Option<&tau_proto::ConnectionId> {
         self.extensions
             .entries
             .values()
             .find(|e| e.name == name)
-            .map(|e| e.connection_id.as_str())
+            .map(|e| &e.connection_id)
     }
 }
 

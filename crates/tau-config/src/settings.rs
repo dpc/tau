@@ -1960,7 +1960,7 @@ pub fn validate_extension_name(extension_name: &str) -> Result<(), InvalidExtens
             reason: "extension name must be at most 128 ASCII bytes",
         });
     }
-    if !tau_proto::valid_extension_name(extension_name) {
+    if tau_proto::ExtensionName::parse(extension_name.to_owned()).is_err() {
         return Err(InvalidExtensionName {
             name: extension_name.to_owned(),
             reason: "extension name must contain 1-128 ASCII letters, digits, '_' or '-'",

@@ -25,6 +25,25 @@ use super::chat::{
 };
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
 
+/// Dynamic action IDs use the bounded ASCII short-ID producer shape accepted by
+/// the protocol type.
+#[test]
+fn action_short_id_producer_stays_within_invocation_id_grammar() {
+    for _ in 0..100 {
+        let raw = super::mint_short_id("action");
+        let id = tau_proto::ActionInvocationId::parse(raw.clone())
+            .expect("generated action invocation id");
+        assert_eq!(id.as_str(), raw);
+        assert_eq!(id.as_str().len(), 13);
+        assert!(id.as_str().starts_with("action-"));
+        assert!(
+            id.as_str()[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
+        );
+    }
+}
+
 /// Returns the stable inline theme shared by CLI renderer tests.
 pub(crate) fn cli_test_theme() -> tau_themes::Theme {
     tau_themes::Theme::parse(
@@ -1378,7 +1397,8 @@ fn sync(handle: &TermHandle) {
 
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: format!("msg-{sender_id}-{recipient}").into(),
+        message_id: tau_proto::AgentMessageId::parse(format!("msg-{sender_id}-{recipient}"))
+            .expect("test message id must satisfy the identifier grammar"),
         sender_id: agent_id(sender_id),
         recipient: if recipient == "user" {
             tau_proto::AgentMessageRecipient::User
@@ -1399,7 +1419,10 @@ fn external_agent_message(
     message: &str,
 ) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: format!("msg-{sender_id}-{session_id}-{recipient}").into(),
+        message_id: tau_proto::AgentMessageId::parse(format!(
+            "msg-{sender_id}-{session_id}-{recipient}"
+        ))
+        .expect("test message id must satisfy the identifier grammar"),
         sender_id: agent_id(sender_id),
         recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
             session_id: test_session_id(session_id),
@@ -1811,7 +1834,8 @@ fn extension_prompt_with_target_does_not_select_from_empty_state() {
     }));
 
     let originator = tau_proto::PromptOriginator::Extension {
-        name: "core-subagents".into(),
+        name: tau_proto::ExtensionName::parse("core-subagents")
+            .expect("test identifier must satisfy its grammar"),
         query_id: "q-worker".to_owned(),
     };
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
@@ -2707,7 +2731,8 @@ fn new_session_initial_history_appends_to_first_agent() {
     }));
     renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
         instance_id: 88.into(),
-        extension_name: "std-session".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-session")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(456),
     }));
     sync(&handle);
@@ -2721,7 +2746,8 @@ fn new_session_initial_history_appends_to_first_agent() {
 
     renderer.handle(&Event::ExtensionReady(ExtensionReady {
         instance_id: 88.into(),
-        extension_name: "std-session".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-session")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(456),
     }));
     sync(&handle);
@@ -2749,7 +2775,8 @@ fn delayed_clear_after_new_session_keeps_initial_history_adoptable() {
     renderer.clear_selected_agent();
     renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
         instance_id: 89.into(),
-        extension_name: "std-race".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-race")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(456),
     }));
     sync(&handle);
@@ -3502,7 +3529,8 @@ fn extension_lifecycle_completion_routes_to_starting_snapshot() {
     renderer.switch_agent("agent-a".to_owned());
     renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
         instance_id: 7.into(),
-        extension_name: "std-test".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-test")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(123),
     }));
     sync(&handle);
@@ -3511,7 +3539,8 @@ fn extension_lifecycle_completion_routes_to_starting_snapshot() {
     renderer.switch_agent("agent-b".to_owned());
     renderer.handle(&Event::ExtensionReady(ExtensionReady {
         instance_id: 7.into(),
-        extension_name: "std-test".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-test")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(123),
     }));
     sync(&handle);
@@ -3539,7 +3568,8 @@ fn initial_no_agent_extension_lifecycle_appends_to_first_agent() {
 
     renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
         instance_id: 8.into(),
-        extension_name: "std-global".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-global")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(456),
     }));
     sync(&handle);
@@ -3553,7 +3583,8 @@ fn initial_no_agent_extension_lifecycle_appends_to_first_agent() {
 
     renderer.handle(&Event::ExtensionExited(tau_proto::ExtensionExited {
         instance_id: 8.into(),
-        extension_name: "std-global".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-global")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(456),
         exit_code: Some(1),
         signal: None,
@@ -3580,7 +3611,8 @@ fn explicit_no_agent_extension_lifecycle_routes_to_no_agent_snapshot() {
     renderer.clear_selected_agent();
     renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
         instance_id: 8.into(),
-        extension_name: "std-global".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-global")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(456),
     }));
     sync(&handle);
@@ -3592,7 +3624,8 @@ fn explicit_no_agent_extension_lifecycle_routes_to_no_agent_snapshot() {
 
     renderer.handle(&Event::ExtensionExited(tau_proto::ExtensionExited {
         instance_id: 8.into(),
-        extension_name: "std-global".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-global")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(456),
         exit_code: Some(1),
         signal: None,
@@ -3619,7 +3652,8 @@ fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
     );
     let message_fact = |target: &str, message_id: &str, text: &str| {
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
-            tau_proto::MessagePublisherId::new("bridge-main"),
+            tau_proto::MessagePublisherId::parse("bridge-main")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
             tau_proto::MessageAgentTarget::new(target),
             tau_proto::MessageFactId::new(message_id),
             tau_proto::MessageParty {
@@ -3701,7 +3735,8 @@ fn compact_message_fact_wraps_at_narrow_width_with_code_styled_publisher() {
         .mark_live("selected-agent");
     renderer.switch_agent("selected-agent".to_owned());
     renderer.handle(&Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("fedi-slack"),
+        tau_proto::MessagePublisherId::parse("fedi-slack")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new("selected-agent"),
         tau_proto::MessageFactId::new("slack-message:opaque"),
         tau_proto::MessageParty {
@@ -3755,7 +3790,8 @@ fn initial_replayed_global_message_fact_survives_first_agent_selection() {
         cli_test_theme(),
     );
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("bridge-main"),
+        tau_proto::MessagePublisherId::parse("bridge-main")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new("unavailable-agent"),
         tau_proto::MessageFactId::new("replayed-message"),
         tau_proto::MessageParty {
@@ -3794,7 +3830,8 @@ fn deselected_live_global_message_fact_survives_fresh_agent_selection() {
     renderer.switch_agent("existing-agent".to_owned());
     renderer.clear_selected_agent();
     renderer.handle(&Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("bridge-main"),
+        tau_proto::MessagePublisherId::parse("bridge-main")
+            .expect("canonical publisher id must satisfy the identifier grammar"),
         tau_proto::MessageAgentTarget::new("unavailable-agent"),
         tau_proto::MessageFactId::new("live-message"),
         tau_proto::MessageParty {
@@ -3830,10 +3867,15 @@ fn action_result_routes_to_invocation_snapshot() {
     );
 
     renderer.switch_agent("agent-a".to_owned());
-    renderer.record_action_invocation("action-1".into(), Some("agent-a".to_owned()));
+    renderer.record_action_invocation(
+        tau_proto::ActionInvocationId::parse("action-1")
+            .expect("test identifier must satisfy its grammar"),
+        Some("agent-a".to_owned()),
+    );
     renderer.switch_agent("agent-b".to_owned());
     renderer.handle(&Event::ActionResult(tau_proto::ActionResult {
-        invocation_id: "action-1".into(),
+        invocation_id: tau_proto::ActionInvocationId::parse("action-1")
+            .expect("test identifier must satisfy its grammar"),
         action_id: "demo.action".to_owned(),
         output: tau_proto::ActionOutput::Text {
             text: "agent a action output".to_owned(),
@@ -3859,10 +3901,15 @@ fn initial_no_agent_action_error_appends_to_first_agent() {
         cli_test_theme(),
     );
 
-    renderer.record_action_invocation("action-2".into(), None);
+    renderer.record_action_invocation(
+        tau_proto::ActionInvocationId::parse("action-2")
+            .expect("test identifier must satisfy its grammar"),
+        None,
+    );
     renderer.switch_agent("fresh-agent".to_owned());
     renderer.handle(&Event::ActionError(tau_proto::ActionError {
-        invocation_id: "action-2".into(),
+        invocation_id: tau_proto::ActionInvocationId::parse("action-2")
+            .expect("test identifier must satisfy its grammar"),
         action_id: "demo.action".to_owned(),
         message: "no-agent action failed".to_owned(),
         details: None,
@@ -3885,10 +3932,15 @@ fn explicit_no_agent_action_error_routes_to_no_agent_snapshot() {
 
     renderer.switch_agent("previous-agent".to_owned());
     renderer.clear_selected_agent();
-    renderer.record_action_invocation("action-2".into(), None);
+    renderer.record_action_invocation(
+        tau_proto::ActionInvocationId::parse("action-2")
+            .expect("test identifier must satisfy its grammar"),
+        None,
+    );
     renderer.switch_agent("fresh-agent".to_owned());
     renderer.handle(&Event::ActionError(tau_proto::ActionError {
-        invocation_id: "action-2".into(),
+        invocation_id: tau_proto::ActionInvocationId::parse("action-2")
+            .expect("test identifier must satisfy its grammar"),
         action_id: "demo.action".to_owned(),
         message: "no-agent action failed".to_owned(),
         details: None,
@@ -3913,9 +3965,14 @@ fn initial_no_agent_action_result_appends_to_first_agent() {
         cli_test_theme(),
     );
 
-    renderer.record_action_invocation("action-3".into(), None);
+    renderer.record_action_invocation(
+        tau_proto::ActionInvocationId::parse("action-3")
+            .expect("test identifier must satisfy its grammar"),
+        None,
+    );
     renderer.handle(&Event::ActionResult(tau_proto::ActionResult {
-        invocation_id: "action-3".into(),
+        invocation_id: tau_proto::ActionInvocationId::parse("action-3")
+            .expect("test identifier must satisfy its grammar"),
         action_id: "demo.action".to_owned(),
         output: tau_proto::ActionOutput::Text {
             text: "visible no-agent action output".to_owned(),
@@ -3943,9 +4000,14 @@ fn explicit_no_agent_action_result_is_preserved_when_switching_to_fresh_agent() 
 
     renderer.switch_agent("previous-agent".to_owned());
     renderer.clear_selected_agent();
-    renderer.record_action_invocation("action-3".into(), None);
+    renderer.record_action_invocation(
+        tau_proto::ActionInvocationId::parse("action-3")
+            .expect("test identifier must satisfy its grammar"),
+        None,
+    );
     renderer.handle(&Event::ActionResult(tau_proto::ActionResult {
-        invocation_id: "action-3".into(),
+        invocation_id: tau_proto::ActionInvocationId::parse("action-3")
+            .expect("test identifier must satisfy its grammar"),
         action_id: "demo.action".to_owned(),
         output: tau_proto::ActionOutput::Text {
             text: "visible no-agent action output".to_owned(),
@@ -3977,7 +4039,8 @@ fn extension_lifecycle_removal_redraws_when_completion_is_filtered() {
 
     renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
         instance_id: 9.into(),
-        extension_name: "std-filtered".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-filtered")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(789),
     }));
     sync(&handle);
@@ -3986,7 +4049,8 @@ fn extension_lifecycle_removal_redraws_when_completion_is_filtered() {
     renderer.apply_setting("notice-level", "warning");
     renderer.handle(&Event::ExtensionReady(ExtensionReady {
         instance_id: 9.into(),
-        extension_name: "std-filtered".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-filtered")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(789),
     }));
 
@@ -4032,7 +4096,8 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
     }));
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: tau_proto::ExtensionName::parse("core-subagents")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "q-worker".to_owned(),
         },
         ..agent_prompt_created("worker-sp", "s1")
@@ -4407,7 +4472,8 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
         message_class: tau_proto::PromptMessageClass::User,
         internal_kind: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: tau_proto::ExtensionName::parse("core-subagents")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "q-worker".to_owned(),
         },
         submission_source: Default::default(),
@@ -4586,14 +4652,16 @@ fn hidden_agent_activity_keeps_global_in_progress() {
     }));
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: tau_proto::ExtensionName::parse("core-subagents")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "q-worker".to_owned(),
         },
         ..agent_prompt_created("worker-sp", "s1")
     }));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: tau_proto::ExtensionName::parse("core-subagents")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "q-worker".to_owned(),
         },
         ..finished_response("worker-sp", vec![assistant_message_item("done")])
@@ -4619,7 +4687,8 @@ fn switched_agent_shows_its_tool_usage() {
         agent_id: agent_id("worker-1"),
     }));
     let originator = tau_proto::PromptOriginator::Extension {
-        name: "core-subagents".into(),
+        name: tau_proto::ExtensionName::parse("core-subagents")
+            .expect("test identifier must satisfy its grammar"),
         query_id: "q-worker".to_owned(),
     };
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -4691,7 +4760,8 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
         agent_id: agent_id("engineer_1"),
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         ..agent_prompt_started("ap-engineer_1-0", "s1")
@@ -4732,7 +4802,8 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
     renderer.switch_agent("worker-1".to_owned());
     renderer.handle(&Event::UiShellCommand(tau_proto::UiShellCommand {
         session_id: test_session_id("s1"),
-        command_id: tau_proto::ShellCommandId::parse("ui-sh-1").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("ui-sh-1")
+            .expect("test identifier must satisfy its grammar"),
         command: "printf worker-output".into(),
         include_in_context: false,
         target_agent_id: Some(agent_id("worker-1")),
@@ -4741,7 +4812,8 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
 
     renderer.handle(&Event::ShellCommandProgress(
         tau_proto::ShellCommandProgress {
-            command_id: tau_proto::ShellCommandId::parse("ui-sh-1").unwrap(),
+            command_id: tau_proto::ShellCommandId::parse("ui-sh-1")
+                .expect("test identifier must satisfy its grammar"),
             stream: tau_proto::ShellStream::Stdout,
             chunk: "worker-output".into(),
             target_agent_id: Some(agent_id("worker-1")),
@@ -4749,7 +4821,8 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
     ));
     renderer.handle(&Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
-            command_id: tau_proto::ShellCommandId::parse("ui-sh-1").unwrap(),
+            command_id: tau_proto::ShellCommandId::parse("ui-sh-1")
+                .expect("test identifier must satisfy its grammar"),
             session_id: test_session_id("s1"),
             command: "printf worker-output".into(),
             include_in_context: false,
@@ -4785,14 +4858,16 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     // selected transcript is main by the time the renderer processes the echo.
     renderer.handle(&Event::UiShellCommand(tau_proto::UiShellCommand {
         session_id: test_session_id("s1"),
-        command_id: tau_proto::ShellCommandId::parse("ui-sh-race").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("ui-sh-race")
+            .expect("test identifier must satisfy its grammar"),
         command: "printf race-output".into(),
         include_in_context: false,
         target_agent_id: Some(agent_id("worker-1")),
     }));
     renderer.handle(&Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
-            command_id: tau_proto::ShellCommandId::parse("ui-sh-race").unwrap(),
+            command_id: tau_proto::ShellCommandId::parse("ui-sh-race")
+                .expect("test identifier must satisfy its grammar"),
             session_id: test_session_id("s1"),
             command: "printf race-output".into(),
             include_in_context: false,
@@ -4821,7 +4896,8 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     }));
     replay.handle(&Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
-            command_id: tau_proto::ShellCommandId::parse("ui-sh-replay").unwrap(),
+            command_id: tau_proto::ShellCommandId::parse("ui-sh-replay")
+                .expect("test identifier must satisfy its grammar"),
             session_id: test_session_id("s1"),
             command: "printf replay-output".into(),
             include_in_context: false,
@@ -4853,7 +4929,8 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
     }));
 
     let originator = tau_proto::PromptOriginator::Extension {
-        name: "core-subagents".into(),
+        name: tau_proto::ExtensionName::parse("core-subagents")
+            .expect("test identifier must satisfy its grammar"),
         query_id: "q-worker".to_owned(),
     };
     renderer.handle(&Event::AgentPromptSubmitted(
@@ -4904,7 +4981,8 @@ fn agent_switch_preserves_separate_transcripts() {
     }));
 
     let originator = tau_proto::PromptOriginator::Extension {
-        name: "core-subagents".into(),
+        name: tau_proto::ExtensionName::parse("core-subagents")
+            .expect("test identifier must satisfy its grammar"),
         query_id: "q-worker".to_owned(),
     };
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
@@ -5577,7 +5655,7 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
             message_id: tau_proto::AgentMessageId::parse("msg-sender-agent-recipient-agent")
-                .unwrap(),
+                .expect("test message id must satisfy its grammar"),
             sender_id: agent_id("sender-agent"),
             sender_session_id: None,
             recipient_id: agent_id("recipient-agent"),
@@ -5650,7 +5728,8 @@ fn no_agent_overview_excludes_structured_watch_status() {
     );
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("watch-turn").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("watch-turn")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("watched-agent"),
             sender_session_id: None,
             recipient_id: agent_id("watcher-agent"),
@@ -5673,7 +5752,8 @@ fn no_agent_overview_excludes_structured_watch_status() {
     let provider_status_body = "watched provider is blocked";
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("watch-provider").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("watch-provider")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("watched-agent"),
             sender_session_id: None,
             recipient_id: agent_id("watcher-agent"),
@@ -5740,7 +5820,8 @@ fn external_agent_messages_render_session_agent_labels() {
     ));
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-inbound-external").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-inbound-external")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("reviewer_33333333"),
             sender_session_id: Some(test_session_id("my_project-cafe-abc123")),
             recipient_id: agent_id("manager_11111111"),
@@ -5789,7 +5870,8 @@ fn watched_turn_transition_renders_as_compact_status() {
 
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("msg-watch-turn-start").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("msg-watch-turn-start")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("researcher"),
             sender_session_id: None,
             recipient_id: agent_id("manager"),
@@ -6232,7 +6314,8 @@ fn warning_notice_level_hides_routine_extension_status() {
 
     renderer.handle(&Event::ExtensionReady(ExtensionReady {
         instance_id: 1.into(),
-        extension_name: "core-shell".into(),
+        extension_name: tau_proto::ExtensionName::parse("core-shell")
+            .expect("test identifier must satisfy its grammar"),
         pid: Some(123),
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
@@ -7009,7 +7092,8 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: tau_proto::ExtensionName::parse("core-subagents")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "q1".to_owned(),
         },
         usage: None,
@@ -7071,7 +7155,8 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         provider_content: Vec::new(),
         kind: tau_proto::ToolResultKind::Final,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: tau_proto::ExtensionName::parse("core-subagents")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "q1".to_owned(),
         },
 
@@ -7103,7 +7188,8 @@ fn model_status_shows_main_tools_then_context_then_quota() {
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
         agent_id: tau_proto::AgentId::parse("q2").expect("agent id"),
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: tau_proto::ExtensionName::parse("core-subagents")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "q2".to_owned(),
         },
         ..agent_prompt_created("side-sp-2", "s1")
@@ -7738,7 +7824,8 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
         agent_id: agent_id("engineer_1"),
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: tau_proto::ExtensionName::parse("core-subagents")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "q1".to_owned(),
         },
         ..agent_prompt_created("side-sp", "s1")
@@ -7750,7 +7837,8 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
             "working",
             None,
             tau_proto::PromptOriginator::Extension {
-                name: "core-subagents".into(),
+                name: tau_proto::ExtensionName::parse("core-subagents")
+                    .expect("test identifier must satisfy its grammar"),
                 query_id: "q1".to_owned(),
             },
         )
@@ -7798,7 +7886,8 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     }));
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
         originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: tau_proto::ExtensionName::parse("core-subagents")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "q2".to_owned(),
         },
         ..agent_prompt_created("later-side-sp", "s1")
@@ -8857,7 +8946,8 @@ fn watched_agent_stats_redraw_active_indicator() {
         model: "test/model".parse().expect("model id"),
         operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         ctx_id: None,
@@ -8926,7 +9016,8 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
             model: "test/model".parse().expect("model id"),
             operation: tau_proto::PromptOperation::Inference,
             originator: tau_proto::PromptOriginator::Extension {
-                name: "__harness__".into(),
+                name: tau_proto::ExtensionName::parse("__harness__")
+                    .expect("test identifier must satisfy its grammar"),
                 query_id: format!("delegate-{watched}"),
             },
             ctx_id: None,
@@ -9040,7 +9131,8 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
         model: "test/model".parse().expect("model id"),
         operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         ctx_id: None,
@@ -9130,7 +9222,8 @@ fn watched_agent_response_finished_removes_active_indicator() {
         model: "test/model".parse().expect("model id"),
         operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         ctx_id: None,
@@ -9167,7 +9260,8 @@ fn watched_agent_response_finished_removes_active_indicator() {
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         usage: None,
@@ -9209,7 +9303,8 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
     ));
     let watch_state = |message_id: &str, state| {
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse(message_id).unwrap(),
+            message_id: tau_proto::AgentMessageId::parse(message_id)
+                .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id("engineer_1"),
             sender_session_id: None,
             recipient_id: agent_id("parent_1"),
@@ -9239,7 +9334,8 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
         model: "test/model".parse().expect("model id"),
         operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         ctx_id: None,
@@ -9248,7 +9344,8 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
         agent_id: agent_id("engineer_1"),
         stop_reason: ProviderStopReason::ToolCalls,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         ..finished_response("ap-engineer_1-0", Vec::new())
@@ -9262,7 +9359,8 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
         agent_id: agent_id("engineer_1"),
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         ..agent_prompt_started("ap-engineer_1-1", "s1")
@@ -9270,7 +9368,8 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
         agent_id: agent_id("engineer_1"),
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         ..finished_response("ap-engineer_1-1", Vec::new())
@@ -9322,7 +9421,8 @@ fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
         tau_proto::ProviderPromptSubmitted {
             agent_prompt_id: test_agent_prompt_id("ap-engineer_1-0"),
             originator: tau_proto::PromptOriginator::Extension {
-                name: "__harness__".into(),
+                name: tau_proto::ExtensionName::parse("__harness__")
+                    .expect("test identifier must satisfy its grammar"),
                 query_id: "delegate-1".to_owned(),
             },
         },
@@ -9348,7 +9448,8 @@ fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         usage: None,
@@ -9399,7 +9500,8 @@ fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
             "working",
             None,
             tau_proto::PromptOriginator::Extension {
-                name: "__harness__".into(),
+                name: tau_proto::ExtensionName::parse("__harness__")
+                    .expect("test identifier must satisfy its grammar"),
                 query_id: "parent-query".to_owned(),
             },
         )
@@ -9425,7 +9527,8 @@ fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "parent-query".to_owned(),
         },
         usage: None,
@@ -9478,7 +9581,8 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         usage: None,
@@ -9498,7 +9602,8 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         model: "test/model".parse().expect("model id"),
         operation: tau_proto::PromptOperation::Inference,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         ctx_id: None,
@@ -9506,7 +9611,8 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
         agent_id: agent_id("engineer_1"),
         originator: tau_proto::PromptOriginator::Extension {
-            name: "__harness__".into(),
+            name: tau_proto::ExtensionName::parse("__harness__")
+                .expect("test identifier must satisfy its grammar"),
             query_id: "delegate-1".to_owned(),
         },
         ..agent_prompt_created("ap-engineer_1-0", "s1")

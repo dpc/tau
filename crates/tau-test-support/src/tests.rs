@@ -6,12 +6,12 @@ use std::thread;
 use std::time::Duration;
 
 use tau_core::{
-    Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
-    EventBus, RoutedFrame, SessionStore, ToolRegistry, memory_connection,
+    Connection, ConnectionOrigin, ConnectionSendError, ConnectionSink, EventBus,
+    PendingConnectionMetadata, RoutedFrame, SessionStore, ToolRegistry, memory_connection,
 };
 use tau_proto::{
-    AgentPromptCreated, ClientKind, ConnectionId, ContentPart, ContextItem, ContextRole, Event,
-    EventName, EventSelector, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
+    AgentPromptCreated, ClientKind, ContentPart, ContextItem, ContextRole, Event, EventName,
+    EventSelector, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
     HarnessOutputWriter, MessageItem,
 };
 use tempfile::TempDir;
@@ -131,9 +131,10 @@ fn stream_connection(
         .try_clone()
         .expect("stream clone for writer should succeed");
     let connection = Connection::new(
-        ConnectionMetadata {
-            id: ConnectionId::default(),
-            name: name.to_owned(),
+        PendingConnectionMetadata {
+            id: None,
+            name: tau_proto::ExtensionName::parse(name)
+                .expect("test connection name must satisfy the identifier grammar"),
             kind,
             origin: ConnectionOrigin::InMemory,
         },
@@ -192,7 +193,10 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     let provider_id = bus.connect(provider_connection);
     let tool_id = bus.connect(tool_connection);
 
-    let (ui_connection, _ui_inbox) = memory_connection("ui", ClientKind::Ui);
+    let (ui_connection, _ui_inbox) = memory_connection(
+        tau_proto::ExtensionName::parse("ui").expect("test UI name must be valid"),
+        ClientKind::Ui,
+    );
     let ui_id = bus.connect(ui_connection);
     bus.set_subscriptions(
         &ui_id,
@@ -215,7 +219,8 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
             config: tau_proto::CborValue::Map(Vec::new()),
-            instance_name: tau_proto::ExtensionName::new("provider-builtin"),
+            instance_name: tau_proto::ExtensionName::parse("provider-builtin")
+                .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: Default::default(),
         }),
@@ -255,7 +260,8 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
             config: tau_proto::CborValue::Map(Vec::new()),
-            instance_name: tau_proto::ExtensionName::new("tool"),
+            instance_name: tau_proto::ExtensionName::parse("tool")
+                .expect("test extension name must satisfy the identifier grammar"),
             state_dir: Some(tool_state_dir),
             secrets: Default::default(),
         }),

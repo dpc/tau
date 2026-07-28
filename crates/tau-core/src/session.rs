@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use tau_proto::{
     AgentHead, AgentHeadMoved, AgentId, AgentMessageId, AgentMessageKind, AgentMessageReceived,
     AgentMessageRecipient, AgentMessageSent, ConnectionId, ContentPart, ContextItem, ContextRole,
-    Event, MessageItem, PromptOriginator, ProviderBackend, ProviderTokenUsage, ToolBackgroundError,
-    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolName, ToolResultItem, ToolResultKind,
-    ToolResultStatus, ToolType, UnixMicros,
+    Event, ExtensionName, MessageItem, PromptOriginator, ProviderBackend, ProviderTokenUsage,
+    ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem, ToolName, ToolResultItem,
+    ToolResultKind, ToolResultStatus, ToolType, UnixMicros,
 };
 
 const MAX_RETAINED_PROVIDER_IMAGE_BYTES_PER_AGENT: u64 = 128 * 1024 * 1024;
@@ -3021,6 +3021,30 @@ fn provider_image_is_animated(bytes: &[u8], media_type: tau_proto::ImageMediaTyp
     }
 }
 
+/// Typed publishing provenance retained with a persisted semantic event.
+///
+/// JSON and CBOR encode this externally tagged enum as a single-entry
+/// `{"connection": id}` or `{"extension": name}` map.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistedEventSource {
+    /// Run-local connection provenance captured when the event was published.
+    Connection(ConnectionId),
+    /// Stable configured extension publisher retained across replay.
+    Extension(ExtensionName),
+}
+
+impl PersistedEventSource {
+    /// Return the captured connection identity when this provenance names one.
+    #[must_use]
+    pub const fn connection_id(&self) -> Option<&ConnectionId> {
+        match self {
+            Self::Connection(connection_id) => Some(connection_id),
+            Self::Extension(_) => None,
+        }
+    }
+}
+
 /// One durable agent-scoped protocol event.
 ///
 /// `parent` is the explicit fold parent that was passed to
@@ -3041,8 +3065,8 @@ pub struct PersistedAgentEvent {
     /// replay; load rejects records where this stored value disagrees with the
     /// record's zero-based position.
     pub seq: PersistedAgentEventSeq,
-    /// Connection that published the fact, when known.
-    pub source: Option<ConnectionId>,
+    /// Typed publisher provenance, when known.
+    pub source: Option<PersistedEventSource>,
     /// Agent-scoped protocol event.
     pub event: Event,
     /// Explicit fold parent used when replaying this record into the agent

@@ -47,12 +47,12 @@ fn ui_shell_provider_discovery_distinguishes_zero_one_and_two_instances() {
     let mut registry = tau_core::ToolRegistry::new();
     assert!(super::ui_shell_provider_ids(&registry).is_empty());
     registry.register(
-        "shell-a",
+        &crate::test_connection_id("shell-a"),
         tagged_tool("shell", true, &["shell:exec:generic"]),
     );
     assert_eq!(super::ui_shell_provider_ids(&registry).len(), 1);
     registry.register(
-        "shell-b",
+        &crate::test_connection_id("shell-b"),
         tagged_tool("prod_shell", true, &["shell:exec:generic"]),
     );
     assert_eq!(super::ui_shell_provider_ids(&registry).len(), 2);
@@ -101,7 +101,8 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
     harness.available_roles = HashMap::from([(ROLE.to_owned(), role)]);
     let model = ModelId::new(ProviderName::new("provider"), ModelName::new("model"));
     harness.provider_model_info = HashMap::from([(model.clone(), model_info(&model, model_tags))]);
-    harness.provider_model_routes = HashMap::from([(model.clone(), "provider".into())]);
+    harness.provider_model_routes =
+        HashMap::from([(model.clone(), crate::test_connection_id("provider"))]);
     harness.selected_role = ROLE.to_owned();
     harness.selected_model = Some(model.clone());
     let group = ToolGroup {
@@ -123,7 +124,7 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
         tagged_tool("dir_lock", true, &["shell:lock"]),
     ] {
         harness.registry.register_with_prompt_fragment(
-            "tools",
+            &crate::test_connection_id("tools"),
             ToolRegistration {
                 tool: spec,
                 tool_group: Some(group.clone()),
@@ -150,7 +151,7 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
         ),
     ] {
         harness.registry.register_with_prompt_fragment(
-            "harness",
+            &crate::test_connection_id("harness"),
             ToolRegistration {
                 tool: tagged_tool(name, enabled_by_default, tags),
                 tool_group: Some(ToolGroup {
@@ -317,7 +318,7 @@ fn provider_supported_tool_types_filter_effective_snapshot() {
     let mut custom = tagged_tool("custom_text", true, &[]);
     custom.tool_type = ToolType::Custom;
     policy.harness.registry.register_with_prompt_fragment(
-        "tools",
+        &crate::test_connection_id("tools"),
         ToolRegistration {
             tool: custom,
             tool_group: None,
@@ -601,11 +602,11 @@ fn policy_exclusive_alias_builds_and_routes_but_joint_surface_fails() {
     policy
         .harness
         .registry
-        .register_internal("harness", aliased("internal_a"));
+        .register_internal(&crate::test_connection_id("harness"), aliased("internal_a"));
     policy
         .harness
         .registry
-        .register_internal("harness", aliased("internal_b"));
+        .register_internal(&crate::test_connection_id("harness"), aliased("internal_b"));
     policy.harness.available_roles.insert(
         ROLE.to_owned(),
         AgentRole {

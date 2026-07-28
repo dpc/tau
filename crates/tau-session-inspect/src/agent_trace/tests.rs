@@ -3,10 +3,10 @@ use std::os::fd::AsRawFd as _;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt as _;
 
-use tau_core::{AgentEventParent, AgentStore};
+use tau_core::{AgentEventParent, AgentStore, PersistedEventSource};
 use tau_proto::{
-    AgentCreator, AgentId, AgentStarted, CborValue, ContextItem, Event, ObservationId, ToolCallRef,
-    UnixMicros,
+    AgentCreator, AgentId, AgentStarted, CborValue, ContextItem, Event, ExtensionName,
+    ObservationId, ToolCallRef, UnixMicros,
 };
 
 use super::*;
@@ -39,7 +39,9 @@ fn prepare_fixture() -> (tempfile::TempDir, PreparedAgentTrace) {
     store
         .append_agent_event_at(
             agent_id.as_str(),
-            None,
+            Some(PersistedEventSource::Extension(
+                ExtensionName::parse("trace-publisher").expect("extension name"),
+            )),
             AgentEventParent::InheritHead,
             Event::AgentStarted(AgentStarted {
                 agent_id: agent_id.clone(),
@@ -84,6 +86,10 @@ fn native_occurrence_exposes_canonical_observation_id() {
     assert!(
         id.bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    assert_eq!(
+        occurrence["source"],
+        serde_json::json!({"extension": "trace-publisher"})
     );
 }
 
@@ -243,7 +249,8 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         &mut store,
         sent,
         Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: tau_proto::AgentMessageId::parse("message-semantic").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("message-semantic")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: agent_id.clone(),
             recipient: tau_proto::AgentMessageRecipient::User,
             kind: tau_proto::AgentMessageKind::Message,
@@ -256,7 +263,8 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         &mut store,
         received,
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("message-semantic").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("message-semantic")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: AgentId::parse("agent-remote").expect("agent"),
             sender_session_id: None,
             recipient_id: agent_id.clone(),

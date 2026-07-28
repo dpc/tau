@@ -57,13 +57,16 @@ fn configured_extension_request_precedes_canonical_fact() {
     );
 
     h.handle_extension_event_inner_with_persist(
-        "requester",
+        &crate::test_connection_id("requester"),
         set_request(&agent_id, "accepted", None),
         Some(true),
     )
     .expect("publish metadata request");
-    h.handle_extension_event_inner("requester", unset_request(&agent_id))
-        .expect("publish metadata unset request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        unset_request(&agent_id),
+    )
+    .expect("publish metadata unset request");
 
     let commits = metadata_commits(&h);
     assert!(matches!(
@@ -109,7 +112,7 @@ fn rollover_metadata_request_is_observation_only() {
     )
     .expect("register interceptor");
     h.handle_extension_event_inner_with_persist(
-        "requester",
+        &crate::test_connection_id("requester"),
         set_request(&agent_id, "stale rollover", None),
         Some(true),
     )
@@ -152,8 +155,11 @@ fn metadata_authority_is_exact_and_canonical_facts_are_harness_owned() {
         let source = format!("configured-{index}");
         let value = format!("configured-{index}");
         connect_ready_configured_extension(&mut h, &source, &source, kind);
-        h.handle_extension_event_inner(&source, set_request(&agent_id, &value, None))
-            .expect("configured extension request");
+        h.handle_extension_event_inner(
+            &crate::test_connection_id(&source),
+            set_request(&agent_id, &value, None),
+        )
+        .expect("configured extension request");
     }
 
     connect_test_client_with_origin(
@@ -162,22 +168,31 @@ fn metadata_authority_is_exact_and_canonical_facts_are_harness_owned() {
         tau_proto::ClientKind::Ui,
         ConnectionOrigin::Socket,
     );
-    h.handle_client_event_inner("ui", set_request(&agent_id, "ui", None))
-        .expect("attached UI request");
+    h.handle_client_event_inner(
+        &crate::test_connection_id("ui"),
+        set_request(&agent_id, &crate::test_connection_id("ui"), None),
+    )
+    .expect("attached UI request");
 
     connect_test_tool(&mut h, "unconfigured");
-    h.handle_extension_event_inner("unconfigured", set_request(&agent_id, "unconfigured", None))
-        .expect("reject unconfigured request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("unconfigured"),
+        set_request(&agent_id, &crate::test_connection_id("unconfigured"), None),
+    )
+    .expect("reject unconfigured request");
     connect_test_client_with_origin(
         &mut h,
         "socket-tool",
         tau_proto::ClientKind::Tool,
         ConnectionOrigin::Socket,
     );
-    h.handle_client_event_inner("socket-tool", set_request(&agent_id, "socket", None))
-        .expect("reject non-UI socket");
+    h.handle_client_event_inner(
+        &crate::test_connection_id("socket-tool"),
+        set_request(&agent_id, &crate::test_connection_id("socket"), None),
+    )
+    .expect("reject non-UI socket");
     h.handle_extension_event_inner(
-        "configured-4",
+        &crate::test_connection_id("configured-4"),
         Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
             agent_id,
             key: tau_proto::AgentMetadataKey::new("ext_test_value"),
@@ -243,9 +258,12 @@ fn stale_extension_request_has_no_canonical_successor() {
     )
     .expect("register interceptor");
 
-    h.handle_extension_event_inner("requester", set_request(&agent_id, "stale", None))
-        .expect("park request");
-    h.handle_disconnect("requester");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        set_request(&agent_id, &crate::test_connection_id("stale"), None),
+    )
+    .expect("park request");
+    h.handle_disconnect(&crate::test_connection_id("requester"));
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -293,9 +311,12 @@ fn disconnected_ui_request_has_no_canonical_successor() {
     )
     .expect("register interceptor");
 
-    h.handle_client_event_inner("ui", set_request(&agent_id, "stale-ui", None))
-        .expect("park UI request");
-    h.bus.disconnect("ui");
+    h.handle_client_event_inner(
+        &crate::test_connection_id("ui"),
+        set_request(&agent_id, &crate::test_connection_id("stale-ui"), None),
+    )
+    .expect("park UI request");
+    h.bus.disconnect(&crate::test_connection_id("ui"));
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -331,8 +352,11 @@ fn invalid_request_commits_without_canonical_successor() {
     );
     let unknown = tau_proto::AgentId::parse("unknown-agent").expect("agent id");
 
-    h.handle_extension_event_inner("requester", set_request(&unknown, "invalid", None))
-        .expect("commit invalid request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        set_request(&unknown, &crate::test_connection_id("invalid"), None),
+    )
+    .expect("commit invalid request");
 
     let commits = metadata_commits(&h);
     assert!(matches!(
@@ -369,8 +393,11 @@ fn invalid_request_replacement_commits_without_original_mutation() {
     )
     .expect("register interceptor");
 
-    h.handle_extension_event_inner("requester", set_request(&agent_id, "original", None))
-        .expect("park request");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("requester"),
+        set_request(&agent_id, &crate::test_connection_id("original"), None),
+    )
+    .expect("park request");
     let replacement = tau_proto::AgentMetadataSet {
         agent_id: tau_proto::AgentId::parse("unknown-agent").expect("agent id"),
         key: tau_proto::AgentMetadataKey::new("ext_test_value"),
@@ -423,7 +450,7 @@ fn tokened_request_preserves_identity_and_reaches_canonical_echo() {
     .expect("register interceptor");
 
     h.handle_extension_event_inner(
-        "requester",
+        &crate::test_connection_id("requester"),
         set_request(&agent_id, "original", Some("mutation-1")),
     )
     .expect("park tokened request");
@@ -446,7 +473,7 @@ fn tokened_request_preserves_identity_and_reaches_canonical_echo() {
     )));
 
     h.handle_extension_event_inner(
-        "requester",
+        &crate::test_connection_id("requester"),
         set_request(&agent_id, "replace-original", Some("mutation-2")),
     )
     .expect("park replacement request");

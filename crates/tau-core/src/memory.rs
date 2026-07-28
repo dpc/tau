@@ -4,10 +4,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use tau_proto::{ClientKind, ConnectionId};
+use tau_proto::ClientKind;
 
 use crate::connection::{
-    Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
+    Connection, ConnectionOrigin, ConnectionSendError, ConnectionSink, PendingConnectionMetadata,
     RoutedFrame,
 };
 
@@ -45,12 +45,15 @@ impl ConnectionSink for MemorySink {
 
 /// Creates a transport-agnostic in-memory connection pair for tests.
 #[must_use]
-pub fn memory_connection(name: impl Into<String>, kind: ClientKind) -> (Connection, MemoryInbox) {
+pub fn memory_connection(
+    name: tau_proto::ExtensionName,
+    kind: ClientKind,
+) -> (Connection, MemoryInbox) {
     let inbox = MemoryInbox::default();
     let connection = Connection::new(
-        ConnectionMetadata {
-            id: ConnectionId::default(),
-            name: name.into(),
+        PendingConnectionMetadata {
+            id: None,
+            name,
             kind,
             origin: ConnectionOrigin::InMemory,
         },

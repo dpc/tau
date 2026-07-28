@@ -21,9 +21,11 @@ A lifecycle-owned worker coalesces one dirty state per journal or directory
 boundary, syncs complete frames and typed child-before-parent directory targets
 in the background, tracks generations
 so concurrent writes cannot lose a wake, and retries failures. Sync failure does
-not retract or fail an accepted semantic append. Locked recovery truncates the
-first invalid frame and all later bytes, rebuilds folded state, and rebuilds
-derived metadata from retained records. Verification ownership is documented in
+not retract or fail an accepted semantic append. Locked recovery truncates only
+an incomplete frame header or payload at EOF, then rebuilds folded state and
+derived metadata from retained records. Complete framing, decode, source,
+sequence, and semantic failures leave the journal unchanged and fail closed.
+Verification ownership is documented in
 [Durable journal append tests](../../../docs/testing.md#durable-journal-append-tests).
 The full crash and external-effect boundary is governed by
 [SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
@@ -82,7 +84,7 @@ files are versioned, journal-bound derived checkpoints rather than a second
 index or evidence of durability. A complete journal-frame write precedes
 checkpoint replacement. Missing, stale, corrupt, or over-budget checkpoints
 must not hide a valid journal-backed agent, and recovery invalidates a checkpoint
-when it truncates an invalid journal suffix.
+when it truncates an incomplete EOF crash tail.
 
 Current-session roster enrichment is read-only and path-exact: `AgentStore`
 reads at most the bounded first record plus an already-loaded or journal-bound checkpoint

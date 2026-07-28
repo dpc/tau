@@ -171,12 +171,15 @@ fn roster_result_is_ui_only_and_requester_directed() {
 
     harness
         .handle_client_message(
-            "requester",
+            &crate::test_connection_id("requester"),
             HarnessInputMessage::GetSessionAgentList(request.clone()),
         )
         .expect("UI request");
     harness
-        .handle_client_message("tool", HarnessInputMessage::GetSessionAgentList(request))
+        .handle_client_message(
+            &crate::test_connection_id("tool"),
+            HarnessInputMessage::GetSessionAgentList(request),
+        )
         .expect("non-UI request is ignored");
 
     assert!(
@@ -209,10 +212,10 @@ fn current_session_result_is_authoritative_ui_only_and_directed() {
 
     harness
         .handle_client_message(
-            "requester",
+            &crate::test_connection_id("requester"),
             HarnessInputMessage::Hello(tau_proto::Hello {
                 protocol_version: tau_proto::PROTOCOL_VERSION,
-                client_name: "claim-external".into(),
+                client_name: crate::test_extension_name("claim-external"),
                 client_kind: tau_proto::ClientKind::External,
                 capabilities: Default::default(),
             }),
@@ -220,12 +223,15 @@ fn current_session_result_is_authoritative_ui_only_and_directed() {
         .expect("Hello claim");
     harness
         .handle_client_message(
-            "requester",
+            &crate::test_connection_id("requester"),
             HarnessInputMessage::GetCurrentSession(request.clone()),
         )
         .expect("UI request");
     harness
-        .handle_client_message("tool", HarnessInputMessage::GetCurrentSession(request))
+        .handle_client_message(
+            &crate::test_connection_id("tool"),
+            HarnessInputMessage::GetCurrentSession(request),
+        )
         .expect("non-UI request is ignored");
 
     assert!(

@@ -15,7 +15,7 @@ fn prompt_fragment(name: &str, template: &str) -> Event {
 /// shell fragment from one test contributor.
 fn register_workdir_capability(h: &mut Harness, source: &str) {
     h.registry.register(
-        source,
+        &crate::test_connection_id(source),
         tau_proto::ToolSpec {
             name: tau_proto::ToolName::new(format!("{}_workdir", source.replace('-', "_"))),
             model_visible_name: None,
@@ -84,7 +84,7 @@ fn dropped_prompt_fragment_does_not_mutate_projection() {
     connect_prompt_fragment_interceptor(&mut h);
 
     h.handle_extension_event_inner_with_persist(
-        "fragment-owner",
+        &crate::test_connection_id("fragment-owner"),
         prompt_fragment("test.drop", "DROPPED"),
         Some(true),
     )
@@ -126,7 +126,7 @@ fn rollover_applies_deferred_prompt_fragment_for_current_generation() {
     .expect("register rollover blocker");
     h.publish_event(None, draft_event("block prompt fragment"));
     h.handle_extension_event_inner_with_persist(
-        "fragment-owner",
+        &crate::test_connection_id("fragment-owner"),
         prompt_fragment("rollover.fragment", "SURVIVES ROLLOVER"),
         Some(false),
     )
@@ -151,7 +151,10 @@ fn rollover_applies_deferred_prompt_fragment_for_current_generation() {
     assert_eq!(
         committed_fragments(&h, "rollover.fragment"),
         vec![(
-            Some(tau_proto::ConnectionId::from("fragment-owner")),
+            Some(
+                tau_proto::ConnectionId::parse("fragment-owner")
+                    .expect("test connection id must satisfy the identifier grammar")
+            ),
             "SURVIVES ROLLOVER".to_owned(),
         )]
     );
@@ -171,7 +174,7 @@ fn replacement_prompt_fragment_projects_only_after_commit() {
     );
     connect_prompt_fragment_interceptor(&mut h);
     h.handle_extension_event_inner_with_persist(
-        "fragment-owner",
+        &crate::test_connection_id("fragment-owner"),
         prompt_fragment("test.replace", "ORIGINAL"),
         Some(true),
     )
@@ -199,7 +202,10 @@ fn replacement_prompt_fragment_projects_only_after_commit() {
     assert_eq!(
         committed_fragments(&h, "test.replace"),
         vec![(
-            Some(tau_proto::ConnectionId::from("fragment-owner")),
+            Some(
+                tau_proto::ConnectionId::parse("fragment-owner")
+                    .expect("test connection id must satisfy the identifier grammar")
+            ),
             "REPLACEMENT".to_owned()
         )]
     );
@@ -224,7 +230,7 @@ fn every_configured_extension_kind_may_publish_prompt_fragments() {
         let source = format!("configured-kind-{index}");
         connect_ready_configured_extension(&mut h, &source, &source, kind);
         h.handle_extension_event_inner_with_persist(
-            &source,
+            &crate::test_connection_id(&source),
             prompt_fragment(&format!("test.kind.{index}"), &source),
             None,
         )
@@ -245,7 +251,7 @@ fn unconfigured_peer_cannot_publish_prompt_fragment() {
     connect_test_client(&mut h, "unconfigured-core", tau_proto::ClientKind::Core);
 
     h.handle_extension_event_inner_with_persist(
-        "unconfigured-core",
+        &crate::test_connection_id("unconfigured-core"),
         prompt_fragment("test.unauthorized", "UNAUTHORIZED"),
         None,
     )
@@ -282,8 +288,11 @@ fn parked_startup_prompt_fragment_blocks_ready_until_commit() {
         TestProtocolItem::Event(prompt_fragment("test.startup", "STARTUP")),
     )
     .expect("park declaration");
-    h.handle_extension_message("fragment-owner", TestMessage::Ready(Default::default()))
-        .expect("Ready waits");
+    h.handle_extension_message(
+        &crate::test_connection_id("fragment-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("Ready waits");
 
     assert_eq!(
         h.extensions.entries["fragment-owner"].state,
@@ -353,11 +362,17 @@ fn startup_prompt_fragment_commits_all_updates_and_activates_latest() {
         committed_fragments(&h, "test.coalesced"),
         vec![
             (
-                Some(tau_proto::ConnectionId::from("fragment-owner")),
+                Some(
+                    tau_proto::ConnectionId::parse("fragment-owner")
+                        .expect("test connection id must satisfy the identifier grammar")
+                ),
                 "FIRST".to_owned()
             ),
             (
-                Some(tau_proto::ConnectionId::from("fragment-owner")),
+                Some(
+                    tau_proto::ConnectionId::parse("fragment-owner")
+                        .expect("test connection id must satisfy the identifier grammar")
+                ),
                 "SECOND".to_owned()
             )
         ]
@@ -373,8 +388,11 @@ fn startup_prompt_fragment_commits_all_updates_and_activates_latest() {
         "SECOND"
     );
 
-    h.handle_extension_message("fragment-owner", TestMessage::Ready(Default::default()))
-        .expect("activate final fragment");
+    h.handle_extension_message(
+        &crate::test_connection_id("fragment-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("activate final fragment");
 
     assert_eq!(
         projected_template(&h, "fragment-owner", "test.coalesced"),
@@ -405,8 +423,11 @@ fn dropped_startup_prompt_fragment_releases_activation_reservation() {
         TestProtocolItem::Event(prompt_fragment("test.startup.drop", "DROP")),
     )
     .expect("park declaration");
-    h.handle_extension_message("fragment-owner", TestMessage::Ready(Default::default()))
-        .expect("Ready waits");
+    h.handle_extension_message(
+        &crate::test_connection_id("fragment-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("Ready waits");
 
     h.handle_extension_event(
         "interceptor",
@@ -550,8 +571,11 @@ fn rollover_stages_deferred_prompt_fragment_for_later_ready() {
         projected_template(&h, "fragment-owner", "test.rollover"),
         None
     );
-    h.handle_extension_message("fragment-owner", TestMessage::Ready(Default::default()))
-        .expect("activate fragment owner");
+    h.handle_extension_message(
+        &crate::test_connection_id("fragment-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("activate fragment owner");
     assert_eq!(
         projected_template(&h, "fragment-owner", "test.rollover"),
         Some("ROLLOVER")
@@ -571,7 +595,7 @@ fn prompt_fragment_declaration_has_no_late_subscriber_replay() {
         tau_proto::ClientKind::Tool,
     );
     h.handle_extension_event_inner_with_persist(
-        "fragment-owner",
+        &crate::test_connection_id("fragment-owner"),
         prompt_fragment("test.no-replay", "LIVE ONLY"),
         Some(true),
     )
@@ -579,7 +603,7 @@ fn prompt_fragment_declaration_has_no_late_subscriber_replay() {
 
     let observer = connect_test_client(&mut h, "late-observer", tau_proto::ClientKind::Ui);
     h.handle_client_message(
-        "late-observer",
+        &crate::test_connection_id("late-observer"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
@@ -614,7 +638,7 @@ fn shell_workdir_visibility_recomputes_after_contributor_disconnect() {
         connect_ready_configured_extension(&mut h, source, source, tau_proto::ClientKind::Tool);
         register_workdir_capability(&mut h, source);
         h.handle_extension_event_inner_with_persist(
-            source,
+            &crate::test_connection_id(source),
             prompt_fragment("shell.workdir", template),
             None,
         )
@@ -629,7 +653,7 @@ fn shell_workdir_visibility_recomputes_after_contributor_disconnect() {
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].template.as_str(), "WORKDIR A");
 
-    h.handle_disconnect("shell-a");
+    h.handle_disconnect(&crate::test_connection_id("shell-a"));
 
     let visible = h
         .gather_prompt_fragments()
@@ -642,7 +666,7 @@ fn shell_workdir_visibility_recomputes_after_contributor_disconnect() {
     connect_ready_configured_extension(&mut h, "shell-0", "shell-a", tau_proto::ClientKind::Tool);
     register_workdir_capability(&mut h, "shell-0");
     h.handle_extension_event_inner_with_persist(
-        "shell-0",
+        &crate::test_connection_id("shell-0"),
         prompt_fragment("shell.workdir", "WORKDIR RESPAWN"),
         None,
     )
@@ -671,13 +695,13 @@ fn stale_prompt_fragment_generation_cannot_mutate_projection() {
     );
     connect_prompt_fragment_interceptor(&mut h);
     h.handle_extension_event_inner_with_persist(
-        "old-generation",
+        &crate::test_connection_id("old-generation"),
         prompt_fragment("test.stale", "STALE"),
         None,
     )
     .expect("park stale declaration");
 
-    h.handle_disconnect("old-generation");
+    h.handle_disconnect(&crate::test_connection_id("old-generation"));
     connect_ready_configured_extension(
         &mut h,
         "new-generation",
@@ -696,7 +720,10 @@ fn stale_prompt_fragment_generation_cannot_mutate_projection() {
     assert_eq!(
         committed_fragments(&h, "test.stale"),
         vec![(
-            Some(tau_proto::ConnectionId::from("old-generation")),
+            Some(
+                tau_proto::ConnectionId::parse("old-generation")
+                    .expect("test connection id must satisfy the identifier grammar")
+            ),
             "STALE".to_owned()
         )]
     );
@@ -726,7 +753,7 @@ fn stale_startup_generation_cannot_consume_successor_reservation() {
     )
     .expect("park old declaration");
 
-    h.handle_disconnect("old-generation");
+    h.handle_disconnect(&crate::test_connection_id("old-generation"));
     connect_ready_configured_extension(
         &mut h,
         "new-generation",
@@ -743,8 +770,11 @@ fn stale_startup_generation_cannot_consume_successor_reservation() {
         TestProtocolItem::Event(prompt_fragment("test.generation", "CURRENT")),
     )
     .expect("queue successor declaration");
-    h.handle_extension_message("new-generation", TestMessage::Ready(Default::default()))
-        .expect("Ready waits");
+    h.handle_extension_message(
+        &crate::test_connection_id("new-generation"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("Ready waits");
     assert_eq!(
         h.extensions
             .pending_prompt_fragment_declarations

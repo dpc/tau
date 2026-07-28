@@ -1310,7 +1310,7 @@ impl SendDeliveryWorker {
             }
             entry.disposition = SendLedgerDisposition::Submitting;
             Event::MessageSentReported(MessageSent::new(
-                MessagePublisherId::new(instance_name),
+                tau_proto::RawMessagePublisherId::new(instance_name),
                 MessageAgentTarget::new(prepared.invoke.agent_id.to_string()),
                 message_id.clone(),
                 recipient,

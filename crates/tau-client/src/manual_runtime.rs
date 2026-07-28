@@ -1030,7 +1030,7 @@ where
         W: Write + Send + 'static,
         MakeState: FnOnce(ClientHandle, ExtensionDataClient) -> Extension::State,
     {
-        let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind());
+        let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind())?;
         self.extension.register(&mut builder);
         builder.validate()?;
 
@@ -1188,7 +1188,7 @@ where
         W: Write + Send + 'static,
         MakeState: FnOnce(ClientHandle) -> Extension::State,
     {
-        let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind());
+        let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind())?;
         self.extension.register(&mut builder);
         builder.validate()?;
         builder.validate_deferred_startup()?;

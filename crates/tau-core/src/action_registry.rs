@@ -133,7 +133,7 @@ impl ActionRegistry {
     /// Register or replace the schema for one extension connection.
     pub fn register_schema(
         &mut self,
-        connection_id: &str,
+        connection_id: &ConnectionId,
         extension_name: ExtensionName,
         instance_id: ExtensionInstanceId,
         schema: tau_actions::ActionSchema,
@@ -141,14 +141,13 @@ impl ActionRegistry {
         let action_ids = schema
             .executable_action_ids()
             .map_err(|error| ActionRegistryError::new(format!("invalid action schema: {error}")))?;
-        let connection_id = ConnectionId::from(connection_id);
         let route_keys = action_ids
             .into_iter()
             .map(|action_id| ActionRouteKey::new(extension_name.clone(), instance_id, action_id))
             .collect::<Vec<_>>();
         for key in &route_keys {
             if let Some(owner) = self.routes.get(key)
-                && owner != &connection_id
+                && owner != connection_id
             {
                 return Err(ActionRegistryError::new(format!(
                     "action route collision for {}#{}:{} already owned by {}",
@@ -156,7 +155,7 @@ impl ActionRegistry {
                 )));
             }
         }
-        self.unregister_connection(connection_id.as_str());
+        self.unregister_connection(connection_id);
 
         for key in route_keys {
             self.routes.insert(key, connection_id.clone());
@@ -164,7 +163,7 @@ impl ActionRegistry {
         self.schemas_by_connection.insert(
             connection_id.clone(),
             ActionProviderSchema {
-                connection_id,
+                connection_id: connection_id.clone(),
                 extension_name,
                 instance_id,
                 schema,
@@ -174,10 +173,12 @@ impl ActionRegistry {
     }
 
     /// Remove any schema and actions owned by one connection.
-    pub fn unregister_connection(&mut self, connection_id: &str) -> Option<ActionProviderSchema> {
-        let connection_id = ConnectionId::from(connection_id);
-        let removed = self.schemas_by_connection.remove(&connection_id)?;
-        self.routes.retain(|_, provider| provider != &connection_id);
+    pub fn unregister_connection(
+        &mut self,
+        connection_id: &ConnectionId,
+    ) -> Option<ActionProviderSchema> {
+        let removed = self.schemas_by_connection.remove(connection_id)?;
+        self.routes.retain(|_, provider| provider != connection_id);
         Some(removed)
     }
 
@@ -224,7 +225,7 @@ impl ActionRegistry {
 
     /// Return true when the connection currently has a published schema.
     #[must_use]
-    pub fn has_schema_for_connection(&self, connection_id: &str) -> bool {
+    pub fn has_schema_for_connection(&self, connection_id: &ConnectionId) -> bool {
         self.schemas_by_connection.contains_key(connection_id)
     }
 }

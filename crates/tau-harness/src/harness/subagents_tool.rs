@@ -30,8 +30,7 @@ use wait_tracker::{
 use crate::error::HarnessError;
 use crate::event::{ExternalMessageToolCompletedCommand, HarnessCommand, HarnessEvent};
 use crate::harness::{
-    AgentMessageRecipientStatus, AgentToolCall, HARNESS_CONNECTION_ID, Harness,
-    PendingExternalAgentMessageAuth,
+    AgentMessageRecipientStatus, AgentToolCall, Harness, PendingExternalAgentMessageAuth,
 };
 
 fn provider_status_attempt(state: &tau_proto::AgentWatchProviderState) -> Option<u32> {
@@ -275,7 +274,7 @@ impl Harness {
             self.agent_context.publish(
                 tau_proto::AgentId::parse(agent_id).expect("agent id"),
                 AgentContextKey::new("delegate_roles"),
-                tau_proto::ConnectionId::from(HARNESS_CONNECTION_ID),
+                crate::harness::harness_connection_id().clone(),
                 "harness".to_owned(),
                 AgentContextValue(serde_json::Value::Array(roles.clone())),
             );
@@ -629,7 +628,7 @@ impl Harness {
             },
         );
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(received),
         );
         Ok(())
@@ -912,7 +911,7 @@ impl Harness {
             })
             .unwrap_or_default();
         self.publish_event(
-            Some(super::HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::AgentWatchesUpdated(AgentWatchesUpdated {
                 session_id: self.current_session_id.clone(),
                 watcher_id: crate::parse_agent_id(watcher_id),
@@ -967,7 +966,7 @@ impl Harness {
             }
         };
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(AgentMessageReceived {
                 message_id,
                 sender_id,
@@ -1110,7 +1109,7 @@ impl Harness {
         let sender_id = crate::parse_agent_id(watched_agent_id);
         let message = crate::prompt::watch_provider_status_text(watched_agent_id, &status);
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(AgentMessageReceived {
                 message_id: next_agent_message_id(&sender_id),
                 sender_id,
@@ -1157,7 +1156,7 @@ impl Harness {
         if kind == tau_proto::AgentMessageKind::Message {
             self.publish_for_agent_from(
                 agent_id,
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 Event::AgentMessageSent(AgentMessageSent {
                     message_id: message_id.clone(),
                     sender_id: sender_id.clone(),
@@ -1169,7 +1168,7 @@ impl Harness {
         }
         if let tau_proto::AgentMessageRecipient::Agent { agent_id } = recipient {
             self.publish_event(
-                Some(HARNESS_CONNECTION_ID),
+                Some(crate::harness::harness_connection_id()),
                 Event::AgentMessageReceived(AgentMessageReceived {
                     message_id,
                     sender_id,
@@ -1442,7 +1441,7 @@ impl Harness {
             },
         );
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(received),
         );
         Ok(())
@@ -1483,7 +1482,7 @@ impl Harness {
             }
         };
         self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
+            Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(AgentMessageReceived {
                 message_id: request.message_id,
                 sender_id: request.sender_id,
@@ -1652,7 +1651,7 @@ impl Harness {
             parent_agent: None,
         };
         let pending = self
-            .prepare_start_agent_request(HARNESS_CONNECTION_ID, query)?
+            .prepare_start_agent_request(crate::harness::harness_connection_id(), query)?
             .ok_or_else(|| INTER_SESSION_UNAVAILABLE.to_owned())?;
         let recipient_id = crate::parse_agent_id(&pending.agent_id);
         let admitted_at = self.admit_peer_input(&recipient_id, message_bytes)?;
@@ -2120,7 +2119,7 @@ impl Harness {
             return;
         };
         if self.tool_turn.is_backgrounded(&call_id) {
-            self.handle_background_tool_result(HARNESS_CONNECTION_ID, result);
+            self.handle_background_tool_result(crate::harness::harness_connection_id(), result);
         } else {
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);
@@ -2142,7 +2141,7 @@ impl Harness {
             return;
         };
         if self.tool_turn.is_backgrounded(&call_id) {
-            self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), error);
+            self.handle_background_tool_error(Some(crate::harness::harness_connection_id()), error);
         } else {
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);
@@ -2281,7 +2280,10 @@ fn authenticate_external_agent_message_sender(
         .map_err(|err| format!("failed to set external auth deadline: {err}"))?;
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
-        client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+        client_name: tau_proto::ExtensionName::parse(
+            crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
+        )
+        .map_err(|error| format!("invalid external-message client name: {error}"))?,
         client_kind: tau_proto::ClientKind::External,
         capabilities: Default::default(),
     }))
@@ -2363,7 +2365,10 @@ fn send_external_agent_message_request(
         .map_err(|err| format!("failed to set peer send deadline: {err}"))?;
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
-        client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+        client_name: tau_proto::ExtensionName::parse(
+            crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
+        )
+        .map_err(|error| format!("invalid external-message client name: {error}"))?,
         client_kind: tau_proto::ClientKind::External,
         capabilities: Default::default(),
     }))

@@ -309,7 +309,7 @@ impl TauExtension for CorrelatedTerminalReportsExtension {
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder.tool(tool_spec("correlated_tool"), |cx| {
             let wrong_originator = PromptOriginator::Extension {
-                name: "wrong-extension".into(),
+                name: test_extension_name("wrong-extension"),
                 query_id: "wrong-query".to_owned(),
             };
             cx.report_result(tau_proto::ToolResult {
@@ -964,7 +964,8 @@ fn config_with_unknown_field() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "unknown": 4 })),
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
     })
@@ -1021,7 +1022,8 @@ fn configure_message() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 3 })),
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
     })
@@ -1107,13 +1109,14 @@ fn latest_extension_data_request(writer: &SharedWriter) -> tau_proto::ExtensionD
 fn action_invoke(extension_name: &str, action_id: &str) -> Event {
     Event::ActionInvoke(tau_proto::ActionInvoke {
         invocation_id: tau_proto::ActionInvocationId::parse(format!(
-            "invoke-{extension_name}-{action_id}"
+            "invoke-{extension_name}-{}",
+            action_id.replace('.', "-")
         ))
-        .unwrap(),
+        .expect("test action invocation id must satisfy its grammar"),
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        extension_name: extension_name.into(),
+        extension_name: test_extension_name(extension_name),
         instance_id: 0.into(),
         action_id: action_id.to_owned(),
         raw_line: format!("/{action_id}"),
@@ -1204,7 +1207,8 @@ fn ui_shell_command() -> Event {
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        command_id: tau_proto::ShellCommandId::parse("cmd-1").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("cmd-1")
+            .expect("test identifier must satisfy its grammar"),
         command: "pwd".to_owned(),
         include_in_context: true,
         target_agent_id: Some(agent_id()),
@@ -1297,7 +1301,8 @@ fn configure_application_failure_sends_config_error() {
             HarnessOutputMessage::Configure(Configure {
                 tool_prefix: None,
                 config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
-                instance_name: tau_proto::ExtensionName::new("test-extension"),
+                instance_name: tau_proto::ExtensionName::parse("test-extension")
+                    .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: None,
                 secrets: std::collections::BTreeMap::new(),
             }),
@@ -1343,7 +1348,8 @@ fn configure_application_failure_runs_error_hook() {
         &[HarnessOutputMessage::Configure(Configure {
             tool_prefix: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })],
@@ -1375,7 +1381,8 @@ fn raw_configure_error_emits_config_error_and_continues() {
             HarnessOutputMessage::Configure(Configure {
                 tool_prefix: None,
                 config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
-                instance_name: tau_proto::ExtensionName::new("test-extension"),
+                instance_name: tau_proto::ExtensionName::parse("test-extension")
+                    .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: None,
                 secrets: std::collections::BTreeMap::new(),
             }),
@@ -1501,7 +1508,7 @@ fn action_schema_and_live_dispatch_match_action_after_harness_routing() {
         .expect("action schema published");
     assert_eq!(
         published_schema.extension_name,
-        tau_proto::ExtensionName::default()
+        test_extension_name("action-owner")
     );
     assert_eq!(published_schema.instance_id, 0.into());
     assert!(schema_index < ready_frame_index(&frames));
@@ -2951,7 +2958,8 @@ fn manual_loop_dispatch_config_error_continues() {
     let initial = HarnessOutputMessage::Configure(Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 7 })),
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
     });
@@ -3357,7 +3365,8 @@ fn configured_tool_prefix_maps_registration_and_dispatch() {
     let configure = HarnessOutputMessage::Configure(Configure {
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         config: CborValue::Null,
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
     });
@@ -3441,7 +3450,8 @@ fn manual_loop_uses_configured_tool_scope() {
     let configure = HarnessOutputMessage::Configure(Configure {
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         config: CborValue::Map(Vec::new()),
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
     });
@@ -3469,7 +3479,8 @@ fn manual_loop_recv_rejects_changed_prefix_and_preserves_scope() {
         HarnessOutputMessage::Configure(Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: CborValue::Map(Vec::new()),
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })
@@ -3510,7 +3521,8 @@ fn manual_loop_try_recv_rejects_changed_prefix_and_preserves_scope() {
         HarnessOutputMessage::Configure(Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: CborValue::Map(Vec::new()),
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })
@@ -3558,7 +3570,8 @@ fn changed_tool_prefix_is_rejected_without_reconfiguring() {
         HarnessOutputMessage::Configure(Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: tau_proto::json_to_cbor(&serde_json::json!({ "value": value })),
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })
@@ -3583,7 +3596,8 @@ fn changed_tool_prefix_preserves_original_tool_dispatch_scope() {
         HarnessOutputMessage::Configure(Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse(prefix).expect("prefix")),
             config: CborValue::Map(Vec::new()),
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         })
@@ -3620,7 +3634,8 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
         .install_tool_name_scope(ToolNameScope::from_configure(&Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
             config: CborValue::Map(Vec::new()),
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
         }))
@@ -4166,4 +4181,10 @@ fn wrong_first_harness_message_fails_before_declarations() {
         frames_from_writer(&written).as_slice(),
         [HarnessInputMessage::Hello(_)]
     ));
+}
+
+/// Builds a validated extension name used by this test module.
+fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
+    tau_proto::ExtensionName::parse(value.as_ref())
+        .expect("test extension name must satisfy the identifier grammar")
 }

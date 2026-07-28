@@ -22,7 +22,8 @@ fn action_schema(root: &str, action_id: &str) -> tau_actions::ActionSchema {
 fn action_state_with_email_list() -> ActionCommandState {
     let state = ActionCommandState::new(BUILTIN_COMMANDS.iter().map(|(name, _)| *name));
     state.apply_schema_published(&tau_proto::ActionSchemaPublished {
-        extension_name: "std-email".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-email")
+            .expect("test identifier must satisfy its grammar"),
         instance_id: 7.into(),
         schema: action_schema(":email", "email.list"),
     });

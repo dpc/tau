@@ -7,13 +7,18 @@ fn extension_reader_waits_for_initialized_ack() {
     let (reader_stream, writer_stream) = UnixStream::pair().expect("stream pair");
     let (tx, rx) = mpsc::channel();
     let (initialized_tx, initialized_rx) = mpsc::channel();
-    spawn_reader_thread_after_initialized("conn-test".into(), reader_stream, tx, initialized_rx);
+    spawn_reader_thread_after_initialized(
+        crate::test_connection_id("conn-test"),
+        reader_stream,
+        tx,
+        initialized_rx,
+    );
 
     let mut writer = tau_proto::HarnessInputWriter::new(BufWriter::new(writer_stream));
     writer
         .write_message(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: "test-extension".into(),
+            client_name: crate::test_extension_name("test-extension"),
             client_kind: tau_proto::ClientKind::Tool,
             capabilities: Default::default(),
         }))
@@ -52,7 +57,11 @@ fn extension_reader_waits_for_initialized_ack() {
 fn reader_reports_decode_failure_separately_from_clean_disconnect() {
     let (reader_stream, mut writer_stream) = UnixStream::pair().expect("stream pair");
     let (tx, rx) = mpsc::channel();
-    spawn_reader_thread("conn-malformed".into(), reader_stream, tx);
+    spawn_reader_thread(
+        crate::test_connection_id("conn-malformed"),
+        reader_stream,
+        tx,
+    );
 
     writer_stream
         .write_all(&[0xff])
@@ -105,7 +114,7 @@ fn writer_failure_still_reaps_supervised_child() {
     let pid = child.id();
     let (harness_tx, harness_rx) = mpsc::channel();
     let (tx, mut writer) = spawn_supervised_writer_thread(
-        "failing-writer".into(),
+        crate::test_connection_id("failing-writer"),
         FailingWriter,
         child,
         None,
@@ -142,8 +151,13 @@ fn graceful_supervised_writer_cleanup_cancels_watchdog() {
         .expect("spawn child");
     let stdin = child.stdin.take().expect("child stdin");
     let (harness_tx, harness_rx) = mpsc::channel();
-    let (writer_tx, mut writer) =
-        spawn_supervised_writer_thread("graceful-writer".into(), stdin, child, None, harness_tx);
+    let (writer_tx, mut writer) = spawn_supervised_writer_thread(
+        crate::test_connection_id("graceful-writer"),
+        stdin,
+        child,
+        None,
+        harness_tx,
+    );
 
     drop(writer_tx);
     let watchdog = writer.start_shutdown_watchdog();
@@ -175,8 +189,13 @@ fn expired_cleanup_deadline_is_carried_into_child_wait() {
     let pid = child.id();
     let stdin = child.stdin.take().expect("child stdin");
     let (harness_tx, harness_rx) = mpsc::channel();
-    let (writer_tx, mut writer) =
-        spawn_supervised_writer_thread("expired-writer".into(), stdin, child, None, harness_tx);
+    let (writer_tx, mut writer) = spawn_supervised_writer_thread(
+        crate::test_connection_id("expired-writer"),
+        stdin,
+        child,
+        None,
+        harness_tx,
+    );
     writer.arm_cleanup_deadline(Instant::now());
     let started = Instant::now();
 
@@ -205,8 +224,13 @@ fn shutdown_watchdog_uses_prearmed_runtime_deadline() {
     let pid = child.id();
     let stdin = child.stdin.take().expect("child stdin");
     let (harness_tx, harness_rx) = mpsc::channel();
-    let (writer_tx, mut writer) =
-        spawn_supervised_writer_thread("prearmed-writer".into(), stdin, child, None, harness_tx);
+    let (writer_tx, mut writer) = spawn_supervised_writer_thread(
+        crate::test_connection_id("prearmed-writer"),
+        stdin,
+        child,
+        None,
+        harness_tx,
+    );
     writer.arm_cleanup_deadline(Instant::now() + Duration::from_millis(200));
     writer_tx
         .send(WriterCommand::Message(HarnessOutputMessage::deliver(

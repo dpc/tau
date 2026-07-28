@@ -103,13 +103,17 @@ Agent `events.cbor` and session `events.cbor`/`restore-events.cbor` use
 length-prefixed CBOR frames. Prefix or payload-write failure triggers truncation
 to the exact pre-append EOF before the caller receives the original append
 error. Only failure to restore that EOF poisons the journal path in the live
-store. A complete frame immediately advances folded state and sequence.
+store. On reopen, a locked writer truncates only an incomplete frame header or
+payload at EOF, which represents a crash tail. A complete frame that fails typed
+decode, source-shape validation, sequence validation, or semantic validation
+fails closed without changing that frame or any following bytes. A valid
+complete frame immediately advances folded state and sequence.
 
 A lifecycle-owned worker coalesces dirty journals and required directory
 coverage, syncs in the background, tracks generations to avoid lost wakes, and
 retries failures without retracting accepted facts. Locked recovery truncates
-the first invalid frame and all later bytes, invalidates derived metadata, and
-never salvages a valid-looking suffix. Re-check byte-boundary, rollback-failure,
+only an incomplete EOF crash tail and invalidates derived metadata after that
+repair. Complete invalid frames fail closed without mutation. Re-check byte-boundary, rollback-failure,
 retry-sequence, restore-journal, writeback, and suffix regressions whenever
 framed I/O changes.
 
@@ -146,8 +150,9 @@ warning coalescing, and nonjoining exit whenever debug-log I/O changes.
 
 Summary files intentionally omit prompt previews. Legacy preview-bearing
 sidecars are unverified hints and are scrubbed when strict journal migration can
-acquire the agent lock. Bounded checkpoint repair never rewrites journal facts;
-writer recovery may truncate an invalid suffix but never salvages later bytes.
+acquire the agent lock. Bounded checkpoint repair never rewrites journal facts.
+Writer recovery may truncate only an incomplete EOF crash tail; complete invalid
+frames and their suffix remain unchanged and fail closed.
 Failure to publish derived metadata does not invalidate an already committed record.
 This is cooperative same-UID crash consistency, not tamper detection: arbitrary
 same-inode/same-size journal mutation is outside the append-only store contract.
@@ -317,7 +322,9 @@ Configured Provider/Tool/Core peers may also publish `tool.request` routing
 intents. The request commits before live generation, call-id correlation, and
 registry routing checks; only harness-sourced derived facts assert acceptance
 or terminal closure. Durable requests retain stable configured publisher
-identity but replay never routes or executes work. See
+identity as a typed configured-extension provenance distinct from run-local
+`ConnectionId`. Replay never interprets that provenance as a live source, never
+routes it, and never executes work. See
 [`SPEC-tool-requests-and-routing`](specs/SPEC-tool-requests-and-routing.md).
 Configured local extensions are trusted to supply request agent correlation.
 Internal-route correlation remains runtime/accounting state and never grants
@@ -490,8 +497,14 @@ verified live-human admission. Receive permission creates only Tau-issued
 source-bound reply authority; proactive permission is a separate alias-only
 grant. Dynamic DMs remain bounded, allowlist/exact-user-bound, and reply-only.
 Slack submits transient message reports through ordinary interception; the
-harness later publishes immutable canonical facts. Actionable reply and reaction
-authority stays in extension-local runtime state. The Slack extension drops
+harness retains each raw publisher claim losslessly for observation and audit.
+The harness publishes an immutable canonical fact only when the top-level claim
+is grammar-valid and exactly matches the authenticated configured extension
+name, then stamps canonical provenance from that captured identity. A malformed
+or mismatched claim remains only a transient report. Nested message references
+remain opaque and follow projection validation rather than report admission.
+Actionable reply and reaction authority stays in extension-local runtime state.
+The Slack extension drops
 recently repeated native occurrence ids with a bounded process-local cache before
 report submission. Generic event infrastructure does no native deduplication or
 ownership resolution: each canonical fact is a new immutable occurrence.

@@ -94,7 +94,7 @@ fn run_test_mode(
 fn write_startup_messages(writer: &mut PeerOutputWriter<impl Write>) -> Result<(), Box<dyn Error>> {
     writer.write_message(&HarnessInputMessage::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "test-child".into(),
+        client_name: tau_proto::ExtensionName::parse("test-child")?,
         client_kind: ClientKind::Tool,
         capabilities: Default::default(),
     }))?;

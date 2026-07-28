@@ -37,7 +37,8 @@ fn synchronous_debug_log_poison_prevents_reenable() {
         .inject_rollback_failure();
 
     harness.log_event(&HarnessEvent::Disconnected {
-        connection_id: tau_proto::ConnectionId::from("conn-1"),
+        connection_id: tau_proto::ConnectionId::parse("conn-1")
+            .expect("test connection id must satisfy the identifier grammar"),
     });
 
     assert!(harness.debug_log_poisoned);
@@ -133,7 +134,7 @@ fn connect_supervised_test_process(
     h.connect_extension(ExtensionConnectCommand {
         entry: ExtensionEntry {
             tool_prefix: config.tool_prefix.clone(),
-            name: config.name.clone(),
+            name: crate::test_extension_name(config.name.clone()),
             instance_id: 700.into(),
             connection_id: connection_id.clone(),
             kind,
@@ -413,12 +414,12 @@ fn connect_handshaking_extension(
     kind: tau_proto::ClientKind,
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let sink = connect_test_client(h, conn_id, kind.clone());
-    let connection_id: tau_proto::ConnectionId = conn_id.into();
+    let connection_id: tau_proto::ConnectionId = crate::test_connection_id(conn_id);
     h.extensions.entries.insert(
         connection_id.clone(),
         ExtensionEntry {
             tool_prefix: None,
-            name: conn_id.to_owned(),
+            name: crate::test_extension_name(conn_id),
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
             kind,
@@ -449,12 +450,12 @@ fn insert_extension_entry_with_meter(
     state: ExtensionState,
     protocol_io: tau_client::ProtocolIoMeter,
 ) {
-    let connection_id: tau_proto::ConnectionId = connection_id.into();
+    let connection_id: tau_proto::ConnectionId = crate::test_connection_id(connection_id);
     h.extensions.entries.insert(
         connection_id.clone(),
         ExtensionEntry {
             tool_prefix: None,
-            name: name.to_owned(),
+            name: crate::test_extension_name(name),
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
             kind: tau_proto::ClientKind::Tool,
@@ -511,7 +512,7 @@ fn assert_no_message<R: std::io::Read>(reader: &mut HarnessOutputReader<R>) {
 
 fn debug_event_stats_request(extension_name: &str) -> HarnessInputMessage {
     HarnessInputMessage::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
-        extension_name: extension_name.into(),
+        extension_name: crate::test_extension_name(extension_name),
     })
 }
 
@@ -599,7 +600,7 @@ fn tree_request_returns_directed_result_during_startup() {
     let baseline_seq = h.event_log.next_seq();
 
     assert!(
-        !h.handle_startup_from_connection(ui_id.as_str(), tree_request("s1", None))
+        !h.handle_startup_from_connection(&ui_id, tree_request("s1", None))
             .expect("handle startup tree request")
     );
 
@@ -625,10 +626,12 @@ fn tree_request_is_silently_denied_for_other_client_origins() {
     let embedded_ui = connect_test_client(&mut h, "tree-embedded-ui", tau_proto::ClientKind::Ui);
     let (external_id, mut external) = connect_socket_ui(&mut h);
     h.handle_client_message(
-        external_id.as_str(),
+        &external_id,
         HarnessInputMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+            client_name: crate::test_extension_name(
+                crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
+            ),
             client_kind: tau_proto::ClientKind::External,
             capabilities: Default::default(),
         }),
@@ -637,8 +640,10 @@ fn tree_request_is_silently_denied_for_other_client_origins() {
     let baseline_seq = h.event_log.next_seq();
 
     for connection_id in [
-        tau_proto::ConnectionId::from("tree-socket-tool"),
-        tau_proto::ConnectionId::from("tree-embedded-ui"),
+        tau_proto::ConnectionId::parse("tree-socket-tool")
+            .expect("test connection id must satisfy the identifier grammar"),
+        tau_proto::ConnectionId::parse("tree-embedded-ui")
+            .expect("test connection id must satisfy the identifier grammar"),
         external_id,
     ] {
         let mut served_clients = 0;
@@ -681,8 +686,11 @@ fn tree_request_is_silently_denied_for_configured_extensions() {
     let notice_count = h.replayable_harness_notices.len();
 
     for connection_id in ["tree-ready-requester", "tree-handshaking-requester"] {
-        h.handle_extension_message(connection_id, tree_request("s1", None))
-            .expect("silently deny configured extension tree request");
+        h.handle_extension_message(
+            &crate::test_connection_id(connection_id),
+            tree_request("s1", None),
+        )
+        .expect("silently deny configured extension tree request");
         let stats = h.extensions.entries[connection_id]
             .protocol_io
             .cumulative_stats();
@@ -729,8 +737,11 @@ fn tree_request_preserves_configured_extension_phase_validation() {
         .state = ExtensionState::Spawning;
     let notice_count = h.replayable_harness_notices.len();
 
-    h.handle_extension_message("tree-spawning-requester", tree_request("s1", None))
-        .expect("isolate out-of-phase requester");
+    h.handle_extension_message(
+        &crate::test_connection_id("tree-spawning-requester"),
+        tree_request("s1", None),
+    )
+    .expect("isolate out-of-phase requester");
 
     let entry = &h.extensions.entries["tree-spawning-requester"];
     assert_eq!(
@@ -738,7 +749,11 @@ fn tree_request_preserves_configured_extension_phase_validation() {
         1
     );
     assert_eq!(entry.state, ExtensionState::Disconnected);
-    assert!(h.bus.connection("tree-spawning-requester").is_none());
+    assert!(
+        h.bus
+            .connection(&crate::test_connection_id("tree-spawning-requester"))
+            .is_none()
+    );
     assert_eq!(h.replayable_harness_notices.len(), notice_count + 1);
 }
 
@@ -805,14 +820,17 @@ fn detach_request_controls_startup_only_for_attached_socket_ui() {
     );
 
     assert!(
-        !h.handle_startup_from_connection("socket-tool", detach_request())
-            .expect("deny socket tool detach")
+        !h.handle_startup_from_connection(
+            &crate::test_connection_id("socket-tool"),
+            detach_request()
+        )
+        .expect("deny socket tool detach")
     );
     assert!(!h.startup_detach_requested);
 
     let (ui_id, mut ui) = connect_socket_ui(&mut h);
     assert!(
-        !h.handle_startup_from_connection(ui_id.as_str(), detach_request())
+        !h.handle_startup_from_connection(&ui_id, detach_request())
             .expect("handle attached UI detach")
     );
     assert!(h.startup_detach_requested);
@@ -835,10 +853,12 @@ fn detach_request_is_silently_denied_for_other_client_origins() {
     let embedded_ui = connect_test_client(&mut h, "embedded-ui", tau_proto::ClientKind::Ui);
     let (external_id, mut external) = connect_socket_ui(&mut h);
     h.handle_client_message(
-        external_id.as_str(),
+        &external_id,
         HarnessInputMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+            client_name: crate::test_extension_name(
+                crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
+            ),
             client_kind: tau_proto::ClientKind::External,
             capabilities: Default::default(),
         }),
@@ -847,8 +867,10 @@ fn detach_request_is_silently_denied_for_other_client_origins() {
     let baseline_seq = h.event_log.next_seq();
 
     for connection_id in [
-        tau_proto::ConnectionId::from("socket-tool"),
-        tau_proto::ConnectionId::from("embedded-ui"),
+        tau_proto::ConnectionId::parse("socket-tool")
+            .expect("test connection id must satisfy the identifier grammar"),
+        tau_proto::ConnectionId::parse("embedded-ui")
+            .expect("test connection id must satisfy the identifier grammar"),
         external_id,
     ] {
         let mut served_clients = 0;
@@ -893,7 +915,7 @@ fn detach_request_is_silently_denied_for_configured_extensions() {
     let notice_count = h.replayable_harness_notices.len();
 
     for connection_id in ["ready-requester", "handshaking-requester"] {
-        h.handle_extension_message(connection_id, detach_request())
+        h.handle_extension_message(&crate::test_connection_id(connection_id), detach_request())
             .expect("silently deny configured extension detach");
         let stats = h.extensions.entries[connection_id]
             .protocol_io
@@ -912,8 +934,16 @@ fn detach_request_is_silently_denied_for_configured_extensions() {
         h.extensions.entries["handshaking-requester"].state,
         ExtensionState::Handshaking
     );
-    assert!(h.bus.connection("ready-requester").is_some());
-    assert!(h.bus.connection("handshaking-requester").is_some());
+    assert!(
+        h.bus
+            .connection(&crate::test_connection_id("ready-requester"))
+            .is_some()
+    );
+    assert!(
+        h.bus
+            .connection(&crate::test_connection_id("handshaking-requester"))
+            .is_some()
+    );
     assert!(
         !h.extensions
             .activation_staging
@@ -946,8 +976,11 @@ fn detach_request_preserves_configured_extension_phase_validation() {
         .state = ExtensionState::Spawning;
     let notice_count = h.replayable_harness_notices.len();
 
-    h.handle_extension_message("spawning-requester", detach_request())
-        .expect("isolate out-of-phase requester");
+    h.handle_extension_message(
+        &crate::test_connection_id("spawning-requester"),
+        detach_request(),
+    )
+    .expect("isolate out-of-phase requester");
 
     let entry = &h.extensions.entries["spawning-requester"];
     assert_eq!(
@@ -955,7 +988,11 @@ fn detach_request_preserves_configured_extension_phase_validation() {
         1
     );
     assert_eq!(entry.state, ExtensionState::Disconnected);
-    assert!(h.bus.connection("spawning-requester").is_none());
+    assert!(
+        h.bus
+            .connection(&crate::test_connection_id("spawning-requester"))
+            .is_none()
+    );
     assert_eq!(h.replayable_harness_notices.len(), notice_count + 1);
 }
 
@@ -1032,13 +1069,13 @@ fn debug_event_stats_request_reports_recorded_extension_input() {
         "std-shell",
         TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: "std-shell".into(),
+            client_name: crate::test_extension_name("std-shell"),
             client_kind: tau_proto::ClientKind::Tool,
             capabilities: Default::default(),
         })),
     )
     .expect("extension hello");
-    h.handle_client_message(ui_id.as_str(), debug_event_stats_request("std-shell"))
+    h.handle_client_message(&ui_id, debug_event_stats_request("std-shell"))
         .expect("request stats");
 
     let notice = read_notice(&mut ui);
@@ -1076,7 +1113,7 @@ fn debug_event_stats_request_rejects_unauthorized_ui_origin() {
     let mut ever_attached = false;
     h.handle_runtime_event(
         HarnessEvent::FromConnection {
-            connection_id: "ui".into(),
+            connection_id: crate::test_connection_id("ui"),
             message: Box::new(debug_event_stats_request("secret-ext")),
         },
         &mut served_clients,
@@ -1112,10 +1149,12 @@ fn debug_event_stats_request_rejects_dedicated_external_peer_without_leaking_cou
     let (client_id, mut client) = connect_socket_ui(&mut h);
     let (_other_ui_id, mut other_ui) = connect_socket_ui(&mut h);
     h.handle_client_message(
-        client_id.as_str(),
+        &client_id,
         HarnessInputMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+            client_name: crate::test_extension_name(
+                crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
+            ),
             client_kind: tau_proto::ClientKind::External,
             capabilities: Default::default(),
         }),
@@ -1135,7 +1174,7 @@ fn debug_event_stats_request_rejects_dedicated_external_peer_without_leaking_cou
         meter,
     );
 
-    h.handle_client_message(client_id.as_str(), debug_event_stats_request("secret-ext"))
+    h.handle_client_message(&client_id, debug_event_stats_request("secret-ext"))
         .expect("request stats");
 
     let notice = read_notice(&mut client);
@@ -1181,7 +1220,7 @@ fn debug_event_stats_request_is_ignored_from_configured_extensions() {
 
     let notice_count = h.replayable_harness_notices.len();
     let event = HarnessEvent::FromConnection {
-        connection_id: "requester".into(),
+        connection_id: crate::test_connection_id("requester"),
         message: Box::new(debug_event_stats_request("secret-ext")),
     };
     h.log_event(&event);
@@ -1232,7 +1271,7 @@ fn debug_event_stats_request_is_not_staged_for_handshaking_extensions() {
     let requester = connect_handshaking_tool(&mut h, "requester");
     let notice_count = h.replayable_harness_notices.len();
     let event = HarnessEvent::FromConnection {
-        connection_id: "requester".into(),
+        connection_id: crate::test_connection_id("requester"),
         message: Box::new(debug_event_stats_request("secret-ext")),
     };
     h.log_event(&event);
@@ -1253,7 +1292,11 @@ fn debug_event_stats_request_is_not_staged_for_handshaking_extensions() {
         h.extensions.entries["requester"].state,
         ExtensionState::Handshaking
     );
-    assert!(h.bus.connection("requester").is_some());
+    assert!(
+        h.bus
+            .connection(&crate::test_connection_id("requester"))
+            .is_some()
+    );
     assert!(
         !h.extensions.activation_staging.contains_key("requester"),
         "denied request must not consume activation quota"
@@ -1276,11 +1319,8 @@ fn debug_event_stats_request_reports_no_live_extension_during_startup() {
     let (ui_id, mut ui) = connect_socket_ui(&mut h);
 
     assert!(
-        !h.handle_startup_from_connection(
-            ui_id.as_str(),
-            debug_event_stats_request("missing-extension"),
-        )
-        .expect("request stats through startup router")
+        !h.handle_startup_from_connection(&ui_id, debug_event_stats_request("missing-extension"),)
+            .expect("request stats through startup router")
     );
 
     let notice = read_notice(&mut ui);
@@ -1329,7 +1369,7 @@ fn debug_event_stats_request_ignores_disconnected_extension_entry() {
         live_meter,
     );
 
-    h.handle_client_message(ui_id.as_str(), debug_event_stats_request("std-shell"))
+    h.handle_client_message(&ui_id, debug_event_stats_request("std-shell"))
         .expect("request stats");
 
     let notice = read_notice(&mut ui);
@@ -1361,7 +1401,7 @@ fn debug_event_stats_request_rejects_ambiguous_live_extension_name() {
         tau_client::ProtocolIoMeter::default(),
     );
 
-    h.handle_client_message(ui_id.as_str(), debug_event_stats_request("std-shell"))
+    h.handle_client_message(&ui_id, debug_event_stats_request("std-shell"))
         .expect("request stats");
 
     let notice = read_notice(&mut ui);
@@ -1415,7 +1455,7 @@ fn configure_includes_extension_state_dir_and_creates_it() {
         "std-email",
         TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: "tau-ext-pim".into(),
+            client_name: crate::test_extension_name("tau-ext-pim"),
             client_kind: tau_proto::ClientKind::Tool,
             capabilities: Default::default(),
         })),
@@ -1463,7 +1503,7 @@ fn configure_includes_only_resolved_extension_secrets() {
         "std-email",
         TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: "tau-ext-pim".into(),
+            client_name: crate::test_extension_name("tau-ext-pim"),
             client_kind: tau_proto::ClientKind::Tool,
             capabilities: Default::default(),
         })),
@@ -1496,7 +1536,7 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
     let _extension_sink = connect_handshaking_tool(&mut h, conn_id);
 
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::ConfigError(tau_proto::ConfigError {
             message: "unknown field `enforce_ro_mode`".to_owned(),
         }),
@@ -1505,7 +1545,7 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
 
     assert!(event_log_contains_source_event(
         &h,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(info)
@@ -1517,7 +1557,7 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
         )
     ));
 
-    let ui_conn: tau_proto::ConnectionId = "late-ui".into();
+    let ui_conn: tau_proto::ConnectionId = crate::test_connection_id("late-ui");
     let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
     h.handle_client_event(
         &ui_conn,
@@ -1551,7 +1591,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
     connect_handshaking_tool(&mut h, conn_id);
     let entry = h.extensions.entries.get_mut(conn_id).expect("extension");
     entry.state = ExtensionState::Ready;
-    entry.name = configured_name.to_owned();
+    entry.name = crate::test_extension_name(configured_name);
     entry
         .peer_capabilities
         .insert(tau_proto::PeerCapability::MessageBridge);
@@ -1565,7 +1605,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
     )
     .expect("subscribe");
     let report = tau_proto::MessageDelivered {
-        publisher_extension_id: tau_proto::MessagePublisherId::new("forged"),
+        publisher_extension_id: tau_proto::RawMessagePublisherId::new(configured_name),
         agent_id: tau_proto::MessageAgentTarget::new("missing-agent"),
         message_id: tau_proto::MessageFactId::new("m1"),
         sender: tau_proto::MessageParty {
@@ -1579,7 +1619,10 @@ fn extension_message_report_produces_stamped_durable_fact() {
     };
 
     let canonical = Event::MessageDeliveredReported(report.clone())
-        .into_stamped_canonical_message_fact(tau_proto::MessagePublisherId::new(configured_name))
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse(configured_name)
+                .expect("canonical publisher id must satisfy the identifier grammar"),
+        )
         .expect("authenticated message fact");
     assert!(matches!(
         canonical,
@@ -1588,7 +1631,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
     ));
 
     h.handle_extension_event_inner_with_persist(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         Event::MessageDeliveredReported(report),
         Some(false),
     )
@@ -1603,7 +1646,9 @@ fn extension_message_report_produces_stamped_durable_fact() {
             source: Some(source),
             event: Event::MessageDelivered(fact),
             ..
-        }] if source.as_str() == HARNESS_CONNECTION_ID
+        }] if source.connection_id().is_some_and(|source| {
+            source == crate::harness::harness_connection_id()
+        })
             && fact.publisher_extension_id.as_str() == configured_name
     ));
     assert!(event_log_contains_source_event(
@@ -1619,7 +1664,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
         matches!(
             event,
             Event::MessageDeliveredReported(report)
-                if report.publisher_extension_id.as_str() == "forged"
+                if report.publisher_extension_id.as_str() == configured_name
         )
     }));
     let events = event_log_events(&h);
@@ -1629,7 +1674,7 @@ fn extension_message_report_produces_stamped_durable_fact() {
             matches!(
                 event,
                 Event::MessageDeliveredReported(report)
-                    if report.publisher_extension_id.as_str() == "forged"
+                    if report.publisher_extension_id.as_str() == configured_name
             )
         })
         .expect("committed report");
@@ -1660,6 +1705,72 @@ fn extension_message_report_produces_stamped_durable_fact() {
     );
 }
 
+/// Invalid or mismatched raw publisher claims remain observable reports but do
+/// not produce canonical durable facts.
+#[test]
+fn extension_message_report_requires_exact_authenticated_publisher_claim() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let conn_id = "bridge-main";
+    let configured_name = "configured-bridge";
+    connect_handshaking_tool(&mut h, conn_id);
+    let entry = h.extensions.entries.get_mut(conn_id).expect("extension");
+    entry.state = ExtensionState::Ready;
+    entry.name = crate::test_extension_name(configured_name);
+    entry
+        .peer_capabilities
+        .insert(tau_proto::PeerCapability::MessageBridge);
+
+    for claim in [
+        "other-bridge",
+        "bad publisher",
+        "control\u{1f}",
+        "c1\u{80}",
+        "unicode-☃",
+    ] {
+        let report = tau_proto::MessageDelivered {
+            publisher_extension_id: tau_proto::RawMessagePublisherId::new(claim),
+            agent_id: tau_proto::MessageAgentTarget::new("missing-agent"),
+            message_id: tau_proto::MessageFactId::new("m1"),
+            sender: tau_proto::MessageParty {
+                stable_id: "u1".to_owned(),
+                display_name: None,
+                sender_auth: None,
+            },
+            conversation: None,
+            text: "hello".to_owned(),
+            extension_data: tau_proto::MessageExtensionData::default(),
+        };
+        h.handle_extension_event_inner_with_persist(
+            &crate::test_connection_id(conn_id),
+            Event::MessageDeliveredReported(report),
+            Some(false),
+        )
+        .expect("report intake");
+        assert!(event_log_contains_source_event(&h, conn_id, |event| {
+            matches!(
+                event,
+                Event::MessageDeliveredReported(report)
+                    if report.publisher_extension_id.as_str() == claim
+            )
+        }));
+    }
+
+    assert!(
+        h.store
+            .session_events("s1")
+            .expect("durable fallback journal")
+            .is_empty()
+    );
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(
+            event,
+            Event::MessageDelivered(fact)
+                if fact.publisher_extension_id.as_str() == configured_name
+        )
+    }));
+}
+
 /// A configured extension cannot bypass report processing by directly emitting
 /// a harness-owned canonical message fact.
 #[test]
@@ -1668,7 +1779,7 @@ fn extension_cannot_emit_canonical_message_fact() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     connect_ready_message_publisher(&mut h, "bridge", "configured-bridge");
     let canonical = Event::MessageDelivered(tau_proto::MessageDelivered::new(
-        tau_proto::MessagePublisherId::new("forged"),
+        tau_proto::MessagePublisherId::parse("forged").expect("canonical publisher"),
         tau_proto::MessageAgentTarget::new("missing-agent"),
         tau_proto::MessageFactId::new("m1"),
         tau_proto::MessageParty {
@@ -1680,8 +1791,12 @@ fn extension_cannot_emit_canonical_message_fact() {
         "hello",
     ));
 
-    h.handle_extension_event_inner_with_persist("bridge", canonical, Some(true))
-        .expect("extension intake");
+    h.handle_extension_event_inner_with_persist(
+        &crate::test_connection_id("bridge"),
+        canonical,
+        Some(true),
+    )
+    .expect("extension intake");
 
     assert!(
         h.store
@@ -1706,7 +1821,8 @@ fn socket_client_cannot_emit_message_reports_or_canonical_facts() {
     let client_id = "ui";
     connect_test_client(&mut h, client_id, tau_proto::ClientKind::Ui);
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered {
-        publisher_extension_id: tau_proto::MessagePublisherId::new("forged"),
+        publisher_extension_id: tau_proto::MessagePublisherId::parse("forged")
+            .expect("canonical publisher"),
         agent_id: tau_proto::MessageAgentTarget::new("missing-agent"),
         message_id: tau_proto::MessageFactId::new("m1"),
         sender: tau_proto::MessageParty {
@@ -1719,12 +1835,12 @@ fn socket_client_cannot_emit_message_reports_or_canonical_facts() {
         extension_data: tau_proto::MessageExtensionData::default(),
     });
 
-    h.handle_client_event_inner(client_id, fact)
+    h.handle_client_event_inner(&crate::test_connection_id(client_id), fact)
         .expect("client intake");
     h.handle_client_event_inner(
-        client_id,
+        &crate::test_connection_id(client_id),
         Event::MessageDeliveredReported(tau_proto::MessageDelivered::new(
-            tau_proto::MessagePublisherId::new("forged"),
+            tau_proto::RawMessagePublisherId::new("forged"),
             tau_proto::MessageAgentTarget::new("missing-agent"),
             tau_proto::MessageFactId::new("m2"),
             tau_proto::MessageParty {
@@ -1763,9 +1879,9 @@ fn ordinary_tool_and_provider_extensions_cannot_emit_message_reports() {
             .expect("extension")
             .state = ExtensionState::Ready;
         h.handle_extension_event_inner_with_persist(
-            connection_id,
+            &crate::test_connection_id(connection_id),
             Event::MessageDeliveredReported(tau_proto::MessageDelivered::new(
-                tau_proto::MessagePublisherId::new("forged"),
+                tau_proto::RawMessagePublisherId::new("forged"),
                 tau_proto::MessageAgentTarget::new("missing-agent"),
                 tau_proto::MessageFactId::new("m1"),
                 tau_proto::MessageParty {
@@ -1820,7 +1936,10 @@ fn extension_rejects_pre_hello_protocol_messages() {
     assert!(h.registry.providers_for("too_early").is_empty());
 
     let ready_error = h
-        .handle_extension_message(conn_id, TestMessage::Ready(Default::default()))
+        .handle_extension_message(
+            &crate::test_connection_id(conn_id),
+            TestMessage::Ready(Default::default()),
+        )
         .expect_err("pre-Hello Ready must fail");
     assert!(ready_error.to_string().contains("out-of-order"));
 }
@@ -1842,7 +1961,7 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
         .require = false;
 
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::ConfigError(tau_proto::ConfigError {
             message: "missing token".to_owned(),
         }),
@@ -1854,7 +1973,7 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
     assert!(!entry.respawn_allowed);
     assert!(event_log_contains_source_event(
         &h,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(info)
@@ -1865,7 +1984,7 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
     ));
     assert!(event_log_contains_source_event(
         &h,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(info)
@@ -1876,7 +1995,7 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
         )
     ));
 
-    let ui_conn: tau_proto::ConnectionId = "late-ui-optional-config".into();
+    let ui_conn: tau_proto::ConnectionId = crate::test_connection_id("late-ui-optional-config");
     let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
     h.handle_client_event(
         &ui_conn,
@@ -1915,7 +2034,7 @@ fn required_initial_config_error_emits_diagnostic_then_fails_startup() {
 
     let error = h
         .handle_extension_message(
-            conn_id,
+            &crate::test_connection_id(conn_id),
             TestMessage::ConfigError(tau_proto::ConfigError {
                 message: "required setting is invalid".to_owned(),
             }),
@@ -1925,7 +2044,7 @@ fn required_initial_config_error_emits_diagnostic_then_fails_startup() {
     assert!(error.to_string().contains("required extension"));
     assert!(event_log_contains_source_event(
         &h,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(notice)
@@ -1980,7 +2099,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
     assert!(h.extension_connection_id(&extension_name).is_none());
     assert!(event_log_contains_source_event(
         &h,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(info)
@@ -2012,7 +2131,7 @@ fn optional_pre_ready_disconnect_is_mandatory_warning_replayed_and_nonfatal() {
         .expect("extension entry")
         .require = false;
 
-    h.handle_startup_disconnect(conn_id)
+    h.handle_startup_disconnect(&crate::test_connection_id(conn_id))
         .expect("optional pre-ready disconnect should not fail startup");
 
     let entry = h.extensions.entries.get(conn_id).expect("extension entry");
@@ -2020,7 +2139,7 @@ fn optional_pre_ready_disconnect_is_mandatory_warning_replayed_and_nonfatal() {
     assert!(!entry.respawn_allowed);
     assert!(event_log_contains_source_event(
         &h,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(info)
@@ -2031,7 +2150,7 @@ fn optional_pre_ready_disconnect_is_mandatory_warning_replayed_and_nonfatal() {
         )
     ));
 
-    let ui_conn: tau_proto::ConnectionId = "late-ui-pre-ready-drop".into();
+    let ui_conn: tau_proto::ConnectionId = crate::test_connection_id("late-ui-pre-ready-drop");
     let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
     h.handle_client_event(
         &ui_conn,
@@ -2073,7 +2192,7 @@ fn optional_startup_timeout_is_mandatory_warning_replayed_and_nonfatal() {
     assert!(!entry.respawn_allowed);
     assert!(event_log_contains_source_event(
         &h,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(info)
@@ -2084,7 +2203,7 @@ fn optional_startup_timeout_is_mandatory_warning_replayed_and_nonfatal() {
         )
     ));
 
-    let ui_conn: tau_proto::ConnectionId = "late-ui-timeout".into();
+    let ui_conn: tau_proto::ConnectionId = crate::test_connection_id("late-ui-timeout");
     let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
     h.handle_client_event(
         &ui_conn,
@@ -2120,7 +2239,7 @@ fn required_startup_timeout_remains_startup_timeout() {
     assert!(matches!(error, HarnessError::StartupTimeout));
     assert!(event_log_contains_source_event(
         &h,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(info)
@@ -2139,7 +2258,7 @@ fn post_ready_optional_tool_disconnect_keeps_existing_respawn_policy_flag() {
     let conn_id = "optional-ready-tool";
     let _sink = connect_handshaking_tool(&mut h, conn_id);
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready { message: None }),
     )
     .expect("ready");
@@ -2153,7 +2272,7 @@ fn post_ready_optional_tool_disconnect_keeps_existing_respawn_policy_flag() {
         entry.respawn_allowed = true;
     }
 
-    h.handle_disconnect(conn_id);
+    h.handle_disconnect(&crate::test_connection_id(conn_id));
 
     let entry = h.extensions.entries.get(conn_id).expect("extension entry");
     assert_eq!(entry.state, ExtensionState::Disconnected);
@@ -2173,7 +2292,7 @@ fn startup_diagnostics_are_mandatory_warning_and_replayed() {
 
     assert!(event_log_contains_source_event(
         &h,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(info)
@@ -2184,7 +2303,7 @@ fn startup_diagnostics_are_mandatory_warning_and_replayed() {
         )
     ));
 
-    let ui_conn: tau_proto::ConnectionId = "late-ui-startup-diagnostic".into();
+    let ui_conn: tau_proto::ConnectionId = crate::test_connection_id("late-ui-startup-diagnostic");
     let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
     h.handle_client_event(
         &ui_conn,
@@ -2215,7 +2334,7 @@ fn harness_failure_notice_is_mandatory_warning() {
 
     assert!(event_log_contains_source_event(
         &h,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(info)
@@ -2355,7 +2474,7 @@ fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
     .expect("stage extension prompt fragment");
 
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
@@ -2397,10 +2516,10 @@ fn two_prefixed_instances_coexist_and_disconnect_independently() {
         entry.tool_prefix = Some(prefix.clone());
         entry.state = ExtensionState::Spawning;
         h.handle_extension_message(
-            connection_id,
+            &crate::test_connection_id(connection_id),
             TestMessage::Hello(tau_proto::Hello {
                 protocol_version: tau_proto::PROTOCOL_VERSION,
-                client_name: connection_id.to_owned().into(),
+                client_name: crate::test_extension_name(connection_id),
                 client_kind: tau_proto::ClientKind::Tool,
                 capabilities: Default::default(),
             }),
@@ -2436,11 +2555,17 @@ fn two_prefixed_instances_coexist_and_disconnect_independently() {
         sinks.insert(connection_id, sink);
     }
 
-    h.handle_extension_message("slack-work", TestMessage::Ready(Default::default()))
-        .expect("first ready");
+    h.handle_extension_message(
+        &crate::test_connection_id("slack-work"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("first ready");
     assert!(h.registry.providers_for("work_slack_send").is_empty());
-    h.handle_extension_message("slack-personal", TestMessage::Ready(Default::default()))
-        .expect("second ready");
+    h.handle_extension_message(
+        &crate::test_connection_id("slack-personal"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("second ready");
 
     assert_eq!(
         h.registry.providers_for("personal_slack_send")[0]
@@ -2471,11 +2596,11 @@ fn two_prefixed_instances_coexist_and_disconnect_independently() {
             .expect("route prefixed tool");
         assert_eq!(
             route.target,
-            tau_core::ToolRouteTarget::Extension(owner.into())
+            tau_core::ToolRouteTarget::Extension(crate::test_connection_id(owner))
         );
         h.bus
             .send_to(
-                owner,
+                &crate::test_connection_id(owner),
                 None,
                 HarnessOutputMessage::deliver(Event::ToolStarted(route.invoke)),
             )
@@ -2488,7 +2613,7 @@ fn two_prefixed_instances_coexist_and_disconnect_independently() {
         };
         assert!(!sink_has_tool_invoke(&sinks[other], call_id));
     }
-    h.handle_disconnect("slack-personal");
+    h.handle_disconnect(&crate::test_connection_id("slack-personal"));
     assert!(h.registry.providers_for("personal_slack_send").is_empty());
     assert_eq!(
         h.registry.providers_for("work_slack_send")[0]
@@ -2525,8 +2650,11 @@ fn optional_disconnect_completes_initial_activation_barrier() {
     )
     .expect("stage tool");
 
-    h.handle_extension_message("ready-owner", TestMessage::Ready(Default::default()))
-        .expect("ready received");
+    h.handle_extension_message(
+        &crate::test_connection_id("ready-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("ready received");
     h.handle_extension_event(
         "ready-owner",
         TestProtocolItem::Event(Event::ToolRegistrationDeclared(
@@ -2549,7 +2677,7 @@ fn optional_disconnect_completes_initial_activation_barrier() {
         ExtensionState::Handshaking
     );
 
-    h.handle_startup_disconnect("optional-blocker")
+    h.handle_startup_disconnect(&crate::test_connection_id("optional-blocker"))
         .expect("optional disconnect degrades");
 
     assert_eq!(
@@ -2600,7 +2728,7 @@ fn pre_ready_extension_data_rpc_bypasses_only_activation_staging() {
     };
 
     h.handle_extension_message(
-        "config-rpc",
+        &crate::test_connection_id("config-rpc"),
         request(
             "configure-write",
             tau_proto::ExtensionDataRequestOp::WriteFile {
@@ -2612,10 +2740,13 @@ fn pre_ready_extension_data_rpc_bypasses_only_activation_staging() {
     .expect("pre-Ready config storage request");
     assert!(has_result("configure-write"));
 
-    h.handle_extension_message("config-rpc", TestMessage::Ready(Default::default()))
-        .expect("peer Ready waits on blocker");
     h.handle_extension_message(
-        "config-rpc",
+        &crate::test_connection_id("config-rpc"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("peer Ready waits on blocker");
+    h.handle_extension_message(
+        &crate::test_connection_id("config-rpc"),
         request(
             "post-ready-read",
             tau_proto::ExtensionDataRequestOp::ReadFile {
@@ -2626,8 +2757,11 @@ fn pre_ready_extension_data_rpc_bypasses_only_activation_staging() {
     .expect("post-Ready request is deferred");
     assert!(!has_result("post-ready-read"));
 
-    h.handle_extension_message("activation-blocker", TestMessage::Ready(Default::default()))
-        .expect("release activation barrier");
+    h.handle_extension_message(
+        &crate::test_connection_id("activation-blocker"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("release activation barrier");
     assert!(has_result("post-ready-read"));
     h.shutdown().expect("shutdown");
 }
@@ -2659,11 +2793,17 @@ fn post_ready_tool_registration_has_topology_independent_runtime_semantics() {
             )),
         )
         .expect("stage startup owner");
-        h.handle_extension_message("late-claimant", TestMessage::Ready(Default::default()))
-            .expect("claimant Ready");
+        h.handle_extension_message(
+            &crate::test_connection_id("late-claimant"),
+            TestMessage::Ready(Default::default()),
+        )
+        .expect("claimant Ready");
         if !blocked_at_registration {
-            h.handle_extension_message("startup-owner", TestMessage::Ready(Default::default()))
-                .expect("complete initial barrier");
+            h.handle_extension_message(
+                &crate::test_connection_id("startup-owner"),
+                TestMessage::Ready(Default::default()),
+            )
+            .expect("complete initial barrier");
         }
         h.handle_extension_event(
             "late-claimant",
@@ -2677,8 +2817,11 @@ fn post_ready_tool_registration_has_topology_independent_runtime_semantics() {
         )
         .expect("late runtime claim is isolated");
         if blocked_at_registration {
-            h.handle_extension_message("startup-owner", TestMessage::Ready(Default::default()))
-                .expect("release initial barrier");
+            h.handle_extension_message(
+                &crate::test_connection_id("startup-owner"),
+                TestMessage::Ready(Default::default()),
+            )
+            .expect("release initial barrier");
         }
         assert_eq!(
             h.registry.providers_for("ready_frozen_tool")[0]
@@ -2718,10 +2861,13 @@ fn required_tool_disconnect_completes_initial_activation_barrier() {
         )),
     )
     .expect("stage tool");
-    h.handle_extension_message("ready-owner", TestMessage::Ready(Default::default()))
-        .expect("ready received");
+    h.handle_extension_message(
+        &crate::test_connection_id("ready-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("ready received");
 
-    h.handle_startup_disconnect("required-tool-blocker")
+    h.handle_startup_disconnect(&crate::test_connection_id("required-tool-blocker"))
         .expect("required tool compatibility disconnect");
 
     assert_eq!(
@@ -2762,8 +2908,11 @@ fn optional_timeout_completes_barrier_for_required_ready_peer() {
         )),
     )
     .expect("stage tool");
-    h.handle_extension_message("required-ready", TestMessage::Ready(Default::default()))
-        .expect("ready received");
+    h.handle_extension_message(
+        &crate::test_connection_id("required-ready"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("ready received");
 
     h.handle_extensions_startup_timeout()
         .expect("optional timeout degrades");
@@ -2823,20 +2972,26 @@ fn optional_mismatched_protocol_is_disabled_but_required_mismatch_is_fatal() {
     let mismatched_hello = |name: &str| {
         TestMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION + 1,
-            client_name: name.to_owned().into(),
+            client_name: crate::test_extension_name(name),
             client_kind: tau_proto::ClientKind::Tool,
             capabilities: Default::default(),
         })
     };
 
-    h.handle_extension_message("optional-old", mismatched_hello("optional-old"))
-        .expect("optional mismatched peer is disabled");
+    h.handle_extension_message(
+        &crate::test_connection_id("optional-old"),
+        mismatched_hello("optional-old"),
+    )
+    .expect("optional mismatched peer is disabled");
     assert_eq!(
         h.extensions.entries["optional-old"].state,
         ExtensionState::Disconnected
     );
     let error = h
-        .handle_extension_message("required-old", mismatched_hello("required-old"))
+        .handle_extension_message(
+            &crate::test_connection_id("required-old"),
+            mismatched_hello("required-old"),
+        )
         .expect_err("required mismatched peer is fatal");
     assert!(error.to_string().contains("protocol"));
     h.shutdown().expect("shutdown");
@@ -2862,8 +3017,11 @@ fn decode_failures_follow_required_optional_and_runtime_policy() {
             .require = required;
     }
 
-    h.handle_startup_read_failure("optional-decode", "malformed cbor".to_owned())
-        .expect("optional decode failure degrades");
+    h.handle_startup_read_failure(
+        &crate::test_connection_id("optional-decode"),
+        "malformed cbor".to_owned(),
+    )
+    .expect("optional decode failure degrades");
     assert_eq!(
         h.extensions.entries["optional-decode"].state,
         ExtensionState::Disconnected
@@ -2871,7 +3029,10 @@ fn decode_failures_follow_required_optional_and_runtime_policy() {
     assert!(!h.extensions.entries["optional-decode"].respawn_allowed);
 
     let error = h
-        .handle_startup_read_failure("required-decode", "oversized frame".to_owned())
+        .handle_startup_read_failure(
+            &crate::test_connection_id("required-decode"),
+            "oversized frame".to_owned(),
+        )
         .expect_err("required initial decode failure is fatal");
     assert!(error.to_string().contains("protocol decode failed"));
 
@@ -2886,7 +3047,7 @@ fn decode_failures_follow_required_optional_and_runtime_policy() {
     let mut ever_attached = false;
     h.handle_runtime_event(
         HarnessEvent::ReadFailed {
-            connection_id: "runtime-decode".into(),
+            connection_id: crate::test_connection_id("runtime-decode"),
             error: "malformed cbor".to_owned(),
         },
         &mut served_clients,
@@ -2914,8 +3075,11 @@ fn runtime_duplicate_ready_disconnects_only_the_extension() {
         .state = ExtensionState::Ready;
     h.initial_extension_tool_preflight_complete = true;
 
-    h.handle_extension_message("runtime-bad", TestMessage::Ready(Default::default()))
-        .expect("runtime protocol failure is isolated");
+    h.handle_extension_message(
+        &crate::test_connection_id("runtime-bad"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("runtime protocol failure is isolated");
 
     assert_eq!(
         h.extensions.entries["runtime-bad"].state,
@@ -2942,7 +3106,7 @@ fn runtime_config_error_disconnects_without_disabling_respawn_policy() {
     h.initial_extension_tool_preflight_complete = true;
 
     h.handle_extension_message(
-        "runtime-config-bad",
+        &crate::test_connection_id("runtime-config-bad"),
         TestMessage::ConfigError(tau_proto::ConfigError {
             message: "runtime update rejected".to_owned(),
         }),
@@ -2983,12 +3147,15 @@ fn optional_activation_staging_enforces_count_and_byte_quotas() {
     let (_diagnostic_td, mut diagnostic_harness) = make_harness("diagnostic-at-limit");
     for _ in 0..super::super::MAX_EXTENSION_ACTIVATION_MESSAGES {
         diagnostic_harness
-            .handle_extension_message("diagnostic-at-limit", subscribe())
+            .handle_extension_message(
+                &crate::test_connection_id("diagnostic-at-limit"),
+                subscribe(),
+            )
             .expect("message within count limit");
     }
     diagnostic_harness
         .handle_extension_message(
-            "diagnostic-at-limit",
+            &crate::test_connection_id("diagnostic-at-limit"),
             TestMessage::ConfigError(tau_proto::ConfigError {
                 message: "configuration rejected at quota boundary".to_owned(),
             }),
@@ -2996,7 +3163,7 @@ fn optional_activation_staging_enforces_count_and_byte_quotas() {
         .expect("mandatory config diagnostic bypasses retained-message quota");
     assert!(event_log_contains_source_event(
         &diagnostic_harness,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(notice)
@@ -3008,10 +3175,13 @@ fn optional_activation_staging_enforces_count_and_byte_quotas() {
 
     let (_ready_td, mut ready_harness) = make_harness("ready-at-limit");
     ready_harness
-        .extension_activation_stage_mut("ready-at-limit")
+        .extension_activation_stage_mut(&crate::test_connection_id("ready-at-limit"))
         .retained_message_count = super::super::MAX_EXTENSION_ACTIVATION_MESSAGES;
     ready_harness
-        .handle_extension_message("ready-at-limit", TestMessage::Ready(Default::default()))
+        .handle_extension_message(
+            &crate::test_connection_id("ready-at-limit"),
+            TestMessage::Ready(Default::default()),
+        )
         .expect("Ready does not consume retained-message quota");
     assert_eq!(
         ready_harness.extensions.entries["ready-at-limit"].state,
@@ -3023,7 +3193,7 @@ fn optional_activation_staging_enforces_count_and_byte_quotas() {
         make_harness("oversized-diagnostic");
     oversized_diagnostic_harness
         .handle_extension_message(
-            "oversized-diagnostic",
+            &crate::test_connection_id("oversized-diagnostic"),
             TestMessage::ConfigError(tau_proto::ConfigError {
                 message: "x".repeat(super::super::MAX_EXTENSION_ACTIVATION_BYTES + 1),
             }),
@@ -3031,7 +3201,7 @@ fn optional_activation_staging_enforces_count_and_byte_quotas() {
         .expect("oversized config diagnostic is bounded and emitted");
     assert!(event_log_contains_source_event(
         &oversized_diagnostic_harness,
-        "harness",
+        HARNESS_CONNECTION_ID,
         |event| matches!(
             event,
             Event::HarnessNotice(notice)
@@ -3045,11 +3215,11 @@ fn optional_activation_staging_enforces_count_and_byte_quotas() {
 
     for _ in 0..super::super::MAX_EXTENSION_ACTIVATION_MESSAGES {
         count_harness
-            .handle_extension_message("count-overflow", subscribe())
+            .handle_extension_message(&crate::test_connection_id("count-overflow"), subscribe())
             .expect("message within count limit");
     }
     count_harness
-        .handle_extension_message("count-overflow", subscribe())
+        .handle_extension_message(&crate::test_connection_id("count-overflow"), subscribe())
         .expect("count overflow degrades");
     assert_eq!(
         count_harness.extensions.entries["count-overflow"].state,
@@ -3067,7 +3237,7 @@ fn optional_activation_staging_enforces_count_and_byte_quotas() {
     };
     let (_bytes_td, mut bytes_harness) = make_harness("bytes-overflow");
     bytes_harness
-        .handle_extension_message("bytes-overflow", oversized())
+        .handle_extension_message(&crate::test_connection_id("bytes-overflow"), oversized())
         .expect("byte overflow degrades");
     assert_eq!(
         bytes_harness.extensions.entries["bytes-overflow"].state,
@@ -3083,14 +3253,14 @@ fn optional_activation_staging_enforces_count_and_byte_quotas() {
         .expect("required")
         .require = true;
     required_harness
-        .handle_extension_message("required-overflow", oversized())
+        .handle_extension_message(&crate::test_connection_id("required-overflow"), oversized())
         .expect_err("required initial overflow is fatal");
     required_harness.shutdown().expect("shutdown");
 
     let (_runtime_td, mut runtime_harness) = make_harness("runtime-overflow");
     runtime_harness.initial_extension_tool_preflight_complete = true;
     runtime_harness
-        .handle_extension_message("runtime-overflow", oversized())
+        .handle_extension_message(&crate::test_connection_id("runtime-overflow"), oversized())
         .expect("runtime overflow isolates");
     let runtime_entry = &runtime_harness.extensions.entries["runtime-overflow"];
     assert_eq!(runtime_entry.state, ExtensionState::Disconnected);
@@ -3106,8 +3276,10 @@ fn initial_internal_tool_conflicts_follow_availability_policy() {
         let td = TempDir::new().expect("tempdir");
         let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
         h.initial_extension_tool_preflight_complete = false;
-        h.registry
-            .register_internal("harness", staged_tool_spec("reserved_tool"));
+        h.registry.register_internal(
+            &crate::test_connection_id("harness"),
+            staged_tool_spec("reserved_tool"),
+        );
         connect_handshaking_tool(&mut h, "claimant");
         h.extensions
             .entries
@@ -3125,7 +3297,10 @@ fn initial_internal_tool_conflicts_follow_availability_policy() {
             )),
         )
         .expect("stage conflicting tool");
-        let result = h.handle_extension_message("claimant", TestMessage::Ready(Default::default()));
+        let result = h.handle_extension_message(
+            &crate::test_connection_id("claimant"),
+            TestMessage::Ready(Default::default()),
+        );
         (h, result)
     };
 
@@ -3183,8 +3358,10 @@ fn initial_tool_collision_matrix_is_deterministic() {
             ready_order.reverse();
         }
         for (connection_id, _) in ready_order {
-            result =
-                h.handle_extension_message(connection_id, TestMessage::Ready(Default::default()));
+            result = h.handle_extension_message(
+                &crate::test_connection_id(*connection_id),
+                TestMessage::Ready(Default::default()),
+            );
             if result.is_err() {
                 break;
             }
@@ -3276,10 +3453,15 @@ fn invalid_initial_tool_registration_does_not_claim_collision_ownership() {
             )
             .expect("stage registration");
         }
-        h.handle_extension_message("invalid-owner", TestMessage::Ready(Default::default()))
-            .expect("first Ready waits");
-        let result =
-            h.handle_extension_message("valid-owner", TestMessage::Ready(Default::default()));
+        h.handle_extension_message(
+            &crate::test_connection_id("invalid-owner"),
+            TestMessage::Ready(Default::default()),
+        )
+        .expect("first Ready waits");
+        let result = h.handle_extension_message(
+            &crate::test_connection_id("valid-owner"),
+            TestMessage::Ready(Default::default()),
+        );
         (h, result)
     };
 
@@ -3332,8 +3514,10 @@ fn initial_tool_refresh_validates_only_last_same_owner_registration() {
             )
             .expect("stage refresh");
         }
-        let result =
-            h.handle_extension_message("refresh-owner", TestMessage::Ready(Default::default()));
+        let result = h.handle_extension_message(
+            &crate::test_connection_id("refresh-owner"),
+            TestMessage::Ready(Default::default()),
+        );
         (h, result)
     };
 
@@ -3407,7 +3591,7 @@ fn tool_prompt_fragment_heading_uses_model_visible_tool_name() {
     )
     .expect("stage empty prompt tool");
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
@@ -3455,11 +3639,15 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
         "configured-blocking-tool",
         tau_proto::ClientKind::Tool,
     );
-    h.registry
-        .register("conn-blocking-tool", staged_tool_spec("blocking_tool"));
+    h.registry.register(
+        &crate::test_connection_id("conn-blocking-tool"),
+        staged_tool_spec("blocking_tool"),
+    );
     let old_provider = connect_test_tool(&mut h, "conn-old-staged-tool");
-    h.registry
-        .register("conn-old-staged-tool", staged_tool_spec("staged_tool"));
+    h.registry.register(
+        &crate::test_connection_id("conn-old-staged-tool"),
+        staged_tool_spec("staged_tool"),
+    );
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-staged-tools");
@@ -3471,7 +3659,8 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
             .any(|spec| spec.name == "staged_tool")
     );
 
-    h.registry.unregister_connection("conn-old-staged-tool");
+    h.registry
+        .unregister_connection(&crate::test_connection_id("conn-old-staged-tool"));
     drop(old_provider);
     h.available_roles
         .get_mut(&h.selected_role)
@@ -3558,7 +3747,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     assert_eq!(h.tool_turn.in_flight_len(), 0);
 
     h.handle_extension_message(
-        "conn-staged-tool",
+        &crate::test_connection_id("conn-staged-tool"),
         TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
@@ -3664,7 +3853,7 @@ fn prompt_snapshot_does_not_expand_to_staged_registration() {
     assert!(!sink_has_tool_invoke(&staged_sink, "call-unadvertised"));
 
     h.handle_extension_message(
-        "conn-unadvertised-staged-tool",
+        &crate::test_connection_id("conn-unadvertised-staged-tool"),
         TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
@@ -3765,7 +3954,7 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
     ));
 
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
@@ -3829,7 +4018,7 @@ fn provider_ready_waits_for_intercepted_declarations_and_coalesces_final_state()
         .expect("admit declaration");
     }
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready { message: None }),
     )
     .expect("receive ready");
@@ -3988,8 +4177,11 @@ fn intercepted_provider_resolution_propagates_initial_tool_collision() {
     )
     .expect("park provider declaration");
     for source in ["required-a", "required-b", provider] {
-        h.handle_extension_message(source, TestMessage::Ready(Default::default()))
-            .expect("ready waits on provider declaration");
+        h.handle_extension_message(
+            &crate::test_connection_id(source),
+            TestMessage::Ready(Default::default()),
+        )
+        .expect("ready waits on provider declaration");
     }
 
     let error = h
@@ -4046,7 +4238,7 @@ fn session_init_catchup_replays_current_session_dir_to_early_subscribers() {
     h.initialized_sessions.remove(&test_session_id("s1"));
 
     h.handle_extension_message(
-        "early-session-dir",
+        &crate::test_connection_id("early-session-dir"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: vec![tau_proto::EventSelector::Exact(
@@ -4092,7 +4284,7 @@ fn session_init_catchup_does_not_duplicate_ui_startup_status_snapshots() {
     h.initialized_sessions.remove(&test_session_id("s1"));
 
     h.handle_client_message(
-        "startup-ui",
+        &crate::test_connection_id("startup-ui"),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: selectors.clone(),
@@ -4105,7 +4297,7 @@ fn session_init_catchup_does_not_duplicate_ui_startup_status_snapshots() {
         "subscribe-time catch-up is skipped while session initialization is incomplete"
     );
 
-    h.replay_harness_notice("startup-ui", &selectors);
+    h.replay_harness_notice(&crate::test_connection_id("startup-ui"), &selectors);
     h.catch_up_subscribers_after_session_init();
 
     let events = events.lock().expect("events");
@@ -4154,7 +4346,7 @@ fn session_context_ready_is_published_live() {
     let conn_id = "conn-session-context-ready";
     let _extension_sink = connect_handshaking_tool(&mut h, conn_id);
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
@@ -4175,7 +4367,7 @@ fn session_context_ready_is_published_live() {
     );
     h.bus
         .set_subscriptions(
-            "session-context-ready-observer",
+            &crate::test_connection_id("session-context-ready-observer"),
             Vec::new(),
             vec![tau_proto::EventSelector::Exact(
                 tau_proto::EventName::EXTENSION_SESSION_CONTEXT_READY,
@@ -4217,7 +4409,7 @@ fn interceptor_registration_is_staged_until_ready() {
     let sink = connect_handshaking_tool(&mut h, conn_id);
 
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
@@ -4233,7 +4425,7 @@ fn interceptor_registration_is_staged_until_ready() {
     );
 
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
@@ -4265,7 +4457,7 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
     let trailing_name: tau_proto::EventName = "demo.after_query".parse().expect("event name");
 
     h.handle_extension_message(
-        first_id,
+        &crate::test_connection_id(first_id),
         TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ExtensionEvent(
                 tau_proto::CustomEvent::try_new(
@@ -4316,7 +4508,7 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
     );
 
     h.handle_extension_message(
-        second_id,
+        &crate::test_connection_id(second_id),
         TestMessage::Ready(tau_proto::Ready {
             message: Some("second ready first".to_owned()),
         }),
@@ -4326,7 +4518,7 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
         matches!(event, Event::StartAgentRequest(_))
     }));
     h.handle_extension_message(
-        first_id,
+        &crate::test_connection_id(first_id),
         TestMessage::Ready(tau_proto::Ready {
             message: Some("first ready second".to_owned()),
         }),
@@ -4353,12 +4545,12 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
     assert_eq!(
         committed,
         [
-            (Some(first_id.into()), custom_name),
+            (Some(crate::test_connection_id(first_id)), custom_name),
             (
-                Some(second_id.into()),
+                Some(crate::test_connection_id(second_id)),
                 tau_proto::EventName::AGENT_START_REQUEST
             ),
-            (Some(first_id.into()), trailing_name)
+            (Some(crate::test_connection_id(first_id)), trailing_name)
         ]
     );
     assert!(h.agents.iter().any(|(cid, conv)| {
@@ -4393,7 +4585,7 @@ fn terminal_output_events_are_deferred_in_order_until_ready() {
     );
     h.bus
         .set_subscriptions(
-            "terminal-output-observer",
+            &crate::test_connection_id("terminal-output-observer"),
             Vec::new(),
             vec![
                 EventSelector::Exact(tau_proto::EventName::TERM_BELL),
@@ -4413,7 +4605,7 @@ fn terminal_output_events_are_deferred_in_order_until_ready() {
         ),
     ] {
         h.handle_extension_message(
-            conn_id,
+            &crate::test_connection_id(conn_id),
             TestMessage::Emit(tau_proto::Emit {
                 event: Box::new(event),
                 persist,
@@ -4426,8 +4618,11 @@ fn terminal_output_events_are_deferred_in_order_until_ready() {
         matches!(event, Event::TermBell(_) | Event::Osc1337SetUserVar(_))
     }));
 
-    h.handle_extension_message(conn_id, TestMessage::Ready(Default::default()))
-        .expect("activate terminal-output owner");
+    h.handle_extension_message(
+        &crate::test_connection_id(conn_id),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("activate terminal-output owner");
 
     let committed: Vec<_> = {
         let mut names = Vec::new();
@@ -4476,12 +4671,12 @@ fn terminal_output_events_are_deferred_in_order_until_ready() {
         delivered,
         [
             (
-                Some(tau_proto::ConnectionId::from(conn_id)),
+                Some(crate::test_connection_id(conn_id)),
                 false,
                 tau_proto::EventName::TERM_BELL,
             ),
             (
-                Some(tau_proto::ConnectionId::from(conn_id)),
+                Some(crate::test_connection_id(conn_id)),
                 false,
                 tau_proto::EventName::TERM_OSC1337_SET_USER_VAR,
             ),
@@ -4499,11 +4694,12 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
     connect_handshaking_tool(&mut h, "operational-owner");
     connect_handshaking_tool(&mut h, "activation-blocker");
     h.pending_ui_shell_commands.insert(
-        UiShellRouteId::new("startup-shell".into()),
+        UiShellRouteId::new(test_shell_command_id("startup-shell")),
         PendingUiShellCommand {
-            provider_id: "operational-owner".into(),
+            provider_id: crate::test_connection_id("operational-owner"),
             command: tau_proto::UiShellCommand {
-                command_id: tau_proto::ShellCommandId::parse("startup-shell").unwrap(),
+                command_id: tau_proto::ShellCommandId::parse("startup-shell")
+                    .expect("test identifier must satisfy its grammar"),
                 session_id: test_session_id("s1"),
                 command: "printf held".to_owned(),
                 include_in_context: false,
@@ -4517,7 +4713,8 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
         "operational-owner",
         TestProtocolItem::Event(Event::ShellCommandFinishedReported(
             tau_proto::ShellCommandFinished {
-                command_id: tau_proto::ShellCommandId::parse("startup-shell").unwrap(),
+                command_id: tau_proto::ShellCommandId::parse("startup-shell")
+                    .expect("test identifier must satisfy its grammar"),
                 session_id: test_session_id("s1"),
                 command: "printf held".to_owned(),
                 include_in_context: false,
@@ -4529,8 +4726,11 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
         )),
     )
     .expect("defer shell completion");
-    h.handle_extension_message("operational-owner", TestMessage::Ready(Default::default()))
-        .expect("owner ready");
+    h.handle_extension_message(
+        &crate::test_connection_id("operational-owner"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("owner ready");
 
     assert!(!event_log_contains_source_event(
         &h,
@@ -4542,8 +4742,11 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
         )
     ));
 
-    h.handle_extension_message("activation-blocker", TestMessage::Ready(Default::default()))
-        .expect("complete barrier");
+    h.handle_extension_message(
+        &crate::test_connection_id("activation-blocker"),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("complete barrier");
 
     assert!(event_log_contains_source_event(
         &h,
@@ -4581,7 +4784,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     let _sink = connect_handshaking_tool(&mut h, conn_id);
 
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: vec![EventSelector::Exact(
@@ -4598,7 +4801,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     )
     .expect("register context provider");
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
@@ -4688,7 +4891,7 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
     let conn_id = "disconnecting-agent-context";
     let _sink = connect_handshaking_tool(&mut h, conn_id);
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Subscribe(Subscribe {
             historical_selectors: Vec::new(),
             live_selectors: vec![EventSelector::Exact(
@@ -4704,8 +4907,11 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
         )),
     )
     .expect("register context provider");
-    h.handle_extension_message(conn_id, TestMessage::Ready(Default::default()))
-        .expect("ready");
+    h.handle_extension_message(
+        &crate::test_connection_id(conn_id),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("ready");
 
     h.dispatch_user_prompt(test_session_id("s1"), "resume after disconnect".to_owned())
         .expect("dispatch user prompt");
@@ -4745,7 +4951,7 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
             .contains("stale")
     );
 
-    h.handle_disconnect(conn_id);
+    h.handle_disconnect(&crate::test_connection_id(conn_id));
 
     assert!(h.pending_publish_idle_dispatches.is_empty());
     assert!(
@@ -4798,7 +5004,7 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     );
 
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready { message: None }),
     )
     .expect("activate provider");
@@ -4882,7 +5088,7 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
     current_info.supported_tool_types.clear();
     h.provider_model_info.insert(current.clone(), current_info);
     h.provider_model_routes
-        .insert(current.clone(), "other-provider".into());
+        .insert(current.clone(), crate::test_connection_id("other-provider"));
     let role = h
         .available_roles
         .get_mut(&h.selected_role)
@@ -4921,8 +5127,11 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
         )
         .expect("stage model snapshot");
     }
-    h.handle_extension_message(tool_conn_id, TestMessage::Ready(Default::default()))
-        .expect("tool Ready waits on provider");
+    h.handle_extension_message(
+        &crate::test_connection_id(tool_conn_id),
+        TestMessage::Ready(Default::default()),
+    )
+    .expect("tool Ready waits on provider");
     assert!(!event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::AgentInferenceDispatchStarted(checkpoint)
@@ -4930,7 +5139,7 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
     )));
 
     h.handle_extension_message(
-        conn_id,
+        &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready { message: None }),
     )
     .expect("activate provider");
@@ -5224,7 +5433,9 @@ fn duplicate_provider_is_rejected_without_ambiguous_fallback() {
     h.selected_model = Some("test/model".into());
 
     let spec = shell_tool_spec(&h);
-    let report = h.registry.register("conn-duplicate-shell", spec);
+    let report = h
+        .registry
+        .register(&crate::test_connection_id("conn-duplicate-shell"), spec);
     assert!(!report.errors.is_empty());
     let notice = tool_unavailable_notice_prompt(&ToolName::new("shell"));
 
@@ -5317,7 +5528,9 @@ fn unavailable_tool_is_reported_without_crashing() {
         .extension_connection_id("shell")
         .expect("shell")
         .to_owned();
-    let removed = h.registry.unregister_connection(&conn_id);
+    let removed = h
+        .registry
+        .unregister_connection(&crate::test_connection_id(&conn_id));
     assert!(removed.iter().any(|t| t == "shell"));
 
     let cid = ensure_test_user_agent(&mut h);
@@ -5449,7 +5662,7 @@ fn disconnected_tool_completes_pending_call() {
         },
     );
     h.pending_tool_providers
-        .insert(call_id.clone(), conn_id.clone().into());
+        .insert(call_id.clone(), crate::test_connection_id(conn_id.clone()));
     h.tool_turn
         .record_unqueued_in_flight(cid.clone(), call_id.clone());
     if let Some(conv) = h.agents.get_mut(&cid) {
@@ -5458,7 +5671,7 @@ fn disconnected_tool_completes_pending_call() {
         };
     }
 
-    h.handle_disconnect(&conn_id);
+    h.handle_disconnect(&crate::test_connection_id(&conn_id));
 
     // Disconnect publishes a ToolError, drops the call from the
     // conversation's `ToolsRunning` set, and — since that was the
@@ -5510,7 +5723,7 @@ fn disconnected_tool_is_removed_cleanly() {
     // Send disconnect to the extension via the bus (through the
     // writer channel → writer thread → stream).
     let _ = h.bus.send_to(
-        &conn_id,
+        &crate::test_connection_id(&conn_id),
         None,
         HarnessOutputMessage::Disconnect(Disconnect {
             reason: Some("test".to_owned()),
@@ -5527,7 +5740,7 @@ fn disconnected_tool_is_removed_cleanly() {
             HarnessEvent::Disconnected {
                 ref connection_id, ..
             } if *connection_id == conn_id => {
-                h.handle_disconnect(&conn_id);
+                h.handle_disconnect(&crate::test_connection_id(&conn_id));
                 break;
             }
             HarnessEvent::FromConnection {
@@ -5542,7 +5755,11 @@ fn disconnected_tool_is_removed_cleanly() {
         assert!(started.elapsed() < Duration::from_secs(2), "timeout");
     }
 
-    assert!(h.bus.connection(&conn_id).is_none());
+    assert!(
+        h.bus
+            .connection(&crate::test_connection_id(&conn_id))
+            .is_none()
+    );
     assert!(h.registry.providers_for("shell").is_empty());
     assert!(
         h.lifecycle_messages
@@ -5624,7 +5841,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
             .write_frame(&TestProtocolItem::Message(TestMessage::Hello(
                 tau_proto::Hello {
                     protocol_version: tau_proto::PROTOCOL_VERSION,
-                    client_name: "late-tool".into(),
+                    client_name: crate::test_extension_name("late-tool"),
                     client_kind: tau_proto::ClientKind::Tool,
                     capabilities: Default::default(),
                 },
@@ -5663,7 +5880,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
     h.queue_extension_connect(ExtensionConnectCommand {
         entry: ExtensionEntry {
             tool_prefix: None,
-            name: "late-tool".to_owned(),
+            name: crate::test_extension_name("late-tool"),
             instance_id: 999.into(),
             connection_id: conn_id.clone(),
             kind: tau_proto::ClientKind::Tool,
@@ -5850,7 +6067,7 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
     let cid = ensure_test_user_agent(&mut h);
     let model: tau_proto::ModelId = "test/model".into();
     h.provider_model_routes
-        .insert(model.clone(), "missing-provider".into());
+        .insert(model.clone(), crate::test_connection_id("missing-provider"));
     h.agents.get_mut(&cid).expect("agent").model_override = Some(model);
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("route failure".to_owned()))
@@ -5902,7 +6119,8 @@ fn targetless_shell_output_injects_into_default_agent() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
     h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
-        command_id: tau_proto::ShellCommandId::parse("shell-1").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("shell-1")
+            .expect("test identifier must satisfy its grammar"),
         session_id: test_session_id("s1"),
         command: "printf hello".to_owned(),
         include_in_context: true,
@@ -5938,7 +6156,8 @@ fn terminating_agent_rejects_late_shell_output() {
 
     for target_agent_id in [Some(agent_id.clone()), None] {
         h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
-            command_id: tau_proto::ShellCommandId::parse("late-shell").unwrap(),
+            command_id: tau_proto::ShellCommandId::parse("late-shell")
+                .expect("test identifier must satisfy its grammar"),
             session_id: test_session_id("s1"),
             command: "printf late".to_owned(),
             include_in_context: true,
@@ -5969,7 +6188,8 @@ fn shell_output_for_wrong_session_is_ignored() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
     h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
-        command_id: tau_proto::ShellCommandId::parse("shell-2").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("shell-2")
+            .expect("test identifier must satisfy its grammar"),
         session_id: test_session_id("other-session"),
         command: "printf wrong".to_owned(),
         include_in_context: true,
@@ -6003,12 +6223,12 @@ fn agents_context_is_injected_when_agent_is_created() {
     // only on the test-injected pair below.
     h.discovered_agents_files.clear();
     h.discovered_agents_files.push(DiscoveredAgentsFile {
-        source_id: tools_connection_id.clone().into(),
+        source_id: crate::test_connection_id(tools_connection_id.clone()),
         file_path: PathBuf::from("/repo/AGENTS.md"),
         content: "# Root\n- root rule\n".to_owned(),
     });
     h.discovered_agents_files.push(DiscoveredAgentsFile {
-        source_id: tools_connection_id.clone().into(),
+        source_id: crate::test_connection_id(tools_connection_id.clone()),
         file_path: PathBuf::from("/repo/pkg/AGENTS.md"),
         content: "# Package\n- package rule\n".to_owned(),
     });
@@ -6089,7 +6309,7 @@ fn resumed_session_init_does_not_reinject_agents_context() {
     assert_eq!(count_marker_injections(&h), 1);
 
     h.discovered_agents_files.push(DiscoveredAgentsFile {
-        source_id: tools_connection_id.clone().into(),
+        source_id: crate::test_connection_id(tools_connection_id.clone()),
         file_path: PathBuf::from("/repo/AGENTS.md"),
         content: format!("# Root\n- {marker}\n"),
     });
@@ -6099,7 +6319,9 @@ fn resumed_session_init_does_not_reinject_agents_context() {
     h.turn_state = TurnState::InitializingSession {
         session_id: test_session_id("s1"),
         reason: tau_proto::SessionStartReason::Resume,
-        waiting_on: [tools_connection_id.clone().into()].into_iter().collect(),
+        waiting_on: [crate::test_connection_id(tools_connection_id.clone())]
+            .into_iter()
+            .collect(),
     };
     h.handle_extension_event(
         &tools_connection_id,
@@ -6244,7 +6466,7 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
 
     h.selected_model = Some("test/model".into());
     h.registry.register(
-        "conn-delegate",
+        &crate::test_connection_id("conn-delegate"),
         ToolSpec {
             name: ToolName::new("agent_start"),
             model_visible_name: None,
@@ -6589,10 +6811,14 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let _tool_events = connect_test_tool(&mut h, "conn-cancel-tools");
-    h.registry
-        .register("conn-cancel-tools", staged_tool_spec("slow_a"));
-    h.registry
-        .register("conn-cancel-tools", staged_tool_spec("slow_b"));
+    h.registry.register(
+        &crate::test_connection_id("conn-cancel-tools"),
+        staged_tool_spec("slow_a"),
+    );
+    h.registry.register(
+        &crate::test_connection_id("conn-cancel-tools"),
+        staged_tool_spec("slow_b"),
+    );
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
@@ -6685,7 +6911,7 @@ fn provider_disconnect_terminates_event_loop() {
         .to_owned();
 
     h.tx.send(HarnessEvent::Disconnected {
-        connection_id: provider_id.into(),
+        connection_id: crate::test_connection_id(provider_id),
     })
     .expect("queue provider disconnect");
 
@@ -6801,7 +7027,7 @@ fn session_restart_budget_reset_preserves_permanent_disablement() {
     }
     h.extensions
         .restart_budget_disabled
-        .insert("budget-disabled".into());
+        .insert(crate::test_connection_id("budget-disabled"));
     let rollover_at = Instant::now();
 
     h.reset_extension_restart_budgets_at(rollover_at);
@@ -6842,7 +7068,7 @@ fn failed_spawn_retry_delay_anchors_to_late_fake_clock_now() {
     entry.state = ExtensionState::Disconnected;
     entry.supervised_config = Some(config);
     let scheduled_at = Instant::now();
-    h.schedule_extension_restart_at(connection_id, scheduled_at);
+    h.schedule_extension_restart_at(&crate::test_connection_id(connection_id), scheduled_at);
     let first_deadline = h.extensions.restart_deadlines[connection_id];
     let late_now = first_deadline + Duration::from_secs(10);
 
@@ -7040,7 +7266,7 @@ fn duplicate_tool_result_is_discarded() {
 fn hello_protocol_version_mismatch_is_rejected() {
     let hello = tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION + 1,
-        client_name: "future-client".into(),
+        client_name: crate::test_extension_name("future-client"),
         client_kind: tau_proto::ClientKind::Tool,
         capabilities: Default::default(),
     };
@@ -7067,10 +7293,10 @@ fn extension_hello_installs_declared_peer_capabilities() {
         .expect("extension")
         .state = ExtensionState::Spawning;
     h.handle_extension_message(
-        "bridge",
+        &crate::test_connection_id("bridge"),
         TestMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
-            client_name: "bridge".into(),
+            client_name: crate::test_extension_name("bridge"),
             client_kind: tau_proto::ClientKind::Tool,
             capabilities: vec![tau_proto::PeerCapability::MessageBridge],
         }),
@@ -7099,7 +7325,7 @@ fn explicit_socket_disconnect_cleans_client_writer_and_bus_state() {
         .find(|metadata| metadata.origin == ConnectionOrigin::Socket)
         .map(|metadata| metadata.id)
         .expect("socket client connection");
-    assert!(h.bus.connection(socket_conn.as_str()).is_some());
+    assert!(h.bus.connection(&socket_conn).is_some());
     assert!(h.client_writers.contains_key(&socket_conn));
 
     h.tx.send(HarnessEvent::FromConnection {
@@ -7112,7 +7338,7 @@ fn explicit_socket_disconnect_cleans_client_writer_and_bus_state() {
 
     h.run_event_loop(Some(1), false).expect("event loop exits");
 
-    assert!(h.bus.connection(socket_conn.as_str()).is_none());
+    assert!(h.bus.connection(&socket_conn).is_none());
     assert!(!h.client_writers.contains_key(&socket_conn));
 }
 
@@ -7155,7 +7381,7 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
             "stale-ui",
             TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
                 protocol_version: tau_proto::PROTOCOL_VERSION + 1,
-                client_name: "stale-ui".into(),
+                client_name: crate::test_extension_name("stale-ui"),
                 client_kind: tau_proto::ClientKind::Ui,
                 capabilities: Default::default(),
             })),
@@ -7240,7 +7466,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
         },
     );
     h.pending_tool_providers
-        .insert(call_id.clone(), "owner-ext".into());
+        .insert(call_id.clone(), crate::test_connection_id("owner-ext"));
     let completed_before = h.completed_tool_calls.clone();
     let (in_flight_before, total_before) = {
         let agent = &h.agents[&cid];
@@ -7463,7 +7689,7 @@ fn disconnect_unregisters_tools_before_advancing_queued_prompt() {
     let mut h = echo_harness(&sp).expect("start");
     connect_test_tool(&mut h, "drop-ext");
     h.registry.register(
-        "drop-ext",
+        &crate::test_connection_id("drop-ext"),
         ToolSpec {
             name: ToolName::new("stale_tool"),
             model_visible_name: None,
@@ -7484,7 +7710,7 @@ fn disconnect_unregisters_tools_before_advancing_queued_prompt() {
         .pending_prompts
         .push_back(PendingPrompt::user("run".to_owned()));
 
-    h.handle_disconnect("drop-ext");
+    h.handle_disconnect(&crate::test_connection_id("drop-ext"));
 
     let prompts: Vec<_> = event_log_events(&h)
         .into_iter()
@@ -7506,7 +7732,7 @@ fn disconnect_session_init_completion_waits_until_tool_cleanup() {
     let mut h = echo_harness(&sp).expect("start");
     connect_test_tool(&mut h, "init-ext");
     h.registry.register(
-        "init-ext",
+        &crate::test_connection_id("init-ext"),
         ToolSpec {
             name: ToolName::new("init_stale_tool"),
             model_visible_name: None,
@@ -7523,7 +7749,8 @@ fn disconnect_session_init_completion_waits_until_tool_cleanup() {
     h.turn_state = TurnState::InitializingSession {
         session_id: h.current_session_id.clone(),
         reason: tau_proto::SessionStartReason::Initial,
-        waiting_on: HashSet::from([tau_proto::ConnectionId::from("init-ext")]),
+        waiting_on: HashSet::from([tau_proto::ConnectionId::parse("init-ext")
+            .expect("test connection id must satisfy the identifier grammar")]),
     };
     let cid = ensure_test_user_agent(&mut h);
     h.agents
@@ -7532,7 +7759,7 @@ fn disconnect_session_init_completion_waits_until_tool_cleanup() {
         .pending_prompts
         .push_back(PendingPrompt::user("run".to_owned()));
 
-    h.handle_disconnect("init-ext");
+    h.handle_disconnect(&crate::test_connection_id("init-ext"));
 
     assert!(h.turn_state.is_idle());
     let prompts: Vec<_> = event_log_events(&h)
@@ -7560,10 +7787,10 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
     {
         let conv = h.agents.get_mut(&cid).expect("agent");
         conv.originator = tau_proto::PromptOriginator::Extension {
-            name: "query-ext".into(),
+            name: crate::test_extension_name("query-ext"),
             query_id: "query-1".into(),
         };
-        conv.source_connection = Some(HARNESS_CONNECTION_ID.into());
+        conv.source_connection = Some(crate::test_connection_id(HARNESS_CONNECTION_ID));
         conv.parent_tool_call_id = None;
     }
     seed_agent_thinking(&mut h, &cid, "sp-query");
@@ -7591,7 +7818,7 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "query-ext".into(),
+            name: crate::test_extension_name("query-ext"),
             query_id: "query-1".into(),
         },
         compaction_original_input_tokens: None,
@@ -7644,19 +7871,20 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
     {
         let conv = h.agents.get_mut(&cid).expect("agent");
         conv.originator = tau_proto::PromptOriginator::Extension {
-            name: "query-ext".into(),
+            name: crate::test_extension_name("query-ext"),
             query_id: "query-2".into(),
         };
-        conv.source_connection = Some(HARNESS_CONNECTION_ID.into());
+        conv.source_connection = Some(crate::test_connection_id(HARNESS_CONNECTION_ID));
         conv.parent_tool_call_id = None;
     }
     seed_agent_thinking(&mut h, &cid, "sp-query-pending");
     h.prompt_agents
         .insert(test_agent_prompt_id("sp-query-pending"), cid.clone());
     h.publish_event(
-        Some(HARNESS_CONNECTION_ID),
+        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("query-pending-message").unwrap(),
+            message_id: tau_proto::AgentMessageId::parse("query-pending-message")
+                .expect("test identifier must satisfy its grammar"),
             sender_id: tau_proto::AgentId::parse("manager").expect("sender id"),
             sender_session_id: None,
             recipient_id: durable_agent_id.clone(),
@@ -7688,7 +7916,7 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
-            name: "query-ext".into(),
+            name: crate::test_extension_name("query-ext"),
             query_id: "query-2".into(),
         },
         compaction_original_input_tokens: None,
@@ -7767,11 +7995,12 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
     let tmp = TempDir::new().expect("temp dir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     connect_test_tool(&mut h, "ctx-ext");
-    let contributor = tau_proto::ConnectionId::from("ctx-ext");
+    let contributor = tau_proto::ConnectionId::parse("ctx-ext")
+        .expect("test connection id must satisfy the identifier grammar");
     let agent_id = crate::parse_agent_id("agent-1");
 
     h.apply_extension_prompt_fragment(
-        "ctx-ext",
+        &crate::test_connection_id("ctx-ext"),
         tau_proto::ExtPromptFragmentPublish {
             fragment: tau_proto::PromptFragment::new(
                 "ctx-fragment",
@@ -7781,7 +8010,7 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
         },
     );
     h.apply_agent_context_publish(
-        "ctx-ext",
+        &crate::test_connection_id("ctx-ext"),
         tau_proto::ExtAgentContextPublish {
             session_id: test_session_id("test-session"),
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
@@ -7799,7 +8028,7 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
         HashSet::from([contributor.clone()]),
     );
 
-    h.handle_disconnect("ctx-ext");
+    h.handle_disconnect(&crate::test_connection_id("ctx-ext"));
 
     assert!(!h.extension_prompt_fragments.contains_key(&contributor));
     assert_eq!(
@@ -7815,11 +8044,12 @@ fn switch_session_clears_session_scoped_extension_context() {
     let tmp = TempDir::new().expect("temp dir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     connect_test_tool(&mut h, "ctx-ext");
-    let contributor = tau_proto::ConnectionId::from("ctx-ext");
+    let contributor = tau_proto::ConnectionId::parse("ctx-ext")
+        .expect("test connection id must satisfy the identifier grammar");
     let agent_id = crate::parse_agent_id("agent-1");
 
     h.apply_extension_prompt_fragment(
-        "ctx-ext",
+        &crate::test_connection_id("ctx-ext"),
         tau_proto::ExtPromptFragmentPublish {
             fragment: tau_proto::PromptFragment::new(
                 "ctx-fragment",
@@ -7829,7 +8059,7 @@ fn switch_session_clears_session_scoped_extension_context() {
         },
     );
     h.apply_agent_context_publish(
-        "ctx-ext",
+        &crate::test_connection_id("ctx-ext"),
         tau_proto::ExtAgentContextPublish {
             session_id: test_session_id("test-session"),
             agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
@@ -7867,4 +8097,10 @@ fn switch_session_clears_session_scoped_extension_context() {
     );
     assert!(h.pending_agent_discovery.is_empty());
     assert!(h.agent_context_providers.contains(&contributor));
+}
+
+/// Builds a validated shell command id used by this test module.
+fn test_shell_command_id(value: impl AsRef<str>) -> tau_proto::ShellCommandId {
+    tau_proto::ShellCommandId::parse(value.as_ref())
+        .expect("test identifier must satisfy its grammar")
 }

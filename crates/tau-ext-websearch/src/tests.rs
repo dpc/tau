@@ -365,7 +365,8 @@ fn configure_message(config: serde_json::Value) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&config),
-        instance_name: tau_proto::ExtensionName::new("test-extension"),
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: BTreeMap::new(),
     })
@@ -579,7 +580,8 @@ fn searcher_error_surfaces_as_tool_error() {
     let (mut reader, mut writer) = spawn_with_searcher(searcher);
     drain_startup(&mut reader);
     let originator = tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("fixture"),
+        name: tau_proto::ExtensionName::parse("fixture")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "query-error".to_owned(),
     };
 
@@ -611,7 +613,8 @@ fn searcher_error_surfaces_as_tool_error() {
 fn tool_result_preserves_prompt_originator() {
     let searcher = StubSearcher::ok("ok");
     let originator = tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("fixture"),
+        name: tau_proto::ExtensionName::parse("fixture")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "query-1".to_owned(),
     };
 
@@ -911,7 +914,8 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
     let (mut reader, mut writer) = spawn_extension(searcher, parallel.clone());
     drain_startup(&mut reader);
     let originator = tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("fixture"),
+        name: tau_proto::ExtensionName::parse("fixture")
+            .expect("test extension name must satisfy the identifier grammar"),
         query_id: "parallel-query".to_owned(),
     };
 

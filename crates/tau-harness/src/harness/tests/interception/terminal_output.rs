@@ -31,9 +31,9 @@ fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> boo
 fn connect_socket_ui(h: &mut Harness, id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let events = Arc::new(Mutex::new(Vec::new()));
     h.bus.connect(Connection::new(
-        ConnectionMetadata {
-            id: id.into(),
-            name: id.to_owned(),
+        PendingConnectionMetadata {
+            id: Some(crate::test_connection_id(id)),
+            name: crate::test_extension_name(id),
             kind: tau_proto::ClientKind::Ui,
             origin: ConnectionOrigin::Socket,
         },
@@ -49,7 +49,7 @@ fn connect_terminal_observer(h: &mut Harness, id: &str) -> Arc<Mutex<Vec<RoutedF
     let sink = connect_test_client(h, id, tau_proto::ClientKind::Ui);
     h.bus
         .set_subscriptions(
-            id,
+            &crate::test_connection_id(id),
             Vec::new(),
             vec![
                 EventSelector::Exact(tau_proto::EventName::TERM_BELL),
@@ -80,9 +80,9 @@ fn every_configured_extension_kind_can_publish_terminal_output() {
         let source = format!("terminal-source-{index}");
         let stable_name = format!("stable-terminal-source-{index}");
         connect_ready_configured_extension(&mut h, &source, &stable_name, kind);
-        h.handle_extension_event_inner(&source, bell())
+        h.handle_extension_event_inner(&crate::test_connection_id(&source), bell())
             .expect("publish bell");
-        h.handle_extension_event_inner(&source, user_var(&source))
+        h.handle_extension_event_inner(&crate::test_connection_id(&source), user_var(&source))
             .expect("publish user variable");
         assert!(source_committed(&h, &source, |event| {
             matches!(event, Event::TermBell(_))
@@ -125,7 +125,7 @@ fn unconfigured_and_disconnected_extensions_cannot_publish_terminal_output() {
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
 
     connect_test_tool(&mut h, "unconfigured");
-    h.handle_extension_event_inner("unconfigured", bell())
+    h.handle_extension_event_inner(&crate::test_connection_id("unconfigured"), bell())
         .expect("reject unconfigured bell");
     assert!(!source_committed(&h, "unconfigured", |event| {
         matches!(event, Event::TermBell(_))
@@ -142,8 +142,11 @@ fn unconfigured_and_disconnected_extensions_cannot_publish_terminal_output() {
         .get_mut("disconnected")
         .expect("configured entry")
         .state = crate::extension::ExtensionState::Disconnected;
-    h.handle_extension_event_inner("disconnected", user_var("stale"))
-        .expect("reject disconnected user variable");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("disconnected"),
+        user_var("stale"),
+    )
+    .expect("reject disconnected user variable");
     assert!(!source_committed(&h, "disconnected", |event| {
         matches!(event, Event::Osc1337SetUserVar(_))
     }));
@@ -157,16 +160,21 @@ fn attached_ui_has_authority_but_external_message_peer_does_not() {
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
 
     connect_socket_ui(&mut h, "ui");
-    h.handle_client_event_inner_with_persist("ui", bell(), Some(true))
+    h.handle_client_event_inner_with_persist(&crate::test_connection_id("ui"), bell(), Some(true))
         .expect("publish UI bell");
     assert!(source_committed(&h, "ui", |event| {
         matches!(event, Event::TermBell(_))
     }));
 
     connect_socket_ui(&mut h, "external");
-    h.external_message_peers.insert("external".into());
-    h.handle_client_event_inner_with_persist("external", user_var("denied"), Some(true))
-        .expect("reject external user variable");
+    h.external_message_peers
+        .insert(crate::test_connection_id("external"));
+    h.handle_client_event_inner_with_persist(
+        &crate::test_connection_id("external"),
+        user_var("denied"),
+        Some(true),
+    )
+    .expect("reject external user variable");
     assert!(!source_committed(&h, "external", |event| {
         matches!(event, Event::Osc1337SetUserVar(_))
     }));
@@ -195,7 +203,7 @@ fn interception_drop_prevents_terminal_output_commit() {
     )
     .expect("register interceptor");
 
-    h.handle_extension_event_inner("publisher", bell())
+    h.handle_extension_event_inner(&crate::test_connection_id("publisher"), bell())
         .expect("park bell");
     h.handle_extension_event(
         "interceptor",
@@ -243,8 +251,12 @@ fn interception_replacement_retains_source_and_replaces_payload() {
     )
     .expect("register interceptor");
 
-    h.handle_extension_event_inner_with_persist("publisher", user_var("original"), Some(false))
-        .expect("park user variable");
+    h.handle_extension_event_inner_with_persist(
+        &crate::test_connection_id("publisher"),
+        user_var("original"),
+        Some(false),
+    )
+    .expect("park user variable");
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -285,7 +297,10 @@ fn interception_replacement_retains_source_and_replaces_payload() {
     assert_eq!(
         deliveries,
         [(
-            Some(tau_proto::ConnectionId::from("publisher")),
+            Some(
+                tau_proto::ConnectionId::parse("publisher")
+                    .expect("test connection id must satisfy the identifier grammar")
+            ),
             false,
             user_var("replacement"),
         )]

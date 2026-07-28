@@ -83,7 +83,7 @@ pub(crate) struct DeferredPromptDispatch {
 /// these is alive so the persisted log order matches publish order.
 pub(crate) struct PendingIntercept {
     /// Connection that owes us an [`InterceptReply`].
-    pub(crate) conn_id: String,
+    pub(crate) conn_id: tau_proto::ConnectionId,
     /// Event sent in the [`InterceptRequest`]. Returned to the chain
     /// if the reply is `Pass(None)`, replaced if `Pass(Some(_))`.
     pub(crate) event: Event,
@@ -178,7 +178,7 @@ pub(crate) struct PeerPublicationContext {
 /// Source envelope retained through generic interception and commit.
 struct PublicationSource {
     /// Original connection for persistence and bus delivery metadata.
-    connection_id: Option<String>,
+    connection_id: Option<tau_proto::ConnectionId>,
     /// Immutable authenticated identity captured at admission.
     peer_context: PeerPublicationContext,
 }
@@ -277,7 +277,7 @@ pub(crate) enum AgentPublishCompletion {
         /// Selected compaction boundary that must remain an ancestor on retry.
         batch_parent: tau_proto::AgentHead,
         /// Original completion source reused for the checkpoint publication.
-        source: Option<String>,
+        source: Option<tau_proto::ConnectionId>,
         /// Uncommitted suffix beginning with this exact batch publication.
         retry_prompts: Vec<crate::agent::PendingPrompt>,
         /// Whether this member owns continuation execution after commit.
@@ -606,11 +606,7 @@ impl Ord for InterceptorRegistration {
                     .as_str()
                     .cmp(other.component_name.as_str())
             })
-            .then_with(|| {
-                self.connection_id
-                    .as_str()
-                    .cmp(other.connection_id.as_str())
-            })
+            .then_with(|| self.connection_id.as_str().cmp(&other.connection_id))
     }
 }
 
@@ -629,7 +625,7 @@ pub(crate) struct InterceptorRegistry {
 impl InterceptorRegistry {
     pub(crate) fn replace_for_connection(
         &mut self,
-        connection_id: &str,
+        connection_id: &tau_proto::ConnectionId,
         component_name: ExtensionName,
         selectors: Vec<EventSelector>,
         priority: InterceptionPriority,
@@ -638,7 +634,7 @@ impl InterceptorRegistry {
         let registration = InterceptorRegistration {
             priority,
             component_name,
-            connection_id: connection_id.into(),
+            connection_id: connection_id.clone(),
         };
         for selector in selectors {
             match selector {
@@ -658,14 +654,14 @@ impl InterceptorRegistry {
         }
     }
 
-    pub(crate) fn remove_connection(&mut self, connection_id: &str) {
+    pub(crate) fn remove_connection(&mut self, connection_id: &tau_proto::ConnectionId) {
         for registrations in self.exact.values_mut() {
-            registrations.retain(|r| r.connection_id.as_str() != connection_id);
+            registrations.retain(|r| r.connection_id != *connection_id);
         }
         self.exact
             .retain(|_, registrations| !registrations.is_empty());
         for registrations in self.prefix.values_mut() {
-            registrations.retain(|r| r.connection_id.as_str() != connection_id);
+            registrations.retain(|r| r.connection_id != *connection_id);
         }
         self.prefix
             .retain(|_, registrations| !registrations.is_empty());
@@ -725,9 +721,12 @@ impl Harness {
         })
     }
 
-    fn suspend_interceptor_after_destructive_cancel(&mut self, connection_id: &str) {
+    fn suspend_interceptor_after_destructive_cancel(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+    ) {
         self.suspended_interceptor_connections
-            .insert(connection_id.into());
+            .insert(connection_id.clone());
     }
 
     /// Remove not-yet-started publications from the same rejected completion
@@ -1327,7 +1326,7 @@ impl Harness {
     /// interception chain and into the bus.
     pub(crate) fn enqueue_publish(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         event: Event,
         persist: bool,
         must_pass: bool,
@@ -1339,7 +1338,7 @@ impl Harness {
     /// Enqueue a peer publication with its immutable frame-admission session.
     pub(super) fn enqueue_publish_with_admission(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         event: Event,
         persist: bool,
         must_pass: bool,
@@ -1358,7 +1357,7 @@ impl Harness {
 
     fn enqueue_publish_inner(
         &mut self,
-        source: Option<&str>,
+        source: Option<&tau_proto::ConnectionId>,
         event: Event,
         persist: bool,
         must_pass: bool,
@@ -1400,7 +1399,7 @@ impl Harness {
             });
         let peer_context = PeerPublicationContext {
             extension: extension.map(|entry| AuthenticatedExtensionPublication {
-                publisher: tau_proto::ExtensionName::from(entry.name.clone()),
+                publisher: entry.name.clone(),
                 source: entry.connection_id.clone(),
                 kind: entry.kind.clone(),
                 instance_id: entry.instance_id,
@@ -1413,7 +1412,7 @@ impl Harness {
             }),
         };
         let source = PublicationSource {
-            connection_id: source.map(str::to_owned),
+            connection_id: source.cloned(),
             peer_context,
         };
         if self.pending_intercept.is_some() {
@@ -1464,7 +1463,7 @@ impl Harness {
             let Some(interceptor_match) = self.interceptors.next_for(&event, cursor.as_ref())
             else {
                 self.commit_event(
-                    source.connection_id.as_deref(),
+                    source.connection_id.as_ref(),
                     &source.peer_context,
                     event,
                     persist,
@@ -1491,7 +1490,7 @@ impl Harness {
                 connection_id = %interceptor.connection_id,
                 "intercepting event emission"
             );
-            let conn_id = interceptor.connection_id.as_str().to_owned();
+            let conn_id = interceptor.connection_id.to_owned();
             let report = self.bus.send_to(
                 &conn_id,
                 None,
@@ -1502,7 +1501,7 @@ impl Harness {
             );
             let delivered = report
                 .as_ref()
-                .is_ok_and(|report| report.delivered_to.iter().any(|id| id.as_str() == conn_id));
+                .is_ok_and(|report| report.delivered_to.iter().any(|id| id == &conn_id));
             if delivered {
                 self.pending_intercept = Some(PendingIntercept {
                     conn_id: conn_id.clone(),
@@ -1543,16 +1542,13 @@ impl Harness {
     /// publish triggers a fatal extension-activation failure.
     pub(crate) fn handle_intercept_reply(
         &mut self,
-        conn_id: &str,
+        conn_id: &tau_proto::ConnectionId,
         reply: InterceptReply,
     ) -> Result<(), crate::HarnessError> {
-        if self
-            .suspended_interceptor_connections
-            .remove(&tau_proto::ConnectionId::from(conn_id))
-        {
+        if self.suspended_interceptor_connections.remove(conn_id) {
             tracing::warn!(
                 target: "tau_harness::interception",
-                connection_id = conn_id,
+                connection_id = %conn_id,
                 "consuming stale reply for destructively canceled intercept request"
             );
             return Ok(());
@@ -1560,15 +1556,15 @@ impl Harness {
         let Some(pending) = self.pending_intercept.take() else {
             tracing::warn!(
                 target: "tau_harness::interception",
-                connection_id = conn_id,
+                connection_id = %conn_id,
                 "InterceptReply received without a pending intercept; ignoring",
             );
             return Ok(());
         };
-        if pending.conn_id != conn_id {
+        if pending.conn_id != *conn_id {
             tracing::warn!(
                 target: "tau_harness::interception",
-                connection_id = conn_id,
+                connection_id = %conn_id,
                 expected = %pending.conn_id,
                 "InterceptReply from unexpected connection; ignoring and \
                  continuing to wait",
@@ -1588,17 +1584,20 @@ impl Harness {
     /// Resolve a pending intercept whose responder disconnected.
     /// Defaults to `Pass(None)` so the original event still flows —
     /// extensions cannot wedge the harness by going away mid-reply.
-    pub(crate) fn fail_pending_intercept_for_disconnect(&mut self, conn_id: &str) {
+    pub(crate) fn fail_pending_intercept_for_disconnect(
+        &mut self,
+        conn_id: &tau_proto::ConnectionId,
+    ) {
         let Some(pending) = self.pending_intercept.take() else {
             return;
         };
-        if pending.conn_id != conn_id {
+        if pending.conn_id != *conn_id {
             self.pending_intercept = Some(pending);
             return;
         }
         tracing::warn!(
             target: "tau_harness::interception",
-            connection_id = conn_id,
+            connection_id = %conn_id,
             "interceptor disconnected mid-reply; treating as Pass(None)",
         );
         self.advance_pending_intercept(pending, InterceptAction::Pass(None));

@@ -31,11 +31,12 @@ bound.
 
 A process crash normally leaves dirty pages eligible for kernel writeback. A
 kernel or power crash may lose or tear the recent suffix even when an external
-effect survives. Under the existing lock, recovery keeps the longest fully
-framed, decoded, sequence-valid, and semantically valid prefix, truncates the
-first invalid record and all later bytes, rebuilds affected derived state, and
-marks the repair dirty. An empty valid prefix is allowed. Recovery never
-automatically resends uncertain external effects.
+effect survives. Under the existing lock, recovery truncates only an incomplete
+frame header or payload at EOF, rebuilds affected derived state, and marks that
+crash-tail repair dirty. Complete frames that fail decoding, source-shape,
+sequence, or semantic validation fail closed byte-for-byte without rebuilding
+from a prefix. An empty valid prefix is allowed. Recovery never automatically
+resends uncertain external effects.
 
 Debug `events.jsonl` remains a separate non-authoritative, bounded,
 nonblocking, droppable diagnostic stream with no sync or shutdown-drain

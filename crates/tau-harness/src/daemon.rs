@@ -550,7 +550,10 @@ fn validate_allowed_extensions(
         .extensions
         .keys()
         .cloned()
-        .map(tau_proto::ExtensionName::from)
+        .map(tau_proto::ExtensionName::parse)
+        .collect::<Result<BTreeSet<_>, _>>()
+        .expect("validated config extension names must remain canonical")
+        .into_iter()
         .collect::<BTreeSet<_>>();
     if &actual != allowed {
         return Err(HarnessError::Participant(format!(
@@ -1177,7 +1180,8 @@ fn connect_daemon_helper(
     let mut peer = SocketPeer::connect(socket_path)?;
     peer.send(&HarnessInputMessage::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: client_name.into(),
+        client_name: tau_proto::ExtensionName::parse(client_name)
+            .expect("validated daemon client name must remain canonical"),
         client_kind: ClientKind::Ui,
         capabilities: Default::default(),
     }))?;

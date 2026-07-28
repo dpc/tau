@@ -428,7 +428,8 @@ fn spawn_extension_with_exit_and_prefix(
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: Default::default(),
@@ -451,7 +452,8 @@ fn prefixed_shell_dispatch_and_dir_lock_refresh_use_wire_names() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: Some(prefix),
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: cbor_map(vec![(
                 "dir_lock",
                 cbor_map(vec![("enable", CborValue::Bool(true))]),
@@ -582,7 +584,8 @@ fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable:
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: cbor_map(vec![(
                 "dir_lock",
                 cbor_map(vec![("enable", CborValue::Bool(enable))]),
@@ -606,11 +609,11 @@ fn tool_started(call_id: &str, tool_name: &str, arguments: CborValue, agent_id: 
 
 fn action_invoke(invocation_id: &str, action_id: &str, directory: &str) -> Event {
     Event::ActionInvoke(tau_proto::ActionInvoke {
-        invocation_id: invocation_id.into(),
+        invocation_id: test_action_invocation_id(invocation_id),
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        extension_name: "tau-ext-shell".into(),
+        extension_name: test_extension_name("tau-ext-shell"),
         instance_id: 0.into(),
         action_id: action_id.to_owned(),
         raw_line: format!(":shell-dir-force-unlock {directory}"),
@@ -624,7 +627,7 @@ fn ui_shell_command(command_id: &str, command: &str) -> Event {
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        command_id: command_id.into(),
+        command_id: test_shell_command_id(command_id),
         command: command.to_owned(),
         include_in_context: true,
         target_agent_id: None,
@@ -654,7 +657,8 @@ fn targeted_user_shell_runs_from_agent_workdir() {
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
-            command_id: tau_proto::ShellCommandId::parse("ui-targeted-pwd").unwrap(),
+            command_id: tau_proto::ShellCommandId::parse("ui-targeted-pwd")
+                .expect("test identifier must satisfy its grammar"),
             command: "pwd".to_owned(),
             include_in_context: false,
             target_agent_id: Some(agent_id),
@@ -1379,7 +1383,8 @@ fn initial_dir_lock_override_is_final_before_ready() {
     input_writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: cbor_map(vec![(
                 "dir_lock",
                 cbor_map(vec![("enable", CborValue::Bool(true))]),
@@ -5710,7 +5715,8 @@ fn shell_tool_applies_configured_prefix_and_command() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: CborValue::Map(vec![(
                 CborValue::Text("shell".to_owned()),
                 CborValue::Map(vec![
@@ -5836,7 +5842,8 @@ fn shell_extension_rejects_invalid_config() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: CborValue::Map(vec![(
                 CborValue::Text("shell".to_owned()),
                 CborValue::Map(vec![(
@@ -5878,7 +5885,8 @@ fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: CborValue::Map(vec![(
                 CborValue::Text("dir_lock".to_owned()),
                 CborValue::Map(vec![
@@ -5977,7 +5985,8 @@ fn shell_extension_reports_invalid_working_directory_config() {
     writer
         .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: cbor_text_map(vec![(
                 "working_directory",
                 missing_dir.to_str().expect("utf8 temp path"),
@@ -6243,7 +6252,8 @@ fn model_and_user_shells_share_protected_pager_environment() {
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        command_id: tau_proto::ShellCommandId::parse("ui-sh-pager-env").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("ui-sh-pager-env")
+            .expect("test identifier must satisfy its grammar"),
         command: command.to_owned(),
         include_in_context: true,
         target_agent_id: None,
@@ -6900,7 +6910,8 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_output_endp
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        command_id: tau_proto::ShellCommandId::parse("ui-sh-bg").unwrap(),
+        command_id: tau_proto::ShellCommandId::parse("ui-sh-bg")
+            .expect("test identifier must satisfy its grammar"),
         command: "setsid sh -c 'sleep 5; printf late' & printf early".to_owned(),
         include_in_context: true,
         target_agent_id: None,
@@ -9376,7 +9387,8 @@ fn live_loaded_agent_does_not_default_workdir_after_replay_error() {
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
-                command_id: tau_proto::ShellCommandId::parse("replay-failed-shell").unwrap(),
+                command_id: tau_proto::ShellCommandId::parse("replay-failed-shell")
+                    .expect("test identifier must satisfy its grammar"),
                 command: "pwd".to_owned(),
                 include_in_context: false,
                 target_agent_id: Some(agent_id),
@@ -9462,4 +9474,22 @@ fn malformed_workdir_metadata_does_not_wedge_context_ready() {
         .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
+}
+
+/// Builds a validated extension name used by this test module.
+fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
+    tau_proto::ExtensionName::parse(value.as_ref())
+        .expect("test extension name must satisfy the identifier grammar")
+}
+
+/// Builds a validated shell command id used by this test module.
+fn test_shell_command_id(value: impl AsRef<str>) -> tau_proto::ShellCommandId {
+    tau_proto::ShellCommandId::parse(value.as_ref())
+        .expect("test identifier must satisfy its grammar")
+}
+
+/// Builds a validated action invocation id used by this test module.
+fn test_action_invocation_id(value: impl AsRef<str>) -> tau_proto::ActionInvocationId {
+    tau_proto::ActionInvocationId::parse(value.as_ref())
+        .expect("test identifier must satisfy its grammar")
 }

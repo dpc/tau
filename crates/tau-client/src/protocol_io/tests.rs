@@ -59,7 +59,7 @@ fn protocol_io_output_message_key_uses_harness_notice_name() {
 fn protocol_io_input_message_key_uses_ui_debug_request_message_name() {
     let message =
         HarnessInputMessage::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
-            extension_name: "std-shell".into(),
+            extension_name: test_extension_name("std-shell"),
         });
 
     assert_eq!(
@@ -282,4 +282,10 @@ fn protocol_io_cumulative_stats_format_uses_labels_and_sorting() {
         formatted.find("large.event").expect("large event line")
             < formatted.find("small.event").expect("small event line")
     );
+}
+
+/// Builds a validated extension name used by this test module.
+fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
+    tau_proto::ExtensionName::parse(value.as_ref())
+        .expect("test extension name must satisfy the identifier grammar")
 }

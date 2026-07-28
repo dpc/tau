@@ -25,7 +25,8 @@ fn schema(root: &str, action_id: &str) -> ActionSchema {
 
 fn published(root: &str, action_id: &str, instance_id: u64) -> ActionSchemaPublished {
     ActionSchemaPublished {
-        extension_name: "std-email".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-email")
+            .expect("test identifier must satisfy its grammar"),
         instance_id: instance_id.into(),
         schema: schema(root, action_id),
     }
@@ -114,7 +115,8 @@ fn nested_schema() -> ActionSchema {
 
 fn nested_published() -> ActionSchemaPublished {
     ActionSchemaPublished {
-        extension_name: "std-email".into(),
+        extension_name: tau_proto::ExtensionName::parse("std-email")
+            .expect("test identifier must satisfy its grammar"),
         instance_id: 1.into(),
         schema: nested_schema(),
     }
@@ -139,7 +141,8 @@ fn google_auth_published(accounts: &[&str], instance_id: u64) -> ActionSchemaPub
         kind: ActionArgKind::String,
     };
     ActionSchemaPublished {
-        extension_name: "work-pim".into(),
+        extension_name: tau_proto::ExtensionName::parse("work-pim")
+            .expect("test identifier must satisfy its grammar"),
         instance_id: instance_id.into(),
         schema: ActionSchema {
             version: ACTION_SCHEMA_VERSION,
@@ -182,7 +185,11 @@ fn parses_known_dynamic_action_line() {
         .expect("known root")
         .expect("valid action");
 
-    assert_eq!(dispatch.extension_name, ExtensionName::from("std-email"));
+    assert_eq!(
+        dispatch.extension_name,
+        tau_proto::ExtensionName::parse("std-email")
+            .expect("test extension name must satisfy the identifier grammar")
+    );
     assert_eq!(dispatch.instance_id, ExtensionInstanceId::from(1));
     assert_eq!(dispatch.parsed.action_id, "email.list");
 }
@@ -274,7 +281,11 @@ fn removes_schema_for_exited_extension() {
     let state = ActionCommandState::new([":quit"]);
     state.apply_schema_published(&published(":email", "email.list", 2));
 
-    state.remove_extension(&ExtensionName::from("std-email"), 2.into());
+    state.remove_extension(
+        &tau_proto::ExtensionName::parse("std-email")
+            .expect("test extension name must satisfy the identifier grammar"),
+        2.into(),
+    );
 
     assert!(state.parse_line(":email list").is_none());
 }

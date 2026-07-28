@@ -53,7 +53,7 @@ fn track_image_call(h: &mut Harness, cid: &crate::AgentId, call_id: &str, allowe
         },
     );
     h.pending_tool_providers
-        .insert(call_id.into(), "shell".into());
+        .insert(call_id.into(), crate::test_connection_id("shell"));
 }
 
 /// Exercises image authorization and media validation through the real
@@ -73,7 +73,7 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
     let cid = ensure_test_user_agent(&mut h);
     let live = connect_test_tool(&mut h, "image-live");
     h.complete_subscription(
-        "image-live",
+        &crate::test_connection_id("image-live"),
         Vec::new(),
         vec![
             EventSelector::Exact(tau_proto::EventName::TOOL_RESULT),
@@ -199,7 +199,7 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
 
     let replay = connect_test_tool(&mut h, "image-replay");
     h.complete_subscription(
-        "image-replay",
+        &crate::test_connection_id("image-replay"),
         vec![EventSelector::Exact(
             tau_proto::EventName::PROVIDER_TOOL_RESULT,
         )],
@@ -262,7 +262,7 @@ fn run_tool_result(
         },
     );
     h.pending_tool_providers
-        .insert(call_id_typed.clone(), "shell".into());
+        .insert(call_id_typed.clone(), crate::test_connection_id("shell"));
     h.handle_extension_event(
         "shell",
         TestProtocolItem::Event(Event::ToolResultReported(ToolResult {
@@ -331,7 +331,7 @@ fn run_tool_error(
         },
     );
     h.pending_tool_providers
-        .insert(call_id_typed.clone(), "shell".into());
+        .insert(call_id_typed.clone(), crate::test_connection_id("shell"));
     h.handle_extension_event(
         "shell",
         TestProtocolItem::Event(Event::ToolErrorReported(tau_proto::ToolError {
@@ -677,7 +677,7 @@ fn dedup_is_scoped_to_a_single_branch() {
             "s1".parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             tau_proto::PromptOriginator::Extension {
-                name: "core-subagents".into(),
+                name: crate::test_extension_name("core-subagents"),
                 query_id: "q-test".to_owned(),
             },
             None, // explicit-root: no inherited head

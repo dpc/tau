@@ -312,6 +312,18 @@ fn gateway_mode(socket_path: std::path::PathBuf) -> BridgeMode {
     BridgeMode::GatewayClient(GatewayClientConfig { socket_path })
 }
 
+fn set_test_publisher(ext: &Extension) {
+    ext.set_publisher_name(
+        tau_proto::ExtensionName::parse("std-telegram").expect("test publisher name"),
+    );
+}
+
+fn test_extension(client: Arc<dyn TelegramClient>, output: impl Into<Output>) -> Extension {
+    let ext = Extension::new(client, output);
+    set_test_publisher(&ext);
+    ext
+}
+
 fn extension() -> (
     Extension,
     mpsc::Receiver<HarnessInputMessage>,
@@ -319,7 +331,7 @@ fn extension() -> (
 ) {
     let (tx, rx) = mpsc::channel();
     let client = FakeClient::new();
-    let ext = Extension::new(client.clone(), tx);
+    let ext = test_extension(client.clone(), tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     (ext, rx, client)
@@ -350,7 +362,9 @@ fn expect_tool_success(rx: &mpsc::Receiver<HarnessInputMessage>) {
 
 /// A successful Telegram send must submit `message.sent_reported` before its
 /// ordinary terminal tool result on the serialized extension output.
-fn expect_successful_send(rx: &mpsc::Receiver<HarnessInputMessage>) -> MessageSent {
+fn expect_successful_send(
+    rx: &mpsc::Receiver<HarnessInputMessage>,
+) -> MessageSent<tau_proto::RawMessagePublisherId> {
     let _progress = rx.recv().expect("progress");
     let message = rx.recv().expect("message.sent_reported");
     let HarnessInputMessage::Emit(emit) = message else {
@@ -360,6 +374,7 @@ fn expect_successful_send(rx: &mpsc::Receiver<HarnessInputMessage>) -> MessageSe
     let Event::MessageSentReported(report) = *emit.event else {
         panic!("message.sent_reported event")
     };
+    assert_eq!(report.publisher_extension_id.as_str(), "std-telegram");
     let result = rx.recv().expect("tool result");
     let HarnessInputMessage::Emit(emit) = result else {
         panic!("emit")
@@ -388,7 +403,9 @@ fn expect_notice(rx: &mpsc::Receiver<HarnessInputMessage>) -> tau_proto::Extensi
     notice
 }
 
-fn expect_delivered(rx: &mpsc::Receiver<HarnessInputMessage>) -> MessageDelivered {
+fn expect_delivered(
+    rx: &mpsc::Receiver<HarnessInputMessage>,
+) -> MessageDelivered<tau_proto::RawMessagePublisherId> {
     let msg = rx.recv().expect("prompt");
     let HarnessInputMessage::Emit(emit) = msg else {
         panic!("emit")
@@ -397,14 +414,18 @@ fn expect_delivered(rx: &mpsc::Receiver<HarnessInputMessage>) -> MessageDelivere
     let Event::MessageDeliveredReported(report) = *emit.event else {
         panic!("message.delivered_reported event")
     };
+    assert_eq!(report.publisher_extension_id.as_str(), "std-telegram");
     report
 }
 
 /// Stamp a bridge-produced delivered report payload as the harness would, then
 /// prove its projection is identical after a serde round trip.
-fn assert_delivered_live_replay_parity(mut report: MessageDelivered) {
-    report.publisher_extension_id = MessagePublisherId::new("std-telegram");
-    let live = Event::MessageDelivered(report);
+fn assert_delivered_live_replay_parity(report: MessageDelivered<tau_proto::RawMessagePublisherId>) {
+    let live = Event::MessageDeliveredReported(report)
+        .into_stamped_canonical_message_fact(
+            tau_proto::MessagePublisherId::parse("std-telegram").expect("canonical publisher"),
+        )
+        .expect("delivered report converts to a canonical fact");
     let encoded = serde_json::to_value(&live).expect("encode fact");
     let replay: Event = serde_json::from_value(encoded).expect("decode replay fact");
     assert_eq!(
@@ -469,7 +490,8 @@ fn telegram_uses_generic_tool_prefix() {
     let scope = tau_client::ToolNameScope::from_configure(&tau_proto::Configure {
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         config: CborValue::Null,
-        instance_name: tau_proto::ExtensionName::new("arbitrary-instance"),
+        instance_name: tau_proto::ExtensionName::parse("arbitrary-instance")
+            .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: BTreeMap::new(),
     });
@@ -588,7 +610,7 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
 
     let (tx, rx) = mpsc::channel();
     let client = FakeClient::new();
-    let ext = Extension::new(client.clone(), tx);
+    let ext = test_extension(client.clone(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
     {
@@ -668,7 +690,7 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
 
     let (tx, rx) = mpsc::channel();
     let client = FakeClient::new();
-    let ext = Extension::new(client.clone(), tx);
+    let ext = test_extension(client.clone(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
     {
@@ -730,7 +752,7 @@ fn gateway_client_send_failure_does_not_submit_sent_report() {
     });
 
     let (tx, rx) = mpsc::channel();
-    let ext = Extension::new(FakeClient::new(), tx);
+    let ext = test_extension(FakeClient::new(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
     {
@@ -789,7 +811,7 @@ fn gateway_client_register_before_session_started_does_not_announce() {
     });
 
     let (tx, rx) = mpsc::channel();
-    let ext = Extension::new(FakeClient::new(), tx);
+    let ext = test_extension(FakeClient::new(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
@@ -821,6 +843,8 @@ fn gateway_delivery_requires_live_local_registration() {
             "s1".parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
         );
+        state.publisher_name =
+            Some(tau_proto::ExtensionName::parse("std-telegram").expect("test publisher name"));
     }
     emit_gateway_deliveries(
         &state,
@@ -935,7 +959,7 @@ fn gateway_client_config_error_sends_goodbye() {
     });
 
     let (tx, _rx) = mpsc::channel();
-    let ext = Extension::new(FakeClient::new(), tx);
+    let ext = test_extension(FakeClient::new(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
     ext.clear_config_after_error();
@@ -984,7 +1008,7 @@ fn gateway_client_agent_unload_sends_unregister() {
     });
 
     let (tx, rx) = mpsc::channel();
-    let ext = Extension::new(FakeClient::new(), tx);
+    let ext = test_extension(FakeClient::new(), tx);
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
     {
@@ -1110,11 +1134,11 @@ fn telegram_register_fails_when_update_stream_lock_is_held() {
     let root = temp_ext_root();
     let cfg = cfg();
     let (tx1, _rx1) = mpsc::channel();
-    let ext1 = Extension::new(FakeClient::new(), tx1);
+    let ext1 = test_extension(FakeClient::new(), tx1);
     ext1.apply_config(cfg.clone(), Some(root.join("std-telegram-1")))
         .expect("apply first config");
     let (tx2, rx2) = mpsc::channel();
-    let ext2 = Extension::new(FakeClient::new(), tx2);
+    let ext2 = test_extension(FakeClient::new(), tx2);
     ext2.apply_config(cfg, Some(root.join("std-telegram-2")))
         .expect("apply second config");
 
@@ -1161,7 +1185,7 @@ fn telegram_register_fails_when_webhook_is_active() {
         pending_update_count: Some(7),
         last_error_message: Some("delivery failed".to_owned()),
     }));
-    let ext = Extension::new(client, tx);
+    let ext = test_extension(client, tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
 
@@ -1185,7 +1209,7 @@ fn telegram_register_fails_when_webhook_is_active() {
 #[test]
 fn telegram_register_fails_when_webhook_preflight_fails() {
     let (tx, rx) = mpsc::channel();
-    let ext = Extension::new(
+    let ext = test_extension(
         FakeClient::with_webhook_info(Err("Telegram transport error".to_owned())),
         tx,
     );
@@ -1216,7 +1240,7 @@ fn telegram_register_fails_when_webhook_preflight_fails() {
 fn additional_registration_does_not_drop_existing_stream_ownership_on_webhook_state() {
     let (tx, rx) = mpsc::channel();
     let client = FakeClient::with_webhook_info(Ok(TgWebhookInfo::default()));
-    let ext = Extension::new(client.clone(), tx);
+    let ext = test_extension(client.clone(), tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
 
@@ -1243,11 +1267,11 @@ fn additional_registration_does_not_drop_existing_stream_ownership_on_webhook_st
 fn update_stream_lock_allows_different_bot_tokens() {
     let root = temp_ext_root();
     let (tx1, _rx1) = mpsc::channel();
-    let ext1 = Extension::new(FakeClient::new(), tx1);
+    let ext1 = test_extension(FakeClient::new(), tx1);
     ext1.apply_config(cfg(), Some(root.join("std-telegram-1")))
         .expect("apply first config");
     let (tx2, rx2) = mpsc::channel();
-    let ext2 = Extension::new(FakeClient::new(), tx2);
+    let ext2 = test_extension(FakeClient::new(), tx2);
     let mut second_cfg = cfg();
     second_cfg.bot_token = "other-secret-token".to_owned();
     ext2.apply_config(second_cfg, Some(root.join("std-telegram-2")))
@@ -1273,11 +1297,11 @@ fn update_stream_lock_allows_different_bot_tokens() {
 fn register_after_idle_must_reacquire_update_stream_lock() {
     let root = temp_ext_root();
     let (tx1, rx1) = mpsc::channel();
-    let ext1 = Extension::new(FakeClient::new(), tx1);
+    let ext1 = test_extension(FakeClient::new(), tx1);
     ext1.apply_config(cfg(), Some(root.join("std-telegram-1")))
         .expect("apply first config");
     let (tx2, rx2) = mpsc::channel();
-    let ext2 = Extension::new(FakeClient::new(), tx2);
+    let ext2 = test_extension(FakeClient::new(), tx2);
     ext2.apply_config(cfg(), Some(root.join("std-telegram-2")))
         .expect("apply second config");
 
@@ -1309,11 +1333,11 @@ fn in_flight_poll_keeps_update_stream_lock_after_unregister() {
     let root = temp_ext_root();
     let (tx1, rx1) = mpsc::channel();
     let client1 = ControlledPollClient::new();
-    let ext1 = Extension::new(client1.clone(), tx1);
+    let ext1 = test_extension(client1.clone(), tx1);
     ext1.apply_config(cfg(), Some(root.join("std-telegram-1")))
         .expect("apply first config");
     let (tx2, rx2) = mpsc::channel();
-    let ext2 = Extension::new(FakeClient::new(), tx2);
+    let ext2 = test_extension(FakeClient::new(), tx2);
     ext2.apply_config(cfg(), Some(root.join("std-telegram-2")))
         .expect("apply second config");
 
@@ -1341,7 +1365,7 @@ fn in_flight_poll_keeps_update_stream_lock_after_unregister() {
 fn get_updates_409_conflict_emits_notice_and_unregisters_agents() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
-    let ext = Extension::new(client.clone(), tx);
+    let ext = test_extension(client.clone(), tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
 
@@ -1428,11 +1452,11 @@ fn webhook_active_message_bounds_and_sanitizes_last_error() {
 fn active_reconfigure_to_locked_stream_fails_closed() {
     let root = temp_ext_root();
     let (tx1, rx1) = mpsc::channel();
-    let ext1 = Extension::new(FakeClient::new(), tx1);
+    let ext1 = test_extension(FakeClient::new(), tx1);
     ext1.apply_config(cfg(), Some(root.join("std-telegram-1")))
         .expect("apply first config");
     let (tx2, rx2) = mpsc::channel();
-    let ext2 = Extension::new(FakeClient::new(), tx2);
+    let ext2 = test_extension(FakeClient::new(), tx2);
     let mut locked_cfg = cfg();
     locked_cfg.bot_token = "super-secret-telegram-token".to_owned();
     ext2.apply_config(locked_cfg.clone(), Some(root.join("std-telegram-2")))
@@ -2091,7 +2115,7 @@ fn initial_poller_drops_stale_backlog() {
             text: Some("old".to_owned()),
         }),
     }]]);
-    let ext = Extension::new(client, tx);
+    let ext = test_extension(client, tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
@@ -2140,7 +2164,7 @@ fn initial_poller_drops_multiple_stale_batches_until_empty() {
             }),
         }],
     ]);
-    let ext = Extension::new(client, tx);
+    let ext = test_extension(client, tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
@@ -2191,7 +2215,8 @@ fn run_exits_after_register_then_disconnect() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2230,7 +2255,8 @@ fn run_exits_promptly_when_disconnect_races_long_poll() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2276,7 +2302,8 @@ fn run_ignores_replayed_tool_delivery_before_live_send() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2335,7 +2362,8 @@ fn run_initial_malformed_config_emits_config_error_without_ready() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "unknown_field": true,
             })),
@@ -2367,6 +2395,8 @@ fn run_initial_malformed_config_emits_config_error_without_ready() {
 
 /// The protocol startup path must publish and dispatch the dynamically computed
 /// namespaced tools, not only construct the helper structs used by unit tests.
+/// A custom initial Configure drives namespaced tool declarations and stamps
+/// the same configured instance name on an outbound message report.
 #[test]
 fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
     let mut input = Vec::new();
@@ -2376,7 +2406,8 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
-            instance_name: tau_proto::ExtensionName::new("telegram-work"),
+            instance_name: tau_proto::ExtensionName::parse("telegram-work")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2394,6 +2425,13 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
             bool_args(true),
         ))))
         .expect("register");
+    writer
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            "work_telegram_send",
+            "agent-1",
+            message_args("hello"),
+        ))))
+        .expect("send");
     writer.flush().expect("flush");
 
     let output = SharedWriter::default();
@@ -2404,6 +2442,7 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
     let mut saw_register_tool = false;
     let mut saw_send_tool = false;
     let mut saw_register_result = false;
+    let mut sent_publisher = None;
     while let Some(frame) = reader.read_message().expect("read output") {
         if let HarnessInputMessage::Emit(emit) = frame {
             match emit.event.as_ref() {
@@ -2426,6 +2465,9 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
                 {
                     saw_register_result = true;
                 }
+                Event::MessageSentReported(report) => {
+                    sent_publisher = Some(report.publisher_extension_id.as_str().to_owned());
+                }
                 _ => {}
             }
         }
@@ -2439,6 +2481,7 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
         saw_register_result,
         "namespaced register invocation should dispatch"
     );
+    assert_eq!(sent_publisher.as_deref(), Some("telegram-work"));
 }
 
 /// Manual deferred dispatch must preserve tau-client's previous named-handler
@@ -2454,7 +2497,8 @@ fn run_ignores_unrelated_tool_started_events() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2510,7 +2554,8 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2531,7 +2576,8 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "unknown_field": true,
             })),
@@ -2591,7 +2637,8 @@ fn run_legacy_tool_namespace_is_rejected() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],
@@ -2611,7 +2658,8 @@ fn run_legacy_tool_namespace_is_rejected() {
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::new("test-extension"),
+            instance_name: tau_proto::ExtensionName::parse("test-extension")
+                .expect("test extension name must satisfy the identifier grammar"),
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "tool_namespace": "tg_ops",
                 "bot_token_secret": "bot",
@@ -2685,7 +2733,7 @@ fn initial_empty_drain_then_fresh_message_routes() {
             }),
         }],
     ]);
-    let ext = Extension::new(client.clone(), tx);
+    let ext = test_extension(client.clone(), tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
@@ -2774,7 +2822,7 @@ fn reconfigured_poll_timeout_keeps_update_offset() {
 fn old_generation_empty_poll_response_does_not_drain_new_stream() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
-    let ext = Extension::new(client.clone(), tx);
+    let ext = test_extension(client.clone(), tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
@@ -2802,7 +2850,7 @@ fn old_generation_empty_poll_response_does_not_drain_new_stream() {
 fn old_generation_non_empty_poll_response_does_not_route_or_advance_offset() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
-    let ext = Extension::new(client.clone(), tx);
+    let ext = test_extension(client.clone(), tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
@@ -2841,7 +2889,7 @@ fn old_generation_non_empty_poll_response_does_not_route_or_advance_offset() {
 fn zero_registered_agents_redrains_backlog_before_routing() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
-    let ext = Arc::new(Extension::new(client.clone(), tx));
+    let ext = Arc::new(test_extension(client.clone(), tx));
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
@@ -2912,7 +2960,7 @@ fn zero_registered_agents_redrains_backlog_before_routing() {
 fn stale_reregistration_releases_pending_stream_interest() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
-    let ext = Arc::new(Extension::new(client.clone(), tx));
+    let ext = Arc::new(test_extension(client.clone(), tx));
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
@@ -2973,7 +3021,7 @@ fn stale_reregistration_releases_pending_stream_interest() {
 fn poll_error_backoff_wakes_on_config_change() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
-    let ext = Extension::new(client.clone(), tx);
+    let ext = test_extension(client.clone(), tx);
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
@@ -2998,7 +3046,7 @@ fn poll_error_backoff_wakes_on_config_change() {
 fn shutdown_wakes_poller_readiness_wait() {
     let (tx, _rx) = mpsc::channel();
     let client = FakeClient::new();
-    let ext = Extension::new(client.clone(), tx.clone());
+    let ext = test_extension(client.clone(), tx.clone());
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
     let state = Arc::clone(&ext.state);

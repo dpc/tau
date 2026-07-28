@@ -2330,7 +2330,10 @@ pub enum AgentCreator {
 /// Stable identity of one non-overlapping outer agent turn.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub struct AgentOuterTurnId(String);
+pub struct AgentOuterTurnId(
+    /// Exact `ot-` prefix followed by a validated [`AgentPromptId`].
+    String,
+);
 
 /// Error returned when parsing an outer-turn identifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5130,17 +5133,17 @@ pub enum Event {
 
     // Extension-published external-message reports
     #[serde(rename = "message.delivered_reported")]
-    MessageDeliveredReported(MessageDelivered),
+    MessageDeliveredReported(MessageDelivered<crate::RawMessagePublisherId>),
     #[serde(rename = "message.edited_reported")]
-    MessageEditedReported(MessageEdited),
+    MessageEditedReported(MessageEdited<crate::RawMessagePublisherId>),
     #[serde(rename = "message.deleted_reported")]
-    MessageDeletedReported(MessageDeleted),
+    MessageDeletedReported(MessageDeleted<crate::RawMessagePublisherId>),
     #[serde(rename = "message.reaction_added_reported")]
-    MessageReactionAddedReported(MessageReactionAdded),
+    MessageReactionAddedReported(MessageReactionAdded<crate::RawMessagePublisherId>),
     #[serde(rename = "message.reaction_removed_reported")]
-    MessageReactionRemovedReported(MessageReactionRemoved),
+    MessageReactionRemovedReported(MessageReactionRemoved<crate::RawMessagePublisherId>),
     #[serde(rename = "message.sent_reported")]
-    MessageSentReported(MessageSent),
+    MessageSentReported(MessageSent<crate::RawMessagePublisherId>),
 
     // Extension supervision
     #[serde(rename = "extension.starting")]
@@ -5417,38 +5420,52 @@ pub enum Event {
 }
 
 impl Event {
-    /// Convert one extension message report into its canonical fact shape.
+    /// Convert an exactly authenticated extension message report into its
+    /// canonical fact shape.
     ///
-    /// The harness replaces the claimed publisher after this conversion. Other
-    /// events return `None`.
-    #[must_use]
-    pub fn into_canonical_message_fact(self) -> Option<Self> {
-        match self {
-            Self::MessageDeliveredReported(report) => Some(Self::MessageDelivered(report)),
-            Self::MessageEditedReported(report) => Some(Self::MessageEdited(report)),
-            Self::MessageDeletedReported(report) => Some(Self::MessageDeleted(report)),
-            Self::MessageReactionAddedReported(report) => Some(Self::MessageReactionAdded(report)),
-            Self::MessageReactionRemovedReported(report) => {
-                Some(Self::MessageReactionRemoved(report))
-            }
-            Self::MessageSentReported(report) => Some(Self::MessageSent(report)),
-            _ => None,
-        }
-    }
-
-    /// Convert one message report and stamp its canonical authenticated
-    /// publisher in one operation.
+    /// Conversion requires a byte-exact match between the raw top-level claim
+    /// and `publisher`, then replaces that claim with the validated canonical
+    /// identity. Mismatched claims and non-report events return `None`.
     #[must_use]
     pub fn into_stamped_canonical_message_fact(
         self,
         publisher: crate::MessagePublisherId,
     ) -> Option<Self> {
-        let mut fact = self.into_canonical_message_fact()?;
-        assert!(
-            fact.stamp_message_publisher(publisher),
-            "message report conversion must produce a canonical message fact"
-        );
-        Some(fact)
+        match self {
+            Self::MessageDeliveredReported(report)
+                if report.publisher_extension_id.as_str() == publisher.as_str() =>
+            {
+                Some(Self::MessageDelivered(report.with_publisher(publisher)))
+            }
+            Self::MessageEditedReported(report)
+                if report.publisher_extension_id.as_str() == publisher.as_str() =>
+            {
+                Some(Self::MessageEdited(report.with_publisher(publisher)))
+            }
+            Self::MessageDeletedReported(report)
+                if report.publisher_extension_id.as_str() == publisher.as_str() =>
+            {
+                Some(Self::MessageDeleted(report.with_publisher(publisher)))
+            }
+            Self::MessageReactionAddedReported(report)
+                if report.publisher_extension_id.as_str() == publisher.as_str() =>
+            {
+                Some(Self::MessageReactionAdded(report.with_publisher(publisher)))
+            }
+            Self::MessageReactionRemovedReported(report)
+                if report.publisher_extension_id.as_str() == publisher.as_str() =>
+            {
+                Some(Self::MessageReactionRemoved(
+                    report.with_publisher(publisher),
+                ))
+            }
+            Self::MessageSentReported(report)
+                if report.publisher_extension_id.as_str() == publisher.as_str() =>
+            {
+                Some(Self::MessageSent(report.with_publisher(publisher)))
+            }
+            _ => None,
+        }
     }
 
     /// Return whether this event is an extension-authored message report.

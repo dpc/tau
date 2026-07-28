@@ -44,7 +44,7 @@ fn connect_custom_observer(
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let sink = connect_test_client(h, id, tau_proto::ClientKind::Tool);
     h.bus
-        .set_subscriptions(id, Vec::new(), selectors)
+        .set_subscriptions(&crate::test_connection_id(id), Vec::new(), selectors)
         .expect("subscribe to custom events");
     sink
 }
@@ -74,7 +74,7 @@ fn every_configured_extension_kind_can_publish_custom_events() {
         let stable_name = format!("stable-custom-source-{index}");
         let name = format!("demo.event_{index}");
         connect_ready_configured_extension(&mut h, &source, &stable_name, kind);
-        h.handle_extension_event_inner(&source, custom(&name, &source))
+        h.handle_extension_event_inner(&crate::test_connection_id(&source), custom(&name, &source))
             .expect("publish configured custom event");
         assert!(source_committed(&h, &source, |event| {
             event.name().to_string() == name && event.payload() == &CborValue::Text(source.clone())
@@ -103,8 +103,11 @@ fn unconfigured_and_disconnected_extensions_cannot_publish_custom_events() {
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
 
     connect_test_tool(&mut h, "unconfigured");
-    h.handle_extension_event_inner("unconfigured", custom("demo.unconfigured", "denied"))
-        .expect("reject unconfigured event");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("unconfigured"),
+        custom("demo.unconfigured", &crate::test_connection_id("denied")),
+    )
+    .expect("reject unconfigured event");
     assert!(!source_committed(&h, "unconfigured", |_| true));
 
     connect_ready_configured_extension(
@@ -118,8 +121,11 @@ fn unconfigured_and_disconnected_extensions_cannot_publish_custom_events() {
         .get_mut("disconnected")
         .expect("configured entry")
         .state = crate::extension::ExtensionState::Disconnected;
-    h.handle_extension_event_inner("disconnected", custom("demo.disconnected", "denied"))
-        .expect("reject disconnected event");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("disconnected"),
+        custom("demo.disconnected", &crate::test_connection_id("denied")),
+    )
+    .expect("reject disconnected event");
     assert!(!source_committed(&h, "disconnected", |_| true));
 }
 
@@ -136,8 +142,12 @@ fn attached_ui_can_publish_but_other_socket_peers_cannot() {
         tau_proto::ClientKind::Ui,
         ConnectionOrigin::Socket,
     );
-    h.handle_client_event_inner_with_persist("ui", custom("demo.ui", "accepted"), Some(true))
-        .expect("publish UI custom event");
+    h.handle_client_event_inner_with_persist(
+        &crate::test_connection_id("ui"),
+        custom("demo.ui", &crate::test_connection_id("accepted")),
+        Some(true),
+    )
+    .expect("publish UI custom event");
     assert!(source_committed(&h, "ui", |event| {
         event.name().to_string() == "demo.ui"
     }));
@@ -148,9 +158,13 @@ fn attached_ui_can_publish_but_other_socket_peers_cannot() {
         tau_proto::ClientKind::Ui,
         ConnectionOrigin::Socket,
     );
-    h.external_message_peers.insert("external".into());
-    h.handle_client_event_inner("external", custom("demo.external", "denied"))
-        .expect("reject external-message peer");
+    h.external_message_peers
+        .insert(crate::test_connection_id("external"));
+    h.handle_client_event_inner(
+        &crate::test_connection_id("external"),
+        custom("demo.external", &crate::test_connection_id("denied")),
+    )
+    .expect("reject external-message peer");
     assert!(!source_committed(&h, "external", |_| true));
 
     connect_test_client_with_origin(
@@ -159,8 +173,11 @@ fn attached_ui_can_publish_but_other_socket_peers_cannot() {
         tau_proto::ClientKind::Tool,
         ConnectionOrigin::Socket,
     );
-    h.handle_client_event_inner("socket-tool", custom("demo.socket_tool", "denied"))
-        .expect("reject non-UI socket");
+    h.handle_client_event_inner(
+        &crate::test_connection_id("socket-tool"),
+        custom("demo.socket_tool", &crate::test_connection_id("denied")),
+    )
+    .expect("reject non-UI socket");
     assert!(!source_committed(&h, "socket-tool", |_| true));
 }
 
@@ -195,8 +212,11 @@ fn interception_drop_prevents_custom_event_publication() {
     )
     .expect("register interceptor");
 
-    h.handle_extension_event_inner("publisher", custom("demo.drop", "original"))
-        .expect("park custom event");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("publisher"),
+        custom("demo.drop", &crate::test_connection_id("original")),
+    )
+    .expect("park custom event");
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -244,7 +264,7 @@ fn same_name_replacement_changes_payload_and_retains_source() {
     .expect("register interceptor");
 
     h.handle_extension_event_inner_with_persist(
-        "publisher",
+        &crate::test_connection_id("publisher"),
         custom("demo.replace", "original"),
         Some(false),
     )
@@ -278,7 +298,10 @@ fn same_name_replacement_changes_payload_and_retains_source() {
     assert_eq!(
         deliveries,
         [(
-            Some(tau_proto::ConnectionId::from("publisher")),
+            Some(
+                tau_proto::ConnectionId::parse("publisher")
+                    .expect("test connection id must satisfy the identifier grammar")
+            ),
             false,
             CborValue::Text("replacement".to_owned()),
         )]
@@ -319,8 +342,11 @@ fn different_name_replacement_preserves_original_event() {
     )
     .expect("register interceptor");
 
-    h.handle_extension_event_inner("publisher", custom("demo.original", "original"))
-        .expect("park original");
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("publisher"),
+        custom("demo.original", &crate::test_connection_id("original")),
+    )
+    .expect("park original");
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -384,7 +410,7 @@ fn custom_events_are_live_only_for_both_persistence_values() {
 
     for persist in [false, true] {
         h.handle_extension_event_inner_with_persist(
-            "publisher",
+            &crate::test_connection_id("publisher"),
             custom("demo.persistence", &persist.to_string()),
             Some(persist),
         )
@@ -432,7 +458,7 @@ fn custom_events_are_live_only_for_both_persistence_values() {
 
     let historical = connect_test_client(&mut h, "historical", tau_proto::ClientKind::Ui);
     h.complete_subscription(
-        "historical",
+        &crate::test_connection_id("historical"),
         vec![EventSelector::Prefix("demo.".to_owned())],
         Vec::new(),
     )

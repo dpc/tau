@@ -11,7 +11,7 @@ fn publish(
     store.publish(
         tau_proto::AgentId::parse(agent).expect("agent id"),
         tau_proto::AgentContextKey::from(key),
-        tau_proto::ConnectionId::from(contributor),
+        crate::test_connection_id(contributor),
         extension_name.to_owned(),
         tau_proto::AgentContextValue(value),
     );
@@ -194,7 +194,10 @@ fn remove_contributor_prunes_empty_agent_and_key_maps() {
         serde_json::json!({"root": "/old"}),
     );
 
-    store.remove_contributor(&tau_proto::ConnectionId::from("stale-ext"));
+    store.remove_contributor(
+        &tau_proto::ConnectionId::parse("stale-ext")
+            .expect("test connection id must satisfy the identifier grammar"),
+    );
 
     assert_eq!(
         template_value(&store, "agent-1")["skills"],

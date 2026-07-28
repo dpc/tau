@@ -24,8 +24,7 @@ pub use snapshot::{
     AgentJournalLocks, AgentJournalReader, AgentJournalSnapshot, read_agent_creation_record,
 };
 use tau_proto::{
-    AgentId, AgentIdParseError, ConnectionId, Event, EventName, MessageAgentTarget, NodeId,
-    UnixMicros,
+    AgentId, AgentIdParseError, Event, EventName, MessageAgentTarget, NodeId, UnixMicros,
 };
 
 use crate::agent_checkpoint::{
@@ -35,7 +34,7 @@ use crate::agent_checkpoint::{
 use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES, missing_directories};
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
-    PersistedAgentEventSeq,
+    PersistedAgentEventSeq, PersistedEventSource,
 };
 
 /// Errors returned by the append-only agent store.
@@ -879,7 +878,7 @@ impl AgentStore {
     pub fn append_agent_event(
         &mut self,
         agent_id: &str,
-        source: Option<ConnectionId>,
+        source: Option<PersistedEventSource>,
         event: Event,
     ) -> Result<AgentAppendOutcome, AgentStoreError> {
         self.append_agent_event_at(
@@ -906,7 +905,7 @@ impl AgentStore {
     pub fn append_agent_event_at(
         &mut self,
         agent_id: &str,
-        source: Option<ConnectionId>,
+        source: Option<PersistedEventSource>,
         parent: AgentEventParent,
         event: Event,
         recorded_at: UnixMicros,
@@ -934,7 +933,7 @@ impl AgentStore {
     pub fn append_agent_event_at_with_observation_id(
         &mut self,
         agent_id: &str,
-        source: Option<ConnectionId>,
+        source: Option<PersistedEventSource>,
         parent: AgentEventParent,
         event: Event,
         recorded_at: UnixMicros,
@@ -1066,7 +1065,7 @@ impl AgentStore {
     pub fn append_agent_message_fact_at(
         &mut self,
         agent_id: &str,
-        source: Option<ConnectionId>,
+        source: Option<PersistedEventSource>,
         event: Event,
         recorded_at: UnixMicros,
     ) -> Result<AgentAppendOutcome, AgentStoreError> {
@@ -1163,7 +1162,7 @@ impl AgentStore {
     pub fn validate_agent_event_at(
         &mut self,
         agent_id: &str,
-        source: Option<ConnectionId>,
+        source: Option<PersistedEventSource>,
         parent: AgentEventParent,
         event: &Event,
         recorded_at: UnixMicros,
@@ -1242,13 +1241,14 @@ impl AgentStore {
         Ok(self.agents.get(&agent_id))
     }
 
-    /// Acquires the agent writer lock and recovers its longest valid journal
-    /// prefix before returning the folded tree.
+    /// Acquires the agent writer lock, repairs an incomplete EOF crash tail
+    /// when present, and returns the folded tree.
     ///
     /// # Errors
     ///
     /// Returns [`AgentStoreError`] for invalid ids, lock or journal I/O
-    /// failure, or inability to truncate an invalid suffix.
+    /// failure, a complete invalid frame, or inability to truncate an
+    /// incomplete EOF crash tail.
     pub fn lock_and_recover_agent(
         &mut self,
         agent_id: &str,
