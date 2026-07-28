@@ -316,6 +316,12 @@ impl WsConn {
     ) -> Result<WsTurnResult, LlmError> {
         let mut envelope =
             build_ws_envelope(config, request, self.cached_response_anchor.as_ref(), None);
+        let eligible_previous_input_tokens = envelope
+            .body
+            .previous_response_id
+            .as_ref()
+            .and(self.cached_response_anchor.as_ref())
+            .and_then(|anchor| anchor.prompt_input_tokens);
         if self.cached_response_anchor.is_none()
             && let Some(baseline) = self.prewarm_baseline.take()
         {
@@ -334,7 +340,7 @@ impl WsConn {
             tau_proto::ProviderBackendTransport::Websocket,
             &envelope,
         );
-        let state = self.run_envelope(
+        let mut state = self.run_envelope(
             agent_prompt_id,
             envelope,
             recording_stream,
@@ -342,15 +348,35 @@ impl WsConn {
             on_dispatched,
             on_update,
         )?;
+        if supports_cache_read_ceiling(config, state.compaction_update().is_some()) {
+            state.prompt_cache_read_ceiling_tokens =
+                eligible_previous_input_tokens.map(Self::cache_read_ceiling);
+        }
         self.cached_response_anchor = state.response_id.clone().and_then(|response_id| {
             let mut represented_prefix = request.context.flatten();
             represented_prefix.extend(state.output_items_snapshot());
-            CachedResponseAnchor::new(response_id, &represented_prefix)
+            CachedResponseAnchor::new_with_input_tokens(
+                response_id,
+                &represented_prefix,
+                state.input_tokens,
+            )
         });
         Ok(WsTurnResult {
             state,
             request_body,
         })
+    }
+
+    /// Applies the provider-local ChatGPT cache reporting geometry.
+    fn cache_read_ceiling(tokens: u64) -> u64 {
+        const MINIMUM: u64 = 1_536;
+        const STEP: u64 = 1_024;
+        const OFFSET: u64 = 512;
+
+        if tokens < MINIMUM {
+            return 0;
+        }
+        OFFSET + ((tokens - OFFSET) / STEP) * STEP
     }
 
     /// Sends one non-generating prewarm envelope with an absolute response
@@ -542,6 +568,15 @@ impl WsConn {
     pub(super) fn carry_response_bytes(&mut self, bytes: u64) {
         self.carried_response_bytes = bytes;
     }
+}
+
+/// Matches the single initial route contract that can establish an exact
+/// cache-read ceiling for a non-compaction response.
+fn supports_cache_read_ceiling(config: &ResponsesConfig, compaction: bool) -> bool {
+    !compaction
+        && config.base_url == "https://chatgpt.com/backend-api"
+        && config.mode == super::ResponsesMode::Standard
+        && config.model_id == "gpt-5.6-sol"
 }
 
 fn prewarm_shape(

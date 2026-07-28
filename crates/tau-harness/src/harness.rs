@@ -24641,6 +24641,10 @@ impl Harness {
         cached_tokens: Option<u64>,
         output_tokens: Option<u64>,
     ) {
+        let reported_cache_read_ceiling = response
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.prompt_cache_read_ceiling_tokens);
         // Save the model that ran this turn before the
         // `prompt_models` entry is consumed below — we'll need it
         // again to anchor the stateful-chain state, and re-reading
@@ -24653,6 +24657,23 @@ impl Harness {
             let sent_tokens = input_tokens.unwrap_or(0);
             let cached_tokens = cached_tokens.unwrap_or(0);
             let received_tokens = output_tokens.unwrap_or(0);
+            let cache_read_ceiling = validate_cache_read_ceiling(
+                sent_tokens,
+                cached_tokens,
+                reported_cache_read_ceiling,
+            );
+            if let Some(rejected_ceiling) = reported_cache_read_ceiling
+                && cache_read_ceiling.is_none()
+            {
+                tracing::warn!(
+                    target: "tau_harness",
+                    agent_prompt_id = %response.agent_prompt_id,
+                    prompt_sent_tokens = sent_tokens,
+                    prompt_cached_tokens = cached_tokens,
+                    prompt_cache_read_ceiling_tokens = rejected_ceiling,
+                    "discarding invalid provider cache-read ceiling"
+                );
+            }
             self.current_session_state
                 .token_usage
                 .add_sent(model, sent_tokens, cached_tokens);
@@ -24663,6 +24684,7 @@ impl Harness {
                 model: Some(model.clone()),
                 prompt_sent_tokens: sent_tokens,
                 prompt_cached_tokens: cached_tokens,
+                prompt_cache_read_ceiling_tokens: cache_read_ceiling,
                 response_received_tokens: received_tokens,
                 stats: self.current_session_state.token_usage.clone(),
             });
@@ -27039,4 +27061,9 @@ pub(crate) fn selector_matches_event(selectors: &[EventSelector], event: &Event)
         EventSelector::Exact(expected) => *expected == target_name,
         EventSelector::Prefix(prefix) => target_name.matches_prefix(prefix),
     })
+}
+
+/// Accepts only internally consistent provider cache-read ceilings.
+fn validate_cache_read_ceiling(sent: u64, cached: u64, ceiling: Option<u64>) -> Option<u64> {
+    ceiling.filter(|ceiling| cached <= *ceiling && *ceiling <= sent)
 }

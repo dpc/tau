@@ -570,6 +570,7 @@ impl StreamState {
             model: None,
             prompt_sent_tokens: input,
             prompt_cached_tokens: cached,
+            prompt_cache_read_ceiling_tokens: None,
             response_received_tokens: output,
             stats: Default::default(),
         })

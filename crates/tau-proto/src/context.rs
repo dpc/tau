@@ -697,6 +697,10 @@ pub fn clear_tool_result_provider_image_bytes(result: &mut ToolResultItem) {
 }
 
 /// One semantic block in a materialized provider prompt context.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "wire DTO variants stay inline to preserve the established public API"
+)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum ContextBlock {

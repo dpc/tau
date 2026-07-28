@@ -406,6 +406,8 @@ pub struct StreamState {
     pub(crate) output_items: Vec<OutputItemAccumulator>,
     pub(crate) input_tokens: Option<u64>,
     pub(crate) cached_tokens: Option<u64>,
+    /// Exact response-local cache-read ceiling established by request lowering.
+    pub(crate) prompt_cache_read_ceiling_tokens: Option<u64>,
     pub(crate) output_tokens: Option<u64>,
     /// Provider-supplied reasoning summary accumulated so far. `None`
     /// when the provider hasn't emitted any summary content (or when
@@ -604,6 +606,7 @@ impl StreamState {
             output_items: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            prompt_cache_read_ceiling_tokens: None,
             output_tokens: None,
             thinking: None,
             thinking_output_index: None,
@@ -1069,6 +1072,9 @@ impl StreamState {
             model: None,
             prompt_sent_tokens: input,
             prompt_cached_tokens: cached,
+            prompt_cache_read_ceiling_tokens: (!self.stale_chain_fallback)
+                .then_some(self.prompt_cache_read_ceiling_tokens)
+                .flatten(),
             response_received_tokens: output,
             stats: Default::default(),
         })

@@ -4,6 +4,7 @@ fn usage(input: u64, cached: u64, output: u64) -> ProviderTokenUsage {
     ProviderTokenUsage {
         prompt_sent_tokens: input,
         prompt_cached_tokens: cached,
+        prompt_cache_read_ceiling_tokens: None,
         response_received_tokens: output,
         ..ProviderTokenUsage::default()
     }

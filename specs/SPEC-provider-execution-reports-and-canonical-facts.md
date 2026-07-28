@@ -66,6 +66,14 @@ and response-local cost increment are present exactly when usage is present;
 otherwise all three accounting fields remain absent. The nested cumulative
 usage snapshot is never durable accounting input.
 
+Provider-reported terminal usage may also carry an optional response-local
+prompt-cache-read ceiling. The harness preserves this assertion in the
+canonical response only when cached input is less than or equal to the ceiling
+and the ceiling is less than or equal to sent input. It replaces an invalid
+assertion with absence and emits one bounded structured warning for the
+accepted terminal report. The ceiling is informational: token counters,
+session and model totals, estimated cost, and latency never consume it.
+
 Canceled, stale, unknown, and duplicate reports produce no canonical response.
 Standalone-compaction success derives `agent.compacted`; invalid standalone compaction
 derives its failure and emits provider-finished only in the existing telemetry-bearing

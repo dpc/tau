@@ -1630,6 +1630,8 @@ pub(super) struct CachedResponseAnchor {
     /// Domain-separated BLAKE3 over the LE-`u64` item count followed by each
     /// item's LE-`u64` byte length and type-preserving Tau CBOR bytes.
     represented_prefix_fingerprint: blake3::Hash,
+    /// Provider-reported input tokens represented by this successful response.
+    prompt_input_tokens: Option<u64>,
 }
 
 impl CachedResponseAnchor {
@@ -1645,7 +1647,19 @@ impl CachedResponseAnchor {
         Some(Self {
             response_id,
             represented_prefix_fingerprint: Self::fingerprint(represented_prefix)?,
+            prompt_input_tokens: None,
         })
+    }
+
+    /// Captures an anchor and its provider-token input length.
+    fn new_with_input_tokens(
+        response_id: String,
+        represented_prefix: &[ContextItem],
+        prompt_input_tokens: Option<u64>,
+    ) -> Option<Self> {
+        let mut anchor = Self::new(response_id, represented_prefix)?;
+        anchor.prompt_input_tokens = prompt_input_tokens;
+        Some(anchor)
     }
 
     /// Reconstructs the latest transcript-derived anchor for VCR matching.

@@ -308,6 +308,7 @@ fn published_line_preserves_enriched_token_usage() {
             model: Some(model),
             prompt_sent_tokens: 1000,
             prompt_cached_tokens: 800,
+            prompt_cache_read_ceiling_tokens: None,
             response_received_tokens: 42,
             stats: tau_proto::TokenUsageStats::default(),
         }),

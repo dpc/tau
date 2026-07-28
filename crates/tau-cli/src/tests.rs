@@ -2591,6 +2591,7 @@ fn finished_response_with_usage(
         usage: Some(tau_proto::ProviderTokenUsage {
             prompt_sent_tokens,
             prompt_cached_tokens,
+            prompt_cache_read_ceiling_tokens: None,
             response_received_tokens,
             stats: tau_proto::TokenUsageStats {
                 total: tau_proto::TokenUsageCounts {
@@ -11886,6 +11887,7 @@ fn format_turn_stats_line_formats_short_latencies_as_millis() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 17_341,
         prompt_cached_tokens: 16_896,
+        prompt_cache_read_ceiling_tokens: None,
         response_received_tokens: 29,
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
@@ -11939,6 +11941,7 @@ fn format_turn_stats_line_uses_previous_turn_for_hit_percent() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 20_100,
         prompt_cached_tokens: 19_000,
+        prompt_cache_read_ceiling_tokens: None,
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
                 sent_tokens: 40_100,
@@ -11965,6 +11968,7 @@ fn format_turn_stats_line_caps_cache_possible_after_chain_reset() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 13_659,
         prompt_cached_tokens: 3_840,
+        prompt_cache_read_ceiling_tokens: None,
         response_received_tokens: 116,
         ..Default::default()
     };
@@ -12057,6 +12061,7 @@ fn render_turn_stats_block_uses_dedicated_styles() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 1_000,
         prompt_cached_tokens: 900,
+        prompt_cache_read_ceiling_tokens: None,
         response_received_tokens: 42,
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
@@ -12096,6 +12101,7 @@ fn render_turn_stats_block_greys_cache_hit_within_512_rounding_bucket() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 20_100,
         prompt_cached_tokens: 19_456,
+        prompt_cache_read_ceiling_tokens: None,
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
                 sent_tokens: 40_100,
@@ -12123,6 +12129,7 @@ fn render_turn_stats_block_warns_cache_hit_above_90_percent() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 10_100,
         prompt_cached_tokens: 9_100,
+        prompt_cache_read_ceiling_tokens: None,
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
                 sent_tokens: 20_100,
@@ -12150,6 +12157,7 @@ fn render_turn_stats_block_highlights_cache_hit_at_or_below_90_percent() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 10_100,
         prompt_cached_tokens: 9_000,
+        prompt_cache_read_ceiling_tokens: None,
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
                 sent_tokens: 20_100,

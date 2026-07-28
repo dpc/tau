@@ -17,6 +17,92 @@ use super::*;
 use crate::responses::ResponsesMode;
 use crate::{NeverAbort, TurnAbortWaker};
 
+/// The initial ChatGPT capability must preserve its exact empirical minimum,
+/// offset, and step boundaries rather than drifting to generic block rounding.
+#[test]
+fn cache_read_ceiling_uses_sol_provider_geometry() {
+    assert_eq!(WsConn::cache_read_ceiling(0), 0);
+    assert_eq!(WsConn::cache_read_ceiling(1_535), 0);
+    assert_eq!(WsConn::cache_read_ceiling(1_536), 1_536);
+    assert_eq!(WsConn::cache_read_ceiling(2_559), 1_536);
+    assert_eq!(WsConn::cache_read_ceiling(2_560), 2_560);
+}
+
+/// Capability matching must stay exact and reject compaction results.
+#[test]
+fn cache_read_ceiling_capability_is_narrow() {
+    let mut config = test_responses_config();
+    config.base_url = "https://chatgpt.com/backend-api".to_owned();
+    config.model_id = "gpt-5.6-sol".to_owned();
+    config.mode = ResponsesMode::Standard;
+    assert!(supports_cache_read_ceiling(&config, false));
+    assert!(!supports_cache_read_ceiling(&config, true));
+
+    config.mode = ResponsesMode::LiteCompatibility;
+    assert!(!supports_cache_read_ceiling(&config, false));
+    config.mode = ResponsesMode::Standard;
+    config.model_id = "gpt-5.6-sol-latest".to_owned();
+    assert!(!supports_cache_read_ceiling(&config, false));
+    config.model_id = "gpt-5.6-sol".to_owned();
+    config.base_url = "https://chatgpt.com/backend-api/".to_owned();
+    assert!(!supports_cache_read_ceiling(&config, false));
+}
+
+/// A matching live-socket anchor emits the ceiling on an ordinary completion,
+/// while the same warm lineage suppresses it when the response compacts.
+#[test]
+fn warm_anchor_emits_ceiling_except_for_compaction() {
+    for compaction in [false, true] {
+        let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+        conn.cached_response_anchor =
+            CachedResponseAnchor::new_with_input_tokens("resp_prev".to_owned(), &[], Some(2_000));
+        let mut config = test_responses_config();
+        config.model_id = "gpt-5.6-sol".to_owned();
+        if compaction {
+            inbound_tx
+                .send(InboundEvent::Event {
+                    text: r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","summary":"old history","input_items":[]}}"#.to_owned().into(),
+                })
+                .expect("queue compaction");
+        }
+        inbound_tx
+            .send(InboundEvent::Event {
+                text: r#"{"type":"response.completed","response":{"id":"resp_next","usage":{"input_tokens":2500,"output_tokens":10,"input_tokens_details":{"cached_tokens":1536}}}}"#.to_owned().into(),
+            })
+            .expect("queue completion");
+        let mut fixture = PromptFixture::new();
+        fixture
+            .context
+            .blocks
+            .push(tau_proto::ContextBlock::AssistantResponse(
+                tau_proto::AssistantResponseBlock {
+                    provider_response_id: Some("resp_prev".to_owned()),
+                    backend: None,
+                    output_items: Vec::new(),
+                    usage: None,
+                },
+            ));
+        let result = conn
+            .run_turn(
+                &config,
+                "ap-cache-ceiling",
+                &fixture.payload(),
+                None,
+                &mut NeverAbort,
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .expect("completed turn");
+        assert_eq!(
+            result
+                .state
+                .usage()
+                .and_then(|usage| usage.prompt_cache_read_ceiling_tokens),
+            (!compaction).then_some(1_536),
+        );
+    }
+}
+
 type TestAbortWakerSlot = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>;
 
 struct CapturingAbort {

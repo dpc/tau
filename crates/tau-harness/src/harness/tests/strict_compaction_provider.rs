@@ -117,6 +117,7 @@ fn reply_for_prompt(prompt: &AgentPromptCreated) -> StrictProviderReply {
             model: Some("strict/model".into()),
             prompt_sent_tokens: 100,
             prompt_cached_tokens: 0,
+            prompt_cache_read_ceiling_tokens: None,
             response_received_tokens: 1,
             stats: Default::default(),
         }),

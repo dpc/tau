@@ -144,6 +144,7 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
                     model: Some(model),
                     prompt_sent_tokens: 100,
                     prompt_cached_tokens: 60,
+                    prompt_cache_read_ceiling_tokens: None,
                     response_received_tokens: 20,
                     stats: tau_proto::TokenUsageStats {
                         total: tau_proto::TokenUsageCounts {

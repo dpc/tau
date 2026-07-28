@@ -2295,6 +2295,7 @@ fn seed_agent_context_usage(state_dir: &Path, model: Option<&str>, input_tokens:
         model: model.map(Into::into),
         prompt_sent_tokens: input_tokens,
         prompt_cached_tokens: input_tokens / 2,
+        prompt_cache_read_ceiling_tokens: None,
         response_received_tokens: 10,
         stats: Default::default(),
     });
@@ -7917,6 +7918,7 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -8051,6 +8053,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -8607,6 +8610,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -8838,6 +8842,7 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -8904,6 +8909,7 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -8989,6 +8995,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9053,6 +9060,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9098,6 +9106,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9167,6 +9176,7 @@ fn model_switch_invalidates_chain_anchor() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9245,6 +9255,7 @@ fn params_drift_invalidates_chain_anchor() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9321,6 +9332,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9410,6 +9422,7 @@ fn tools_drift_invalidates_chain_anchor() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9498,6 +9511,7 @@ fn stable_params_preserve_chain_anchor() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9565,6 +9579,7 @@ fn missing_response_id_leaves_chain_unset() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -9643,6 +9658,7 @@ fn queued_prompt_extends_completed_first_prompt() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -10950,6 +10966,7 @@ fn finished_response_injects_crossed_context_size_alert() {
         model: None,
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
+        prompt_cache_read_ceiling_tokens: None,
         response_received_tokens: 2,
         stats: Default::default(),
     });
@@ -11040,6 +11057,7 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
         model: None,
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
+        prompt_cache_read_ceiling_tokens: None,
         response_received_tokens: 2,
         stats: Default::default(),
     });
@@ -11088,6 +11106,7 @@ fn failed_response_does_not_inject_context_size_alert() {
         model: None,
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
+        prompt_cache_read_ceiling_tokens: None,
         response_received_tokens: 0,
         stats: Default::default(),
     });
@@ -11136,6 +11155,7 @@ fn inline_compaction_response_resets_context_size_alerts_without_injection() {
         model: None,
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
+        prompt_cache_read_ceiling_tokens: None,
         response_received_tokens: 1,
         stats: Default::default(),
     });
@@ -11185,6 +11205,7 @@ fn inline_compaction_discards_other_queued_context_size_alerts() {
         model: None,
         prompt_sent_tokens: 101,
         prompt_cached_tokens: 0,
+        prompt_cache_read_ceiling_tokens: None,
         response_received_tokens: 1,
         stats: Default::default(),
     });
@@ -21471,6 +21492,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -21559,6 +21581,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -22638,6 +22661,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -22780,6 +22804,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -22937,6 +22962,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -23059,6 +23085,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -23276,6 +23303,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -23339,6 +23367,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -27031,6 +27060,7 @@ fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
             model: Some(model),
             prompt_sent_tokens: 1_000_000,
             prompt_cached_tokens: 0,
+            prompt_cache_read_ceiling_tokens: None,
             response_received_tokens: 0,
             stats: Default::default(),
         }),
@@ -27280,6 +27310,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -27344,6 +27375,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -27416,6 +27448,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -27572,6 +27605,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -27630,6 +27664,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -27756,6 +27791,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -27819,6 +27855,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -27945,6 +27982,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -28003,6 +28041,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
                 model: None,
                 prompt_sent_tokens: input_tokens.unwrap_or(0),
                 prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                prompt_cache_read_ceiling_tokens: None,
                 response_received_tokens: output_tokens.unwrap_or(0),
                 stats: Default::default(),
             }),
@@ -30748,6 +30787,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
             model: None,
             prompt_sent_tokens: 999,
             prompt_cached_tokens: 111,
+            prompt_cache_read_ceiling_tokens: None,
             response_received_tokens: 7,
             stats: Default::default(),
         }),
@@ -33013,4 +33053,26 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
     }));
 
     h.shutdown().expect("shutdown");
+}
+
+/// Canonical usage preserves only cache-read ceilings consistent with raw
+/// counters.
+#[test]
+fn cache_read_ceiling_validation_preserves_valid_and_rejects_invalid_values() {
+    assert_eq!(
+        super::super::validate_cache_read_ceiling(4_096, 3_584, Some(3_584)),
+        Some(3_584)
+    );
+    assert_eq!(
+        super::super::validate_cache_read_ceiling(4_096, 3_584, Some(3_000)),
+        None
+    );
+    assert_eq!(
+        super::super::validate_cache_read_ceiling(4_096, 3_584, Some(5_000)),
+        None
+    );
+    assert_eq!(
+        super::super::validate_cache_read_ceiling(4_096, 3_584, None),
+        None
+    );
 }

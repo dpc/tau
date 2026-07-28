@@ -3103,6 +3103,7 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
             model: None,
             prompt_sent_tokens: 101,
             prompt_cached_tokens: 0,
+            prompt_cache_read_ceiling_tokens: None,
             response_received_tokens: 2,
             stats: Default::default(),
         });
