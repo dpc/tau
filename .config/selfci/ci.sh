@@ -6,6 +6,11 @@ function job_lint() {
   if ! treefmt --ci ; then
     selfci step fail
   fi
+
+  selfci step start "quota extractor fixtures"
+  if ! python3 .agents/skills/tau-qodq/test_extract_quota.py; then
+    selfci step fail
+  fi
 }
 
 function job_cargo() {
