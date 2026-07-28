@@ -10130,6 +10130,62 @@ fn tool_progress_display_replaces_live_state_generically() {
     assert!(vt.screen_contains(80, "waiting"));
 }
 
+/// A harness-originated message call must leave the live-progress set when its
+/// canonical provider terminal arrives, even when the renderer does not receive
+/// the redundant transient `tool.result` projection.
+#[test]
+fn provider_terminal_finishes_harness_originated_message_progress() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::parse("__harness__").expect("extension name"),
+        query_id: "peer-auto-start".to_owned(),
+    };
+    let mut started = match tool_started(
+        "message-call",
+        "message",
+        CborValue::Map(vec![(
+            CborValue::Text("recipient_id".into()),
+            CborValue::Text("engineer".into()),
+        )]),
+    ) {
+        Event::ToolStarted(started) => started,
+        _ => unreachable!("tool_started helper always returns ToolStarted"),
+    };
+    started.agent_id = agent_id("coordinator");
+    started.originator = originator.clone();
+    renderer.handle(&Event::ToolStarted(started));
+    renderer.handle(&Event::ToolProgress(tau_proto::ToolProgress {
+        call_id: "message-call".into(),
+        tool_name: tau_proto::ToolName::new("message"),
+        message: None,
+        progress: None,
+        display: Some(tau_proto::ToolUseState {
+            args: "engineer".into(),
+            status: tau_proto::ToolUseStatus::InProgress,
+            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
+            ..Default::default()
+        }),
+    }));
+    renderer.handle(&Event::ProviderToolResult(tau_proto::ToolResult {
+        call_id: "message-call".into(),
+        tool_name: tau_proto::ToolName::new("message"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("Message sent".into()),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator,
+    }));
+    sync(&handle);
+
+    assert!(!vt.screen_contains(80, "message engineer"));
+}
+
 #[test]
 fn tool_started_renders_pending_until_provider_progress() {
     let (_term, handle, vt) = setup(80, 24);

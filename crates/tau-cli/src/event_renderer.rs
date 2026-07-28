@@ -4097,6 +4097,7 @@ impl EventRenderer {
             Event::ProviderPromptSubmitted(submitted) => !submitted.originator.is_user(),
             Event::ProviderResponseUpdated(update) => !update.originator.is_user(),
             Event::ProviderResponseFinished(finished) => !finished.originator.is_user(),
+            Event::ToolStarted(started) => !started.originator.is_user(),
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 !result.originator.is_user()
             }
