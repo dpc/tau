@@ -1283,6 +1283,8 @@ fn watch_response(
         kind: tau_proto::AgentMessageKind::WatchResponse,
         watch_turn_state: None,
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: content.to_owned(),
     }
 }
@@ -1301,6 +1303,8 @@ fn watch_prompt(
         kind: tau_proto::AgentMessageKind::WatchPrompt,
         watch_turn_state: None,
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: content.to_owned(),
     }
 }
@@ -1328,6 +1332,8 @@ fn watch_turn(
             turn_generation,
         }),
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: String::new(),
     }
 }

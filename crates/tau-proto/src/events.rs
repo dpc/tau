@@ -2041,6 +2041,11 @@ pub enum AgentMessageKind {
     WatchTurnState,
     /// An automatic structured, sanitized provider-work status notification.
     WatchProviderStatus,
+    /// An automatic structured self-reported work-status notification.
+    WatchWorkStatus,
+    /// An automatic structured notification that a watched agent crossed a
+    /// long-wait threshold.
+    WatchLongWait,
 }
 
 impl AgentMessageKind {
@@ -2104,6 +2109,13 @@ pub struct AgentMessageReceived {
     /// Structured status carried by [`AgentMessageKind::WatchProviderStatus`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_provider_status: Option<AgentWatchProviderStatusNotification>,
+    /// Structured work status carried by [`AgentMessageKind::WatchWorkStatus`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_work_status: Option<AgentWatchWorkStatusNotification>,
+    /// Structured wait threshold carried by
+    /// [`AgentMessageKind::WatchLongWait`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_long_wait: Option<AgentWatchLongWaitNotification>,
     /// Message body.
     pub message: String,
 }
@@ -2265,6 +2277,55 @@ pub struct AgentWatchTurnStateNotification {
     /// Harness-runtime-scoped watched-agent generation, incremented only when
     /// an idle agent starts an outer turn.
     pub turn_generation: u64,
+}
+
+/// Closed self-reported task phase exposed to agent watchers.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWorkStatusPhase {
+    /// The agent has not reported task status.
+    Unreported,
+    /// The agent reports active work.
+    Working,
+    /// The agent reports completed work.
+    Done,
+    /// The agent reports work blocked on external input.
+    Blocked,
+    /// The harness can no longer rely on the previous report.
+    Unknown,
+}
+
+/// Harness-authored current self-reported work-status snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentWatchWorkStatusNotification {
+    /// Session containing the watch relation.
+    pub session_id: SessionId,
+    /// Fresh identity for the directed watch relation.
+    pub subscription_id: String,
+    /// Runtime-local generation of the watched agent's work report.
+    pub status_epoch: u64,
+    /// Closed self-reported task phase.
+    pub phase: AgentWorkStatusPhase,
+    /// Canonical model-authored title: absent for `Unreported`; otherwise
+    /// present, nonempty, already trimmed, one line, free of control
+    /// characters, and at most 160 UTF-8 bytes.
+    /// for `Unreported`.
+    pub title: Option<String>,
+    /// Whether this is a non-activating snapshot returned at watch enable.
+    pub initial: bool,
+}
+
+/// Harness-authored notification that an agent crossed a waiting threshold.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentWatchLongWaitNotification {
+    /// Session containing the watch relation.
+    pub session_id: SessionId,
+    /// Fresh identity for the directed watch relation.
+    pub subscription_id: String,
+    /// Work-status epoch in which waiting accumulated.
+    pub status_epoch: u64,
+    /// Newly crossed threshold in whole minutes.
+    pub threshold_minutes: u32,
 }
 
 /// Durable agent branch-state fact: the selected head moved, so the next

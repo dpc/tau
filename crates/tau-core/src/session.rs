@@ -164,6 +164,10 @@ pub enum AgentEntry {
         watch_turn_state: Option<tau_proto::AgentWatchTurnStateNotification>,
         /// Typed provider status for receiver-only watch projections.
         watch_provider_status: Option<tau_proto::AgentWatchProviderStatusNotification>,
+        /// Typed self-reported work status for receiver-only watch projections.
+        watch_work_status: Option<Box<tau_proto::AgentWatchWorkStatusNotification>>,
+        /// Typed long-wait threshold for receiver-only watch projections.
+        watch_long_wait: Option<Box<tau_proto::AgentWatchLongWaitNotification>>,
         /// Message body.
         message: String,
     },
@@ -1709,6 +1713,8 @@ impl AgentTree {
             kind: message.kind,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: message.message.clone(),
         })
     }
@@ -1730,6 +1736,8 @@ impl AgentTree {
             kind: message.kind,
             watch_turn_state: message.watch_turn_state.clone(),
             watch_provider_status: message.watch_provider_status.clone(),
+            watch_work_status: message.watch_work_status.clone().map(Box::new),
+            watch_long_wait: message.watch_long_wait.clone().map(Box::new),
             message: message.message.clone(),
         })
     }
@@ -1955,13 +1963,39 @@ impl AgentTree {
                 let payload_matches_kind = ((message.kind == AgentMessageKind::WatchTurnState)
                     == message.watch_turn_state.is_some())
                     && ((message.kind == AgentMessageKind::WatchProviderStatus)
-                        == message.watch_provider_status.is_some());
-                Some(if payload_matches_kind {
-                    Ok(())
-                } else {
+                        == message.watch_provider_status.is_some())
+                    && ((message.kind == AgentMessageKind::WatchWorkStatus)
+                        == message.watch_work_status.is_some())
+                    && ((message.kind == AgentMessageKind::WatchLongWait)
+                        == message.watch_long_wait.is_some());
+                let work_status_shape_valid =
+                    message.watch_work_status.as_ref().is_none_or(|status| {
+                        (status.phase == tau_proto::AgentWorkStatusPhase::Unreported)
+                            == status.title.is_none()
+                    });
+                let work_status_title_valid =
+                    message.watch_work_status.as_ref().is_none_or(|status| {
+                        status.title.as_ref().is_none_or(|title| {
+                            !title.is_empty()
+                                && title.len() <= 160
+                                && !title.chars().any(char::is_control)
+                                && title.trim() == title
+                        })
+                    });
+                Some(if !payload_matches_kind {
                     Err(AgentEventValidationError::new(
                         "watch payload must be present exactly for its matching watch message kind",
                     ))
+                } else if !work_status_shape_valid {
+                    Err(AgentEventValidationError::new(
+                        "work-status title must be absent for unreported and present for every reported phase",
+                    ))
+                } else if !work_status_title_valid {
+                    Err(AgentEventValidationError::new(
+                        "work-status title must be nonempty, trimmed, one line, control-free, and at most 160 UTF-8 bytes",
+                    ))
+                } else {
+                    Ok(())
                 })
             }
             _ => None,

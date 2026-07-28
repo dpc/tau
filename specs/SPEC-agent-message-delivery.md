@@ -83,11 +83,12 @@ prompt text:
   `<tau_peer_message>` envelope and stable typed sender session/agent identity;
 - `WatchResponse` and `WatchPrompt` retain separate sender-labelled typed
   wrappers and replace only their own exact closing sentinel in each body;
-- `WatchTurnState` and `WatchProviderStatus` render only wording reconstructed
+- structured turn, provider, work-status, and long-wait kinds render wording reconstructed
   from their structured state.
 
 Display names remain UI-only. Peer bodies remain agent-authored model input, not
-harness instructions. Initial and redundant structured watch snapshots render
+harness instructions. Model-authored work titles receive trusted-frame visible
+escaping before interpolation. Initial and redundant structured watch snapshots render
 zero provider blocks.
 
 All body text other than the current envelope's own exact close remains literal,
@@ -121,7 +122,7 @@ Activation classes are:
 
 - ordinary agent input for `Message`, `WatchResponse`, and `WatchPrompt`;
 - isolated lifecycle/provider-watch input for noninitial model-visible
-  `WatchTurnState` and `WatchProviderStatus`; and
+  turn, provider, work-status, and long-wait projections; and
 - no activation for initial or redundant structured watch snapshots.
 
 Explicit message intake never becomes watch-prompt fanout. Isolated lifecycle

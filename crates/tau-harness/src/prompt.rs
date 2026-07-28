@@ -693,6 +693,32 @@ pub(crate) fn watch_turn_transition_text(
     ))
 }
 
+/// Render a non-initial work-status transition while escaping the
+/// model-authored title as untrusted visible metadata.
+pub(crate) fn watch_work_status_text(
+    sender_label: &str,
+    status: &tau_proto::AgentWatchWorkStatusNotification,
+) -> Option<String> {
+    if status.initial {
+        return None;
+    }
+    let title = status
+        .title
+        .as_deref()
+        .map(tau_proto::visible_escape_metadata)
+        .unwrap_or_default();
+    let transition = match status.phase {
+        tau_proto::AgentWorkStatusPhase::Unreported => return None,
+        tau_proto::AgentWorkStatusPhase::Working => "started working",
+        tau_proto::AgentWorkStatusPhase::Done => "reported done",
+        tau_proto::AgentWorkStatusPhase::Blocked => "is blocked",
+        tau_proto::AgentWorkStatusPhase::Unknown => "stopped reporting a reliable status",
+    };
+    Some(format!(
+        "[tau-internal]: Watched agent {sender_label} {transition}: {title}"
+    ))
+}
+
 /// Render only closed structured provider categories; no provider-authored text
 /// crosses the watch boundary.
 pub(crate) fn watch_provider_status_text(
@@ -1070,14 +1096,18 @@ pub(crate) fn assemble_prompt_context_from(
                 ));
             }
             AgentEntry::AgentMessage {
+                durable_event_seq: _,
+                message_id: _,
                 direction,
                 sender_id,
                 sender_session_id,
+                recipient: _,
                 kind,
                 watch_turn_state,
                 watch_provider_status,
+                watch_work_status,
+                watch_long_wait,
                 message,
-                ..
             } => match kind {
                 tau_proto::AgentMessageKind::Message => {
                     contains_exact_sentinel_envelope |=
@@ -1226,6 +1256,44 @@ pub(crate) fn assemble_prompt_context_from(
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
                                         text: watch_provider_status_text(&sender_label, status),
+                                    }],
+                                    phase: None,
+                                    responses_raw_json: None,
+                                })],
+                            },
+                        ));
+                    }
+                }
+                tau_proto::AgentMessageKind::WatchWorkStatus => {
+                    if let (tau_core::AgentMessageDirection::Inbound, Some(status)) =
+                        (direction, watch_work_status.as_ref())
+                        && let Some(text) = watch_work_status_text(sender_id.as_ref(), status)
+                    {
+                        blocks.push(tau_proto::ContextBlock::UserInput(
+                            tau_proto::UserInputBlock {
+                                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                                    role: tau_proto::ContextRole::User,
+                                    content: vec![tau_proto::ContentPart::Text { text }],
+                                    phase: None,
+                                    responses_raw_json: None,
+                                })],
+                            },
+                        ));
+                    }
+                }
+                tau_proto::AgentMessageKind::WatchLongWait => {
+                    if let (tau_core::AgentMessageDirection::Inbound, Some(wait)) =
+                        (direction, watch_long_wait.as_ref())
+                    {
+                        blocks.push(tau_proto::ContextBlock::UserInput(
+                            tau_proto::UserInputBlock {
+                                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                                    role: tau_proto::ContextRole::User,
+                                    content: vec![tau_proto::ContentPart::Text {
+                                        text: format!(
+                                            "[tau-internal]: Watched agent {sender_id} has spent over {} minutes waiting.",
+                                            wait.threshold_minutes
+                                        ),
                                     }],
                                     phase: None,
                                     responses_raw_json: None,

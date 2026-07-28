@@ -1404,6 +1404,8 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
             kind,
             watch_turn_state,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: String::new(),
         });
         assert!(
@@ -1441,11 +1443,126 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
             kind,
             watch_turn_state: None,
             watch_provider_status,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: String::new(),
         });
         assert!(
             validation_error(&tree, event).contains("payload must be present exactly"),
             "provider-status payloads must match their discriminator"
+        );
+    }
+}
+
+/// Ensures canonical work-status phase/title violations fail with a diagnostic
+/// distinct from the message-kind payload discriminator.
+#[test]
+fn validate_event_rejects_noncanonical_work_status_title_shape() {
+    let id = agent_id();
+    let tree = AgentTree::from_events(id.clone(), &[]);
+    let event_for = |phase, title: Option<String>| {
+        Event::AgentMessageReceived(AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("msg-invalid-work-status")
+                .expect("test message id must satisfy its grammar"),
+            sender_id: other_agent_id(),
+            sender_session_id: None,
+            recipient_id: id.clone(),
+            kind: AgentMessageKind::WatchWorkStatus,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+                session_id: "session-1".parse().expect("valid session id"),
+                subscription_id: "watch-1".to_owned(),
+                status_epoch: 1,
+                phase,
+                title,
+                initial: true,
+            }),
+            watch_long_wait: None,
+            message: String::new(),
+        })
+    };
+    let shape_diagnostic =
+        "work-status title must be absent for unreported and present for every reported phase";
+    for (phase, title) in [
+        (
+            tau_proto::AgentWorkStatusPhase::Unreported,
+            Some("title".to_owned()),
+        ),
+        (tau_proto::AgentWorkStatusPhase::Working, None),
+    ] {
+        assert_eq!(
+            validation_error(&tree, event_for(phase, title)),
+            shape_diagnostic
+        );
+    }
+    let canonical_diagnostic = "work-status title must be nonempty, trimmed, one line, control-free, and at most 160 UTF-8 bytes";
+    for title in [
+        String::new(),
+        " ".to_owned(),
+        " title".to_owned(),
+        "title ".to_owned(),
+        "two\nlines".to_owned(),
+        "control\u{7}".to_owned(),
+        "x".repeat(161),
+    ] {
+        assert_eq!(
+            validation_error(
+                &tree,
+                event_for(tau_proto::AgentWorkStatusPhase::Working, Some(title))
+            ),
+            canonical_diagnostic
+        );
+    }
+    tree.validate_event(&event_for(
+        tau_proto::AgentWorkStatusPhase::Working,
+        Some("x".repeat(160)),
+    ))
+    .expect("the exact 160-byte boundary must remain valid");
+}
+
+/// Ensures both new watch kinds require exactly their matching typed payload
+/// and reject the same payload on an ordinary message.
+#[test]
+fn validate_event_enforces_semantic_watch_payload_discriminators() {
+    let id = agent_id();
+    let tree = AgentTree::from_events(id.clone(), &[]);
+    let work = tau_proto::AgentWatchWorkStatusNotification {
+        session_id: "session-1".parse().expect("valid session id"),
+        subscription_id: "watch-1".to_owned(),
+        status_epoch: 1,
+        phase: tau_proto::AgentWorkStatusPhase::Working,
+        title: Some("work".to_owned()),
+        initial: false,
+    };
+    let wait = tau_proto::AgentWatchLongWaitNotification {
+        session_id: "session-1".parse().expect("valid session id"),
+        subscription_id: "watch-1".to_owned(),
+        status_epoch: 1,
+        threshold_minutes: 15,
+    };
+    for (kind, watch_work_status, watch_long_wait) in [
+        (AgentMessageKind::WatchWorkStatus, None, None),
+        (AgentMessageKind::Message, Some(work), None),
+        (AgentMessageKind::WatchLongWait, None, None),
+        (AgentMessageKind::Message, None, Some(wait)),
+    ] {
+        let event = Event::AgentMessageReceived(AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("msg-invalid-semantic-watch")
+                .expect("valid message id"),
+            sender_id: other_agent_id(),
+            sender_session_id: None,
+            recipient_id: id.clone(),
+            kind,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            watch_work_status,
+            watch_long_wait,
+            message: String::new(),
+        });
+        assert_eq!(
+            validation_error(&tree, event),
+            "watch payload must be present exactly for its matching watch message kind"
         );
     }
 }
@@ -1606,6 +1723,8 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             kind: AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "inbound after fact".to_owned(),
         }),
     );
@@ -1757,6 +1876,8 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         kind: AgentMessageKind::Message,
         watch_turn_state: None,
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: "sibling materializes now".to_owned(),
     });
     let (_, sibling_node) = apply_persisted_test_record(
@@ -1781,6 +1902,8 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
         kind: AgentMessageKind::Message,
         watch_turn_state: None,
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: "descendant waits".to_owned(),
     });
     let (_, descendant_node) = apply_persisted_test_record(

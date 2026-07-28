@@ -1,5 +1,11 @@
 # SPEC-agent-watch: Agent watch
 
+## Status
+
+The protocol, durable message fold, and prompt projection accept typed
+self-reported work-status and long-wait notifications. Harness producers still
+emit the older turn-state projection until the runtime migration completes.
+
 ## Record justification
 
 Agent watch behavior spans harness-owned topology and dedupe state, typed
@@ -72,6 +78,16 @@ defense in depth for malformed topology. If ordinary input joins that generation
 tool/provider continuation, the harness first emits the delayed start edge, then emits
 the matching stop normally; it never exposes an orphan stop.
 
+Self-reported work status uses a closed phase (`unreported`, `working`, `done`,
+`blocked`, or `unknown`), a runtime-local epoch, and a canonical model-authored
+title of at most 160 UTF-8 bytes. The title is nonempty, trimmed, single-line,
+and contains no control characters. An `unreported` notification carries no
+title. Initial snapshots do not activate the watcher. Later status transitions
+and newly crossed long-wait thresholds are durable typed, isolated
+notifications. Long-wait projections carry only the crossed whole-minute
+threshold; enabling a watch never replays historical thresholds. Prompt
+presentation escapes the title as untrusted visible metadata.
+
 The watch path must not forward internal steering prompts, background or foreground
 tool-completion prompts, explicit `message` tool deliveries to the watched agent, or
 other hidden/non-user inputs. A completed `agent_start` result is the started child
@@ -104,6 +120,7 @@ Every accepted watch-derived `AgentMessageReceived` is the sole canonical
 payload projection for its occurrence and follows the sequence-aware placement
 in [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md).
 `WatchResponse` and `WatchPrompt` use ordinary live activation. Noninitial
-model-visible turn/provider transitions use isolated activation. Initial and
+model-visible turn, provider, work-status, and long-wait transitions use
+isolated activation. Initial and
 redundant structured snapshots have no wake and no provider block. Replay
 retains canonical facts without waking or refanout.

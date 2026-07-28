@@ -1172,6 +1172,8 @@ fn representative_events() -> Vec<Event> {
             kind: AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "hello back".to_owned(),
         }),
         Event::AgentWatchesUpdated(AgentWatchesUpdated {
@@ -2703,6 +2705,8 @@ fn agent_message_events_have_names_and_persistence_defaults() {
         kind: AgentMessageKind::Message,
         watch_turn_state: None,
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: "hello back".to_owned(),
     });
     assert_eq!(received.name(), EventName::AGENT_MESSAGE_RECEIVED);
@@ -2732,6 +2736,8 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
         kind: AgentMessageKind::Message,
         watch_turn_state: None,
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: "hello".to_owned(),
     };
     let message_json = serde_json::to_value(&explicit_message).expect("serialize message");
@@ -2785,6 +2791,43 @@ fn representative_directional_messages_round_trip_through_cbor() {
         let decoded = decode_harness_output_from_slice(&encoded).expect("output should decode");
         assert_eq!(decoded, message);
     }
+}
+
+/// Ensures semantic watch DTOs retain their approved closed wire shapes.
+#[test]
+fn semantic_watch_notifications_round_trip_with_closed_phases() {
+    let status = AgentWatchWorkStatusNotification {
+        session_id: test_session_id("session-1"),
+        subscription_id: "watch-1".to_owned(),
+        status_epoch: 4,
+        phase: AgentWorkStatusPhase::Working,
+        title: Some("trace restore".to_owned()),
+        initial: false,
+    };
+    let value = serde_json::to_value(&status).expect("serialize work status");
+    assert_eq!(value["phase"], "working");
+    assert!(
+        serde_json::from_value::<AgentWatchWorkStatusNotification>(serde_json::json!({
+            "session_id": "session-1",
+            "subscription_id": "watch-1",
+            "status_epoch": 4,
+            "phase": "invented",
+            "title": "trace restore",
+            "initial": false
+        }))
+        .is_err()
+    );
+
+    let wait = AgentWatchLongWaitNotification {
+        session_id: test_session_id("session-1"),
+        subscription_id: "watch-1".to_owned(),
+        status_epoch: 4,
+        threshold_minutes: 30,
+    };
+    let decoded: AgentWatchLongWaitNotification =
+        serde_json::from_value(serde_json::to_value(&wait).expect("serialize long wait"))
+            .expect("decode long wait");
+    assert_eq!(decoded, wait);
 }
 
 /// Visible metadata classification covers spoofing-prone default ignorables,

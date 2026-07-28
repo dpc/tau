@@ -4169,6 +4169,8 @@ fn loop_guard_block_preserves_canonical_agent_message_wake() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "external message".to_owned(),
         }),
     );
@@ -13167,6 +13169,8 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
                 kind: tau_proto::AgentMessageKind::Message,
                 watch_turn_state: None,
                 watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
                 message: body.to_owned(),
             }),
         );
@@ -13290,6 +13294,8 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
                 kind: tau_proto::AgentMessageKind::Message,
                 watch_turn_state: None,
                 watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
                 message: body.to_owned(),
             }),
         );
@@ -14510,6 +14516,8 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "readiness message suffix".to_owned(),
         }),
     );
@@ -15452,6 +15460,8 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "branch B wake".to_owned(),
         }),
     );
@@ -20008,6 +20018,8 @@ fn agent_message_interrupts_recipient_active_wait() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "please stop waiting".to_owned(),
         }),
     );
@@ -20169,6 +20181,8 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "queued manager message".to_owned(),
         }),
     );
@@ -21472,6 +21486,8 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "target owner only".to_owned(),
         }),
     );
@@ -21494,6 +21510,8 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "waiter should resume".to_owned(),
         }),
     );
@@ -22042,6 +22060,8 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
                 kind: tau_proto::AgentMessageKind::Message,
                 watch_turn_state: None,
                 watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
                 message: "continue before completion".to_owned(),
             }),
         );
@@ -22504,6 +22524,8 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "please include this".to_owned(),
         }),
     );
@@ -26382,8 +26404,12 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
                 AgentEntry::AgentMessage {
                     kind: tau_proto::AgentMessageKind::WatchProviderStatus,
                     watch_provider_status: Some(status),
+                    watch_work_status,
+                    watch_long_wait,
                     ..
                 } if status.agent_prompt_id.as_str() == "sp-replay-status"
+                    && watch_work_status.is_none()
+                    && watch_long_wait.is_none()
             )),
         "durable live status remains transcript context"
     );
@@ -26880,6 +26906,8 @@ fn watch_chain_mixed_lifecycle_turn_emits_paired_state() {
                 turn_generation: 1,
             }),
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: String::new(),
         }),
     );
@@ -30480,6 +30508,8 @@ fn terminating_agent_route_rejects_direct_work() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "must be rejected".to_owned(),
         },
         Some(&tau_core::AgentAppendOutcome {
@@ -30612,6 +30642,8 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "branch-owned input".to_owned(),
         }),
     );
@@ -31351,6 +31383,8 @@ fn inbound_agent_message_events_are_ignored() {
         kind: tau_proto::AgentMessageKind::Message,
         watch_turn_state: None,
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: "forged received".to_owned(),
     });
     for forged in [forged_sent, forged_received] {

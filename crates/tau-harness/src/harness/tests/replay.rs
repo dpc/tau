@@ -958,6 +958,8 @@ fn received_agent_message_replay_restores_context_without_wake() {
                 kind: tau_proto::AgentMessageKind::Message,
                 watch_turn_state: None,
                 watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
                 message: "persisted <message>& body".to_owned(),
             }),
         );

@@ -5715,6 +5715,8 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "overview semantic body".to_owned(),
         },
     ));
@@ -5795,6 +5797,8 @@ fn no_agent_overview_excludes_structured_watch_status() {
                 turn_generation: 1,
             }),
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "watch turn compatibility body".to_owned(),
         },
     ));
@@ -5822,6 +5826,8 @@ fn no_agent_overview_excludes_structured_watch_status() {
                 },
                 initial: false,
             }),
+            watch_work_status: None,
+            watch_long_wait: None,
             message: provider_status_body.to_owned(),
         },
     ));
@@ -5881,6 +5887,8 @@ fn external_agent_messages_render_session_agent_labels() {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "hello back".to_owned(),
         },
     ));
@@ -5937,6 +5945,8 @@ fn watched_turn_transition_renders_as_compact_status() {
                 turn_generation: 1,
             }),
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "[tau-internal]: compatibility presentation".to_owned(),
         },
     ));
@@ -9370,6 +9380,8 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
                 turn_generation: 1,
             }),
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: "compatibility text is not UI state".to_owned(),
         })
     };

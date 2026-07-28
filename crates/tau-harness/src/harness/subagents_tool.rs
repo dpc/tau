@@ -604,6 +604,8 @@ impl Harness {
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: message.clone(),
         };
         self.pending_external_receive_acks.insert(
@@ -981,6 +983,8 @@ impl Harness {
                     turn_generation,
                 }),
                 watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
                 message,
             }),
         );
@@ -1118,6 +1122,8 @@ impl Harness {
                 kind: tau_proto::AgentMessageKind::WatchProviderStatus,
                 watch_turn_state: None,
                 watch_provider_status: Some(status),
+                watch_work_status: None,
+                watch_long_wait: None,
                 message,
             }),
         );
@@ -1177,6 +1183,8 @@ impl Harness {
                     kind,
                     watch_turn_state: None,
                     watch_provider_status: None,
+                    watch_work_status: None,
+                    watch_long_wait: None,
                     message,
                 }),
             );
@@ -1421,6 +1429,8 @@ impl Harness {
             kind: request.kind,
             watch_turn_state: None,
             watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
             message: request.message,
         };
         self.pending_external_receive_acks.insert(
@@ -1491,6 +1501,8 @@ impl Harness {
                 kind: request.kind,
                 watch_turn_state: None,
                 watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
                 message: request.message,
             }),
         );

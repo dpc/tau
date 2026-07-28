@@ -4728,6 +4728,8 @@ fn agent_message_received_event(recipient_id: &str) -> Event {
         kind: tau_proto::AgentMessageKind::Message,
         watch_turn_state: None,
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: "hello".to_owned(),
     })
 }

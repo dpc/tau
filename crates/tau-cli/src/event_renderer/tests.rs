@@ -72,6 +72,8 @@ fn watch_turn_state_event(
             turn_generation: 1,
         }),
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: "non-authoritative compatibility text".to_owned(),
     })
 }
@@ -883,6 +885,8 @@ fn watch_turn_state_renders_as_compact_typed_status() {
             turn_generation: 1,
         }),
         watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
         message: "[tau-internal]: stale presentation".to_owned(),
     });
 

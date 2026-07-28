@@ -204,6 +204,11 @@ no-mutation failure contract whenever watch topology ownership or event-loop
 serialization changes. See
 [`GATE-agent-watch-acyclic-topology`](specs/GATE-agent-watch-acyclic-topology.md).
 
+Work-status titles are model-authored cross-agent content, not trusted routing
+or instruction data. The harness keeps their typed phase and epoch separate and
+applies visible trusted-frame escaping before prompt interpolation. Long-wait
+notifications contain only harness-derived numeric thresholds.
+
 ## Prompt capability authority
 
 The harness's immutable post-policy, provider-filtered prompt snapshot is the

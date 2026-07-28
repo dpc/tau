@@ -386,7 +386,7 @@ fn default_navigation_mode(
 }
 
 /// Classifies live activation without carrying or re-rendering message payload.
-fn agent_message_activation_class(
+pub(crate) fn agent_message_activation_class(
     message: &tau_proto::AgentMessageReceived,
 ) -> Option<crate::agent::AgentMessageActivationClass> {
     use crate::agent::AgentMessageActivationClass::{
@@ -405,6 +405,15 @@ fn agent_message_activation_class(
             .watch_provider_status
             .as_ref()
             .is_some_and(|status| !status.initial)
+            .then_some(IsolatedWatchNotification),
+        tau_proto::AgentMessageKind::WatchWorkStatus => message
+            .watch_work_status
+            .as_ref()
+            .is_some_and(|status| !status.initial)
+            .then_some(IsolatedWatchNotification),
+        tau_proto::AgentMessageKind::WatchLongWait => message
+            .watch_long_wait
+            .is_some()
             .then_some(IsolatedWatchNotification),
     }
 }
