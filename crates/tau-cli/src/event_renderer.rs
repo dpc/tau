@@ -258,6 +258,9 @@ pub(crate) struct EventRenderer {
     /// When `AgentPromptStarted` fires for a dequeued prompt,
     /// the first entry is popped and moved back to history.
     queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
+    /// Provider-neutral pending row shown after the harness accepts a user
+    /// submission and before it assigns a prompt id.
+    accepted_submission_block: Option<tau_cli_term::BlockId>,
     /// Per-`call_id` UI state. Tracks the live block (if any), the
     /// cached tool args/progress for in-place re-renders, and
     /// whether the call belongs to a sub-agent side-conversation (in
@@ -480,6 +483,7 @@ struct AgentUiState {
     prompts: HashMap<String, PromptState>,
     last_user_block: Option<(tau_cli_term::BlockId, String)>,
     queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
+    accepted_submission_block: Option<tau_cli_term::BlockId>,
     tool_calls: HashMap<String, ToolCallState>,
     shell_blocks: HashMap<String, ShellBlockState>,
     model_status_block: Option<tau_cli_term::BlockId>,
@@ -1472,6 +1476,7 @@ impl EventRenderer {
             prompts: HashMap::new(),
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
+            accepted_submission_block: None,
             tool_calls: HashMap::new(),
             tool_timer: None,
             shell_blocks: HashMap::new(),
@@ -2207,6 +2212,7 @@ impl EventRenderer {
             prompts: std::mem::take(&mut self.prompts),
             last_user_block: self.last_user_block.take(),
             queued_user_blocks: std::mem::take(&mut self.queued_user_blocks),
+            accepted_submission_block: self.accepted_submission_block.take(),
             tool_calls: std::mem::take(&mut self.tool_calls),
             shell_blocks: std::mem::take(&mut self.shell_blocks),
             model_status_block: self.model_status_block.take(),
@@ -2256,6 +2262,7 @@ impl EventRenderer {
         self.prompts = state.prompts;
         self.last_user_block = state.last_user_block;
         self.queued_user_blocks = state.queued_user_blocks;
+        self.accepted_submission_block = state.accepted_submission_block;
         self.tool_calls = state.tool_calls;
         self.shell_blocks = state.shell_blocks;
         self.model_status_block = state.model_status_block;
@@ -3049,6 +3056,7 @@ impl EventRenderer {
         self.prompts.clear();
         self.last_user_block = None;
         self.queued_user_blocks.clear();
+        self.accepted_submission_block = None;
         self.tool_calls.clear();
         if let Some(timer) = &self.tool_timer {
             timer.clear_active();
@@ -3493,13 +3501,23 @@ impl EventRenderer {
                     .finish_background_tool(&cancelled.call_id);
             }
             Event::UiCancelPrompt(_) => self.agent_activity.clear_optimistic_submissions(),
-            Event::SessionShutdown(_) => self.agent_activity.clear(),
+            Event::SessionShutdown(_) => {
+                self.clear_accepted_submission_indicators_everywhere();
+                self.clear_main_agent_turn_active_everywhere();
+                self.agent_activity.clear();
+            }
             _ => {}
         }
     }
 
     fn sync_main_tools_visibility_for_prompt_lifecycle(&mut self, event: &Event) {
         match event {
+            Event::AgentPromptSubmitted(prompt)
+                if prompt.inference_activation && prompt.originator.is_user() =>
+            {
+                self.set_main_agent_turn_active(true);
+                self.show_accepted_submission_indicator();
+            }
             Event::AgentPromptCreated(prompt) => {
                 if prompt.originator.is_user() || !self.has_live_main_delegate_tool_call() {
                     self.set_main_agent_turn_active(prompt.originator.is_user());
@@ -3523,6 +3541,7 @@ impl EventRenderer {
                 }
             }
             Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
+                self.clear_accepted_submission_indicator();
                 if tool_calls_from_output_items(&finished.output_items).is_empty() {
                     self.clear_main_agent_turn_active_everywhere();
                 }
@@ -3533,6 +3552,7 @@ impl EventRenderer {
                 self.set_main_agent_turn_active(false);
             }
             Event::AgentPromptTerminated(terminated) if terminated.originator.is_user() => {
+                self.clear_accepted_submission_indicator();
                 if !self.agent_activity.has_active_prompts() {
                     self.set_main_agent_turn_active(false);
                 }
@@ -3542,7 +3562,46 @@ impl EventRenderer {
             {
                 self.set_main_agent_turn_active(false);
             }
+            Event::UiCancelPrompt(_) => {
+                self.clear_accepted_submission_indicator();
+                self.set_main_agent_turn_active(false);
+            }
             _ => {}
+        }
+    }
+
+    fn show_accepted_submission_indicator(&mut self) {
+        if self.accepted_submission_block.is_some() {
+            return;
+        }
+        let block = streaming_block(
+            &self.theme,
+            tau_themes::names::AGENT_PENDING,
+            STREAMING_AGENT_RESPONSE_PREFIX.trim_end(),
+        );
+        let block_id = self
+            .handle
+            .new_block("agent-turn-accepted".to_owned(), block);
+        self.handle.push_above_active(block_id);
+        self.accepted_submission_block = Some(block_id);
+        self.handle.redraw();
+    }
+
+    fn clear_accepted_submission_indicator(&mut self) {
+        if let Some(block_id) = self.accepted_submission_block.take() {
+            self.handle.remove_block(block_id);
+            self.handle.redraw();
+        }
+    }
+
+    fn clear_accepted_submission_indicators_everywhere(&mut self) {
+        self.clear_accepted_submission_indicator();
+        for state in self.agents_ui_state.values_mut() {
+            if let Some(block_id) = state.accepted_submission_block.take() {
+                state.output.remove_block(block_id);
+            }
+            state.main_agent_turn_active = false;
+            state.agent_activity.clear();
         }
     }
 
@@ -3681,6 +3740,8 @@ impl EventRenderer {
     pub(crate) fn handle_disconnect(&mut self, reason: Option<String>) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
+        self.clear_accepted_submission_indicators_everywhere();
+        self.clear_main_agent_turn_active_everywhere();
         self.agent_activity.clear();
         self.agent_in_progress.store(false, Ordering::Relaxed);
         let mut summary_blocks = HashSet::new();
@@ -5318,6 +5379,7 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_started(&mut self, prompt: &tau_proto::AgentPromptStarted) {
+        self.clear_accepted_submission_indicator();
         self.finished_provider_prompts
             .remove(prompt.agent_prompt_id.as_str());
         let state = self
@@ -5340,6 +5402,7 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_terminated(&mut self, terminated: &tau_proto::AgentPromptTerminated) {
+        self.clear_accepted_submission_indicator();
         self.clear_editor_current_response_for_user_prompt(terminated.originator.is_user());
         self.finished_provider_prompts
             .insert(terminated.agent_prompt_id.to_string());

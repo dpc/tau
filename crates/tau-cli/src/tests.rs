@@ -4281,6 +4281,59 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
     assert!(navigation.is_active("worker-1"));
 }
 
+/// An accepted inference-activating user prompt must expose main-turn activity
+/// before any prompt-id or provider event exists, so local provider warm-up
+/// cannot leave the UI looking idle.
+#[test]
+fn accepted_prompt_submission_starts_main_turn_before_provider_activity() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let in_progress = renderer.agent_in_progress_state();
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        literal: false,
+        session_id: test_session_id("s1"),
+        text: "warm up locally".to_owned(),
+        agent_id: agent_id("local-agent"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    assert!(!renderer.main_agent_turn_active_for_test());
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "◇ …"));
+
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: true,
+        agent_id: agent_id("local-agent"),
+        text: "warm up locally".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: Default::default(),
+        display_name: None,
+        ctx_id: None,
+    }));
+
+    assert!(renderer.main_agent_turn_active_for_test());
+    assert!(in_progress.load(std::sync::atomic::Ordering::Relaxed));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(80, "◇ …"),
+        "screen: {:?}",
+        vt.screen_text(80)
+    );
+
+    renderer.handle_disconnect(Some("provider socket closed".to_owned()));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "◇ …"));
+    assert!(vt.screen_contains(80, "provider socket closed"));
+    assert!(!renderer.main_agent_turn_active_for_test());
+}
+
 /// Applies one complete authoritative navigation snapshot in renderer tests.
 fn apply_test_navigation_mode(renderer: &mut EventRenderer, mode: tau_proto::AgentNavigationMode) {
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
