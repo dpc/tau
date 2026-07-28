@@ -214,6 +214,19 @@ impl PtyProcess {
         self.wait_for_prompt("editable terminal prompt", deadline, prompt_ready)
     }
 
+    /// Waits for an empty editable prompt that names the exact role used to
+    /// start the first agent.
+    pub(super) fn wait_ready_to_start_role(
+        &self,
+        role: &str,
+        deadline: Instant,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let needle = format!("Write a message to start a new {role} agent...");
+        self.wait_for_prompt(&format!("prompt `{needle}`"), deadline, |parser| {
+            prompt_ready_for(parser, &needle)
+        })
+    }
+
     /// Waits for an empty editable prompt targeting one exact selected agent.
     pub(super) fn wait_ready_for(
         &self,
@@ -246,7 +259,7 @@ impl PtyProcess {
                 );
             }
             let (next, _) = wake
-                .wait_timeout(capture, remaining.min(Duration::from_millis(100)))
+                .wait_timeout(capture, remaining)
                 .map_err(|_| "PTY capture poisoned")?;
             capture = next;
         }

@@ -423,6 +423,8 @@ fn selectors() -> Vec<EventSelector> {
         E::TOOL_ERROR,
         E::EXTENSION_READY,
         E::EXTENSION_EXITED,
+        E::HARNESS_ROLES_AVAILABLE,
+        E::HARNESS_ROLE_SELECTED,
         E::AGENT_REPLAY_COMPLETE,
         E::SESSION_REPLAY_COMPLETE,
         E::HARNESS_NOTICE,

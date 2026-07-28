@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{DurableSnapshot, ScenarioActionV2, ScenarioLaneV2, ScenarioV2};
 use tau_proto::{
-    AgentId, AgentRuntimeState, CborValue, ContextItem, Event, SessionId, SessionStartReason,
-    ToolCallId,
+    AgentId, AgentRuntimeState, CborValue, ContextItem, Event, ModelId, SessionId,
+    SessionStartReason, ToolCallId,
 };
 
 #[path = "core_resume/gate_fixture.rs"]
@@ -30,9 +30,13 @@ use pty_process::{PtyArtifacts, PtyProcess};
 
 const FAKE_PROVIDER: &str = env!("CARGO_BIN_EXE_tau-e2e-fake-provider");
 const DEADLINE: Duration = Duration::from_secs(20);
+const DUMMY_ROLE: &str = "deterministic-e2e";
+const DUMMY_TOOL: &str = "restart_test_dummy";
 
-/// Proves a completed real dummy-tool call never repaints as pending in a new
-/// spawned Tau UI, while the same durable agent remains useful after cold
+/// Proves Boot A selects `deterministic-e2e` / `fake/test`, exposes only
+/// `restart_test_dummy`, and renders the matching editable prompt before first
+/// input. It then proves that completed tool call never repaints as pending in
+/// a new spawned Tau UI and the same durable agent remains useful after cold
 /// resume.
 #[test]
 fn spawned_tau_resume_keeps_completed_dummy_tool_terminal_and_continues()
@@ -83,6 +87,8 @@ fn spawned_tau_resume_keeps_completed_dummy_tool_terminal_and_continues()
         deadline,
     )?;
     wait_extensions(&mut observer_a, deadline)?;
+    wait_for_dummy_role_selection(&mut observer_a, deadline)?;
+    boot_a.wait_ready_to_start_role(DUMMY_ROLE, deadline)?;
     boot_a.send_line(&before)?;
     let agent_id = wait_for_agent(&mut observer_a, &session_id, deadline)?;
     wait_for_terminal_turn(
@@ -204,6 +210,64 @@ fn wait_extensions(
             fake |= ready.extension_name.as_str() == "e2e-fake-provider";
             dummy |= ready.extension_name.as_str() == "test-dummy";
         }
+    }
+    Ok(())
+}
+
+/// Waits for the exact dummy-tool role snapshot and its resolved model
+/// selection so Boot A cannot accept input from the CLI's fallback role.
+fn wait_for_dummy_role_selection(
+    observer: &mut SideObserver,
+    deadline: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let available = if let Some(available) =
+        observer
+            .events
+            .iter()
+            .find_map(|observed| match &observed.event {
+                Event::HarnessRolesAvailable(available)
+                    if available.roles.iter().any(|role| role.name == DUMMY_ROLE) =>
+                {
+                    Some(available.clone())
+                }
+                _ => None,
+            }) {
+        available
+    } else {
+        let observed = observer.recv_until(deadline, |observed| {
+            matches!(&observed.event, Event::HarnessRolesAvailable(available)
+                if available.roles.iter().any(|role| role.name == DUMMY_ROLE))
+        })?;
+        match observed.event {
+            Event::HarnessRolesAvailable(available) => available,
+            _ => unreachable!("predicate admitted another event"),
+        }
+    };
+    let role = available
+        .roles
+        .iter()
+        .find(|role| role.name == DUMMY_ROLE)
+        .ok_or("Boot A omitted its deterministic role")?;
+    let tools = role
+        .details
+        .as_ref()
+        .and_then(|details| details.tools.as_ref())
+        .ok_or("Boot A deterministic role omitted its explicit tool snapshot")?;
+    if tools.len() != 1 || tools[0].as_str() != DUMMY_TOOL {
+        return Err(format!(
+            "Boot A `{DUMMY_ROLE}` tool snapshot was {tools:?}, expected only `{DUMMY_TOOL}`"
+        )
+        .into());
+    }
+
+    let expected_model = ModelId::from("fake/test");
+    let selected = |observed: &ObservedEvent| {
+        matches!(&observed.event, Event::HarnessRoleSelected(selected)
+            if selected.role == DUMMY_ROLE
+                && selected.model.as_ref() == Some(&expected_model))
+    };
+    if !observer.events.iter().any(selected) {
+        observer.recv_until(deadline, selected)?;
     }
     Ok(())
 }
