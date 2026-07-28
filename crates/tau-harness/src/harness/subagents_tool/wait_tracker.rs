@@ -1501,41 +1501,41 @@ impl WaitTracker {
         reply
     }
 
-    /// Move runtime ownership without changing retained durable correlation
-    /// identities.
-    pub(super) fn transfer_call_owner(
-        &mut self,
-        call_id: &ToolCallId,
-        source: &AgentId,
-        target: &AgentId,
-    ) {
-        // TODO(89re): This runtime-only reparenting can separate a retained
-        // declaration/terminal from a later parent-owned wait settlement.
-        // Keep the behavior while its durable ownership semantics are researched.
-        if !self.calls.contains_key(call_id) {
-            return;
+    /// Retire every source call and installed wait owned by an unloading agent.
+    ///
+    /// Returns every retired source or wait call ID so the harness can clear
+    /// its corresponding outer tool tracking.
+    pub(super) fn discard_owner(&mut self, owner: &AgentId) -> Vec<ToolCallId> {
+        let mut call_ids: Vec<_> = self
+            .call_owners
+            .iter()
+            .filter_map(|(call_id, call_owner)| (call_owner == owner).then_some(call_id.clone()))
+            .collect();
+        call_ids.extend(
+            self.waiters
+                .values()
+                .filter_map(|wait| (&wait.owner == owner).then_some(wait.call_id.clone())),
+        );
+        if let Some(wait) = self.any_waiters.remove(owner) {
+            call_ids.push(wait.call_id);
         }
-        match self.call_owners.get(call_id) {
-            Some(owner) if owner != source => {}
-            _ => {
-                self.call_owners.insert(call_id.clone(), target.clone());
-            }
+        if let Some(wait) = self.input_waiters.remove(owner) {
+            call_ids.push(wait.request.call_id);
         }
-    }
-
-    /// Retire a torn-down owner’s call and all retained correlation.
-    pub(super) fn discard_call_owner(&mut self, call_id: &ToolCallId, source: &AgentId) {
-        if self.call_owners.get(call_id) != Some(source) {
-            return;
+        self.waiters.retain(|_, wait| &wait.owner != owner);
+        call_ids.sort();
+        call_ids.dedup();
+        for call_id in &call_ids {
+            self.calls.remove(call_id);
+            self.call_refs.remove(call_id);
+            self.terminal_observations.remove(call_id);
+            self.call_owners.remove(call_id);
+            self.call_tool_names.remove(call_id);
+            self.completion_order
+                .retain(|completed| completed != call_id);
+            self.terminal_order.retain(|terminal| terminal != call_id);
         }
-        self.calls.remove(call_id);
-        self.call_refs.remove(call_id);
-        self.terminal_observations.remove(call_id);
-        self.call_owners.remove(call_id);
-        self.call_tool_names.remove(call_id);
-        self.completion_order
-            .retain(|completed| completed != call_id);
-        self.terminal_order.retain(|terminal| terminal != call_id);
+        call_ids
     }
 
     fn finish_any_waiter_if_no_candidates(&mut self, owner: &AgentId) -> Vec<WaitReply> {

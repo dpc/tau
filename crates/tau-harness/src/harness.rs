@@ -749,12 +749,6 @@ pub(crate) fn tool_available_again_notice_prompt(tool_name: &ToolName) -> String
     )
 }
 
-fn remove_pending_internal_prompt_text(prompts: &mut VecDeque<PendingPrompt>, text: &str) -> bool {
-    let before = prompts.len();
-    prompts.retain(|prompt| !(prompt.is_internal() && prompt.text == text));
-    prompts.len() != before
-}
-
 fn load_system_prompt_templates(config_dir: Option<&Path>) -> HashMap<String, String> {
     let mut templates = built_in_system_prompt_templates();
     let Some(config_dir) = config_dir else {
@@ -14551,13 +14545,13 @@ impl Harness {
     }
 
     fn apply_pending_cancel_for_agent(&mut self, cid: &AgentId) {
-        let Some(cancel) = self
+        if !self
             .agents
             .get(cid)
-            .and_then(|conv| conv.pending_cancel.clone())
-        else {
+            .is_some_and(|conv| conv.pending_cancel.is_some())
+        {
             return;
-        };
+        }
         let Some(turn_state) = self.agents.get(cid).map(|conv| conv.turn_state.clone()) else {
             return;
         };
@@ -14582,7 +14576,6 @@ impl Harness {
                 let foreground_pending = self.cancel_remaining_tool_calls(
                     cid,
                     cancelled_calls,
-                    &cancel.reason,
                     BackgroundCompletionPromptMode::QueuePassive,
                 );
                 if !foreground_pending {
@@ -14695,7 +14688,6 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         remaining_calls: Vec<ToolCallId>,
-        _reason: &str,
         background_completion_prompt_mode: BackgroundCompletionPromptMode,
     ) -> bool {
         let remaining: std::collections::HashSet<ToolCallId> =
@@ -15005,7 +14997,6 @@ impl Harness {
         let foreground_pending = self.cancel_remaining_tool_calls(
             &cid,
             cancelled_calls,
-            "delegate cancel tool",
             BackgroundCompletionPromptMode::DoNotQueue,
         );
         if foreground_pending {
@@ -15055,7 +15046,6 @@ impl Harness {
             );
         }
         self.release_start_agent_request(cid);
-        self.discard_background_completion_target_before_teardown(cid);
         self.remove_agent(cid);
         self.try_advance_queue();
     }
@@ -20652,6 +20642,7 @@ impl Harness {
                 originator: PromptOriginator::User,
             });
         }
+        self.retire_background_work_before_agent_unload(cid);
         let unloading_agent_id = self
             .agents
             .get(cid)
@@ -25078,7 +25069,6 @@ impl Harness {
         if keep_parented_conversation {
             self.detach_completed_parented_start_agent(cid);
         } else {
-            self.transfer_background_completion_target_before_teardown(cid);
             self.remove_agent(cid);
         }
         self.try_advance_queue();
@@ -25765,31 +25755,14 @@ impl Harness {
         }
     }
 
-    fn transfer_background_completion_target_before_teardown(&mut self, cid: &AgentId) {
-        // TODO(89re): Research a durable representation for child background
-        // calls whose runtime completion/wait ownership is reparented here.
-        // Compact projection currently treats resulting cross-journal refs as
-        // unavailable instead of making this runtime policy part of its schema.
+    fn retire_background_work_before_agent_unload(&mut self, cid: &AgentId) {
         let call_ids = self.background_completion_call_ids_for_teardown(cid);
-        if call_ids.is_empty() {
-            return;
-        }
-        let Some(target_cid) = self.background_completion_teardown_target(cid) else {
-            return;
-        };
-        for call_id in call_ids {
-            if self.tool_agents.get(&call_id) == Some(cid)
-                && self.tool_turn.is_backgrounded(&call_id)
-            {
-                self.tool_agents.insert(call_id.clone(), target_cid.clone());
-            }
-            if self.background_completion_targets.get(&call_id) == Some(cid) {
-                self.background_completion_targets
-                    .insert(call_id.clone(), target_cid.clone());
-            }
-            self.transfer_wait_background_owner_before_teardown(&call_id, cid, &target_cid);
-            self.transfer_queued_background_completion_prompt(cid, &target_cid, &call_id);
-        }
+        self.cancel_remaining_tool_calls(
+            cid,
+            call_ids.into_iter().collect(),
+            BackgroundCompletionPromptMode::DoNotQueue,
+        );
+        self.discard_background_completion_target_before_teardown(cid);
     }
 
     fn discard_background_completion_target_before_teardown(&mut self, cid: &AgentId) {
@@ -25797,7 +25770,9 @@ impl Harness {
             self.suppressed_background_completion_prompts
                 .remove(&call_id);
             self.background_completion_targets.remove(&call_id);
-            self.discard_wait_background_owner_before_teardown(&call_id, cid);
+            self.clear_tool_call_tracking(call_id.as_str());
+        }
+        for call_id in self.discard_wait_owner_before_teardown(cid) {
             self.clear_tool_call_tracking(call_id.as_str());
         }
     }
@@ -25807,6 +25782,7 @@ impl Harness {
             .tool_turn
             .backgrounded_calls_for(cid)
             .into_iter()
+            .filter(|call_id| self.peer_internal_tool_agents.get(call_id) != Some(cid))
             .collect();
         call_ids.extend(self.tool_agents.iter().filter_map(|(call_id, owner)| {
             (owner == cid && self.tool_turn.is_backgrounded(call_id)).then_some(call_id.clone())
@@ -25817,42 +25793,6 @@ impl Harness {
                 .filter_map(|(call_id, owner)| (owner == cid).then_some(call_id.clone())),
         );
         call_ids
-    }
-
-    fn transfer_queued_background_completion_prompt(
-        &mut self,
-        source_cid: &AgentId,
-        target_cid: &AgentId,
-        call_id: &ToolCallId,
-    ) {
-        let prompt = background_completion_prompt(call_id);
-        let removed = self.agents.get_mut(source_cid).is_some_and(|conv| {
-            remove_pending_internal_prompt_text(&mut conv.pending_prompts, &prompt)
-        });
-        if removed {
-            self.queue_background_completion_prompt(target_cid, call_id);
-        }
-    }
-
-    fn background_completion_teardown_target(&self, cid: &AgentId) -> Option<AgentId> {
-        let conv = self.agents.get(cid)?;
-        if let Some(parent_cid) = &conv.parent_agent_id
-            && parent_cid != cid
-            && self.agents.contains_key(parent_cid)
-        {
-            return Some(parent_cid.clone());
-        }
-        if let Some(parent_call_id) = &conv.parent_tool_call_id
-            && let Some(parent_cid) = self.tool_agents.get(parent_call_id)
-            && parent_cid != cid
-            && self.agents.contains_key(parent_cid)
-        {
-            return Some(parent_cid.clone());
-        }
-        self.agents.iter().find_map(|(candidate_cid, candidate)| {
-            (candidate_cid != cid && candidate.session_id == conv.session_id)
-                .then_some(candidate_cid.clone())
-        })
     }
 
     /// Hook called whenever a tool call has finished (result, error,

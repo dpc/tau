@@ -52,8 +52,9 @@ nondecreasing producer wall clock.
 Selected endpoints in another agent journal use the same non-fatal
 `source_not_selected` or `unresolved` fallback as unavailable endpoints. They
 never transfer terminal status or output ownership and never produce a
-cross-journal interval. This deliberately does not enshrine runtime
-background-call reparenting in the projection schema.
+cross-journal interval. Normal runtime teardown does not transfer background-call
+ownership; this fallback instead keeps selected subsets and incomplete or
+historical journals non-fatal.
 
 Configured extensions may classify
 `ExtInternalPromptSubmitRequest.activation_kind` as `timer`. Absence and explicit

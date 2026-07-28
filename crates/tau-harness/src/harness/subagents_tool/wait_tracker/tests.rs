@@ -389,7 +389,7 @@ fn discarded_background_correlation_is_fully_retired() {
             .calls
             .insert(call_id.clone(), WaitCallState::Backgrounded);
         tracker.completion_order.push_back(call_id.clone());
-        tracker.discard_call_owner(&call_id, &owner);
+        tracker.discard_owner(&owner);
     }
 
     assert!(tracker.calls.is_empty());
@@ -399,6 +399,69 @@ fn discarded_background_correlation_is_fully_retired() {
     assert!(tracker.call_tool_names.is_empty());
     assert!(tracker.completion_order.is_empty());
     assert!(tracker.terminal_order.is_empty());
+}
+
+/// Unloading one agent retires all of its source calls and every installed wait
+/// mode while preserving another agent's calls and waits.
+#[test]
+fn discarded_owner_retires_source_exact_bare_and_input_wait_state() {
+    let owner = conv("side");
+    let other = conv("other");
+    let mut tracker = WaitTracker::default();
+    for (call_id, call_owner) in [
+        ("source", owner.clone()),
+        ("wait-exact", owner.clone()),
+        ("wait-bare", owner.clone()),
+        ("wait-input", owner.clone()),
+        ("other-source", other.clone()),
+    ] {
+        tracker.record_tool_invoke(call_id.into(), slow_tool_name(), call_owner);
+    }
+    tracker.calls.insert(
+        "source".into(),
+        WaitCallState::BackgroundResult(background_result("source", "done")),
+    );
+    tracker.completion_order.push_back("source".into());
+    let wait = |call_id: &str, wait_owner: AgentId| WaitRequest {
+        call_id: call_id.into(),
+        tool_name: wait_tool_name(),
+        owner: wait_owner,
+        display_args: String::new(),
+        call_ref: Some(call_ref(1, 0)),
+        wait_observation: observation(),
+        registration: observation(),
+    };
+    tracker
+        .waiters
+        .insert("source".into(), wait("wait-exact", owner.clone()));
+    tracker
+        .any_waiters
+        .insert(owner.clone(), wait("wait-bare", owner.clone()));
+    tracker.input_waiters.insert(
+        owner.clone(),
+        InputWaitRequest {
+            request: wait("wait-input", owner.clone()),
+            deadline: Instant::now() + Duration::from_secs(60),
+        },
+    );
+    tracker
+        .any_waiters
+        .insert(other.clone(), wait("other-wait", other.clone()));
+
+    let retired = tracker.discard_owner(&owner);
+
+    for call_id in ["source", "wait-exact", "wait-bare", "wait-input"] {
+        assert!(retired.contains(&ToolCallId::from(call_id)));
+        assert!(!tracker.calls.contains_key(call_id));
+        assert!(!tracker.call_owners.contains_key(call_id));
+        assert!(!tracker.call_refs.contains_key(call_id));
+        assert!(!tracker.terminal_observations.contains_key(call_id));
+    }
+    assert!(tracker.waiters.is_empty());
+    assert!(!tracker.any_waiters.contains_key(&owner));
+    assert!(!tracker.input_waiters.contains_key(&owner));
+    assert!(tracker.calls.contains_key("other-source"));
+    assert!(tracker.any_waiters.contains_key(&other));
 }
 
 /// Provider-declared exact, next-background, and activating-input waits retain
@@ -1671,11 +1734,10 @@ fn exact_wait_after_no_arg_consumes_reports_already_consumed() {
     assert!(message.contains("already consumed"));
 }
 
-/// Side-conversation teardown transfers background ownership to the parent;
-/// the wait tracker must follow that transfer so the parent can consume a
-/// completion with `wait({})` after the side conversation disappears.
+/// Agent teardown must retire completed background payloads instead of making
+/// them available to another agent's bare wait.
 #[test]
-fn transferred_background_owner_can_be_consumed_by_parent_no_arg_wait() {
+fn retired_background_owner_cannot_be_consumed_by_parent_no_arg_wait() {
     let parent = conv("parent");
     let side = conv("side");
     let mut tracker = WaitTracker::default();
@@ -1688,18 +1750,14 @@ fn transferred_background_owner_can_be_consumed_by_parent_no_arg_wait() {
             )
             .is_empty()
     );
-    tracker.transfer_call_owner(&"bg-side".into(), &side, &parent);
+    tracker.discard_owner(&side);
 
-    let result = reply_result(start_reply(start_wait_any(
+    let (message, _) = reply_error(start_reply(start_wait_any(
         &mut tracker,
         &parent,
         "wait-parent",
     )));
-    assert_eq!(
-        cbor_map_text(&result, ORIGINAL_TOOL_CALL_ID_HEADER),
-        Some("bg-side")
-    );
-    assert_eq!(cbor_map_text(&result, "output"), Some("done"));
+    assert!(message.contains("no background tool calls"));
 }
 
 /// A canceled background call remains waitable once. It should not be marked

@@ -6365,7 +6365,6 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
     h.cancel_remaining_tool_calls(
         &cid,
         vec![call_id.clone()],
-        "test cancel",
         BackgroundCompletionPromptMode::QueuePassive,
     );
 
@@ -6821,7 +6820,6 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
     h.cancel_remaining_tool_calls(
         &parent_cid,
         vec![call_id.clone()],
-        "harness teardown",
         BackgroundCompletionPromptMode::DoNotQueue,
     );
 
@@ -16778,7 +16776,6 @@ fn manual_self_compaction_pre_start_cancel_is_passive() {
     h.cancel_remaining_tool_calls(
         &cid,
         vec![call.id.clone()],
-        "test cancellation",
         BackgroundCompletionPromptMode::QueuePassive,
     );
 
@@ -19354,7 +19351,6 @@ fn manual_cross_compaction_post_start_cancel_is_exact() {
     h.cancel_remaining_tool_calls(
         &caller,
         vec![call.id.clone()],
-        "test cancellation",
         BackgroundCompletionPromptMode::QueuePassive,
     );
 
@@ -23595,11 +23591,12 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     h.shutdown().expect("shutdown");
 }
 
-/// Background tool completions from removed non-tool side agents are
-/// transferred to a live parent/default conversation instead of being lost with
-/// the removed conversation.
+/// Unloading a side agent must commit cancellation before unload, retire its
+/// routing, waits, and completion prompts without transferring them, and ignore
+/// late reports without injecting any completion into another agent. A failed
+/// child terminal append must still clean up and unload after that one attempt.
 #[test]
-fn background_completion_from_removed_side_conversation_queues_on_parent() {
+fn background_completion_from_removed_side_conversation_is_retired() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -23631,8 +23628,18 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
     h.handle_start_agent_request("conn-agent", ext_query("q-removed-bg"))
         .expect("side query");
     let side_cid = ext_query_cid(&h, "q-removed-bg").expect("side conversation");
+    let side_agent_id = h.agents[&side_cid].agent_id.clone().expect("side agent id");
     let call_id: ToolCallId = "removed-slow-call".into();
 
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("slow"),
+            internal_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
     h.tool_agents.insert(call_id.clone(), side_cid.clone());
     h.background_completion_targets
         .insert(call_id.clone(), side_cid.clone());
@@ -23642,20 +23649,136 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
     assert!(h.tool_turn.mark_backgrounded(&call_id));
     h.queue_background_completion_prompt(&side_cid, &call_id);
 
-    h.transfer_background_completion_target_before_teardown(&side_cid);
     h.remove_agent(&side_cid);
 
     assert!(!h.agents.contains_key(&side_cid));
-    assert_eq!(h.tool_agents.get(&call_id), Some(&parent_cid));
-    assert_eq!(
-        h.background_completion_targets.get(&call_id),
-        Some(&parent_cid)
+    assert!(!h.tool_agents.contains_key(&call_id));
+    assert!(!h.background_completion_targets.contains_key(&call_id));
+    let parent = h
+        .agents
+        .get(&parent_cid)
+        .expect("parent conversation remains live");
+    assert!(
+        parent
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != background_completion_prompt(&call_id))
+    );
+    assert!(event_log_contains(
+        &h,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::ToolCancelRequest(request) if request.target_call_id == call_id
+        )
+    ));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundError(error)
+            if error.call_id == call_id && error.message == "Tool call canceled"
+    )));
+    let terminal_position = event_log_position(&h, |event| {
+        matches!(
+            event,
+            Event::ToolBackgroundError(error) if error.call_id == call_id
+        )
+    })
+    .expect("child terminal committed");
+    let unload_position = event_log_position(&h, |event| {
+        matches!(
+            event,
+            Event::SessionAgentUnloaded(unloaded)
+                if unloaded.agent_id.as_str() == side_agent_id
+        )
+    })
+    .expect("child unload committed");
+    assert!(terminal_position < unload_position);
+
+    h.handle_extension_event_inner(
+        "conn-slow",
+        Event::ToolResultReported(ToolResult {
+            call_id: call_id.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("late".to_owned()),
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            originator: tau_proto::PromptOriginator::User,
+            display: None,
+        }),
+    )
+    .expect("late report is ignored");
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundResult(result) if result.call_id == call_id
+    )));
+    let parent = h
+        .agents
+        .get(&parent_cid)
+        .expect("parent conversation remains live");
+    assert!(
+        parent
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != background_completion_prompt(&call_id))
     );
 
-    assert!(
-        h.agents.contains_key(&parent_cid),
-        "parent conversation remains live"
+    h.handle_start_agent_request("conn-agent", ext_query("q-removed-bg-fault"))
+        .expect("fault side query");
+    let fault_cid = ext_query_cid(&h, "q-removed-bg-fault").expect("fault side conversation");
+    let fault_agent_id = h.agents[&fault_cid]
+        .agent_id
+        .clone()
+        .expect("fault side agent id");
+    let fault_call_id: ToolCallId = "removed-slow-call-fault".into();
+    h.pending_tools.insert(
+        fault_call_id.clone(),
+        PendingTool {
+            name: ToolName::new("slow"),
+            internal_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
     );
+    h.tool_agents
+        .insert(fault_call_id.clone(), fault_cid.clone());
+    h.background_completion_targets
+        .insert(fault_call_id.clone(), fault_cid.clone());
+    h.tool_turn
+        .record_unqueued_in_flight(fault_cid.clone(), fault_call_id.clone());
+    assert!(h.tool_turn.begin_backgrounding(&fault_call_id));
+    assert!(h.tool_turn.mark_backgrounded(&fault_call_id));
+    let journal = h
+        .state_dir
+        .join("agents")
+        .join(&fault_agent_id)
+        .join("events.cbor");
+    let backup = journal.with_extension("cbor.unload-test-backup");
+    std::fs::rename(&journal, &backup).expect("park fault child journal");
+    std::fs::create_dir(&journal).expect("block fault child journal");
+
+    h.remove_agent(&fault_cid);
+
+    assert!(!h.agents.contains_key(&fault_cid));
+    assert!(!h.tool_agents.contains_key(&fault_call_id));
+    assert!(!h.background_completion_targets.contains_key(&fault_call_id));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::SessionAgentUnloaded(unloaded)
+            if unloaded.agent_id.as_str() == fault_agent_id
+    )));
+    let parent = h
+        .agents
+        .get(&parent_cid)
+        .expect("parent remains after failed child terminal");
+    assert!(
+        parent
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != background_completion_prompt(&fault_call_id))
+    );
+    std::fs::remove_dir(&journal).expect("remove child journal blocker");
+    std::fs::rename(&backup, &journal).expect("restore fault child journal");
 
     h.shutdown().expect("shutdown");
 }

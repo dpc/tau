@@ -851,10 +851,10 @@ fn crash_tail_and_selected_cut_remain_explicitly_incomplete() {
     assert_eq!(call["terminal_resolution"], "source_not_selected");
 }
 
-/// Child background-call ownership transfer remains non-fatal without exposing
-/// a new cross-journal schema state or attributing its output to the parent.
+/// A foreign background completion remains non-fatal without exposing a new
+/// cross-journal schema state or attributing its output to another agent.
 #[test]
-fn reparented_background_completion_uses_unresolved_fallbacks() {
+fn foreign_background_completion_uses_unresolved_fallbacks() {
     let records = project_facts(
         vec![
             declaration("agent-b", 1, 0, "source"),
@@ -953,7 +953,7 @@ fn reparented_background_completion_uses_unresolved_fallbacks() {
         ],
         super::super::AgentTraceMode::Lite,
     )
-    .expect("reparented projection")
+    .expect("foreign-endpoint projection")
     .into_iter()
     .map(|record| serde_json::to_value(record).expect("record JSON"))
     .collect::<Vec<_>>();
@@ -994,10 +994,10 @@ fn reparented_background_completion_uses_unresolved_fallbacks() {
     );
 }
 
-/// Reparenting before completion can leave the declaration in the child while
-/// cancellation and the canonical terminal commit in the parent.
+/// A foreign terminal cannot transfer status or output to a declaration in
+/// another agent journal.
 #[test]
-fn reparented_terminal_does_not_transfer_call_status_or_output() {
+fn foreign_terminal_does_not_transfer_call_status_or_output() {
     let records = project_facts(
         vec![
             declaration("agent-b", 1, 0, "source"),
@@ -1037,7 +1037,7 @@ fn reparented_terminal_does_not_transfer_call_status_or_output() {
         ],
         super::super::AgentTraceMode::Full,
     )
-    .expect("reparented terminal projection")
+    .expect("foreign terminal projection")
     .into_iter()
     .map(|record| serde_json::to_value(record).expect("record JSON"))
     .collect::<Vec<_>>();

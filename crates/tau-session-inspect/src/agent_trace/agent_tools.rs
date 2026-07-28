@@ -819,10 +819,8 @@ fn project_facts(
                         if classification_fully_local && owner.agent_id == declaration.agent_id {
                             Resolution::Resolved
                         } else {
-                            // TODO(89re): Child background-call teardown can move
-                            // completion ownership to a parent while the declaration
-                            // remains in the child journal. Keep the relationship
-                            // non-fatal without exporting that runtime policy.
+                            // Foreign or missing endpoints can occur in selected
+                            // subsets and incomplete or historical journals.
                             Resolution::SourceNotSelected
                         },
                     );

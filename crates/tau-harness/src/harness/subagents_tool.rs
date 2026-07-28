@@ -386,29 +386,14 @@ impl Harness {
         self.publish_wait_replies(replies);
     }
 
-    /// Move the wait tracker's background-call ownership during
-    /// side-conversation teardown.
-    pub(crate) fn transfer_wait_background_owner_before_teardown(
+    /// Retire every wait-tracker entry owned by an unloading agent.
+    ///
+    /// Returns every retired source or wait call ID for outer tool cleanup.
+    pub(crate) fn discard_wait_owner_before_teardown(
         &mut self,
-        call_id: &ToolCallId,
-        source: &AgentId,
-        target: &AgentId,
-    ) {
-        self.subagents
-            .wait_tracker
-            .transfer_call_owner(call_id, source, target);
-    }
-
-    /// Drop wait ownership for a background call that belongs to a canceled
-    /// side agent so it cannot become waitable from its parent.
-    pub(crate) fn discard_wait_background_owner_before_teardown(
-        &mut self,
-        call_id: &ToolCallId,
-        source: &AgentId,
-    ) {
-        self.subagents
-            .wait_tracker
-            .discard_call_owner(call_id, source);
+        owner: &AgentId,
+    ) -> Vec<ToolCallId> {
+        self.subagents.wait_tracker.discard_owner(owner)
     }
 
     fn wait_owner_for_call(&self, call_id: &ToolCallId) -> Option<AgentId> {
