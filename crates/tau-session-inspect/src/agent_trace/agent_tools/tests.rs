@@ -406,6 +406,206 @@ fn projected_payload_transformations_match_json_and_toon() {
     }
 }
 
+/// Structured shell outcomes must come from raw canonical CBOR, preserve
+/// lifecycle status, and serialize identically in lite/full JSON and TOON.
+#[test]
+fn shell_outcome_preserves_lifecycle_and_encoding_parity() {
+    for mode in [
+        super::super::AgentTraceMode::Lite,
+        super::super::AgentTraceMode::Full,
+    ] {
+        let mut declared = declaration("agent-a", 1, 0, "shell-call");
+        let Event::ProviderResponseFinished(response) = &mut declared.event else {
+            panic!("declaration helper must create a provider finish");
+        };
+        let ContextItem::ToolCall(declared_call) = &mut response.output_items[0] else {
+            panic!("declaration helper must create a tool call");
+        };
+        declared_call.name = tau_proto::ToolName::new("shell_command");
+        let facts = vec![
+            declared,
+            fact(
+                "agent-a",
+                2,
+                1,
+                2,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(1),
+                    terminal: id(3),
+                    cause: tau_proto::ToolTerminalCause::Completed,
+                }),
+            ),
+            fact(
+                "agent-a",
+                3,
+                2,
+                3,
+                Event::ProviderToolResult(tau_proto::ToolResult {
+                    call_id: "shell-call".into(),
+                    tool_name: tau_proto::ToolName::new("gpt_shell"),
+                    tool_type: tau_proto::ToolType::Function,
+                    result: CborValue::Map(vec![
+                        (
+                            CborValue::Text("output".into()),
+                            CborValue::Text("status: 0".into()),
+                        ),
+                        (
+                            CborValue::Text("status".into()),
+                            CborValue::Integer(100.into()),
+                        ),
+                        (
+                            CborValue::Text("termination_reason".into()),
+                            CborValue::Text("exit".into()),
+                        ),
+                    ]),
+                    provider_content: Vec::new(),
+                    kind: tau_proto::ToolResultKind::Final,
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+            ),
+        ];
+        let records = project_facts(facts, mode).expect("projection");
+        let json = serde_json::to_value(&records[0]).expect("JSON record");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["shell_outcome"]["source"], "tool_result");
+        assert_eq!(json["shell_outcome"]["success"], false);
+        assert_eq!(json["shell_outcome"]["termination_reason"], "exit");
+        assert_eq!(json["shell_outcome"]["exit_code"], 100);
+        assert!(json["shell_outcome"].get("timed_out").is_none());
+
+        let agent_id = AgentId::parse("agent-a").expect("agent");
+        let header = Header {
+            schema: SCHEMA,
+            schema_version: 0,
+            record_type: "header",
+            root_agent_id: &agent_id,
+            included_agent_ids: vec![&agent_id],
+            content: mode.label(),
+            time_unit: "microseconds",
+            absolute_time: "unix_epoch_microseconds_at_journal_append_invocation",
+            timing_basis: "producer_wall_clock_at_observation",
+            causality: "explicit_observation_refs_only",
+        };
+        let mut encoded = Vec::new();
+        toon::write(&header, records, &mut encoded).expect("TOON");
+        let toon: serde_json::Value =
+            serde_toon::from_str(std::str::from_utf8(&encoded).expect("UTF-8")).expect("TOON");
+        assert_eq!(toon["items"][0]["shell_outcome"], json["shell_outcome"]);
+    }
+}
+
+/// Cancellation classification must suppress structured result details even
+/// when a same-call canonical terminal carries a coherent shell map.
+#[test]
+fn cancellation_never_projects_a_shell_outcome() {
+    let mut source = declaration("agent-a", 1, 0, "source");
+    let Event::ProviderResponseFinished(response) = &mut source.event else {
+        panic!("declaration helper must create a provider finish");
+    };
+    let ContextItem::ToolCall(call_item) = &mut response.output_items[0] else {
+        panic!("declaration helper must create a tool call");
+    };
+    call_item.name = tau_proto::ToolName::new("shell");
+    let records = project_facts(
+        vec![
+            source,
+            declaration("agent-a", 2, 1, "cancel"),
+            fact(
+                "agent-a",
+                3,
+                2,
+                3,
+                Event::AgentToolCancellationRequested(tau_proto::AgentToolCancellationRequested {
+                    cancel_call: call(2),
+                    target_call: call(1),
+                }),
+            ),
+            fact(
+                "agent-a",
+                4,
+                3,
+                4,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(1),
+                    terminal: id(5),
+                    cause: tau_proto::ToolTerminalCause::Cancellation { request: id(3) },
+                }),
+            ),
+            fact(
+                "agent-a",
+                5,
+                4,
+                5,
+                Event::ProviderToolResult(tau_proto::ToolResult {
+                    call_id: "source".into(),
+                    tool_name: tau_proto::ToolName::new("shell"),
+                    tool_type: tau_proto::ToolType::Function,
+                    result: CborValue::Map(vec![(
+                        CborValue::Text("status".into()),
+                        CborValue::Integer(0.into()),
+                    )]),
+                    provider_content: Vec::new(),
+                    kind: tau_proto::ToolResultKind::Final,
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+            ),
+        ],
+        super::super::AgentTraceMode::Lite,
+    )
+    .expect("cancelled projection");
+    let source = serde_json::to_value(&records[0]).expect("JSON");
+    assert_eq!(source["status"], "cancelled");
+    assert!(source.get("shell_outcome").is_none());
+}
+
+/// Lookalike structured fields from a non-shell declaration must not acquire
+/// shell-specific semantics.
+#[test]
+fn non_shell_calls_omit_shell_outcomes() {
+    let records = project_facts(
+        vec![
+            declaration("agent-a", 1, 0, "source"),
+            fact(
+                "agent-a",
+                2,
+                1,
+                2,
+                Event::AgentToolTerminalClassified(tau_proto::AgentToolTerminalClassified {
+                    call: call(1),
+                    terminal: id(3),
+                    cause: tau_proto::ToolTerminalCause::Completed,
+                }),
+            ),
+            fact(
+                "agent-a",
+                3,
+                2,
+                3,
+                Event::ProviderToolResult(tau_proto::ToolResult {
+                    call_id: "source".into(),
+                    tool_name: tau_proto::ToolName::new("test"),
+                    tool_type: tau_proto::ToolType::Function,
+                    result: CborValue::Map(vec![(
+                        CborValue::Text("status".into()),
+                        CborValue::Integer(0.into()),
+                    )]),
+                    provider_content: Vec::new(),
+                    kind: tau_proto::ToolResultKind::Final,
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+            ),
+        ],
+        super::super::AgentTraceMode::Lite,
+    )
+    .expect("non-shell projection");
+    let call = serde_json::to_value(&records[0]).expect("JSON");
+    assert_eq!(call["status"], "ok");
+    assert!(call.get("shell_outcome").is_none());
+}
+
 /// Completion delivery must leave payload ownership on the source terminal in
 /// both output modes and expose only an explicit wait reference.
 #[test]
@@ -1760,6 +1960,7 @@ fn toon_frames_control_bearing_payload_fields() {
                 terminal_resolution: LocalResolution::Resolved,
                 dispatch_to_terminal_us: None,
                 backgrounded_to_terminal_us: None,
+                shell_outcome: None,
                 output: CallOutputRecord::Full {
                     output: "result\u{1b}[0m".into(),
                     output_complete: CompleteOutput,
@@ -1782,6 +1983,7 @@ fn toon_frames_control_bearing_payload_fields() {
                 terminal_resolution: LocalResolution::Resolved,
                 dispatch_to_terminal_us: None,
                 backgrounded_to_terminal_us: None,
+                shell_outcome: None,
                 output: CallOutputRecord::Lite {
                     output_bytes: 12,
                     output_lines: 2,
@@ -1806,6 +2008,7 @@ fn toon_frames_control_bearing_payload_fields() {
                 terminal_resolution: LocalResolution::Resolved,
                 dispatch_to_terminal_us: None,
                 backgrounded_to_terminal_us: None,
+                shell_outcome: None,
                 output: CallOutputRecord::Full {
                     output: "line1\nline2".into(),
                     output_complete: CompleteOutput,

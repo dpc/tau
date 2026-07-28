@@ -84,5 +84,16 @@ Full mode retains complete content. The family rank order is `call`,
 `assistant_message`, `assistant_reasoning`, `message_sent`, `message_received`,
 `activation`, then `relationship`.
 
+Resolved `shell`, `shell_command`, and `gpt_shell` calls may additionally carry
+bounded `shell_outcome` metadata read only from the canonical terminal's raw
+structured result or error details. Its process success is independent of the
+call lifecycle `status`; malformed, unavailable, cancelled, or unresolved
+outcomes remain absent. Foreground and background terminals, JSON Lines and
+TOON, and lite and full modes use the same outcome semantics.
+The exact source mapping, accepted per-reason field matrix, legacy
+result-payload fallback, and malformed-data rejection contract are defined by
+the compact trace interface in
+[`docs/agent-trace.md`](../docs/agent-trace.md#compact-semantic-traces).
+
 The native `tau.agent_trace` JSON Lines occurrence includes its observation ID,
 journal identity, sequence, timestamp, source, parent, and lossless typed event.

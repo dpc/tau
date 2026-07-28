@@ -1,6 +1,7 @@
 //! Compact semantic timeline with explicit observation correlation.
 
 mod semantic;
+mod shell_outcome;
 mod toon;
 
 // Keep test-only modules after every production module.
@@ -14,6 +15,7 @@ use tau_core::{AgentJournalSnapshot, PersistedAgentEventSeq};
 use tau_proto::{AgentId, CborValue, ContextItem, Event, ObservationId, ToolCallRef, UnixMicros};
 
 use self::semantic::SemanticRecord;
+use self::shell_outcome::ShellOutcome;
 use crate::InspectError;
 
 const SCHEMA: &str = "tau.agent_trace_compact";
@@ -269,6 +271,9 @@ enum CallLifecycleRecord {
         /// Qualified background-to-terminal interval.
         #[serde(skip_serializing_if = "Option::is_none")]
         backgrounded_to_terminal_us: Option<u64>,
+        /// Authoritative structured process outcome for shell-family calls.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shell_outcome: Option<ShellOutcome>,
         /// Source-owned output representation.
         #[serde(flatten)]
         output: CallOutputRecord,
@@ -376,6 +381,8 @@ struct CallProjection {
     output: Option<String>,
     /// Whether rendered output is complete.
     output_complete: Option<bool>,
+    /// Authoritative structured process outcome for shell-family calls.
+    shell_outcome: Option<ShellOutcome>,
 }
 
 impl CallProjection {
@@ -424,6 +431,7 @@ impl CallProjection {
                     terminal_resolution: LocalResolution::Resolved,
                     dispatch_to_terminal_us: self.dispatch_to_terminal_us,
                     backgrounded_to_terminal_us: self.backgrounded_to_terminal_us,
+                    shell_outcome: self.shell_outcome,
                     output,
                 }
             }
@@ -895,6 +903,7 @@ fn project_keyed_facts(
             output_lines: None,
             output: None,
             output_complete: None,
+            shell_outcome: None,
         };
         if let Some(dispatch) = dispatch.get(&call_ref) {
             interval(&mut value.declaration_to_dispatch_us, declaration, dispatch);
@@ -944,6 +953,17 @@ fn project_keyed_facts(
                         && (!wait_calls.contains(&call_ref) || wait_owns_output)
                     {
                         add_owned_output(&mut value, &owner.event, mode);
+                    }
+                    if classification_fully_local
+                        && owner.agent_id == declaration.agent_id
+                        && is_shell_tool(&call.name)
+                        && matches!(
+                            terminal_event.cause,
+                            tau_proto::ToolTerminalCause::Completed
+                                | tau_proto::ToolTerminalCause::ToolError
+                        )
+                    {
+                        value.shell_outcome = ShellOutcome::from_terminal_event(&owner.event);
                     }
                 }
                 None => value.terminal_resolution = Some(Resolution::SourceNotSelected),
@@ -1989,7 +2009,7 @@ fn faithful_json(value: &CborValue) -> Option<serde_json::Value> {
     }
 }
 fn shell_command(tool: &tau_proto::ToolName, args: &CborValue) -> Option<String> {
-    if !matches!(tool.as_str(), "shell" | "shell_command" | "gpt_shell") {
+    if !is_shell_tool(tool) {
         return None;
     }
     let CborValue::Text(v) = tau_proto::cbor_field(args, "command")? else {
@@ -1997,6 +2017,11 @@ fn shell_command(tool: &tau_proto::ToolName, args: &CborValue) -> Option<String>
     };
     Some(v.clone())
 }
+
+fn is_shell_tool(tool: &tau_proto::ToolName) -> bool {
+    matches!(tool.as_str(), "shell" | "shell_command" | "gpt_shell")
+}
+
 fn render_error(message: &str, details: Option<&CborValue>) -> String {
     let mut r = tau_proto::ToolResponse::from_cbor(details.unwrap_or(&CborValue::Null));
     r.headers.insert(

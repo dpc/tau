@@ -198,6 +198,62 @@ Wait relationships report registration as `immediate`, `active`, or `unresolved`
 
 A canonical terminal owns normalized output exactly once. Lite mode emits its exact `output_bytes` and `output_lines` plus bounded output; full mode emits complete `output` (or TOON `output_base64` where required). A completion-delivering wait emits only `output_ref` and `envelope`, never copied payload or counts. JSONL and TOON preserve the same identities, lifecycle, wait outcomes, relationships, and ownership; only payload representation differs.
 
+Resolved calls declared as `shell`, `shell_command`, or `gpt_shell` include an
+optional `shell_outcome` only when their selected canonical terminal contains a
+coherent raw structured result. This object is identical in lite/full and
+JSONL/TOON:
+
+```json
+{
+  "source": "tool_result",
+  "success": false,
+  "termination_reason": "exit",
+  "exit_code": 100
+}
+```
+
+`source` is `tool_result` or `tool_error_details`; `termination_reason` is
+`exit`, `timeout`, `signal`, `start_error`, or explicitly recorded `unknown`.
+`exit_code` and `signal` are exact signed 32-bit integers when available, and
+`timed_out` appears only as `true`. `success` means a coherent normal exit with
+code zero. In particular, top-level `status: ok` means the virtual call reached
+a completed terminal and can coexist with `shell_outcome.success: false` for a
+nonzero exit, timeout, or signal. To select known failed shell processes use
+`select(.shell_outcome.success == false)`; handle cancelled and unavailable
+outcomes separately through lifecycle `status` and object absence.
+
+The projector never parses rendered output or display text. Cancellation,
+unresolved/source-not-selected terminals, synthetic background placeholders,
+malformed or contradictory maps, unavailable legacy fields, and non-shell
+calls omit the object. A legacy structured map with an exit `status` but no
+reason is treated as `exit` only for final foreground/background result
+payloads and only when the `termination_reason`, `timed_out`, and `signal` keys
+are all absent; error details never use this fallback. Missing data is never
+converted to `unknown`.
+
+The accepted field matrix is exact:
+
+- `exit` requires `exit_code` and forbids a signal or true timeout.
+- `timeout` requires `timed_out: true`; it preserves any recorded exit code or
+  signal.
+- `signal` requires `signal`, forbids a true timeout, and preserves a recorded
+  exit code.
+- `start_error` is accepted only from structured foreground/background tool
+  error details and preserves otherwise well-typed optional fields (the current
+  producer normally records no exit code, signal, or true timeout).
+- Explicit `unknown` is accepted as the producer's known classification,
+  preserving any otherwise well-typed exit code, signal, or true timeout; it is
+  never a malformed-data fallback.
+
+Final `ProviderToolResult` and `ToolBackgroundResult` payloads map to
+`source: tool_result`. `ProviderToolError` and `ToolBackgroundError` details map
+to `source: tool_error_details`. Wrong types, duplicate recognized text fields
+(`status`, `signal`, `timed_out`, or `termination_reason`), unknown reason
+strings, contradictory combinations, and integers outside signed 32-bit range
+omit the whole object without failing trace export. Unknown keys, including
+duplicates, are ignored because journal decoding has already erased some raw
+CBOR key distinctions and they cannot affect this projection.
+
 JSONL writes one header followed by independently parseable items. TOON writes
 the same header fields, then a strict `items[N]:` counted array in the same
 item order. Optional fields below are absent unless their stated evidence
@@ -230,6 +286,8 @@ call:
   call_id, tool, arguments, status
   [command] [terminal] [terminal_resolution] [cause]
   [output,output_complete] [output_bytes,output_lines]
+  [shell_outcome={source,success,termination_reason,
+                  [exit_code],[signal],[timed_out=true]}]
   [qualified *_us intervals]
 
 activation:

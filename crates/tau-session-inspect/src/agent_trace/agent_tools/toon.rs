@@ -263,6 +263,9 @@ enum ToonCallLifecycle {
         /// Qualified background-to-terminal interval.
         #[serde(skip_serializing_if = "Option::is_none")]
         backgrounded_to_terminal_us: Option<u64>,
+        /// Authoritative structured process outcome for shell-family calls.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shell_outcome: Option<super::ShellOutcome>,
         /// Mode-specific record-owned output.
         #[serde(flatten)]
         output: ToonCallOutput,
@@ -291,6 +294,7 @@ impl From<CallLifecycleRecord> for ToonCallLifecycle {
                 terminal_resolution,
                 dispatch_to_terminal_us,
                 backgrounded_to_terminal_us,
+                shell_outcome,
                 output,
             } => Self::Resolved {
                 status,
@@ -299,6 +303,7 @@ impl From<CallLifecycleRecord> for ToonCallLifecycle {
                 terminal_resolution,
                 dispatch_to_terminal_us,
                 backgrounded_to_terminal_us,
+                shell_outcome,
                 output: output.into(),
             },
         }

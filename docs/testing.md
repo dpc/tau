@@ -491,7 +491,12 @@ Compact semantic coverage additionally checks explicit observation identities,
 selected-cut unresolved references, globally sorted absolute/relative journal
 timing, provider item order, semantic prose/reasoning selection, both explicit
 message directions, crash-tail incompleteness, source-owned output, bounded lite
-content, complete full content, and faithful tagged-CBOR fallback. Runtime tests
+content, complete full content, and faithful tagged-CBOR fallback. Structured
+shell-outcome coverage enforces the exact raw-CBOR field/coherence matrix from
+[`SPEC-durable-tool-observation-correlation`](../specs/SPEC-durable-tool-observation-correlation.md),
+canonical foreground/background result and error ownership, cancellation/
+placeholder/unresolved/non-shell omission, lifecycle-status independence, and
+lite/full JSONL/TOON parity. Runtime tests
 separately cover call-ID reuse and background completion correlation. TOON
 coverage strictly decodes the counted item document, protects multiline/control
 escaping and field-level Base64 framing, and compares its semantics with
