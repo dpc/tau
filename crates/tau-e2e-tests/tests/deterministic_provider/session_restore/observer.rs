@@ -283,6 +283,26 @@ impl SessionRestoreObserver {
         self.wait_for_idle_agent_count(2)
     }
 
+    /// Wait until one live creation fact names the requested role.
+    pub(super) fn wait_for_agent_role(
+        &mut self,
+        role: &str,
+    ) -> Result<tau_proto::AgentId, Box<dyn std::error::Error>> {
+        let mut next = 0;
+        loop {
+            while let Some(observed) = self.events.get(next) {
+                next += 1;
+                if let Event::AgentStarted(started) = &observed.event
+                    && !observed.replay
+                    && started.role == role
+                {
+                    return Ok(started.agent_id.clone());
+                }
+            }
+            self.recv_one()?;
+        }
+    }
+
     /// Waits until exactly `expected` distinct agents' latest complete stats
     /// are idle and empty.
     pub(super) fn wait_for_idle_agent_count(

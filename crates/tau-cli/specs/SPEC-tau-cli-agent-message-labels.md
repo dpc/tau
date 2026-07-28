@@ -68,16 +68,16 @@ input to the selected existing agent makes that exact target `active` for
 subsequent navigation; complete harness stats, not the local prompt event, update
 the CLI cache.
 
-Execution state (`running` or `waiting`) describes the outer agent turn from
-activating input until the final response or termination returns control. It
-includes inner model and tool rounds. Each directed watch edge retains its own
-authority: structured watched-agent turn state is authoritative once received,
-while prompt/provider lifecycle is only a compatibility fallback before that
-edge's first snapshot. Stats add details but do not establish execution.
+Current CLI activity comes from the latest watched-agent `TurnState` record
+cached on each directed watch edge. `Running` renders as active and `Idle` does
+not. Before an edge receives its first `TurnState`, active prompt tracking for
+the target is the edge-local compatibility/catch-up fallback. The CLI does not
+yet consume structured `WorkStatus`; semantic status migration belongs to a
+later explicitly approved client change.
 
 The CLI derives recursive activity exactly over the current live watch DAG. A
-direct target whose edge is running renders as `running [name] @id`. An otherwise
-idle edge whose target watches an effective descendant renders as
+direct target whose edge reports Running renders as `running [name] @id`. An otherwise
+non-Running edge whose target watches an effective descendant renders as
 `watching [name] @id -> @witness`, where the witness is the nearest directly
 running descendant and equal-depth candidates use stable agent-id order. Direct
 activity wins when both apply. Rows remain ordered by stable target id, and the

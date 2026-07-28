@@ -764,7 +764,7 @@ impl Harness {
                 );
             }
             self.publish_agent_watches_snapshot(watcher_id, Some(watched_agent_id), cause);
-            self.notify_agent_watcher_turn_state(watcher_id, watched_agent_id, true);
+            self.notify_agent_watcher_work_status(watcher_id, watched_agent_id, true);
             if let Some(status) = self
                 .agent_watch_provider_status
                 .get(watched_agent_id)
@@ -924,18 +924,38 @@ impl Harness {
         );
     }
 
-    /// Deliver one structured current/transition outer agent-turn state to a
-    /// watcher.
-    pub(crate) fn notify_agent_watcher_turn_state(
+    /// Apply one canonical report and fan out its typed live transition.
+    pub(crate) fn report_agent_work_status(
+        &mut self,
+        conversation_id: &AgentId,
+        report: crate::WorkStatusReport,
+    ) -> Result<bool, String> {
+        let (changed, watched_agent_id) = {
+            let Some(agent) = self.agents.get_mut(conversation_id) else {
+                return Err("status caller is no longer loaded".to_owned());
+            };
+            let current = &mut agent.work_status;
+            if !current.report(report) {
+                return Ok(false);
+            }
+            (true, agent.agent_id.clone())
+        };
+        if let Some(watched_agent_id) = watched_agent_id {
+            for watcher_id in self.watchers_for_agent(&watched_agent_id) {
+                self.notify_agent_watcher_work_status(&watcher_id, &watched_agent_id, false);
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Deliver one typed current or live work-status projection.
+    pub(crate) fn notify_agent_watcher_work_status(
         &mut self,
         watcher_id: &str,
         watched_agent_id: &str,
         initial: bool,
     ) {
-        if self.agent_message_recipient_status(watcher_id) != AgentMessageRecipientStatus::Live
-            || self.agent_message_recipient_status(watched_agent_id)
-                != AgentMessageRecipientStatus::Live
-        {
+        if self.agent_message_recipient_status(watcher_id) != AgentMessageRecipientStatus::Live {
             return;
         }
         let Some(subscription_id) = self
@@ -945,47 +965,33 @@ impl Harness {
         else {
             return;
         };
-        let (state, turn_generation) = self
+        let status = self
             .agent_routes
             .get(watched_agent_id)
             .and_then(|cid| self.agents.get(cid))
-            .map(|agent| (agent.published_runtime_state, agent.turn_generation))
-            .unwrap_or((tau_proto::AgentRuntimeState::Idle, 0));
+            .map(|agent| agent.work_status.clone())
+            .unwrap_or_default();
         let sender_id = crate::parse_agent_id(watched_agent_id);
-        let message_id = next_agent_message_id(&sender_id);
-        let message = match (initial, state) {
-            (true, tau_proto::AgentRuntimeState::Running) => format!(
-                "[tau-internal]: Watched agent {watched_agent_id} is currently running an agent turn (initial watch state)"
-            ),
-            (true, tau_proto::AgentRuntimeState::Idle) => format!(
-                "[tau-internal]: Watched agent {watched_agent_id} is not currently running an agent turn (initial watch state)"
-            ),
-            (false, tau_proto::AgentRuntimeState::Running) => {
-                format!("[tau-internal]: Watched agent {watched_agent_id} started an agent turn")
-            }
-            (false, tau_proto::AgentRuntimeState::Idle) => {
-                format!("[tau-internal]: Watched agent {watched_agent_id} stopped its agent turn")
-            }
-        };
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::AgentMessageReceived(AgentMessageReceived {
-                message_id,
+                message_id: next_agent_message_id(&sender_id),
                 sender_id,
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(watcher_id),
-                kind: tau_proto::AgentMessageKind::WatchTurnState,
-                watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+                kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+                watch_turn_state: None,
+                watch_provider_status: None,
+                watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                     session_id: self.current_session_id.clone(),
                     subscription_id,
-                    state,
+                    status_epoch: status.epoch(),
+                    phase: status.phase(),
+                    title: status.title().map(ToOwned::to_owned),
                     initial,
-                    turn_generation,
                 }),
-                watch_provider_status: None,
-                watch_work_status: None,
                 watch_long_wait: None,
-                message,
+                message: String::new(),
             }),
         );
     }

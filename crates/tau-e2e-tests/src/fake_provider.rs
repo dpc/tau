@@ -136,25 +136,19 @@ enum WatchCausalChain {
     Complete,
 }
 
-/// One semantic fact in the two independent watch chains.
+/// One semantic fact in the direct watch content chain.
 enum WatchChainFact {
     /// Direct user prompt.
     Prompt,
     /// Final child response.
     Response,
-    /// Outer turn entered running.
-    Running,
-    /// Outer turn returned idle.
-    Idle,
 }
 
-/// Admission state for two independent causal watch-notification chains.
+/// Admission state for the prompt-before-response watch-notification chain.
 #[derive(Clone, Copy, Default)]
 struct WatchChainProgress {
     /// Prompt-before-response chain.
     prompt_response: WatchCausalChain,
-    /// Running-before-idle chain.
-    running_idle: WatchCausalChain,
 }
 
 impl WatchChainProgress {
@@ -173,43 +167,23 @@ impl WatchChainProgress {
                 self.prompt_response = WatchCausalChain::Complete;
                 Ok(WatchChainFact::Response)
             }
-            tau_proto::AgentMessageKind::WatchTurnState => {
-                match (
-                    message.watch_turn_state.as_ref().map(|state| state.state),
-                    self.running_idle,
-                ) {
-                    (Some(tau_proto::AgentRuntimeState::Running), WatchCausalChain::Pending) => {
-                        self.running_idle = WatchCausalChain::PredecessorSeen;
-                        Ok(WatchChainFact::Running)
-                    }
-                    (
-                        Some(tau_proto::AgentRuntimeState::Idle),
-                        WatchCausalChain::PredecessorSeen,
-                    ) => {
-                        self.running_idle = WatchCausalChain::Complete;
-                        Ok(WatchChainFact::Idle)
-                    }
-                    _ => Err("watch turn-state chain duplicated or inverted"),
-                }
-            }
             _ => Err("watch prompt/response chain duplicated or inverted"),
         }
     }
 
-    /// Returns whether both independent chains admitted both facts.
+    /// Returns whether the content chain admitted both facts.
     fn is_complete(self) -> bool {
         matches!(self.prompt_response, WatchCausalChain::Complete)
-            && matches!(self.running_idle, WatchCausalChain::Complete)
     }
 }
 
-/// Configured text for one closed two-chain watch action.
+/// Configured text for one closed content-chain watch action.
 struct WatchChainContents {
     /// Expected direct user prompt.
     prompt: String,
     /// Expected final child response.
     response: String,
-    /// Main-agent response after all four facts.
+    /// Main-agent response after both facts.
     completion: String,
 }
 
@@ -596,10 +570,8 @@ impl FakeState {
                         Some(match fact {
                             WatchChainFact::Prompt => prompt.clone(),
                             WatchChainFact::Response => response.clone(),
-                            _ => unreachable!("content-bearing fact changed"),
                         })
                     }
-                    WatchChainFact::Running | WatchChainFact::Idle => None,
                 };
                 let expected = match fact {
                     WatchChainFact::Prompt => WatchNotificationV2::Prompt {
@@ -607,12 +579,6 @@ impl FakeState {
                     },
                     WatchChainFact::Response => WatchNotificationV2::Response {
                         content: configured_content.expect("response content selected"),
-                    },
-                    WatchChainFact::Running => WatchNotificationV2::TurnState {
-                        state: tau_proto::AgentRuntimeState::Running,
-                    },
-                    WatchChainFact::Idle => WatchNotificationV2::TurnState {
-                        state: tau_proto::AgentRuntimeState::Idle,
                     },
                 };
                 (expected, Some(progress))
@@ -779,7 +745,7 @@ impl FakeState {
         let Some(next_progress) = progress.checked_add(actual.len()) else {
             return Err(self.mismatch(cursor, "watch chain progress overflow"));
         };
-        if actual.is_empty() || 4 < next_progress {
+        if actual.is_empty() || 2 < next_progress {
             return Err(self.mismatch(cursor, "watch chain is over-consumed"));
         }
         let expected = actual
@@ -821,13 +787,13 @@ impl FakeState {
                 originator: prompt.originator.clone(),
             },
         ))?;
-        let terminal_response = if next_progress == 4 {
+        let terminal_response = if next_progress == 2 {
             let admitted = self
                 .watch_chain_progress
                 .remove(&prompt.agent_id)
                 .unwrap_or_default();
             if !admitted.is_complete() {
-                return Err(self.mismatch(cursor, "watch chains completed without all four facts"));
+                return Err(self.mismatch(cursor, "watch chain completed without both facts"));
             }
             self.watch_progress.remove(&prompt.agent_id);
             self.watch_turn_correlations.remove(&prompt.agent_id);

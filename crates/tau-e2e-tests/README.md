@@ -64,7 +64,7 @@ the completed durable worker as an idle independently addressable
 conversation, and proves the old automatic watch does not re-fan out fresh
 worker activity. A separate fresh fixture recreates the watch through production
 `agent_watch`, proves the initial snapshot is non-model, and correlates one
-direct worker turn's prompt/running/response/idle facts to the new subscription.
+direct worker turn's initial work-status, prompt, and response facts to the new subscription.
 A third fixture adds a promptless ephemeral worker through `UiCreateAgent`, then
 seeds a valid durable worker load/unload history while the stores are unowned.
 Cold resume restores only the two current durable routes, reports the seeded

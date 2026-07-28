@@ -1504,6 +1504,8 @@ fn validate_event_rejects_noncanonical_work_status_title_shape() {
         "title ".to_owned(),
         "two\nlines".to_owned(),
         "control\u{7}".to_owned(),
+        "line\u{2028}separator".to_owned(),
+        "paragraph\u{2029}separator".to_owned(),
         "x".repeat(161),
     ] {
         assert_eq!(

@@ -17,6 +17,7 @@ mod ui_liveness;
 use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
 use crate::harness::interception::AgentPublishCompletion;
+use crate::harness::working_final::WorkingFinalDisposition;
 use crate::harness::{PendingTool, background_completion_prompt};
 
 /// Construct one authenticated-provenance report for ordinary extension
@@ -70,6 +71,286 @@ fn clear_interception_fixture_models(h: &mut Harness) {
         .expect("quiet provider")
         .to_owned();
     h.set_provider_models(&crate::test_connection_id(&provider_id), Vec::new());
+}
+
+/// A must-pass challenged final cannot be dropped after interception; its
+/// reminder starts only after the candidate commits.
+#[test]
+fn challenged_working_final_drop_is_overridden_until_post_commit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "intercepted final".to_owned(),
+        )
+        .expect("valid report"),
+    )
+    .expect("working");
+    let prompt_id =
+        tau_proto::AgentPromptId::parse("working-final-drop").expect("known-safe prompt id");
+    seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
+    h.prompt_agents.insert(prompt_id.clone(), cid.clone());
+    let interceptor = connect_test_tool(&mut h, "working-final-drop-owner");
+    h.handle_extension_event(
+        "working-final-drop-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_provider_response_finished(provider_text_response(&prompt_id, agent_id, "candidate"))
+        .expect("park candidate");
+    let _ = intercepted_payload(&interceptor);
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+
+    h.handle_extension_event(
+        "working-final-drop-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop is overridden");
+    assert!(matches!(
+        h.agents[&cid].turn_state,
+        AgentTurnState::AgentThinking { .. }
+    ));
+    h.shutdown().expect("shutdown");
+}
+
+/// A delayed interceptor release cannot append a Root-owned Working final below
+/// a child selected while the provider response was parked.
+#[test]
+fn delayed_working_final_release_retains_exact_root_parent() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderResponseFinished(provider_text_response(
+            &tau_proto::AgentPromptId::parse("delayed-parent-child").expect("known-safe prompt id"),
+            agent_id.clone(),
+            "pre-existing child",
+        )),
+    );
+    let child = h.agents[&cid].head.expect("pre-existing child");
+    h.agents.get_mut(&cid).expect("agent").head = None;
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "delayed parent".to_owned(),
+        )
+        .expect("valid report"),
+    )
+    .expect("working");
+    let prompt_id =
+        tau_proto::AgentPromptId::parse("delayed-parent-final").expect("known-safe prompt id");
+    seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
+    h.prompt_agents.insert(prompt_id.clone(), cid.clone());
+    let interceptor = connect_test_tool(&mut h, "delayed-parent-owner");
+    h.handle_extension_event(
+        "delayed-parent-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.handle_provider_response_finished(provider_text_response(&prompt_id, agent_id, "candidate"))
+        .expect("park candidate");
+    let (parked, _) = intercepted_payload(&interceptor);
+    h.agents.get_mut(&cid).expect("agent").head = Some(child);
+    h.handle_extension_event(
+        "delayed-parent-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(parked))),
+        })),
+    )
+    .expect("release candidate");
+
+    assert!(h.pending_agent_publish_completions.contains_key(&cid));
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+            .count(),
+        1,
+        "the parked candidate must not commit below the selected child"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Append failure retains the exact challenged response owner without queuing a
+/// reminder, and ordinary extension progress retries it after storage recovers.
+#[test]
+fn challenged_working_final_append_failure_retains_retry_owner() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut h = echo_harness(&state_dir).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "append retry".to_owned(),
+        )
+        .expect("valid report"),
+    )
+    .expect("working");
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderResponseFinished(provider_text_response(
+            &tau_proto::AgentPromptId::parse("working-final-prelude")
+                .expect("known-safe prompt id"),
+            agent_id.clone(),
+            "owning branch",
+        )),
+    );
+    let prompt_id =
+        tau_proto::AgentPromptId::parse("working-final-append").expect("known-safe prompt id");
+    seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
+    let owning_head = h.agents[&cid]
+        .head
+        .map(tau_proto::AgentHead::Node)
+        .unwrap_or(tau_proto::AgentHead::Root);
+    h.prompt_agents.insert(prompt_id.clone(), cid.clone());
+    let interceptor = connect_test_tool(&mut h, "working-final-append-owner");
+    h.handle_extension_event(
+        "working-final-append-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_provider_response_finished(provider_text_response(
+        &prompt_id,
+        agent_id.clone(),
+        "candidate",
+    ))
+    .expect("park candidate");
+    let (parked, _) = intercepted_payload(&interceptor);
+    let journal_path = state_dir
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let backup_path = journal_path.with_extension("cbor.working-final-backup");
+    std::fs::rename(&journal_path, &backup_path).expect("park journal");
+    std::fs::create_dir(&journal_path).expect("reject append");
+    h.handle_extension_event(
+        "working-final-append-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(parked))),
+        })),
+    )
+    .expect("release into append failure");
+    assert!(h.pending_agent_publish_completions.contains_key(&cid));
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+
+    std::fs::remove_dir(&journal_path).expect("remove append blocker");
+    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
+    h.agents.get_mut(&cid).expect("agent").head = None;
+    h.handle_extension_event(
+        "working-final-append-owner",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: Vec::new(),
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("off-branch runtime progress");
+    assert!(
+        h.pending_agent_publish_completions.contains_key(&cid),
+        "off-branch progress must retain the original response"
+    );
+    h.agents.get_mut(&cid).expect("agent").head = owning_head.as_option();
+    h.handle_extension_event(
+        "working-final-append-owner",
+        TestProtocolItem::Message(TestMessage::ConfigError(tau_proto::ConfigError {
+            message: "progress probe".to_owned(),
+        })),
+    )
+    .expect("owning-branch runtime progress retries retained append");
+    assert!(!h.pending_agent_publish_completions.contains_key(&cid));
+    assert!(matches!(
+        h.agents[&cid].turn_state,
+        AgentTurnState::AgentThinking { .. }
+    ));
+    h.shutdown().expect("shutdown");
+}
+
+/// Retained Working finals require the exact captured parent: Root does not
+/// admit a later child, and a captured node does not admit a later descendant.
+#[test]
+fn retained_working_final_rejects_root_and_descendant_head_drift() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    let make_completion = |batch_parent, suffix: &str| AgentPublishCompletion::WorkingFinal {
+        agent_prompt_id: tau_proto::AgentPromptId::parse(format!("retained-{suffix}"))
+            .expect("known-safe prompt id"),
+        batch_parent,
+        disposition: WorkingFinalDisposition::Challenge {
+            title: "exact parent".to_owned(),
+        },
+        retry_event: Some(Box::new(Event::ProviderResponseFinished(
+            provider_text_response(
+                &tau_proto::AgentPromptId::parse(format!("retry-{suffix}"))
+                    .expect("known-safe prompt id"),
+                agent_id.clone(),
+                "candidate",
+            ),
+        ))),
+    };
+    let publish_child = |h: &mut Harness, suffix: &str| {
+        h.publish_for_agent(
+            &cid,
+            Event::ProviderResponseFinished(provider_text_response(
+                &tau_proto::AgentPromptId::parse(format!("child-{suffix}"))
+                    .expect("known-safe prompt id"),
+                agent_id.clone(),
+                suffix,
+            )),
+        );
+    };
+
+    assert_eq!(
+        h.selected_head_for_agent(&cid),
+        Some(tau_proto::AgentHead::Root)
+    );
+    h.pending_agent_publish_completions.insert(
+        cid.clone(),
+        make_completion(tau_proto::AgentHead::Root, "root"),
+    );
+    publish_child(&mut h, "after-root");
+    h.retry_pending_agent_publish_completion(&cid);
+    assert!(h.pending_agent_publish_completions.contains_key(&cid));
+
+    h.pending_agent_publish_completions.remove(&cid);
+    let captured = h.selected_head_for_agent(&cid).expect("captured child");
+    h.pending_agent_publish_completions
+        .insert(cid.clone(), make_completion(captured, "descendant"));
+    publish_child(&mut h, "later-descendant");
+    h.retry_pending_agent_publish_completion(&cid);
+    assert!(h.pending_agent_publish_completions.contains_key(&cid));
+    h.shutdown().expect("shutdown");
 }
 
 /// Collect committed model declaration/state events with their delivery source.

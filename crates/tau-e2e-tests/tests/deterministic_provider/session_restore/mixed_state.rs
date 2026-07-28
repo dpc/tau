@@ -36,9 +36,9 @@ const REPAIR_CONTINUATION: &str = "Continue the mixed-state repaired tool round.
 const REPAIR_MARKER: &str = "mixed-state interrupted tool repaired";
 const HOLD_TIMEOUT_MS: u64 = 10_000;
 const TOOL_CALL_ID: &str = "s7-interrupted-tool";
-const BOOT_A_CURSORS: [usize; 4] = [6, 1, 1, 1];
-const COMPLETE_CURSORS: [usize; 4] = [6, 1, 1, 2];
-const SCENARIO_BYTES: usize = 2_445;
+const BOOT_A_CURSORS: [usize; 4] = [5, 1, 1, 1];
+const COMPLETE_CURSORS: [usize; 4] = [5, 1, 1, 2];
+const SCENARIO_BYTES: usize = 2_223;
 const MAX_CHECKPOINT_BYTES: usize = 64 * 1024;
 
 /// Decoded fake-provider checkpoint used to prove all four immutable lane
@@ -158,7 +158,8 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
         "s7-start-uncertain",
         "start the dispatch-uncertain deterministic worker",
     )?;
-    observer_a.wait_for_marker("dispatch-uncertain worker running observed")?;
+    observer_a.wait_for_agent_role(UNCERTAIN_ROLE)?;
+    observer_a.wait_for_marker("dispatch-uncertain worker start accepted")?;
     let uncertain = sole_live_agent_for_role(&observer_a.events, UNCERTAIN_ROLE)?;
     let dispatch = interruption::wait_for_worker_dispatch(&mut observer_a, &uncertain)?;
     let durable_dispatch =
@@ -191,15 +192,15 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
         &provider_budget(
             &identities,
             S7ProviderTurnCounts {
-                main: 8,
+                main: 5,
                 quiescent: 1,
                 uncertain: 1,
                 repair: 1,
             },
         ),
     )?;
-    if matched_action_count(&fixture)? != 9 {
-        return Err("S7 Boot A did not stop at the exact nine-action crash cut".into());
+    if matched_action_count(&fixture)? != 8 {
+        return Err("S7 Boot A did not stop at the exact eight-action crash cut".into());
     }
     assert_fake_checkpoint(&fixture, &scenario, &identities, BOOT_A_CURSORS)?;
     interruption::assert_hold_ready_and_live(&fixture, &dispatch.agent_prompt_id)?;
@@ -236,7 +237,7 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
         &observer_b.events,
         &provider_budget(&identities, S7ProviderTurnCounts::ZERO),
     )?;
-    if matched_action_count(&fixture)? != 9 {
+    if matched_action_count(&fixture)? != 8 {
         return Err("S7 Boot B consumed fake work while restoring mixed state".into());
     }
     assert_fake_checkpoint(&fixture, &scenario, &identities, BOOT_A_CURSORS)?;
@@ -276,7 +277,7 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
         &observer_c.events,
         &provider_budget(&identities, S7ProviderTurnCounts::ZERO),
     )?;
-    if matched_action_count(&fixture)? != 9 {
+    if matched_action_count(&fixture)? != 8 {
         return Err("S7 Boot C consumed fake work without user input".into());
     }
     assert_fake_checkpoint(&fixture, &scenario, &identities, BOOT_A_CURSORS)?;
@@ -308,7 +309,7 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
             },
         ),
     )?;
-    if matched_action_count(&fixture)? != 10 {
+    if matched_action_count(&fixture)? != 9 {
         return Err("S7 repair continuation did not consume exactly its own final action".into());
     }
     assert_fake_checkpoint(&fixture, &scenario, &identities, COMPLETE_CURSORS)?;
@@ -357,17 +358,9 @@ fn mixed_state_scenario(diagnostic: &str) -> ScenarioV2 {
                         response: "quiescent worker start accepted".to_owned(),
                     },
                     ScenarioActionV2::WatchNotifications {
-                        notifications: vec![
-                            WatchNotificationV2::TurnState {
-                                state: AgentRuntimeState::Running,
-                            },
-                            WatchNotificationV2::Response {
-                                content: "quiescent worker complete".to_owned(),
-                            },
-                            WatchNotificationV2::TurnState {
-                                state: AgentRuntimeState::Idle,
-                            },
-                        ],
+                        notifications: vec![WatchNotificationV2::Response {
+                            content: "quiescent worker complete".to_owned(),
+                        }],
                         response: "quiescent worker completion observed".to_owned(),
                     },
                     ScenarioActionV2::AgentStartCall {
@@ -381,12 +374,6 @@ fn mixed_state_scenario(diagnostic: &str) -> ScenarioV2 {
                         user_text: "start the dispatch-uncertain deterministic worker".to_owned(),
                         call_id: "s7-start-uncertain".into(),
                         response: "dispatch-uncertain worker start accepted".to_owned(),
-                    },
-                    ScenarioActionV2::WatchNotifications {
-                        notifications: vec![WatchNotificationV2::TurnState {
-                            state: AgentRuntimeState::Running,
-                        }],
-                        response: "dispatch-uncertain worker running observed".to_owned(),
                     },
                 ],
             },

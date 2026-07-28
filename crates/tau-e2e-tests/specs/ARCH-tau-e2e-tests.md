@@ -56,8 +56,7 @@ restore, durable projection, and headless shutdown. Its two-agent restore gate
 also proves that one completed production-started durable worker remains
 addressable with its own transcript and route while the daemon-lifetime
 automatic watch is dropped. S2 explicitly recreates that watch after resume and
-proves one fresh subscription's exact initial, prompt, running, response, and
-idle facts without treating the initial snapshot as model work. S3 composes the
+proves one fresh subscription's exact initial work-status, prompt, and response facts without treating the initial snapshot as model work. S3 composes the
 same current durable pair with one valid unloaded durable history member while
 proving a same-daemon ephemeral agent leaves no cold-restored transcript,
 membership, route, or replay boundary. S4 restores a three-member durable

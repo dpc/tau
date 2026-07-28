@@ -30,10 +30,11 @@ fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std
         .iter()
         .map(|lane| lane.actions.len())
         .collect::<Vec<_>>();
-    if action_counts != [6, 2, 2] || serde_json::to_vec(&scenario)?.len() != 1_911 {
+    let encoded_bytes = serde_json::to_vec(&scenario)?.len();
+    if action_counts != [6, 2, 2] || encoded_bytes != 1_757 {
         return Err(format!(
             "S4 scenario no longer matches its three-lane [6, 2, 2]-action, \
-             1,911-byte budget: {action_counts:?}"
+             1,757-byte budget: actions={action_counts:?}, bytes={encoded_bytes}"
         )
         .into());
     }
@@ -63,7 +64,7 @@ fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std
     assert_provider_turn_counts_by_agent(
         &observer_a.events,
         &BTreeMap::from([
-            (identities.main.clone(), 8),
+            (identities.main.clone(), 6),
             (identities.alpha.clone(), 1),
             (identities.beta.clone(), 1),
         ]),
@@ -182,17 +183,9 @@ fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std
 
 fn s4_scenario() -> ScenarioV2 {
     let watch = |content: &str, response: &str| ScenarioActionV2::WatchNotifications {
-        notifications: vec![
-            WatchNotificationV2::TurnState {
-                state: AgentRuntimeState::Running,
-            },
-            WatchNotificationV2::Response {
-                content: content.to_owned(),
-            },
-            WatchNotificationV2::TurnState {
-                state: AgentRuntimeState::Idle,
-            },
-        ],
+        notifications: vec![WatchNotificationV2::Response {
+            content: content.to_owned(),
+        }],
         response: response.to_owned(),
     };
     ScenarioV2::new(

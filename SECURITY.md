@@ -208,6 +208,14 @@ Work-status titles are model-authored cross-agent content, not trusted routing
 or instruction data. The harness keeps their typed phase and epoch separate and
 applies visible trusted-frame escaping before prompt interpolation. Long-wait
 notifications contain only harness-derived numeric thresholds.
+Only the model-owned, policy-authorized `status` call may mutate its calling
+agent. Configured extensions cannot invoke it directly or select a target agent.
+The harness validates the closed phase and canonical 160-byte, single-line title
+at both tool and durable boundaries. A challenged successful response becomes
+watchable or completes delegated work only after its semantic append and bounded
+challenge lifecycle; append failure, interception rejection, unload, and session
+rollover release that runtime ownership. Revisit these invariants whenever
+internal-tool ownership, response interception, or agent teardown changes.
 
 ## Prompt capability authority
 

@@ -83,8 +83,9 @@ prompt text:
   `<tau_peer_message>` envelope and stable typed sender session/agent identity;
 - `WatchResponse` and `WatchPrompt` retain separate sender-labelled typed
   wrappers and replace only their own exact closing sentinel in each body;
-- structured turn, provider, work-status, and long-wait kinds render wording reconstructed
-  from their structured state.
+- current provider and work-status kinds render wording reconstructed from their
+  structured state; legacy turn and long-wait kinds do so only on compatibility
+  replay.
 
 Display names remain UI-only. Peer bodies remain agent-authored model input, not
 harness instructions. Model-authored work titles receive trusted-frame visible
@@ -121,12 +122,12 @@ the original start owner or tearing the endpoint down.
 Activation classes are:
 
 - ordinary agent input for `Message`, `WatchResponse`, and `WatchPrompt`;
-- isolated lifecycle/provider-watch input for noninitial model-visible
-  turn, provider, work-status, and long-wait projections; and
+- isolated provider/work-status watch input for noninitial model-visible
+  provider and work-status projections; and
 - no activation for initial or redundant structured watch snapshots.
 
-Explicit message intake never becomes watch-prompt fanout. Isolated lifecycle
-turns retain watch-cascade suppression.
+Explicit message intake never becomes watch-prompt fanout. Legacy lifecycle
+records are replay-only; isolated current watch turns retain cascade suppression.
 
 ## Checkpoints, branches, and compaction
 

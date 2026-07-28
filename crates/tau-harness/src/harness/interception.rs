@@ -265,6 +265,18 @@ impl ConversationHeadSync {
 /// Harness-owned continuation bound to one exact agent publication envelope.
 #[derive(Clone)]
 pub(crate) enum AgentPublishCompletion {
+    /// Apply one Working final disposition only after its durable append
+    /// commits.
+    WorkingFinal {
+        /// Prompt identity of the durable candidate response.
+        agent_prompt_id: tau_proto::AgentPromptId,
+        /// Selected transcript head that owned the provider response.
+        batch_parent: tau_proto::AgentHead,
+        /// Exact post-commit terminal or continuation behavior.
+        disposition: super::working_final::WorkingFinalDisposition,
+        /// Exact interceptor-approved event retained after append rejection.
+        retry_event: Option<Box<Event>>,
+    },
     /// Resume the successful standalone compaction after the final steer in its
     /// completion batch commits.
     StandaloneContinuation {
@@ -284,15 +296,19 @@ pub(crate) enum AgentPublishCompletion {
         complete_on_commit: bool,
         /// Exact interceptor-approved steer retained after persistence
         /// rejection.
-        approved_retry_event: Option<Event>,
+        approved_retry_event: Option<Box<Event>>,
     },
 }
 
 impl AgentPublishCompletion {
     /// Return the durable transaction shared by every member of this batch.
     fn transaction_id(&self) -> &tau_proto::CompactionTransactionId {
-        let Self::StandaloneContinuation { transaction_id, .. } = self;
-        transaction_id
+        match self {
+            Self::StandaloneContinuation { transaction_id, .. } => transaction_id,
+            Self::WorkingFinal { .. } => {
+                unreachable!("working finals do not own compaction transactions")
+            }
+        }
     }
 }
 
@@ -876,6 +892,7 @@ impl Harness {
             AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
                 .first()
                 .is_some_and(crate::agent::PendingPrompt::should_notify_watchers),
+            AgentPublishCompletion::WorkingFinal { .. } => false,
         };
         let agent_id = self.agent_id_for_event(&event).or_else(|| {
             self.agents
@@ -1226,7 +1243,7 @@ impl Harness {
     }
 
     /// Returns the runtime-selected durable head for one loaded agent.
-    fn selected_head_for_agent(&self, cid: &AgentId) -> Option<tau_proto::AgentHead> {
+    pub(super) fn selected_head_for_agent(&self, cid: &AgentId) -> Option<tau_proto::AgentHead> {
         self.agents.get(cid).map(|agent| {
             agent
                 .head

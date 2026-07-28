@@ -94,6 +94,12 @@ semantic session or agent history. See
 [SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
 
 This component implements the harness-owned parts of [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md), [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md), and [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
+The harness owns runtime-only semantic work status for each loaded agent and
+projects validated reports durably to current watchers. Successful no-tool
+responses while Working remain durable assistant transcript entries but withhold
+watch, worker-result, and detach projections until their append commits and the
+bounded same-outer-turn challenge completes. Unsuccessful terminals instead
+invalidate Working to Unknown without a challenge.
 
 ## Tool-surface and extension-instance ownership
 

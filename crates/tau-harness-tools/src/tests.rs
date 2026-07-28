@@ -1,5 +1,60 @@
 use super::*;
 
+/// The status parser accepts only the closed state set and canonicalizes
+/// titles.
+#[test]
+fn status_arguments_are_closed_and_canonical() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("state".to_owned()),
+            CborValue::Text("working".to_owned()),
+        ),
+        (
+            CborValue::Text("title".to_owned()),
+            CborValue::Text("  trace lifecycle  ".to_owned()),
+        ),
+    ]);
+    let report = parse_status_args(&args).expect("valid status arguments");
+    assert_eq!(report.phase(), tau_proto::AgentWorkStatusPhase::Working);
+    assert_eq!(report.title(), "trace lifecycle");
+
+    for state in ["unknown", "Working", "idle"] {
+        let mut invalid = args.clone();
+        let CborValue::Map(entries) = &mut invalid else {
+            unreachable!()
+        };
+        entries[0].1 = CborValue::Text(state.to_owned());
+        assert!(parse_status_args(&invalid).is_err());
+    }
+}
+
+/// The status parser enforces the exact UTF-8 byte and single-line title
+/// contract.
+#[test]
+fn status_title_validation_uses_utf8_bytes() {
+    let make = |title: String| {
+        CborValue::Map(vec![
+            (
+                CborValue::Text("state".to_owned()),
+                CborValue::Text("done".to_owned()),
+            ),
+            (CborValue::Text("title".to_owned()), CborValue::Text(title)),
+        ])
+    };
+    assert!(parse_status_args(&make("é".repeat(80))).is_ok());
+    assert!(parse_status_args(&make(format!("{}a", "é".repeat(80)))).is_err());
+    for title in [
+        "",
+        " \t ",
+        "two\nlines",
+        "control\u{7f}",
+        "line\u{2028}separator",
+        "paragraph\u{2029}separator",
+    ] {
+        assert!(parse_status_args(&make(title.to_owned())).is_err());
+    }
+}
+
 /// Hidden repository verification sub-skills must remain exact-query loadable
 /// through the same selection, bounded read, and body extraction path as the
 /// model-visible `skill` tool.
@@ -712,7 +767,7 @@ fn agent_watch_ignores_mid_turn_tool_call_responses() {
         ws_pool_delta: None,
     };
 
-    assert!(agent_watch_response_should_notify(&response).is_none());
+    assert!(agent_watch_response_should_notify(&response, false).is_none());
 }
 
 /// Internal or steering-originated provider turns, such as background tool
@@ -754,7 +809,47 @@ fn agent_watch_ignores_internal_originated_responses() {
         ws_pool_delta: None,
     };
 
-    assert!(agent_watch_response_should_notify(&response).is_none());
+    assert!(agent_watch_response_should_notify(&response, false).is_none());
+}
+
+/// A committing publication-local Working final is owned by the harness
+/// post-commit path and must not also fan out through the built-in handler.
+#[test]
+fn agent_watch_suppresses_committing_working_final_response() {
+    let response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: "sp-working-final"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
+        output_items: vec![ContextItem::Message(tau_proto::MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "accepted final".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+
+    assert_eq!(
+        agent_watch_response_should_notify(&response, false),
+        Some("accepted final".to_owned())
+    );
+    assert!(agent_watch_response_should_notify(&response, true).is_none());
 }
 
 /// Untyped provider errors are represented by the harness's structured unknown
@@ -785,7 +880,7 @@ fn agent_watch_legacy_response_suppresses_untyped_provider_errors() {
         ws_pool_delta: None,
     };
 
-    assert!(agent_watch_response_should_notify(&response).is_none());
+    assert!(agent_watch_response_should_notify(&response, false).is_none());
 }
 
 /// A completed `agent_start` result is the child agent's terminal answer to the

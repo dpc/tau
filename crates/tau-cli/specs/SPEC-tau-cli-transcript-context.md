@@ -42,7 +42,7 @@ and recipient projections by their originating session and shared message id,
 and continuing to apply the configured `show-messages` mode. User-recipient
 broadcasts retain current-visible global routing without aggregate copying.
 `Message`, `WatchResponse`, and `WatchPrompt` are the only overview content
-kinds; structured `WatchTurnState`, `WatchProviderStatus`, `WatchWorkStatus`,
+kinds; compatibility `WatchTurnState`, current `WatchProviderStatus` and `WatchWorkStatus`,
 and `WatchLongWait` records stay in the
 watcher's transcript. Once the aggregate has an entry, its
 snapshot is protected even on the initial screen, and selecting or creating an

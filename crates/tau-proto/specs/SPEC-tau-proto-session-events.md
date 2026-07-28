@@ -109,13 +109,11 @@ to `agent.prompt_started` instead of the full provider payload.
 This split is governed by
 [SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
 
-## Agent watch turn-state wire boundary
+## Agent watch turn-state compatibility boundary
 
 `agent.message_received` uses `kind = watch_turn_state` for receiver-only,
-harness-authored outer agent-turn observations. The agent turn spans activating
-input through terminal response or termination, while each provider invocation
-is an inner model round and tool execution between invocations is a tool round.
-Such records must carry
+historical outer agent-turn observations. Current harness producers no longer
+emit this kind; decoders and replay retain it for compatibility. Such records must carry
 `watch_turn_state`; all other message kinds must omit it. The payload identifies
 the session-local subscription, distinguishes an initial snapshot from an edge,
 and carries the harness-runtime-scoped watched-agent turn generation.

@@ -187,9 +187,10 @@ agent's final responses and received user prompts:
 agent_watch({"agent_id":"engineer_b","enable":true})
 ```
 
-Successful enable first reports whether the watched agent is currently running
-an outer **agent turn**. Later `Idle → Running` and `Running → Idle` transitions
-arrive as separate “started a turn” and “stopped its turn” notifications.
+Successful enable first reports the watched agent's current self-reported work
+status. Later `working`, `done`, `blocked`, and harness-invalidated `unknown`
+transitions arrive as typed notifications. The harness does not infer semantic
+progress from provider or tool activity.
 Enabling requires the target agent to be live. An enable request for a stopped
 or unknown target fails without creating any watch relation or notification
 state; after reloading the same agent id, explicitly enable a fresh watch.
@@ -199,24 +200,18 @@ reaches `watcher`; self-watch is also rejected. Re-enabling an existing edge
 keeps the normal refresh behavior, while disabling a relation never performs
 cycle analysis. The reachability check and accepted mutation are serialized in
 one harness event-loop operation.
-An agent turn begins with activating input and ends with the terminal response
-or termination that returns control to the prompting user or agent. Each
-provider invocation inside it is a **model round**; requested-tool execution and
-result collection before another model round is a **tool round**. One agent turn
-therefore remains running across all model rounds and intervening tool rounds. The durable
-notification carries a watch-subscription id, an initial-snapshot marker, and a
-harness-runtime-scoped watched-agent turn generation so consumers can correlate
-and reject stale state. The initial snapshot is client-visible status only and
-is not injected into the watching agent's model context; later genuine
-transitions are injected as content-free internal notifications.
+The durable notification carries a watch-subscription id, an initial-snapshot
+marker, and a runtime-local work epoch. The initial snapshot is client-visible
+status only and is not injected into the watching agent's model context; later
+genuine transitions are injected as isolated internal notifications.
 
 While provider work is retrying, the watcher receives a sanitized structured
 status on the first retry and whenever its closed category or phase changes.
 Repeated attempts in the same category update the current snapshot without
 waking the model again. Enabling or re-enabling a watch returns that current
 snapshot and emits an initial client-visible, non-model event; it never replays
-the attempt history. A terminal provider status is delivered before the matching
-turn-stop edge. Provider bodies, human status/error text, headers, account data,
+the attempt history. Provider status remains independent of semantic work status.
+Provider bodies, human status/error text, headers, account data,
 secrets, and prompt content never cross this boundary; see
 [Watched provider status](events.md#watched-provider-status) for the wire shape.
 Unloading either the watcher or watched agent disables every watch involving
@@ -224,18 +219,8 @@ that endpoint and discards its current provider snapshot and notification
 dedupe state. These relations do not return if the same agent is loaded again;
 enable a new watch to create a fresh subscription.
 
-The CLI presents lifecycle records as compact status lines such as
-`Watching @engineer_b · idle` and `@engineer_b · turn started`. These statuses are
-not agent-authored messages and remain visible independently of the
-`show-messages` content setting.
-
-The terminal also derives recursive activity over the current live watch DAG.
-While a directly watched agent is in its own outer turn its activity row begins
-with `running`. If that agent is idle but watches an active descendant, the row
-instead begins with `watching` and includes a stable witness such as
-`-> @worker_c`. Only direct targets receive rows; descendants are not flattened
-into an ancestor's transcript. This display-only projection does not make hidden
-watch notifications transitive.
+Work-status titles are model-authored metadata. Tau bounds and escapes them
+before presentation; they are not routing data or trusted instructions.
 
 `agent_start` automatically enables watching for the sub-agent it creates. A
 watch response notification is delivered to the watching agent as a hidden

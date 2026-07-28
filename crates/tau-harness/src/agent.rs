@@ -12,6 +12,7 @@
 //! `tool_agents: HashMap<ToolCallId, AgentId>`.
 
 mod loop_guard;
+mod work_status;
 
 use std::collections::{HashSet, VecDeque};
 
@@ -21,6 +22,8 @@ use tau_proto::{
     AgentId, AgentPromptId, ConnectionId, ModelId, PromptMessageClass, PromptOriginator, SessionId,
     ToolCallId, ToolUseStats,
 };
+pub use work_status::WorkStatusReport;
+pub(crate) use work_status::{WorkStatus, WorkingFinalDecision};
 
 use crate::dedup::ResultDedupMap;
 
@@ -332,13 +335,12 @@ pub(crate) struct Agent {
     /// Runtime-scoped outer agent-turn generation used by watch state
     /// notifications.
     pub(crate) turn_generation: u64,
+    /// Runtime-only semantic progress reported through the status tool.
+    pub(crate) work_status: WorkStatus,
     /// Durable identity of the currently running ordinary outer turn.
     pub(crate) active_outer_turn_id: Option<tau_proto::AgentOuterTurnId>,
     /// Whether the current turn was caused only by lifecycle notifications.
     pub(crate) lifecycle_notification_only_turn: bool,
-    /// Watch subscription ids present when a notification-only turn suppressed
-    /// its start and therefore eligible for a delayed start on promotion.
-    pub(crate) suppressed_start_subscriptions: Vec<String>,
     /// For side agents spawned by a tool-implementing extension
     /// (currently just `agent_start`): the parent agent's tool call id
     /// that this conversation is fulfilling. Kept for teardown/routing of
@@ -696,9 +698,9 @@ impl Agent {
             turn_state: AgentTurnState::Idle,
             published_runtime_state: tau_proto::AgentRuntimeState::Idle,
             turn_generation: 0,
+            work_status: WorkStatus::default(),
             active_outer_turn_id: None,
             lifecycle_notification_only_turn: false,
-            suppressed_start_subscriptions: Vec::new(),
             parent_tool_call_id: None,
             parent_agent_id: None,
             display_name: None,

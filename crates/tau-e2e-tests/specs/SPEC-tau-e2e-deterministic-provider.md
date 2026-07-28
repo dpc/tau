@@ -99,25 +99,25 @@ contains no subscription identity. No other harness-owned tool enters the
 grammar.
 
 S1 also adds one bounded `WatchNotifications` action containing one to four
-typed `Response`, `Prompt`, or non-initial `TurnState` records. Each provider
+typed `Response`, `Prompt`, or live compatibility `TurnState` records. Each provider
 prompt consumes and validates the complete already-delivered queue prefix for
 the current closed action; an incomplete prefix returns fixed text without
 advancing the lane action. The action requires the retained child identity,
-exact sender/recipient, kind, content or runtime state, and one stable
-subscription-id/turn-generation pair across its turn-state records. It also
+exact sender/recipient, kind, and content. It also
 checks the exact ordered, escaped model-visible prompt projection. Only records
 for the current closed action enter the queue; unrelated, reordered, and excess
 live traffic fails before admission. Replayed deliveries cannot populate this
-live queue.
+live queue. Response and Prompt records validate exact content. `TurnState`
+records validate exact runtime state, non-initial status, a stable subscription
+ID, and stable turn-generation correlation within the batch.
 
 S2's closed `WatchNotificationChains` action requires the explicit watch to
-create exactly one non-model initial idle
-snapshot with a new nonempty subscription ID distinct from Boot A. Its one
-fresh direct worker turn then yields exactly one prompt notification, running
-edge, final-response notification, and idle edge. Only prompt-before-response
-and running-before-idle are ordered across those streams. The later turn-state
-edges retain the new subscription and generation; the initial snapshot consumes
-no provider action.
+create exactly one non-model initial Unreported work-status snapshot with a new
+nonempty subscription ID distinct from Boot A. Its one fresh direct worker turn
+then yields exactly one prompt notification and one final-response notification
+in that order. The initial snapshot consumes no provider action. The S2 chain
+oracle does not require a live `TurnState`, but the general S1 notification
+grammar continues to accept and validate that compatibility record.
 
 A barrier is the lane's sole action, appears once per distinct
 participant lane, and has one consistent bounded participant count, preventing

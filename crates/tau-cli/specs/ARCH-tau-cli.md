@@ -119,12 +119,14 @@ parse in the CLI but address exact harness-owned prompt work or provenance rathe
 than reconstructing it locally. Their behavior is specified by
 [SPEC-tau-cli-command-mode](SPEC-tau-cli-command-mode.md).
 
-The CLI also owns presentation-only recursive watch activity. It folds the
-harness-owned live watch DAG and edge-scoped outer-turn lifecycle into direct
-`running` and transitive `watching` rows plus the session-wide side-agent count.
-This projection must not create protocol facts, model-visible notifications,
-navigation state, persistence, or routing behavior. Its authority and exact
-presentation are specified by
+The CLI also owns presentation-only recursive watch activity. Its current
+implementation folds the harness-owned live watch DAG and watched-agent
+`TurnState` compatibility records, with active-prompt fallback until an edge
+receives its first such record, into direct `running` and transitive `watching`
+rows plus the session-wide side-agent count. It does not yet consume semantic
+`WorkStatus` snapshots. This projection must not create protocol facts,
+model-visible notifications, navigation state, persistence, or routing behavior.
+Its authority and exact presentation are specified by
 [SPEC-tau-cli-agent-message-labels](SPEC-tau-cli-agent-message-labels.md).
 
 Visible transcript state lives in renderer fields; hidden agent and protected

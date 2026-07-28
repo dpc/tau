@@ -30,7 +30,7 @@ pub(super) fn assert_snapshot_a(
         != expected
         || snapshot.session_events.len() != 2
         || snapshot.restore_events.len() != 2
-        || snapshot.agent_events[&identities.main].len() != 33
+        || snapshot.agent_events[&identities.main].len() != 24
         || snapshot.agent_events[&identities.worker].len() != 10
     {
         return Err(format!(
@@ -66,11 +66,7 @@ pub(super) fn assert_snapshot_a(
         &snapshot.agent_events[&identities.main],
         &identities.main,
         &snapshot.session_id,
-        &[
-            (&["ap-main-0", "ap-main-1"], 0),
-            (&["ap-main-2"], 4),
-            (&["ap-main-3"], 6),
-        ],
+        &[(&["ap-main-0", "ap-main-1"], 0), (&["ap-main-2"], 5)],
     )?;
     let worker_prompt = format!("ap-{}-0", identities.worker.as_str());
     let worker_runtime = assert_lifecycle_pairs(
@@ -144,19 +140,10 @@ fn assert_exact_event_names(
         E::PROVIDER_TOOL_RESULT,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_PROMPT_STARTED,
-        E::AGENT_MESSAGE_RECEIVED,
-        E::AGENT_ACTIVATION_QUEUED,
         E::PROVIDER_RESPONSE_FINISHED,
         E::AGENT_OUTER_TURN_FINISHED,
-        E::AGENT_INFERENCE_DISPATCH_STARTED,
-        E::AGENT_OUTER_TURN_STARTED,
-        E::AGENT_PROMPT_STARTED,
         E::AGENT_MESSAGE_RECEIVED,
         E::AGENT_ACTIVATION_QUEUED,
-        E::AGENT_MESSAGE_RECEIVED,
-        E::AGENT_ACTIVATION_QUEUED,
-        E::PROVIDER_RESPONSE_FINISHED,
-        E::AGENT_OUTER_TURN_FINISHED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_OUTER_TURN_STARTED,
         E::AGENT_PROMPT_STARTED,
@@ -304,30 +291,10 @@ fn assert_boot_a_agent_payloads(
         })
         .collect::<Vec<_>>();
     let expected_messages = [
-        (
-            tau_proto::AgentMessageKind::WatchTurnState,
-            format!(
-                "[tau-internal]: Watched agent {} is not currently running an agent turn (initial watch state)",
-                identities.worker
-            ),
-        ),
-        (
-            tau_proto::AgentMessageKind::WatchTurnState,
-            format!(
-                "[tau-internal]: Watched agent {} started an agent turn",
-                identities.worker
-            ),
-        ),
+        (tau_proto::AgentMessageKind::WatchWorkStatus, String::new()),
         (
             tau_proto::AgentMessageKind::WatchResponse,
             "worker boot-a complete".to_owned(),
-        ),
-        (
-            tau_proto::AgentMessageKind::WatchTurnState,
-            format!(
-                "[tau-internal]: Watched agent {} stopped its agent turn",
-                identities.worker
-            ),
         ),
     ];
     if messages.len() != expected_messages.len()
@@ -348,29 +315,20 @@ fn assert_boot_a_agent_payloads(
     }
     let states = messages
         .iter()
-        .filter_map(|message| message.watch_turn_state.as_ref())
+        .filter_map(|message| message.watch_work_status.as_ref())
         .collect::<Vec<_>>();
-    let [initial, running, idle] = states.as_slice() else {
-        return Err("S8 exact durable watch state count changed".into());
+    let [initial] = states.as_slice() else {
+        return Err("S8 exact durable work-status count changed".into());
     };
     if initial.session_id != snapshot.session_id
         || initial.subscription_id.is_empty()
         || !initial.initial
-        || initial.state != tau_proto::AgentRuntimeState::Idle
-        || initial.turn_generation != 0
-        || running.session_id != snapshot.session_id
-        || running.initial
-        || running.state != tau_proto::AgentRuntimeState::Running
-        || idle.session_id != snapshot.session_id
-        || idle.initial
-        || idle.state != tau_proto::AgentRuntimeState::Idle
-        || running.subscription_id != initial.subscription_id
-        || idle.subscription_id != initial.subscription_id
-        || running.turn_generation == 0
-        || idle.turn_generation != running.turn_generation
-        || messages[2].watch_turn_state.is_some()
+        || initial.phase != tau_proto::AgentWorkStatusPhase::Unreported
+        || initial.status_epoch != 0
+        || initial.title.is_some()
+        || messages[1].watch_work_status.is_some()
     {
-        return Err("S8 exact durable structured watch state changed".into());
+        return Err("S8 exact durable structured work status changed".into());
     }
     let text_responses = main
         .iter()
@@ -383,11 +341,7 @@ fn assert_boot_a_agent_payloads(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let expected = [
-        "worker start accepted",
-        "watch notification accepted",
-        "worker completion observed",
-    ];
+    let expected = ["worker start accepted", "worker completion observed"];
     if text_responses.len() != expected.len()
         || text_responses
             .iter()
@@ -399,12 +353,11 @@ fn assert_boot_a_agent_payloads(
     assert_inference_rounds(
         main,
         &identities.main,
-        &[0, 3, 5, 8],
+        &[0, 3, 5],
         &[
             tau_proto::AgentHead::Root,
             tau_proto::AgentHead::Node(tau_proto::NodeId::new(2)),
-            tau_proto::AgentHead::Node(tau_proto::NodeId::new(3)),
-            tau_proto::AgentHead::Node(tau_proto::NodeId::new(5)),
+            tau_proto::AgentHead::Node(tau_proto::NodeId::new(4)),
         ],
     )?;
     assert_inference_rounds(

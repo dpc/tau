@@ -173,7 +173,7 @@ completed durable worker cold-restores with its own route and transcript while
 the daemon-lifetime watch is absent. Its S2 grammar adds one closed
 `AgentWatchCall`/`AgentWatchResult` pair, and the fresh fixture proves a new
 subscription produces exactly one non-model initial snapshot plus one
-prompt/running/response/idle set under only the two contract causal edges.
+initial work-status/prompt/response set under the content-delivery causal edge.
 S3 reuses the S1 grammar, creates one promptless ephemeral worker through the UI,
 and seeds a typed durable worker load/unload history between clean boots. Its
 current/history roster, route-rejection, replay, typed-store, and exact-lane
@@ -501,3 +501,14 @@ separately cover call-ID reuse and background completion correlation. TOON
 coverage strictly decodes the counted item document, protects multiline/control
 escaping and field-level Base64 framing, and compares its semantics with
 independently parsed JSONL items.
+
+
+## Semantic agent-status coverage
+
+`tau-harness-tools` owns focused status argument validation. `tau-harness` owns
+WorkStatus transitions, effective-snapshot acknowledgement, policy revocation,
+post-append challenge, delegated completion/detach, append failure, and
+interception regressions. The deterministic provider restore lane owns exact
+production watch grammar, durable projection, and cold-replay oracles. Keep
+parser-only tests as focused validation supplements; add production-boundary
+regressions alongside each new handler or lifecycle integration.

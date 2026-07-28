@@ -21661,6 +21661,36 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
+    h.report_agent_work_status(
+        &side_cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "delegated final".to_owned(),
+        )
+        .expect("valid delegated report"),
+    )
+    .expect("delegated Working");
+    h.agents
+        .get_mut(&side_cid)
+        .expect("side agent")
+        .work_status
+        .record_final_challenge();
+    h.agents
+        .get_mut(&side_cid)
+        .expect("side agent")
+        .work_status
+        .record_final_challenge();
+    let final_interceptor = connect_test_tool(&mut h, "delegated-final-interceptor");
+    h.handle_extension_event(
+        "delegated-final-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register delegated final interceptor");
     h.handle_provider_response_finished(ProviderResponseFinished {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
@@ -21705,7 +21735,57 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         provider_response_id: None,
         ws_pool_delta: None,
     })
-    .expect("side finished");
+    .expect("side final parked");
+
+    let (parked_final, _) = intercepted_payload(&final_interceptor);
+    assert!(
+        delegate_events
+            .lock()
+            .expect("delegate events")
+            .iter()
+            .all(|routed| !matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::StartAgentResult(result)) if result.query_id == "q1"
+            )),
+        "parked final must not complete delegated work"
+    );
+    assert!(matches!(
+        h.agents[&side_cid].originator,
+        tau_proto::PromptOriginator::Extension { .. }
+    ));
+    let journal_path = sp
+        .join("agents")
+        .join(side_agent_id.as_str())
+        .join("events.cbor");
+    let backup_path = journal_path.with_extension("cbor.delegated-final-backup");
+    std::fs::rename(&journal_path, &backup_path).expect("park side journal");
+    std::fs::create_dir(&journal_path).expect("reject side append");
+    h.handle_extension_event(
+        "delegated-final-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(parked_final))),
+        })),
+    )
+    .expect("release delegated final into append failure");
+    assert!(h.pending_agent_publish_completions.contains_key(&side_cid));
+    assert!(matches!(
+        h.agents[&side_cid].originator,
+        tau_proto::PromptOriginator::Extension { .. }
+    ));
+    assert!(
+        delegate_events
+            .lock()
+            .expect("delegate events")
+            .iter()
+            .all(|routed| !matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::StartAgentResult(result)) if result.query_id == "q1"
+            )),
+        "append failure must not complete delegated work"
+    );
+    std::fs::remove_dir(&journal_path).expect("remove append blocker");
+    std::fs::rename(&backup_path, &journal_path).expect("restore side journal");
+    h.retry_pending_agent_publish_completion(&side_cid);
 
     assert!(matches!(h.turn_state, TurnState::Idle));
     assert!(
@@ -21713,13 +21793,19 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         "parent agent_start tool must remain in flight until its ToolResult arrives"
     );
     let events = delegate_events.lock().expect("delegate events");
-    let result = events
+    let results = events
         .iter()
-        .find_map(|routed| match peel_inner_event(&routed.frame) {
+        .filter_map(|routed| match peel_inner_event(&routed.frame) {
             Some(Event::StartAgentResult(result)) if result.query_id == "q1" => Some(result),
             _ => None,
         })
-        .expect("query result routed");
+        .collect::<Vec<_>>();
+    let [result] = results.as_slice() else {
+        panic!(
+            "expected exactly one delegated result, got {}",
+            results.len()
+        );
+    };
     assert_eq!(result.text, "delegated answer");
 
     let side_cid = h
@@ -21960,7 +22046,7 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
         // Deliberately persist only the terminal provider fact. This models the
         // crash cut before handle_finished_response_side_conversation can return
         // StartAgentResult and call complete_finished_side_conversation.
-        h.publish_finished_response_for_agent(&worker_cid, None, &terminal);
+        h.publish_finished_response_for_agent(&worker_cid, None, &terminal, None);
         assert!(matches!(
             h.agents[&worker_cid].originator,
             tau_proto::PromptOriginator::Extension { .. }
@@ -26159,7 +26245,6 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
             attempt: 2,
         }),
     );
-    h.notify_agent_watcher_turn_state(&watcher_id, &watched_id, false);
     assert!(
         h.publish_agent_watch_response_from_agent(
             &watched_cid,
@@ -26438,9 +26523,9 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
     resumed.shutdown().expect("shutdown");
 }
 
-/// The production finished-response path must retain the matching retry attempt
-/// for a terminal update, publish that update before the turn-stop edge, clear
-/// retry state after success, and ignore duplicate/stale terminal responses.
+/// The production finished-response path retains the matching retry attempt in
+/// its terminal update, clears retry state after success, and ignores duplicate
+/// or stale terminal responses without exposing raw provider text.
 #[test]
 fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
     let td = TempDir::new().expect("tempdir");
@@ -26519,7 +26604,6 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
                 && matches!(
                     message.kind,
                     tau_proto::AgentMessageKind::WatchProviderStatus
-                        | tau_proto::AgentMessageKind::WatchTurnState
                 )
                 && !message
                     .watch_turn_state
@@ -26542,16 +26626,19 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
             )
         })
         .expect("terminal status");
-    let stop_index = watched_edges
+    let retry_index = watched_edges
         .iter()
         .position(|message| {
-            message
-                .watch_turn_state
-                .as_ref()
-                .is_some_and(|state| state.state == tau_proto::AgentRuntimeState::Idle)
+            matches!(
+                message
+                    .watch_provider_status
+                    .as_ref()
+                    .map(|status| &status.state),
+                Some(tau_proto::AgentWatchProviderState::Retrying { attempt: 17, .. })
+            )
         })
-        .expect("turn stop");
-    assert!(terminal_index < stop_index);
+        .expect("retry status");
+    assert!(retry_index < terminal_index);
     assert!(
         watched_edges
             .iter()
@@ -26659,11 +26746,9 @@ fn disabling_agent_watch_removes_response_fanout_route() {
     h.shutdown().expect("shutdown");
 }
 
-/// A watch must receive one structured initial snapshot and one start/stop pair
-/// per outer agent turn, while provider/tool continuations retain one
-/// generation.
+/// A watch receives nonactivating current status and isolated live transitions.
 #[test]
-fn agent_watch_reports_structured_outer_agent_turn_state() {
+fn agent_watch_reports_structured_work_status() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -26672,201 +26757,338 @@ fn agent_watch_reports_structured_outer_agent_turn_state() {
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
-    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: test_agent_prompt_id("watcher-busy"),
-    };
-
     h.set_agent_watch(
         &watcher_id,
         &watched_id,
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
-    assert!(
-        h.agents
-            .get(&watcher_cid)
-            .expect("watcher")
-            .pending_prompts
-            .is_empty(),
-        "initial state is durable client status, not a prompt for the watcher"
-    );
-    h.set_agent_watch(
-        &watcher_id,
-        &watched_id,
-        true,
-        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-    );
-    h.set_agent_turn_state(
-        &watched_cid,
-        AgentTurnState::AgentThinking {
-            agent_prompt_id: test_agent_prompt_id("watched-turn"),
-        },
-    );
-    h.set_agent_turn_state(
-        &watched_cid,
-        AgentTurnState::ToolsRunning {
-            remaining_calls: vec!["call-1".into()],
-        },
-    );
-    // Internal tool-result continuation bookkeeping may temporarily use Idle,
-    // but the published outer agent-turn state remains running.
-    h.agents.get_mut(&watched_cid).expect("watched").turn_state = AgentTurnState::Idle;
-    h.set_agent_turn_state(
-        &watched_cid,
-        AgentTurnState::AgentThinking {
-            agent_prompt_id: test_agent_prompt_id("watched-continuation"),
-        },
-    );
-    h.set_agent_turn_state(&watched_cid, AgentTurnState::Idle);
-
-    let notifications: Vec<_> = session_agent_message_received_events(&h)
+    let initial = session_agent_message_received_events(&h)
         .into_iter()
-        .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
-        .collect();
-    assert_eq!(notifications.len(), 4);
-    let initial = notifications[0]
-        .watch_turn_state
-        .as_ref()
-        .expect("initial payload");
+        .find(|message| message.kind == tau_proto::AgentMessageKind::WatchWorkStatus)
+        .and_then(|message| message.watch_work_status)
+        .expect("initial status");
     assert!(initial.initial);
-    assert_eq!(initial.state, tau_proto::AgentRuntimeState::Idle);
-    assert_eq!(initial.turn_generation, 0);
-    assert!(
-        notifications[1]
-            .watch_turn_state
-            .as_ref()
-            .expect("re-enabled snapshot")
-            .initial
-    );
-    let started = notifications[2]
-        .watch_turn_state
-        .as_ref()
-        .expect("start payload");
-    assert!(!started.initial);
-    assert_eq!(started.state, tau_proto::AgentRuntimeState::Running);
-    assert_eq!(started.turn_generation, 1);
-    let stopped = notifications[3]
-        .watch_turn_state
-        .as_ref()
-        .expect("stop payload");
-    assert_eq!(stopped.state, tau_proto::AgentRuntimeState::Idle);
-    assert_eq!(stopped.turn_generation, 1);
-    assert_eq!(initial.subscription_id, started.subscription_id);
-    assert_eq!(started.subscription_id, stopped.subscription_id);
-    assert!(durable_agent_message_sent_events(&h).is_empty());
-    assert_eq!(
-        durable_agent_message_received_events(&h)
-            .into_iter()
-            .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
-            .count(),
-        4
-    );
+    assert_eq!(initial.phase, tau_proto::AgentWorkStatusPhase::Unreported);
+    assert!(h.agents[&watcher_cid].pending_prompts.is_empty());
 
-    h.set_agent_watch(
-        &watcher_id,
-        &watched_id,
-        false,
-        tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
+    assert!(
+        h.report_agent_work_status(
+            &watched_cid,
+            crate::WorkStatusReport::new(
+                tau_proto::AgentWorkStatusPhase::Working,
+                "trace lifecycle".to_owned()
+            )
+            .expect("valid work status report"),
+        )
+        .expect("status report")
     );
-    h.set_agent_turn_state(
-        &watched_cid,
-        AgentTurnState::AgentThinking {
-            agent_prompt_id: test_agent_prompt_id("already-running-on-reenable"),
-        },
+    assert!(
+        !h.report_agent_work_status(
+            &watched_cid,
+            crate::WorkStatusReport::new(
+                tau_proto::AgentWorkStatusPhase::Working,
+                "trace lifecycle".to_owned()
+            )
+            .expect("valid work status report"),
+        )
+        .expect("idempotent status report")
     );
+    let live: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchWorkStatus)
+        .collect();
+    assert_eq!(live.len(), 2, "identical updates do not fan out");
+    let update = live[1].watch_work_status.as_ref().expect("live status");
+    assert!(!update.initial);
+    assert_eq!(update.status_epoch, 1);
+    assert_eq!(update.title.as_deref(), Some("trace lifecycle"));
+
+    let late_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let late_id = durable_agent_id_for_conversation(&h, &late_cid).to_string();
     h.set_agent_watch(
-        &watcher_id,
+        &late_id,
         &watched_id,
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
-    let reenabled = session_agent_message_received_events(&h)
+    let late = session_agent_message_received_events(&h)
         .into_iter()
-        .rev()
-        .find(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
-        .expect("re-enabled initial state");
-    let reenabled_state = reenabled
-        .watch_turn_state
-        .as_ref()
-        .expect("re-enabled payload");
-    assert!(reenabled_state.initial);
-    assert_eq!(reenabled_state.state, tau_proto::AgentRuntimeState::Running);
-    assert_eq!(reenabled_state.turn_generation, 2);
-    assert_ne!(reenabled_state.subscription_id, initial.subscription_id);
-    h.set_agent_turn_state(&watched_cid, AgentTurnState::Idle);
-
-    let before_notification_only_turn = session_agent_message_received_events(&h)
-        .into_iter()
-        .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
-        .count();
-    let before_accounting_boundaries = h
-        .agent_store
-        .agent_events(watched_id.as_str())
-        .expect("watched records")
-        .into_iter()
-        .filter(|record| {
-            matches!(
-                record.event,
-                Event::AgentOuterTurnStarted(_) | Event::AgentOuterTurnFinished(_)
-            )
+        .filter(|message| {
+            message.kind == tau_proto::AgentMessageKind::WatchWorkStatus
+                && message.recipient_id.as_str() == late_id
         })
-        .count();
-    h.agents
-        .get_mut(&watched_cid)
-        .expect("watched")
-        .lifecycle_notification_only_turn = true;
-    h.set_agent_turn_state(
-        &watched_cid,
-        AgentTurnState::AgentThinking {
-            agent_prompt_id: test_agent_prompt_id("notification-only-turn"),
-        },
-    );
-    h.set_agent_turn_state(&watched_cid, AgentTurnState::Idle);
-    let after_notification_only_turn = session_agent_message_received_events(&h)
-        .into_iter()
-        .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
-        .count();
-    assert_eq!(
-        after_notification_only_turn, before_notification_only_turn,
-        "notification-only turns must not recursively fan out lifecycle state"
-    );
-    assert_eq!(
-        h.agent_store
-            .agent_events(watched_id.as_str())
-            .expect("watched records")
-            .into_iter()
-            .filter(|record| matches!(
-                record.event,
-                Event::AgentOuterTurnStarted(_) | Event::AgentOuterTurnFinished(_)
-            ))
-            .count(),
-        before_accounting_boundaries,
-        "notification-only turns must append neither accounting boundary"
-    );
-
+        .collect::<Vec<_>>();
+    assert_eq!(late.len(), 1);
+    let late_status = late[0]
+        .watch_work_status
+        .as_ref()
+        .expect("late current status");
+    assert!(late_status.initial);
+    assert_eq!(late_status.phase, tau_proto::AgentWorkStatusPhase::Working);
+    assert_eq!(late_status.title.as_deref(), Some("trace lifecycle"));
     h.shutdown().expect("shutdown");
 }
 
-/// An acyclic watch chain must not cascade lifecycle-only turns, while ordinary
-/// input added during a tool continuation promotes the generation with a
-/// delayed start so its eventual stop remains paired.
+/// The production response handler durably challenges exactly two ordinary
+/// finals, then accepts one Unknown terminal with one harness-owned response.
 #[test]
-fn watch_chain_mixed_lifecycle_turn_emits_paired_state() {
+fn working_final_gate_commits_bounded_candidates_and_accepts_unknown() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.selected_model = Some("test/model".into());
-    let a_cid = ensure_test_user_agent(&mut h);
-    let b_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let cid = ensure_test_user_agent(&mut h);
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "finish gate".to_owned(),
+        )
+        .expect("valid work status report"),
+    )
+    .expect("working");
+    h.agents.get_mut(&cid).expect("agent").turn_generation = 7;
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        agent_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    let first = test_agent_prompt_id("status-final-0");
+    seed_agent_thinking(&mut h, &cid, first.as_str());
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .published_runtime_state = tau_proto::AgentRuntimeState::Running;
+    h.prompt_agents.insert(first.clone(), cid.clone());
+    let outer_generation = h.agents[&cid].turn_generation;
+    for index in 0..3 {
+        let prompt_id = match &h.agents[&cid].turn_state {
+            AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+            state => panic!("candidate {index} lacks an active prompt: {state:?}"),
+        };
+        h.handle_provider_response_finished(provider_text_response(
+            &prompt_id,
+            agent_id.clone(),
+            &format!("candidate {index}"),
+        ))
+        .expect("finish candidate");
+        let responses = session_agent_message_received_events(&h)
+            .into_iter()
+            .filter(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchResponse
+                    && message.sender_id == agent_id
+                    && message.recipient_id == watcher_id
+            })
+            .count();
+        assert_eq!(
+            responses,
+            usize::from(index == 2),
+            "only the accepted committed candidate releases one watch response"
+        );
+    }
+    let agent = h.agents.get(&cid).expect("agent");
+    assert_eq!(
+        agent.work_status.phase(),
+        tau_proto::AgentWorkStatusPhase::Unknown
+    );
+    assert_eq!(agent.turn_generation, outer_generation);
+    assert!(matches!(agent.turn_state, AgentTurnState::Idle));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+            .count(),
+        3
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// The production response handler makes an unsuccessful terminal Unknown
+/// exactly once without scheduling a Working continuation.
+#[test]
+fn unsuccessful_working_terminal_bypasses_reminders() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "failing".to_owned(),
+        )
+        .expect("valid work status report"),
+    )
+    .expect("working");
+    let prompt_id = test_agent_prompt_id("status-error");
+    seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
+    h.prompt_agents.insert(prompt_id.clone(), cid.clone());
+    let response = ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: prompt_id,
+        agent_id: durable_agent_id_for_conversation(&h, &cid),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        error: Some("provider failed".to_owned()),
+        failure_kind: Some(tau_proto::ProviderFailureKind::Unknown),
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    h.handle_provider_response_finished(response)
+        .expect("finish unsuccessful terminal");
+    assert_eq!(
+        h.agents[&cid].work_status.phase(),
+        tau_proto::AgentWorkStatusPhase::Unknown
+    );
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
+/// Repeated synthetic dispatch terminalization invalidates Working once and
+/// never installs a final-response reminder.
+#[test]
+fn synthetic_dispatch_terminal_emits_one_unknown_without_reminder() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let watched_id = durable_agent_id_for_conversation(&h, &cid);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
+    h.set_agent_watch(
+        watcher_id.as_str(),
+        watched_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "synthetic failure".to_owned(),
+        )
+        .expect("valid work status report"),
+    )
+    .expect("working");
+    h.agents.get_mut(&cid).expect("agent").activation_dispatch =
+        crate::agent::ActivationDispatchState::DispatchUncertain {
+            owner: crate::agent::InferenceCheckpointOwner::Inference,
+            agent_prompt_id: test_agent_prompt_id("synthetic-terminal"),
+            through: tau_proto::AgentHead::Root,
+            model: Some("test/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: None,
+        };
+    h.terminalize_owned_dispatch_error(&cid, "route failed".to_owned());
+    h.terminalize_owned_dispatch_error(&cid, "duplicate route failure".to_owned());
+
+    let unknowns = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.kind == tau_proto::AgentMessageKind::WatchWorkStatus
+                && message.watch_work_status.as_ref().is_some_and(|status| {
+                    !status.initial && status.phase == tau_proto::AgentWorkStatusPhase::Unknown
+                })
+        })
+        .count();
+    assert_eq!(unknowns, 1);
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
+/// Each status-enabled effective snapshot owns one acknowledgement decision;
+/// same-turn snapshots repeat it, revocation suppresses it, and a changed-title
+/// Working report acknowledges the current snapshot.
+#[test]
+fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let status_spec = shared_test_tool_spec("status");
+
+    for (prompt, call) in [
+        ("ack-prompt-1", "ack-call-1"),
+        ("ack-prompt-2", "ack-call-2"),
+    ] {
+        let prompt_id = test_agent_prompt_id(prompt);
+        h.prompt_tool_specs
+            .insert(prompt_id.clone(), vec![status_spec.clone()]);
+        h.prompt_tool_call_prompts.insert(call.into(), prompt_id);
+        h.agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status
+            .reset_ack_notice();
+        h.queue_status_acknowledgement_if_needed(&cid, call);
+    }
+    assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .pending_prompts
+        .clear();
+
+    let revoked_prompt = test_agent_prompt_id("ack-revoked");
+    h.prompt_tool_specs
+        .insert(revoked_prompt.clone(), Vec::new());
+    h.prompt_tool_call_prompts
+        .insert("ack-revoked-call".into(), revoked_prompt);
+    h.queue_status_acknowledgement_if_needed(&cid, "ack-revoked-call");
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .work_status
+        .reset_ack_notice();
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "changed same-turn title".to_owned(),
+        )
+        .expect("valid changed report"),
+    )
+    .expect("changed Working report");
+    let changed_prompt = test_agent_prompt_id("ack-changed");
+    h.prompt_tool_specs
+        .insert(changed_prompt.clone(), vec![status_spec]);
+    h.prompt_tool_call_prompts
+        .insert("ack-changed-call".into(), changed_prompt);
+    h.queue_status_acknowledgement_if_needed(&cid, "ack-changed-call");
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
+/// Work-status fanout follows only the direct watch edge and cannot cascade.
+#[test]
+fn watch_chain_work_status_does_not_cascade() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let b_cid = ensure_test_user_agent(&mut h);
+    let a_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let c_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let a_id = durable_agent_id_for_conversation(&h, &a_cid).to_string();
     let b_id = durable_agent_id_for_conversation(&h, &b_cid).to_string();
     let c_id = durable_agent_id_for_conversation(&h, &c_cid).to_string();
-    for cid in [&a_cid, &b_cid] {
-        h.agents.get_mut(cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
-            agent_prompt_id: test_agent_prompt_id(format!("busy-{cid}")),
-        };
-    }
     h.set_agent_watch(
         &a_id,
         &b_id,
@@ -26874,174 +27096,35 @@ fn watch_chain_mixed_lifecycle_turn_emits_paired_state() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
     h.set_agent_watch(
-        &b_id,
         &c_id,
+        &a_id,
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
-
-    h.agents.get_mut(&b_cid).expect("agent b").turn_state = AgentTurnState::Idle;
-    assert!(
-        h.agents
-            .get(&b_cid)
-            .expect("agent b")
-            .pending_prompts
-            .is_empty(),
-        "initial watch snapshots must not create lifecycle turns"
-    );
-    h.publish_event(
-        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
-        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("watch-chain-lifecycle")
-                .expect("test identifier must satisfy its grammar"),
-            sender_id: crate::parse_agent_id(&c_id),
-            sender_session_id: None,
-            recipient_id: crate::parse_agent_id(&b_id),
-            kind: tau_proto::AgentMessageKind::WatchTurnState,
-            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-                session_id: h.current_session_id.clone(),
-                subscription_id: "watch-chain-b-c".to_owned(),
-                state: tau_proto::AgentRuntimeState::Running,
-                initial: false,
-                turn_generation: 1,
-            }),
-            watch_provider_status: None,
-            watch_work_status: None,
-            watch_long_wait: None,
-            message: String::new(),
-        }),
-    );
-    assert!(
-        h.agents[&b_cid].lifecycle_notification_only_turn,
-        "typed lifecycle wake must isolate watcher fanout"
-    );
-    h.set_agent_turn_state(
+    h.report_agent_work_status(
         &b_cid,
-        AgentTurnState::ToolsRunning {
-            remaining_calls: vec!["mixed-call".into()],
-        },
-    );
-    let fresh_cid =
-        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
-    let fresh_id = durable_agent_id_for_conversation(&h, &fresh_cid).to_string();
-    h.agents
-        .get_mut(&fresh_cid)
-        .expect("fresh watcher")
-        .turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: test_agent_prompt_id("fresh-watcher-busy"),
-    };
-    h.set_agent_watch(
-        &fresh_id,
-        &b_id,
-        true,
-        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-    );
-    let before_promotion = session_agent_message_received_events(&h)
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "direct".to_owned(),
+        )
+        .expect("valid work status report"),
+    )
+    .expect("report");
+    let live: Vec<_> = session_agent_message_received_events(&h)
         .into_iter()
         .filter(|message| {
-            message.kind == tau_proto::AgentMessageKind::WatchTurnState
-                && message.sender_id.as_str() == b_id
-                && message.recipient_id.as_str() == a_id
-                && !message
-                    .watch_turn_state
+            message.kind == tau_proto::AgentMessageKind::WatchWorkStatus
+                && message
+                    .watch_work_status
                     .as_ref()
-                    .is_some_and(|state| state.initial)
-        })
-        .count();
-    assert_eq!(before_promotion, 0);
-
-    h.agents
-        .get_mut(&b_cid)
-        .expect("agent b")
-        .pending_prompts
-        .push_back(PendingPrompt::internal(
-            "ordinary continuation input".to_owned(),
-        ));
-    h.fold_pending_prompts_as_steered(&b_cid);
-    h.set_agent_turn_state(&b_cid, AgentTurnState::Idle);
-
-    let mixed_edges: Vec<_> = session_agent_message_received_events(&h)
-        .into_iter()
-        .filter(|message| {
-            message.kind == tau_proto::AgentMessageKind::WatchTurnState
-                && message.sender_id.as_str() == b_id
-                && message.recipient_id.as_str() == a_id
-                && !message
-                    .watch_turn_state
-                    .as_ref()
-                    .is_some_and(|state| state.initial)
+                    .is_some_and(|status| !status.initial)
         })
         .collect();
-    assert_eq!(mixed_edges.len(), 2);
-    let start = mixed_edges[0].watch_turn_state.as_ref().expect("start");
-    let stop = mixed_edges[1].watch_turn_state.as_ref().expect("stop");
-    assert_eq!(start.state, tau_proto::AgentRuntimeState::Running);
-    assert_eq!(stop.state, tau_proto::AgentRuntimeState::Idle);
-    assert_eq!(start.turn_generation, stop.turn_generation);
-    let fresh_states: Vec<_> = session_agent_message_received_events(&h)
-        .into_iter()
-        .filter(|message| {
-            message.kind == tau_proto::AgentMessageKind::WatchTurnState
-                && message.sender_id.as_str() == b_id
-                && message.recipient_id.as_str() == fresh_id
-        })
-        .collect();
-    assert_eq!(
-        fresh_states.len(),
-        2,
-        "initial running plus one stop: {fresh_states:?}"
-    );
-    assert!(
-        fresh_states[0].watch_turn_state.as_ref().is_some_and(
-            |state| state.initial && state.state == tau_proto::AgentRuntimeState::Running
-        )
-    );
-    assert!(
-        fresh_states[1].watch_turn_state.as_ref().is_some_and(
-            |state| !state.initial && state.state == tau_proto::AgentRuntimeState::Idle
-        )
-    );
-    let b_records = h
-        .agent_store
-        .agent_events(b_id.as_str())
-        .expect("agent b records");
-    let starts = b_records
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::AgentOuterTurnStarted(started) => Some(started),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let owned_prompts = b_records
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::AgentPromptStarted(prompt) if prompt.outer_turn_id.is_some() => Some(prompt),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let finishes = b_records
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::AgentOuterTurnFinished(finished) => Some(finished),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        (starts.len(), owned_prompts.len(), finishes.len()),
-        (1, 1, 1),
-        "notification-only promotion must produce one owned ordinary lifecycle"
-    );
-    assert_eq!(starts[0].outer_turn_id, finishes[0].outer_turn_id);
-    assert_eq!(
-        owned_prompts[0].outer_turn_id.as_ref(),
-        Some(&starts[0].outer_turn_id)
-    );
-
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].recipient_id.as_str(), a_id);
     h.shutdown().expect("shutdown");
 }
 
-/// A successful model response to a provider-status-only turn must not be
-/// propagated up an acyclic watch chain and start an unbounded interaction.
 #[test]
 fn watch_chain_provider_status_turn_does_not_fan_out_final_response() {
     let td = TempDir::new().expect("tempdir");
@@ -31163,8 +31246,8 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     assert!(watcher.pending_prompts.is_empty());
     assert_eq!(
         watcher.pending_message_wakes.len(),
-        2,
-        "user-prompt content and the watched turn transition activate separately"
+        1,
+        "only user-prompt content activates after turn-state producer removal"
     );
     let context = crate::prompt::assemble_prompt_context_from(
         h.agent_store.agent(&watcher_id).expect("watcher tree"),

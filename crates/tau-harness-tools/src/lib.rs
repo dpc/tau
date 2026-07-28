@@ -14,6 +14,10 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
+mod status;
+
+#[cfg(test)]
+use status::parse_args as parse_status_args;
 use tau_harness::internal_tools::{InternalSkill, InternalSkillSource};
 use tau_harness::{AgentId, AgentToolCall, HarnessError, InternalToolHandler, InternalToolHost};
 use tau_proto::{
@@ -34,6 +38,7 @@ const COMPACT_TOOL_NAME: &str = "compact";
 const AGENT_COMPACT_TOOL_NAME: &str = "agent_compact";
 const SESSION_LIST_TOOL_NAME: &str = "session_list";
 const AGENT_LIST_TOOL_NAME: &str = "agent_list";
+const STATUS_TOOL_NAME: &str = "status";
 const DISCOVERY_MAX_RESULTS: usize = 50;
 
 /// Return handlers for Tau's built-in harness-process tools.
@@ -205,6 +210,7 @@ impl InternalToolHandler for BuiltinTools {
             agent_compact_tool_spec(),
             session_list_tool_spec(),
             agent_list_tool_spec(),
+            status::tool_spec(),
         ]
     }
 
@@ -235,6 +241,7 @@ impl InternalToolHandler for BuiltinTools {
                 | AGENT_COMPACT_TOOL_NAME
                 | SESSION_LIST_TOOL_NAME
                 | AGENT_LIST_TOOL_NAME
+                | STATUS_TOOL_NAME
         )
     }
 
@@ -324,6 +331,22 @@ impl InternalToolHandler for BuiltinTools {
                         &call,
                         visible_tool_name,
                     ),
+                    STATUS_TOOL_NAME => {
+                        let Some(owned) = host.agent_owned_internal_started_call(started) else {
+                            host.finish_tool_with_error(
+                                &conversation_id,
+                                call.id.clone(),
+                                visible_tool_name,
+                                call.tool_type,
+                                "configured extensions cannot invoke `status`".to_owned(),
+                                Some(call.arguments.clone()),
+                            );
+                            return Ok(());
+                        };
+                        debug_assert_eq!(owned.conversation_id(), &conversation_id);
+                        debug_assert_eq!(owned.call().id, call.id);
+                        status::handle_tool_call(host, &owned)
+                    }
                     _ => Ok(()),
                 }
             }
@@ -526,7 +549,8 @@ impl BuiltinTools {
         host: &mut InternalToolHost<'_>,
         response: &ProviderResponseFinished,
     ) -> Result<(), HarnessError> {
-        let Some(message) = agent_watch_response_should_notify(response) else {
+        let working_final = host.is_working_final_response(&response.agent_prompt_id);
+        let Some(message) = agent_watch_response_should_notify(response, working_final) else {
             return Ok(());
         };
         let sender_id = response.agent_id.to_string();
@@ -1765,11 +1789,15 @@ fn sanitized_display_agent_id(arguments: &CborValue) -> Option<String> {
         .map(tau_proto::AgentId::into_string)
 }
 
-fn agent_watch_response_should_notify(response: &ProviderResponseFinished) -> Option<String> {
+fn agent_watch_response_should_notify(
+    response: &ProviderResponseFinished,
+    working_final: bool,
+) -> Option<String> {
     // Only interactive user turns produce per-turn watch responses. Side-agent
     // provider turns are summarized through `StartAgentResult`, and internal
     // steering/tool-completion turns must stay local to the watched agent.
-    if !response.originator.is_user() || response.stop_reason.requests_tool_calls() {
+    if working_final || !response.originator.is_user() || response.stop_reason.requests_tool_calls()
+    {
         return None;
     }
     if response.failure_kind.is_some() || response.error.is_some() {

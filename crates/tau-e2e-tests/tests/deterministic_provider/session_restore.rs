@@ -152,17 +152,9 @@ fn production_worker_scenario(name: &str, prefix: &str) -> ScenarioV2 {
                         response: "worker start accepted".to_owned(),
                     },
                     ScenarioActionV2::WatchNotifications {
-                        notifications: vec![
-                            WatchNotificationV2::TurnState {
-                                state: AgentRuntimeState::Running,
-                            },
-                            WatchNotificationV2::Response {
-                                content: "worker boot-a complete".to_owned(),
-                            },
-                            WatchNotificationV2::TurnState {
-                                state: AgentRuntimeState::Idle,
-                            },
-                        ],
+                        notifications: vec![WatchNotificationV2::Response {
+                            content: "worker boot-a complete".to_owned(),
+                        }],
                         response: "worker completion observed".to_owned(),
                     },
                     ScenarioActionV2::Text {
@@ -211,7 +203,7 @@ fn cold_resume_restores_completed_production_worker() -> Result<(), Box<dyn std:
     assert_provider_turn_counts(
         &observer_a.events,
         &identities,
-        ProviderTurnCounts { main: 4, worker: 1 },
+        ProviderTurnCounts { main: 3, worker: 1 },
     )?;
     let boot_a_action_matches = fixture
         .trace()?
@@ -305,17 +297,9 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
                             response: "worker start accepted".to_owned(),
                         },
                         ScenarioActionV2::WatchNotifications {
-                            notifications: vec![
-                                WatchNotificationV2::TurnState {
-                                    state: AgentRuntimeState::Running,
-                                },
-                                WatchNotificationV2::Response {
-                                    content: "worker boot-a complete".to_owned(),
-                                },
-                                WatchNotificationV2::TurnState {
-                                    state: AgentRuntimeState::Idle,
-                                },
-                            ],
+                            notifications: vec![WatchNotificationV2::Response {
+                                content: "worker boot-a complete".to_owned(),
+                            }],
                             response: "worker completion observed".to_owned(),
                         },
                         ScenarioActionV2::AgentWatchCall {
@@ -367,7 +351,7 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
     assert_provider_turn_counts(
         &observer_a.events,
         &identities,
-        ProviderTurnCounts { main: 4, worker: 1 },
+        ProviderTurnCounts { main: 3, worker: 1 },
     )?;
     let boot_a_action_matches = matched_action_count(&fixture)?;
     disconnect_ui(&mut observer_a.peer)?;
@@ -436,7 +420,7 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
     assert_provider_turn_counts(
         &observer_b.events,
         &identities,
-        ProviderTurnCounts { main: 5, worker: 1 },
+        ProviderTurnCounts { main: 4, worker: 1 },
     )?;
     disconnect_ui(&mut observer_b.peer)?;
     daemon_b.finish()?;
@@ -567,14 +551,14 @@ fn initial_live_watch_subscription_id(
                 if !observed.replay
                     && message.sender_id == identities.worker
                     && message.recipient_id == identities.main
-                    && message.kind == AgentMessageKind::WatchTurnState
+                    && message.kind == AgentMessageKind::WatchWorkStatus
                     && message
-                        .watch_turn_state
+                        .watch_work_status
                         .as_ref()
                         .is_some_and(|state| state.initial && &state.session_id == session_id) =>
             {
                 message
-                    .watch_turn_state
+                    .watch_work_status
                     .as_ref()
                     .map(|state| state.subscription_id.clone())
             }
@@ -627,13 +611,13 @@ fn assert_explicit_watch_initial(
                 Event::AgentMessageReceived(message)
                     if message.sender_id == identities.worker
                         && message.recipient_id == identities.main
-                        && message.kind == AgentMessageKind::WatchTurnState
+                        && message.kind == AgentMessageKind::WatchWorkStatus
                         && message.watch_provider_status.is_none()
-                        && message.watch_turn_state.as_ref().is_some_and(|state| {
+                        && message.watch_work_status.as_ref().is_some_and(|state| {
                             state.initial
                                 && &state.session_id == session_id
                                 && state.subscription_id == subscription_id
-                                && state.state == AgentRuntimeState::Idle
+                                && state.phase == tau_proto::AgentWorkStatusPhase::Unreported
                         })
             )
     });
@@ -680,9 +664,9 @@ fn assert_explicit_watch_notifications(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if relevant.len() != 5 {
+    if relevant.len() != 3 {
         return Err(format!(
-            "explicit watch emitted {} worker-to-main notifications instead of five",
+            "explicit watch emitted {} worker-to-main notifications instead of three",
             relevant.len()
         )
         .into());
@@ -694,7 +678,16 @@ fn assert_explicit_watch_notifications(
         return Err("S2 watch facts carried an unexpected provider-status payload".into());
     }
     assert_watch_prompt_response(&relevant)?;
-    assert_watch_turn_states(&relevant, session_id, subscription_id)
+    let (_, initial) = sole_watch_message(&relevant, AgentMessageKind::WatchWorkStatus)?;
+    if !initial.watch_work_status.as_ref().is_some_and(|status| {
+        status.initial
+            && &status.session_id == session_id
+            && status.subscription_id == subscription_id
+            && status.phase == tau_proto::AgentWorkStatusPhase::Unreported
+    }) {
+        return Err("explicit watch initial work-status snapshot changed".into());
+    }
+    Ok(())
 }
 
 fn assert_watch_prompt_response(
@@ -709,49 +702,6 @@ fn assert_watch_prompt_response(
         || prompt_index >= response_index
     {
         return Err("watched prompt/response content or causal order changed".into());
-    }
-    Ok(())
-}
-
-fn assert_watch_turn_states(
-    messages: &[(usize, &tau_proto::AgentMessageReceived)],
-    session_id: &SessionId,
-    subscription_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut turn_states = messages.iter().filter_map(|(index, message)| {
-        (message.kind == AgentMessageKind::WatchTurnState)
-            .then_some((index, message.watch_turn_state.as_ref()))
-    });
-    let mut initial = None;
-    let mut running = None;
-    let mut idle = None;
-    for _ in 0..3 {
-        let Some((index, Some(state))) = turn_states.next() else {
-            return Err("watch turn-state notification count or payload changed".into());
-        };
-        if state.subscription_id != subscription_id {
-            return Err("watch turn-state subscription identity changed".into());
-        }
-        if &state.session_id != session_id {
-            return Err("watch turn-state session identity changed".into());
-        }
-        match (state.initial, state.state) {
-            (true, AgentRuntimeState::Idle) => initial = Some(*index),
-            (false, AgentRuntimeState::Running) => running = Some((*index, state.turn_generation)),
-            (false, AgentRuntimeState::Idle) => idle = Some((*index, state.turn_generation)),
-            pair => return Err(format!("unexpected watch turn-state edge: {pair:?}").into()),
-        }
-    }
-    if turn_states.next().is_some() {
-        return Err("watch emitted more than three turn-state facts".into());
-    }
-    let (Some(_initial), Some((running, running_generation)), Some((idle, idle_generation))) =
-        (initial, running, idle)
-    else {
-        return Err("watch initial/running/idle edges were incomplete".into());
-    };
-    if running >= idle || running_generation != idle_generation {
-        return Err("watch running/idle causal correlation changed".into());
     }
     Ok(())
 }

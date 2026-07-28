@@ -49,6 +49,8 @@ pub fn dump_initial_prompt(
 pub use tau_core::{AgentEntry, AgentTree, SessionMeta, list_session_metas, session_is_locked};
 pub use tau_proto::AgentId;
 
+pub use crate::agent::WorkStatusReport;
+
 pub(crate) fn parse_agent_id(value: impl AsRef<str>) -> AgentId {
     AgentId::parse(value.as_ref()).expect("harness stores only valid agent ids")
 }
@@ -85,7 +87,9 @@ pub use crate::error::{ExtensionSpawnError, HarnessError};
 pub use crate::extension::{harness_log_path, session_logs_dir};
 pub use crate::format::{format_extension_event, format_tool_progress};
 pub use crate::harness::{AgentToolCall, Harness, normalized_wait_timeout_minutes};
-pub use crate::internal_tools::{InternalToolHandler, InternalToolHandlers, InternalToolHost};
+pub use crate::internal_tools::{
+    AgentOwnedInternalToolCall, InternalToolHandler, InternalToolHandlers, InternalToolHost,
+};
 pub use crate::settings::{
     EXTENSION_CLI_OVERRIDES_ENV, HARNESS_CONFIG_CLI_OVERRIDES_ENV, ROLE_CLI_OVERRIDES_ENV,
     STARTUP_ROLE_ENV, builtin_extensions, default_config, validate_cli_overrides,

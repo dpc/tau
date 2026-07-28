@@ -3,8 +3,8 @@
 use serde::Deserialize;
 use tau_e2e_tests::AgentWatchResultExpectationV2;
 use tau_proto::{
-    AgentId, AgentMessageKind, AgentPromptId, AgentRuntimeState, AgentWatchProviderCategory,
-    AgentWatchProviderState, AgentWatchUpdateCause, Event, SessionAgentListScope, SessionId,
+    AgentId, AgentMessageKind, AgentPromptId, AgentWatchProviderCategory, AgentWatchProviderState,
+    AgentWatchUpdateCause, Event, SessionAgentListScope, SessionId,
 };
 
 use super::super::daemon_support::{disconnect_ui, spawn_daemon};
@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Exact compact JSON size of the reviewed S5 scenario grammar.
-const SCENARIO_BYTES: usize = 1_192;
+const SCENARIO_BYTES: usize = 1_061;
 /// Existing bounded hold deadline used only to keep the provider prompt in
 /// flight until the synchronized process-group kill.
 const HOLD_TIMEOUT_MS: u64 = 10_000;
@@ -79,7 +79,8 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     let daemon_a = spawn_daemon(&fixture, &socket_a, tau_harness::SessionLaunchStatus::New);
     let mut observer_a = SessionRestoreObserver::connect(&socket_a)?;
     observer_a.create_main("s5-main", "start the held deterministic worker")?;
-    observer_a.wait_for_marker("held worker running observed")?;
+    observer_a.wait_for_agent_role("deterministic-worker")?;
+    observer_a.wait_for_marker("held worker start accepted")?;
     let identities = BootIdentities::from_events(&observer_a.events)?;
     let boot_a_subscription_id =
         initial_live_watch_subscription_id(&observer_a.events, &identities, &session_id)?;
@@ -91,15 +92,15 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
         &dispatch,
     )?;
     interruption::wait_for_hold_readiness(&fixture, &dispatch.agent_prompt_id)?;
-    assert_fake_checkpoint(&fixture, &scenario, &identities, [3, 1])?;
+    assert_fake_checkpoint(&fixture, &scenario, &identities, [2, 1])?;
     interruption::assert_unfinished_worker_dispatch(&durable_a, &identities.worker, &dispatch)?;
     assert_provider_turn_counts(
         &observer_a.events,
         &identities,
-        ProviderTurnCounts { main: 3, worker: 1 },
+        ProviderTurnCounts { main: 2, worker: 0 },
     )?;
-    if matched_action_count(&fixture)? != 4 {
-        return Err("S5 Boot A did not stop at the exact four-action crash cut".into());
+    if matched_action_count(&fixture)? != 3 {
+        return Err("S5 Boot A did not stop at the exact three-action crash cut".into());
     }
     interruption::assert_hold_ready_and_live(&fixture, &dispatch.agent_prompt_id)?;
     daemon_a.kill_ungracefully()?;
@@ -125,7 +126,7 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
         &identities,
         ProviderTurnCounts { main: 0, worker: 0 },
     )?;
-    if matched_action_count(&fixture)? != 4 {
+    if matched_action_count(&fixture)? != 3 {
         return Err("S5 Boot B replay automatically consumed provider work".into());
     }
     let roster_b = observer_b.roster(&session_id, SessionAgentListScope::Current)?;
@@ -155,10 +156,10 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
         &identities,
         ProviderTurnCounts { main: 2, worker: 0 },
     )?;
-    if matched_action_count(&fixture)? != 6 {
+    if matched_action_count(&fixture)? != 5 {
         return Err("S5 Boot B explicit watch exceeded its two-action main budget".into());
     }
-    assert_fake_checkpoint(&fixture, &scenario, &identities, [5, 1])?;
+    assert_fake_checkpoint(&fixture, &scenario, &identities, [4, 1])?;
     disconnect_ui(&mut observer_b.peer)?;
     daemon_b.finish()?;
 
@@ -205,10 +206,10 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
         &identities,
         ProviderTurnCounts { main: 0, worker: 0 },
     )?;
-    if matched_action_count(&fixture)? != 6 {
+    if matched_action_count(&fixture)? != 5 {
         return Err("S5 Boot C automatically consumed provider work".into());
     }
-    assert_fake_checkpoint(&fixture, &scenario, &identities, [5, 1])?;
+    assert_fake_checkpoint(&fixture, &scenario, &identities, [4, 1])?;
     let roster_c = observer_c.roster(&session_id, SessionAgentListScope::Current)?;
     assert_restored_roster(&roster_c, &identities)?;
     disconnect_ui(&mut observer_c.peer)?;
@@ -241,12 +242,6 @@ fn dispatch_uncertain_scenario() -> ScenarioV2 {
                         call_id: "s5-agent-start".into(),
                         response: "held worker start accepted".to_owned(),
                     },
-                    ScenarioActionV2::WatchNotifications {
-                        notifications: vec![super::WatchNotificationV2::TurnState {
-                            state: AgentRuntimeState::Running,
-                        }],
-                        response: "held worker running observed".to_owned(),
-                    },
                     ScenarioActionV2::AgentWatchCall {
                         user_text: "recreate uncertain worker watch".to_owned(),
                         call_id: "s5-agent-watch".into(),
@@ -278,7 +273,7 @@ fn assert_scenario_budget(scenario: &ScenarioV2) -> Result<(), Box<dyn std::erro
         .map(|lane| lane.actions.len())
         .collect::<Vec<_>>();
     let encoded = serde_json::to_vec(scenario)?;
-    if actions != [5, 1] || encoded.len() != SCENARIO_BYTES {
+    if actions != [4, 1] || encoded.len() != SCENARIO_BYTES {
         return Err(format!(
             "S5 scenario budget changed: lanes={}, actions={actions:?}, bytes={}",
             scenario.lanes.len(),
@@ -362,6 +357,7 @@ fn assert_no_restored_watch(
                             AgentMessageKind::WatchPrompt
                                 | AgentMessageKind::WatchResponse
                                 | AgentMessageKind::WatchTurnState
+                                | AgentMessageKind::WatchWorkStatus
                                 | AgentMessageKind::WatchProviderStatus
                         )
             )
@@ -408,6 +404,7 @@ fn assert_dispatch_uncertain_watch(
                         AgentMessageKind::WatchPrompt
                             | AgentMessageKind::WatchResponse
                             | AgentMessageKind::WatchTurnState
+                            | AgentMessageKind::WatchWorkStatus
                             | AgentMessageKind::WatchProviderStatus
                     ) =>
             {
@@ -430,31 +427,30 @@ fn assert_dispatch_uncertain_watch(
     {
         return Err(format!("explicit S5 watch topology changed: {update:?}").into());
     }
-    let [turn_message, status_message] = watch_messages.as_slice() else {
+    let [work_message, status_message] = watch_messages.as_slice() else {
         return Err(format!(
             "explicit S5 watch emitted {} worker-to-main snapshots",
             watch_messages.len()
         )
         .into());
     };
-    let Some(turn) = turn_message.watch_turn_state.as_ref() else {
-        return Err("explicit S5 watch did not publish its turn-state snapshot first".into());
+    let Some(work) = work_message.watch_work_status.as_ref() else {
+        return Err("explicit S5 watch did not publish its work-status snapshot first".into());
     };
     let Some(status) = status_message.watch_provider_status.as_ref() else {
         return Err("explicit S5 watch did not publish its provider snapshot second".into());
     };
-    if turn_message.kind != AgentMessageKind::WatchTurnState
-        || turn_message.watch_provider_status.is_some()
-        || !turn.initial
-        || &turn.session_id != session_id
-        || turn.subscription_id != subscription_id
-        || turn.state != AgentRuntimeState::Idle
+    if work_message.kind != AgentMessageKind::WatchWorkStatus
+        || work_message.watch_provider_status.is_some()
+        || !work.initial
+        || &work.session_id != session_id
+        || work.subscription_id != subscription_id
+        || work.phase != tau_proto::AgentWorkStatusPhase::Unreported
         || status_message.kind != AgentMessageKind::WatchProviderStatus
         || status_message.watch_turn_state.is_some()
         || !status.initial
         || &status.session_id != session_id
         || status.subscription_id != subscription_id
-        || status.turn_generation != turn.turn_generation
         || &status.agent_prompt_id != prompt_id
         || status.state
             != (AgentWatchProviderState::DispatchUncertain {

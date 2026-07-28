@@ -753,10 +753,10 @@ fn v2_watch_notification_actions_are_closed_and_bounded() {
     }
 }
 
-/// Accepts either cross-stream interleaving of the prompt/response and
-/// running/idle chains while rejecting each causal inversion before admission.
+/// Accepts the prompt-before-response chain and rejects response-first or
+/// duplicate-prompt admission.
 #[test]
-fn v2_watch_notification_chains_enforce_only_their_two_predecessors() {
+fn v2_watch_notification_chains_enforce_prompt_before_response() {
     let parent = tau_proto::AgentId::parse("parent").expect("parent id");
     let child = tau_proto::AgentId::parse("child").expect("child id");
     let scenario = || {
@@ -775,18 +775,16 @@ fn v2_watch_notification_chains_enforce_only_their_two_predecessors() {
         state
     };
 
-    let mut alternate = state();
+    let mut ordered = state();
     for message in [
-        watch_turn(&parent, &child, tau_proto::AgentRuntimeState::Running, 7),
         watch_prompt(&parent, &child, "work"),
-        watch_turn(&parent, &child, tau_proto::AgentRuntimeState::Idle, 7),
         watch_response(&parent, &child, "done"),
     ] {
-        alternate
+        ordered
             .record_watch_notification(&message)
-            .expect("valid partial-order interleaving");
+            .expect("valid content-chain order");
     }
-    assert_eq!(alternate.watch_notifications[&parent].len(), 4);
+    assert_eq!(ordered.watch_notifications[&parent].len(), 2);
 
     let mut response_first = state();
     assert!(
@@ -796,18 +794,16 @@ fn v2_watch_notification_chains_enforce_only_their_two_predecessors() {
     );
     assert!(response_first.watch_notifications.is_empty());
 
-    let mut idle_first = state();
+    let mut duplicate_prompt = state();
+    duplicate_prompt
+        .record_watch_notification(&watch_prompt(&parent, &child, "work"))
+        .expect("first prompt");
     assert!(
-        idle_first
-            .record_watch_notification(&watch_turn(
-                &parent,
-                &child,
-                tau_proto::AgentRuntimeState::Idle,
-                7,
-            ))
+        duplicate_prompt
+            .record_watch_notification(&watch_prompt(&parent, &child, "work"))
             .is_err()
     );
-    assert!(idle_first.watch_notifications.is_empty());
+    assert_eq!(duplicate_prompt.watch_notifications[&parent].len(), 1);
 }
 
 /// Rejects unrelated, malformed, re-correlated, and excess live watch records

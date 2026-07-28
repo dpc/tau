@@ -105,6 +105,7 @@ use crate::harness::interception::{
 };
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::subagents_tool::SubagentToolState;
+use crate::harness::working_final::{CommittedWorkingFinal, WorkingFinalDisposition};
 use crate::internal_tools::InternalToolHandlers;
 use crate::model::{
     LoadedRoles, MissingDefaultRole, baseline_params_for_selection, context_percent_used,
@@ -1692,6 +1693,7 @@ mod subagents_tool;
 pub(crate) use subagents_tool::PeerIoPermit;
 pub use subagents_tool::normalized_wait_timeout_minutes;
 mod user_skill_invocation;
+mod working_final;
 
 pub(crate) use subagents_tool::ExternalMessageToolCompletion;
 
@@ -2461,6 +2463,9 @@ pub struct Harness {
     /// Standalone continuations whose exact completion-bearing steer was
     /// rejected before commit and must retry on branch reselection.
     pending_agent_publish_completions: HashMap<AgentId, AgentPublishCompletion>,
+    /// Publication-local completion visible only during committed internal-tool
+    /// reaction, including nested publication restoration.
+    committing_agent_publish_completion: Option<AgentPublishCompletion>,
     /// Explicit provider operation and resume policy for each in-flight prompt.
     pub(crate) prompt_operations:
         std::collections::HashMap<AgentPromptId, (tau_proto::PromptOperation, bool)>,
@@ -3194,6 +3199,7 @@ impl Harness {
             pending_ui_compactions_after_wait: HashMap::new(),
             enqueued_standalone_inference_checkpoints: HashSet::new(),
             pending_agent_publish_completions: HashMap::new(),
+            committing_agent_publish_completion: None,
             prompt_operations: HashMap::new(),
             prompt_tool_specs: HashMap::new(),
             prompt_tool_call_prompts: HashMap::new(),
@@ -4980,6 +4986,10 @@ impl Harness {
                 .cloned()
                 .map(crate::parse_agent_id)
         });
+        let must_pass = matches!(
+            completion,
+            Some(AgentPublishCompletion::WorkingFinal { .. })
+        );
         let sync = Some(ConversationHeadSync {
             cid: cid.clone(),
             agent_id,
@@ -4990,7 +5000,7 @@ impl Harness {
                 .map(PostCommitContinuation::AgentPublish),
             notify_watchers,
         });
-        self.enqueue_publish(source.as_ref(), event, persist, false, sync);
+        self.enqueue_publish(source.as_ref(), event, persist, must_pass, sync);
     }
 
     fn note_agent_prompt_created(&mut self, prompt: &AgentPromptCreated) {
@@ -5506,6 +5516,15 @@ impl Harness {
             self.emit_info("dropping stale completion publication after agent/session teardown");
             return;
         }
+        if let Some(sync) = sync_head_for.as_ref()
+            && let Some(AgentPublishCompletion::WorkingFinal { batch_parent, .. }) =
+                sync.completion()
+            && self.selected_head_for_agent(&sync.cid) != Some(*batch_parent)
+        {
+            self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
+            self.emit_info("retaining Working final until its owning branch is selected");
+            return;
+        }
         let mut commit_timing = CommitEventTiming::new(event.name());
         // When this publish was stamped with a conversation, fold
         // the event onto that agent's branch directly. This
@@ -5855,9 +5874,16 @@ impl Harness {
                 self.inject_user_shell_output(finished);
             }
         }
+        let previous_completion = std::mem::replace(
+            &mut self.committing_agent_publish_completion,
+            agent_publish_completion
+                .as_ref()
+                .map(|(_, completion, _)| completion.clone()),
+        );
         if let Err(error) = self.dispatch_internal_tool_event(&event) {
             self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
         }
+        self.committing_agent_publish_completion = previous_completion;
         self.process_committed_peer_event(source, peer_context, &event);
         self.with_derived_publish_source(source.cloned(), |harness| {
             harness.react_to_committed_event(source, &event, persist, append_outcome.as_ref());
@@ -6018,6 +6044,30 @@ impl Harness {
         completion: AgentPublishCompletion,
         through: tau_proto::AgentHead,
     ) {
+        if let AgentPublishCompletion::WorkingFinal { disposition, .. } = completion {
+            match disposition {
+                WorkingFinalDisposition::Challenge { title } => {
+                    if let Some(agent) = self.agents.get_mut(cid) {
+                        agent.work_status.record_final_challenge();
+                        agent.pending_prompts.push_back(PendingPrompt::internal(format!(
+                            "You are still marked as working on {title:?}. Continue the work, call `status` with state `done` or `blocked`, or use `wait` when waiting for input."
+                        )));
+                    }
+                    self.continue_after_working_final_challenge(cid);
+                }
+                WorkingFinalDisposition::AcceptUnknown { terminal } => {
+                    if self
+                        .agents
+                        .get_mut(cid)
+                        .is_some_and(|agent| agent.work_status.invalidate_working())
+                    {
+                        self.notify_work_status_transition(cid);
+                    }
+                    self.complete_committed_working_final(cid, *terminal);
+                }
+            }
+            return;
+        }
         let AgentPublishCompletion::StandaloneContinuation {
             transaction_id,
             model,
@@ -6027,7 +6077,10 @@ impl Harness {
             retry_prompts: _,
             complete_on_commit,
             ..
-        } = completion;
+        } = completion
+        else {
+            unreachable!("working final returned above")
+        };
         if !complete_on_commit {
             return;
         }
@@ -6076,6 +6129,18 @@ impl Harness {
         );
     }
 
+    /// Return whether the currently committing publication owns a Working-final
+    /// disposition for this exact prompt.
+    pub(crate) fn committing_working_final(&self, prompt_id: &AgentPromptId) -> bool {
+        matches!(
+            self.committing_agent_publish_completion.as_ref(),
+            Some(AgentPublishCompletion::WorkingFinal {
+                agent_prompt_id,
+                ..
+            }) if agent_prompt_id == prompt_id
+        )
+    }
+
     /// Retain a rejected completion-bearing envelope without synthesizing an
     /// activation token or draining its prompt payload.
     fn retain_rejected_agent_publish(
@@ -6090,12 +6155,21 @@ impl Harness {
         }) else {
             return;
         };
-        let AgentPublishCompletion::StandaloneContinuation {
-            approved_retry_event,
-            ..
-        } = &mut completion;
-        *approved_retry_event = Some(event.clone());
-        self.discard_deferred_agent_publish_batch(&cid, &completion);
+        match &mut completion {
+            AgentPublishCompletion::StandaloneContinuation {
+                approved_retry_event,
+                ..
+            } => *approved_retry_event = Some(Box::new(event.clone())),
+            AgentPublishCompletion::WorkingFinal { retry_event, .. } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
+        }
+        if matches!(
+            completion,
+            AgentPublishCompletion::StandaloneContinuation { .. }
+        ) {
+            self.discard_deferred_agent_publish_batch(&cid, &completion);
+        }
         self.pending_agent_publish_completions
             .insert(cid, completion);
     }
@@ -6105,6 +6179,28 @@ impl Harness {
         let Some(completion) = self.pending_agent_publish_completions.remove(cid) else {
             return;
         };
+        if let AgentPublishCompletion::WorkingFinal {
+            batch_parent,
+            retry_event,
+            ..
+        } = &completion
+        {
+            if self.selected_head_for_agent(cid) != Some(*batch_parent) {
+                self.pending_agent_publish_completions
+                    .insert(cid.clone(), completion);
+                return;
+            }
+            let Some(event) = retry_event.clone() else {
+                return;
+            };
+            let mut approved = completion;
+            let AgentPublishCompletion::WorkingFinal { retry_event, .. } = &mut approved else {
+                unreachable!()
+            };
+            *retry_event = None;
+            self.commit_approved_agent_retry(cid, *event, approved);
+            return;
+        }
         let (batch_parent, retry_prompts, approved_retry_event) = match &completion {
             AgentPublishCompletion::StandaloneContinuation {
                 batch_parent,
@@ -6116,6 +6212,7 @@ impl Harness {
                 retry_prompts.clone(),
                 approved_retry_event.clone(),
             ),
+            AgentPublishCompletion::WorkingFinal { .. } => unreachable!("returned above"),
         };
         if retry_prompts.is_empty() {
             return;
@@ -6142,10 +6239,13 @@ impl Harness {
                 approved_retry_event,
                 complete_on_commit,
                 ..
-            } = &mut approved_completion;
+            } = &mut approved_completion
+            else {
+                return;
+            };
             *approved_retry_event = None;
             *complete_on_commit = retry_prompts.len() == 1;
-            self.commit_approved_agent_retry(cid, approved_event, approved_completion);
+            self.commit_approved_agent_retry(cid, *approved_event, approved_completion);
             if self.pending_agent_publish_completions.contains_key(cid) {
                 return;
             }
@@ -6156,7 +6256,10 @@ impl Harness {
             let AgentPublishCompletion::StandaloneContinuation {
                 approved_retry_event,
                 ..
-            } = &mut remaining_completion;
+            } = &mut remaining_completion
+            else {
+                return;
+            };
             *approved_retry_event = None;
             self.publish_prompts_as_steered(
                 cid,
@@ -6166,6 +6269,19 @@ impl Harness {
             return;
         }
         self.publish_prompts_as_steered(cid, retry_prompts, Some(completion));
+    }
+
+    /// Retry retained append-rejected publications when ordinary runtime input
+    /// proves that the harness is making progress again.
+    fn retry_pending_agent_publications(&mut self) {
+        let pending = self
+            .pending_agent_publish_completions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for cid in pending {
+            self.retry_pending_agent_publish_completion(&cid);
+        }
     }
 
     /// Retry the exact standalone-owned inference checkpoint after branch
@@ -10396,6 +10512,7 @@ impl Harness {
         message: HarnessInputMessage,
         admission: ExtensionFrameAdmission,
     ) -> Result<(), HarnessError> {
+        self.retry_pending_agent_publications();
         if let Some(entry) = self.extensions.entries.get(source_id) {
             if entry.state == ExtensionState::Disconnected
                 && matches!(message, HarnessInputMessage::ExtensionNoticeRequest(_))
@@ -20764,34 +20881,10 @@ impl Harness {
             }),
         );
         self.emit_agent_stats_updated(cid);
-        let suppress = self
-            .agents
-            .get(cid)
-            .is_some_and(|agent| agent.lifecycle_notification_only_turn);
-        if suppress && new_state == tau_proto::AgentRuntimeState::Running {
-            let subscriptions = self
-                .watchers_for_agent(&agent_id)
-                .into_iter()
-                .filter_map(|watcher_id| {
-                    self.agent_watch_subscriptions
-                        .get(&(watcher_id, agent_id.clone()))
-                        .cloned()
-                })
-                .collect();
-            if let Some(agent) = self.agents.get_mut(cid) {
-                agent.suppressed_start_subscriptions = subscriptions;
-            }
-        }
-        if !suppress {
-            for watcher_id in self.watchers_for_agent(&agent_id) {
-                self.notify_agent_watcher_turn_state(&watcher_id, &agent_id, false);
-            }
-        }
         if new_state == tau_proto::AgentRuntimeState::Idle
             && let Some(agent) = self.agents.get_mut(cid)
         {
             agent.lifecycle_notification_only_turn = false;
-            agent.suppressed_start_subscriptions.clear();
         }
     }
 
@@ -20882,28 +20975,13 @@ impl Harness {
     /// Convert a notification-only running generation into an observable mixed
     /// turn by emitting its delayed start before any eventual stop.
     fn promote_lifecycle_notification_turn(&mut self, cid: &AgentId) {
-        let promoted = self.agents.get_mut(cid).and_then(|agent| {
+        if let Some(agent) = self.agents.get_mut(cid) {
             if !agent.lifecycle_notification_only_turn
                 || agent.published_runtime_state != tau_proto::AgentRuntimeState::Running
             {
-                return None;
+                return;
             }
             agent.lifecycle_notification_only_turn = false;
-            Some((
-                agent.agent_id.clone()?,
-                std::mem::take(&mut agent.suppressed_start_subscriptions),
-            ))
-        });
-        let Some((agent_id, owed_subscriptions)) = promoted else {
-            return;
-        };
-        for watcher_id in self.watchers_for_agent(&agent_id) {
-            let subscription = self
-                .agent_watch_subscriptions
-                .get(&(watcher_id.clone(), agent_id.clone()));
-            if subscription.is_some_and(|id| owed_subscriptions.contains(id)) {
-                self.notify_agent_watcher_turn_state(&watcher_id, &agent_id, false);
-            }
         }
     }
 
@@ -22722,6 +22800,7 @@ impl Harness {
         if let Some(Event::ProviderResponseFinished(response)) = failure.as_ref() {
             self.local_route_failure_prompts
                 .insert(response.agent_prompt_id.clone());
+            self.invalidate_working_status_after_unsuccessful_terminal(cid);
         }
         if let Some(failure) = failure {
             self.publish_for_agent(cid, failure);
@@ -22782,7 +22861,22 @@ impl Harness {
             }
             _ => return,
         };
+        if matches!(failure, Event::ProviderResponseFinished(_)) {
+            self.invalidate_working_status_after_unsuccessful_terminal(cid);
+        }
         self.publish_for_agent(cid, failure);
+    }
+
+    /// Invalidate a Working report when a synthetic unsuccessful terminal
+    /// bypasses the ordinary provider-response gate.
+    fn invalidate_working_status_after_unsuccessful_terminal(&mut self, cid: &AgentId) {
+        let changed = self
+            .agents
+            .get_mut(cid)
+            .is_some_and(|agent| agent.work_status.invalidate_working());
+        if changed {
+            self.notify_work_status_transition(cid);
+        }
     }
 
     /// Builds one prompt request and records the live in-flight bookkeeping
@@ -23009,8 +23103,12 @@ impl Harness {
                     .is_some_and(|(_, _, resume)| resume.is_some()),
             ),
         );
+        let status_available = tool_specs.iter().any(|spec| spec.name.as_str() == "status");
         self.prompt_tool_specs
             .insert(agent_prompt_id.clone(), tool_specs);
+        if status_available && let Some(agent) = self.agents.get_mut(cid) {
+            agent.work_status.reset_ack_notice();
+        }
         let session_id = self
             .agents
             .get(cid)
@@ -24031,7 +24129,56 @@ impl Harness {
             }
         }
 
-        self.publish_finished_response_for_agent(&cid, source, &response);
+        let status_gate = (!requested_tool_calls)
+            .then(|| self.apply_working_final_response_gate(&cid, &response))
+            .flatten();
+        let completion = match status_gate {
+            Some(crate::agent::WorkingFinalDecision::Challenge) => {
+                Some(AgentPublishCompletion::WorkingFinal {
+                    agent_prompt_id: response.agent_prompt_id.clone(),
+                    batch_parent: self
+                        .agents
+                        .get(&cid)
+                        .and_then(|agent| agent.head)
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                    disposition: WorkingFinalDisposition::Challenge {
+                        title: self
+                            .agents
+                            .get(&cid)
+                            .and_then(|agent| agent.work_status.title())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    },
+                    retry_event: None,
+                })
+            }
+            Some(crate::agent::WorkingFinalDecision::AcceptUnknown) => {
+                Some(AgentPublishCompletion::WorkingFinal {
+                    agent_prompt_id: response.agent_prompt_id.clone(),
+                    batch_parent: self
+                        .agents
+                        .get(&cid)
+                        .and_then(|agent| agent.head)
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                    disposition: WorkingFinalDisposition::AcceptUnknown {
+                        terminal: Box::new(CommittedWorkingFinal {
+                            response: response.clone(),
+                            response_contains_compaction,
+                            input_tokens,
+                            context_size_alerts: context_size_alerts.clone(),
+                            is_non_tool_ext_query,
+                            source: source.cloned(),
+                        }),
+                    },
+                    retry_event: None,
+                })
+            }
+            None => None,
+        };
+        self.publish_finished_response_for_agent(&cid, source, &response, completion);
+        if status_gate.is_some() {
+            return Ok(());
+        }
         if response_contains_compaction {
             self.clear_agent_context_usage(&cid);
         } else if response.error.is_none()
@@ -25139,6 +25286,7 @@ impl Harness {
         cid: &AgentId,
         source: Option<&tau_proto::ConnectionId>,
         response: &ProviderResponseFinished,
+        completion: Option<AgentPublishCompletion>,
     ) {
         // Publish via the owning agent's branch — when text is
         // present the AgentTree fold appends an assistant response as a
@@ -25146,10 +25294,12 @@ impl Harness {
         // whichever branch happened to be at `tree.head` (e.g. after
         // a sibling side conv's teardown touched another branch).
         // `publish_for_agent` snaps and updates `c.head`.
-        self.publish_for_agent_from(
+        self.publish_event_for_agent_with_completion(
             cid,
             source,
             Event::ProviderResponseFinished(response.clone()),
+            completion,
+            false,
         );
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         if let Some(conv) = self.agents.get_mut(cid) {
@@ -25501,6 +25651,124 @@ impl Harness {
         // any queued prompts (on this or other agents) that
         // are now eligible to dispatch.
         self.try_advance_queue();
+    }
+
+    /// Apply the common successful-terminal gate before ordinary or delegated
+    /// completion can project the candidate response.
+    fn apply_working_final_response_gate(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+    ) -> Option<crate::agent::WorkingFinalDecision> {
+        let successful = response.error.is_none()
+            && response.failure_kind.is_none()
+            && !matches!(
+                response.stop_reason,
+                ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
+            );
+        self.agents.get(cid)?.work_status.decide_final(successful)
+    }
+
+    /// Perform ordinary or delegated completion only after an accepted Working
+    /// final crossed its semantic append boundary.
+    fn complete_committed_working_final(&mut self, cid: &AgentId, terminal: CommittedWorkingFinal) {
+        let CommittedWorkingFinal {
+            response,
+            response_contains_compaction,
+            input_tokens,
+            context_size_alerts,
+            is_non_tool_ext_query,
+            source,
+        } = terminal;
+        if response_contains_compaction {
+            self.clear_agent_context_usage(cid);
+        } else if response.error.is_none()
+            && response.failure_kind.is_none()
+            && !matches!(
+                response.stop_reason,
+                ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
+            )
+        {
+            self.queue_crossed_context_size_alerts(cid, input_tokens, &context_size_alerts);
+        }
+        let assistant_text = assistant_text_from_output_items(&response.output_items);
+        let notify_watchers = !matches!(
+            response.originator,
+            tau_proto::PromptOriginator::Extension { .. }
+        ) && self
+            .agents
+            .get(cid)
+            .is_some_and(|agent| !agent.lifecycle_notification_only_turn);
+        let mut normalized_tool_calls = NormalizedFinishedToolCalls::default();
+        if self.handle_finished_response_side_conversation(
+            cid,
+            FinishedSideConversation {
+                response: &response,
+                requested_tool_calls: false,
+                is_non_tool_ext_query,
+                assistant_text: assistant_text.as_deref(),
+                tool_call_count: 0,
+            },
+            &mut normalized_tool_calls,
+            source.as_ref(),
+        ) {
+            return;
+        }
+        if notify_watchers
+            && response.error.is_none()
+            && response.failure_kind.is_none()
+            && let Some(message) = assistant_text.clone()
+        {
+            self.notify_agent_watchers_about_response(cid, message);
+        }
+        self.complete_finished_response_without_tool_calls(
+            cid,
+            &response,
+            assistant_text.as_deref(),
+        );
+    }
+
+    /// Dispatch a challenged candidate as an inner continuation without closing
+    /// its durable outer turn or changing its runtime generation.
+    fn continue_after_working_final_challenge(&mut self, cid: &AgentId) {
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.turn_state = AgentTurnState::Idle;
+        }
+        self.fold_pending_prompts_as_steered(cid);
+        self.dispatch_activation_after_publish_idle(cid);
+    }
+
+    fn notify_work_status_transition(&mut self, cid: &AgentId) {
+        let Some(agent_id) = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.clone())
+        else {
+            return;
+        };
+        for watcher_id in self.watchers_for_agent(&agent_id) {
+            self.notify_agent_watcher_work_status(&watcher_id, &agent_id, false);
+        }
+    }
+
+    /// Publish one accepted ordinary final to each current watcher after the
+    /// provider response itself has committed.
+    fn notify_agent_watchers_about_response(&mut self, cid: &AgentId, message: String) {
+        let Some(agent_id) = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.clone())
+        else {
+            return;
+        };
+        for watcher_id in self.watchers_for_agent(&agent_id) {
+            if self
+                .publish_agent_watch_response_from_agent(cid, watcher_id.clone(), message.clone())
+                .is_err()
+            {
+                self.prune_agent_watch(&watcher_id, &agent_id);
+            }
+        }
     }
 
     fn known_tool_call_ids(&self) -> HashSet<ToolCallId> {
@@ -26208,6 +26476,7 @@ impl Harness {
             false
         };
         if should_send {
+            self.queue_status_acknowledgement_if_needed(cid, completed_call_id);
             let pending_ui = self.pending_ui_compactions_after_wait.remove(cid);
             if let Some(pending) = pending_ui
                 && pending.wait_call_id.as_str() == completed_call_id
@@ -26267,6 +26536,29 @@ impl Harness {
         }
     }
 
+    /// Fold at most one acknowledgement into the complete foreground tool-round
+    /// continuation, after every parallel terminal has settled.
+    fn queue_status_acknowledgement_if_needed(&mut self, cid: &AgentId, completed_call_id: &str) {
+        let status_was_available = self
+            .prompt_tool_call_prompts
+            .get(completed_call_id)
+            .and_then(|prompt_id| self.prompt_tool_specs.get(prompt_id))
+            .is_some_and(|specs| specs.iter().any(|spec| spec.name.as_str() == "status"));
+        if !status_was_available {
+            return;
+        }
+        let Some(agent) = self.agents.get_mut(cid) else {
+            return;
+        };
+        if !agent.work_status.mark_ack_notice_delivered() {
+            return;
+        }
+        agent.pending_prompts.push_back(PendingPrompt::internal(
+            "[tau-internal]: Use `status` with state `working` and a short title to acknowledge this work."
+                .to_owned(),
+        ));
+    }
+
     fn has_pending_agent_message_wake(&self, cid: &AgentId) -> bool {
         self.agents.get(cid).is_some_and(|conv| {
             conv.pending_message_wakes.iter().any(|wake| {
@@ -26297,15 +26589,17 @@ impl Harness {
             let inference_activation = prompt.creates_inference_activation();
             let internal_kind = prompt.internal_kind();
             let event_completion = completion.clone().map(|mut completion| {
-                let AgentPublishCompletion::StandaloneContinuation {
+                if let AgentPublishCompletion::StandaloneContinuation {
                     retry_prompts: suffix,
                     complete_on_commit,
                     approved_retry_event,
                     ..
-                } = &mut completion;
-                *suffix = retry_prompts[index..].to_vec();
-                *complete_on_commit = index + 1 == prompt_count;
-                *approved_retry_event = None;
+                } = &mut completion
+                {
+                    *suffix = retry_prompts[index..].to_vec();
+                    *complete_on_commit = index + 1 == prompt_count;
+                    *approved_retry_event = None;
+                }
                 completion
             });
             let event = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {

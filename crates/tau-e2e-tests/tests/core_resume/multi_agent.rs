@@ -8,7 +8,7 @@ use std::time::Instant;
 use tau_e2e_tests::{
     DurableSessionSnapshot, ScenarioActionV2, ScenarioLaneV2, ScenarioV2, WatchNotificationV2,
 };
-use tau_proto::{AgentId, AgentRuntimeState, SessionAgentListScope, SessionId};
+use tau_proto::{AgentId, SessionAgentListScope, SessionId};
 
 #[path = "multi_agent/agent_start_projection.rs"]
 mod agent_start_projection;
@@ -77,7 +77,7 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
     assert_provider_turns(
         &observer_a.events,
         &identities,
-        ProviderTurns { main: 4, worker: 1 },
+        ProviderTurns { main: 3, worker: 1 },
     )?;
     let matched_after_a = matched_actions(&fixture)?;
     if matched_after_a != 4 {
@@ -211,17 +211,9 @@ fn scenario() -> ScenarioV2 {
                         response: "worker start accepted".to_owned(),
                     },
                     ScenarioActionV2::WatchNotifications {
-                        notifications: vec![
-                            WatchNotificationV2::TurnState {
-                                state: AgentRuntimeState::Running,
-                            },
-                            WatchNotificationV2::Response {
-                                content: "worker boot-a complete".to_owned(),
-                            },
-                            WatchNotificationV2::TurnState {
-                                state: AgentRuntimeState::Idle,
-                            },
-                        ],
+                        notifications: vec![WatchNotificationV2::Response {
+                            content: "worker boot-a complete".to_owned(),
+                        }],
                         response: "worker completion observed".to_owned(),
                     },
                 ],

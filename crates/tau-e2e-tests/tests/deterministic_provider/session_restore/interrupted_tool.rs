@@ -13,7 +13,7 @@ use super::{
 /// Exact provider-authored foreground tool identity.
 const TOOL_CALL_ID: &str = "s6-interrupted-tool";
 /// Exact compact JSON size of the reviewed S6 scenario grammar.
-const SCENARIO_BYTES: usize = 1_259;
+const SCENARIO_BYTES: usize = 1_120;
 
 /// Proves a worker's acknowledged but unterminated foreground tool is repaired
 /// once on resume and remains balanced across a second cold resume.
@@ -35,7 +35,8 @@ fn cold_resume_repairs_interrupted_worker_tool_once() -> Result<(), Box<dyn std:
     let daemon_a = spawn_daemon(&fixture, &socket_a, tau_harness::SessionLaunchStatus::New);
     let mut observer_a = SessionRestoreObserver::connect(&socket_a)?;
     observer_a.create_main("s6-main", "start the tool-holding deterministic worker")?;
-    observer_a.wait_for_marker("tool-holding worker running observed")?;
+    observer_a.wait_for_agent_role("deterministic-worker")?;
+    observer_a.wait_for_marker("tool-holding worker start accepted")?;
     let identities = BootIdentities::from_events(&observer_a.events)?;
     interruption::wait_for_tool_readiness(&mut observer_a, TOOL_CALL_ID)?;
     let snapshot_a = interruption::wait_for_interrupted_tool_snapshot(
@@ -49,10 +50,10 @@ fn cold_resume_repairs_interrupted_worker_tool_once() -> Result<(), Box<dyn std:
     assert_provider_turn_counts(
         &observer_a.events,
         &identities,
-        ProviderTurnCounts { main: 3, worker: 1 },
+        ProviderTurnCounts { main: 2, worker: 1 },
     )?;
-    if matched_action_count(&fixture)? != 4 {
-        return Err("S6 Boot A did not stop at the exact four-action crash cut".into());
+    if matched_action_count(&fixture)? != 3 {
+        return Err("S6 Boot A did not stop at the exact three-action crash cut".into());
     }
     let terminated = daemon_a.kill_ungracefully()?;
     drop(observer_a);
@@ -102,7 +103,7 @@ fn cold_resume_repairs_interrupted_worker_tool_once() -> Result<(), Box<dyn std:
         &identities,
         ProviderTurnCounts { main: 0, worker: 1 },
     )?;
-    if matched_action_count(&fixture)? != 5 {
+    if matched_action_count(&fixture)? != 4 {
         return Err("S6 Boot B repair did not consume exactly one fake action".into());
     }
     let current_b = observer_b.roster(&session_id, SessionAgentListScope::Current)?;
@@ -137,7 +138,7 @@ fn cold_resume_repairs_interrupted_worker_tool_once() -> Result<(), Box<dyn std:
         &identities,
         ProviderTurnCounts { main: 0, worker: 0 },
     )?;
-    if matched_action_count(&fixture)? != 5 {
+    if matched_action_count(&fixture)? != 4 {
         return Err("S6 Boot C consumed provider work without new input".into());
     }
     let current_c = observer_c.roster(&session_id, SessionAgentListScope::Current)?;
@@ -177,12 +178,6 @@ fn interrupted_tool_scenario(diagnostic: &str) -> ScenarioV2 {
                         call_id: "s6-agent-start".into(),
                         response: "tool-holding worker start accepted".to_owned(),
                     },
-                    ScenarioActionV2::WatchNotifications {
-                        notifications: vec![super::WatchNotificationV2::TurnState {
-                            state: tau_proto::AgentRuntimeState::Running,
-                        }],
-                        response: "tool-holding worker running observed".to_owned(),
-                    },
                 ],
             },
             ScenarioLaneV2 {
@@ -212,7 +207,7 @@ fn assert_scenario_budget(scenario: &ScenarioV2) -> Result<(), Box<dyn std::erro
         .map(|lane| lane.actions.len())
         .collect::<Vec<_>>();
     let encoded = serde_json::to_vec(scenario)?;
-    if actions != [3, 2] || encoded.len() != SCENARIO_BYTES {
+    if actions != [2, 2] || encoded.len() != SCENARIO_BYTES {
         return Err(format!(
             "S6 scenario budget changed: lanes={}, actions={actions:?}, bytes={}",
             scenario.lanes.len(),

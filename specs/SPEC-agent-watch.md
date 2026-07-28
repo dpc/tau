@@ -2,9 +2,9 @@
 
 ## Status
 
-The protocol, durable message fold, and prompt projection accept typed
-self-reported work-status and long-wait notifications. Harness producers still
-emit the older turn-state projection until the runtime migration completes.
+Typed long-wait notifications remain protocol/replay compatibility only. The
+Phase C monotonic wait accounting, threshold deadlines, and live producers are
+not implemented.
 
 ## Record justification
 
@@ -45,7 +45,7 @@ is rejected without changing any watch state when `watched` already reaches
 agent watch would create a cycle: `<watcher>` -> `<watched>`
 ```
 
-Rejection publishes no topology snapshot or initial turn/provider state event.
+Rejection publishes no topology snapshot or initial work/provider state event.
 Re-enabling an existing edge retains its established behavior and subscription
 identity. Disable bypasses cycle analysis. See
 [GATE-agent-watch-acyclic-topology](GATE-agent-watch-acyclic-topology.md).
@@ -63,30 +63,31 @@ clearly labeled as watch notifications, not as explicit `message` tool deliverie
 - `[tau-internal]: Watched agent <agent-id> emitted a response`
 - `[tau-internal]: Watched agent <agent-id> received a user prompt`
 
-Content-free outer agent-turn initial/start/stop notifications are also allowed.
-An agent turn runs from activating input through the terminal response or
-termination, including inner model and tool rounds. These notifications contain only stable
-watch/session identity, idle/running state, snapshot status, and a
-harness-runtime-scoped watched-agent turn generation. They must never include prompt,
-response, message, tool, or error content. Initial snapshots are not model input. Later
-model-visible transition wording is reconstructed from the typed state and watched
-identity, never trusted from the event's compatibility message field.
-
-A turn caused only by lifecycle notifications suppresses both lifecycle edges so
-watch-derived activity cannot cascade along accepted acyclic chains. This is also
-defense in depth for malformed topology. If ordinary input joins that generation during a
-tool/provider continuation, the harness first emits the delayed start edge, then emits
-the matching stop normally; it never exposes an orphan stop.
-
 Self-reported work status uses a closed phase (`unreported`, `working`, `done`,
 `blocked`, or `unknown`), a runtime-local epoch, and a canonical model-authored
 title of at most 160 UTF-8 bytes. The title is nonempty, trimmed, single-line,
 and contains no control characters. An `unreported` notification carries no
 title. Initial snapshots do not activate the watcher. Later status transitions
-and newly crossed long-wait thresholds are durable typed, isolated
-notifications. Long-wait projections carry only the crossed whole-minute
-threshold; enabling a watch never replays historical thresholds. Prompt
-presentation escapes the title as untrusted visible metadata.
+are durable typed, isolated notifications. Prompt presentation escapes the title
+as untrusted visible metadata. The former content-free `WatchTurnState` schema
+remains accepted only for compatibility and replay; the harness no longer
+produces lifecycle notifications.
+
+The default `status` tool remains subject to each effective prompt's ordinary
+tool policy. Each effective snapshot containing `status` owns one acknowledgement
+decision; an accepted Working report in that snapshot suppresses its reminder,
+including a changed Working title, while a later same-outer-turn snapshot receives
+a fresh decision. Done and Blocked mutate reported status only, never close a turn
+or install a wait, and a later activation does not silently change them.
+
+Successful no-tool finals while Working are durable candidate responses. Watch,
+delegated result, and detach projections remain withheld until the candidate's
+semantic append commits. A bounded challenge continues the same outer turn;
+exhaustion accepts the committed candidate and changes Working to Unknown.
+Unsuccessful terminals bypass challenges and change Working to Unknown once.
+Current status is runtime-only; durable typed message facts provide projection
+and replay authority. A newly enabled watcher receives only the current snapshot,
+never historical transitions or thresholds.
 
 The watch path must not forward internal steering prompts, background or foreground
 tool-completion prompts, explicit `message` tool deliveries to the watched agent, or
@@ -120,7 +121,7 @@ Every accepted watch-derived `AgentMessageReceived` is the sole canonical
 payload projection for its occurrence and follows the sequence-aware placement
 in [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md).
 `WatchResponse` and `WatchPrompt` use ordinary live activation. Noninitial
-model-visible turn, provider, work-status, and long-wait transitions use
+model-visible provider and work-status transitions use
 isolated activation. Initial and
 redundant structured snapshots have no wake and no provider block. Replay
 retains canonical facts without waking or refanout.

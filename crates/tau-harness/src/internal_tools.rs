@@ -105,6 +105,34 @@ pub struct InternalToolHost<'a> {
     harness: &'a mut Harness,
 }
 
+/// Opaque proof that one committed internal-tool start belongs to its calling
+/// model agent rather than a configured extension.
+pub struct AgentOwnedInternalToolCall {
+    /// Calling conversation selected from harness-owned routing.
+    conversation_id: AgentId,
+    /// Materialized internal call.
+    call: AgentToolCall,
+    /// Model-visible tool name.
+    visible_tool_name: ToolName,
+}
+
+impl AgentOwnedInternalToolCall {
+    /// Return the calling conversation.
+    pub fn conversation_id(&self) -> &AgentId {
+        &self.conversation_id
+    }
+
+    /// Return the validated agent-owned call.
+    pub fn call(&self) -> &AgentToolCall {
+        &self.call
+    }
+
+    /// Return the model-visible tool name.
+    pub fn visible_tool_name(&self) -> &ToolName {
+        &self.visible_tool_name
+    }
+}
+
 impl<'a> InternalToolHost<'a> {
     pub(crate) fn new(harness: &'a mut Harness) -> Self {
         Self { harness }
@@ -155,6 +183,18 @@ impl<'a> InternalToolHost<'a> {
     /// Emit an important informational message to the user.
     pub fn emit_info_important(&mut self, message: &str) {
         self.harness.emit_info_important(message);
+    }
+
+    /// Apply a canonical work-status report to the calling agent only.
+    ///
+    /// Returns whether the runtime snapshot changed.
+    pub fn report_work_status(
+        &mut self,
+        owner: &AgentOwnedInternalToolCall,
+        report: crate::WorkStatusReport,
+    ) -> Result<bool, String> {
+        self.harness
+            .report_agent_work_status(owner.conversation_id(), report)
     }
 
     /// Ensure and return the agent id for a conversation.
@@ -376,6 +416,28 @@ impl<'a> InternalToolHost<'a> {
             arguments: started.arguments.clone(),
         };
         Some((cid, call, pending.name))
+    }
+
+    /// Resolve a committed internal-tool start only when its validated runtime
+    /// owner is the calling model agent.
+    pub fn agent_owned_internal_started_call(
+        &mut self,
+        started: &tau_proto::ToolStarted,
+    ) -> Option<AgentOwnedInternalToolCall> {
+        let cid = self.harness.tool_agents.get(&started.call_id)?.clone();
+        let pending = self.harness.pending_tools.get(&started.call_id)?.clone();
+        let call = AgentToolCall {
+            call_ref: None,
+            id: started.call_id.clone(),
+            name: pending.internal_name,
+            tool_type: pending.tool_type,
+            arguments: started.arguments.clone(),
+        };
+        Some(AgentOwnedInternalToolCall {
+            conversation_id: cid,
+            call,
+            visible_tool_name: pending.name,
+        })
     }
 
     /// Dispatch a hidden activating background-completion prompt synchronously.
@@ -702,6 +764,12 @@ impl<'a> InternalToolHost<'a> {
             .get(watched_agent_id)
             .and_then(|cid| self.harness.agents.get(cid))
             .is_some_and(|agent| !agent.terminating && !agent.lifecycle_notification_only_turn)
+    }
+
+    /// Return whether the committing publication owns any Working-final
+    /// disposition for this exact prompt.
+    pub fn is_working_final_response(&self, prompt_id: &tau_proto::AgentPromptId) -> bool {
+        self.harness.committing_working_final(prompt_id)
     }
 
     /// Prune a stale watch relationship after notification delivery failed.

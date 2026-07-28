@@ -1978,7 +1978,10 @@ impl AgentTree {
                         status.title.as_ref().is_none_or(|title| {
                             !title.is_empty()
                                 && title.len() <= 160
-                                && !title.chars().any(char::is_control)
+                                && !title.chars().any(|character| {
+                                    character.is_control()
+                                        || matches!(character, '\u{2028}' | '\u{2029}')
+                                })
                                 && title.trim() == title
                         })
                     });
