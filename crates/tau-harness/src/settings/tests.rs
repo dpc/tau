@@ -646,6 +646,22 @@ fn built_in_extensions_json5_disables_slack_agent_id_prefix() {
     );
 }
 
+/// Ensures the bundled Swarm bridge remains inert and optional until an
+/// operator provides its pinned endpoint and Configure secret.
+#[test]
+fn built_in_extensions_json5_contains_disabled_optional_std_swarm() {
+    let swarm = built_in_extension_defs()
+        .iter()
+        .find(|def| def.name == "std-swarm")
+        .expect("std-swarm built-in extension");
+    assert!(!swarm.enable);
+    assert!(!swarm.require);
+    assert_eq!(
+        swarm.suffix.as_deref(),
+        Some(["component".into(), "ext-swarm".into()].as_slice())
+    );
+}
+
 #[test]
 fn built_in_extensions_json5_contains_disabled_std_pim_and_email_alias() {
     // Guard the real embedded JSON5, not the local test fixture, so the

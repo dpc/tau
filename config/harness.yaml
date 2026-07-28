@@ -100,6 +100,21 @@
 #     config:
 #       # Opt in to the legacy `[agent-id] ` prefix on agent-authored posts.
 #       prefix_agent_id: false
+#
+#   # Publish this Tau session to one identity-pinned Tau Swarm server.
+#   std-swarm:
+#     enable: true
+#     require: false
+#     secrets:
+#       swarm_worker_secret: {}
+#     config:
+#       endpoint:
+#         peer_id: "kix..."
+#         # relay_url: "https://relay.example.net"
+#         # direct_addresses: ["203.0.113.10:11204"]
+#       credential_id: "tau-worker-production"
+#       credential_secret: "swarm_worker_secret"
+#       # hostname: "builder-01"
 #   std-telegram:
 #     enable: true
 #     secrets:

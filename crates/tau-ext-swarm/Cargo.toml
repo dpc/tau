@@ -1,0 +1,35 @@
+[package]
+name = "tau-ext-swarm"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+rust-version = "1.91"
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bincode.workspace = true
+iroh.workspace = true
+libc.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tau-client.workspace = true
+tau-proto.workspace = true
+tau-swarm-api.workspace = true
+tau-swarm-client.workspace = true
+tau-swarm-client-api.workspace = true
+tau-swarm-iroh.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tau-swarm-core.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

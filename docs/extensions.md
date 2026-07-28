@@ -1,5 +1,15 @@
 # Configuring extensions
 
+## Tau Swarm
+
+The bundled `std-swarm` instance is disabled by default and optional
+(`require: false`). See the [authoritative configuration, bounds, retry, and
+process-memory semantics](../crates/tau-ext-swarm/README.md). The extension
+exposes the agent-scoped `blocker` action tool and `swarm_update`.
+
+
+
+
 Tau extensions are separate processes configured under `extensions` in
 `harness.yaml`. Run `tau init` to generate the normal configuration files.
 

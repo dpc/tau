@@ -46,6 +46,14 @@
         config: { prefix_agent_id: false },
     },
     {
+        name: "std-swarm",
+        suffix: ["component", "ext-swarm"],
+        role: "tool",
+        enable: false,
+        require: false,
+        config: {},
+    },
+    {
         name: "std-telegram",
         suffix: ["component", "ext-telegram"],
         role: "tool",

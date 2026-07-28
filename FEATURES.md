@@ -248,3 +248,12 @@ fixed-point cache ratios, missing-evidence coverage, and explicitly qualified
 journal recorded-at wall-clock intervals with one summary per included agent.
 
 Compact trace formats provide a semantic assistant/tool/message timeline in JSONL or TOON. Lite bounds each text/output item to 4 KiB while retaining exact complete-content metrics; full retains complete content. Journal sequence is authoritative within an agent, while cross-agent wall time is only a readable overview and not causality.
+
+## Tau Swarm
+
+The optional `std-swarm` extension publishes a replay-coherent live session
+overview to an identity-pinned Tau Swarm peer. It accepts correlated prompts
+and blocker answers and provides agent-scoped blocker/update tools. Command
+deduplication, blocker history, updates, and acknowledgements are
+process-memory-only and reset on session switch or extension restart.
+See [Configuring extensions: Tau Swarm](docs/extensions.md#tau-swarm).

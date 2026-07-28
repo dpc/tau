@@ -1,5 +1,11 @@
 # Security policy
 
+The optional `std-swarm` configured extension is a trusted same-user local
+executable. Its remote Iroh peer is cooperative but authenticated and
+identity-pinned before the worker credential is sent; externally supplied
+prompts, answers, identifiers, and collections remain size-validated inputs.
+
+
 Tau is early-stage software, but security issues are important. Please report suspected vulnerabilities through GitHub private vulnerability reporting for `dpc/tau` (<https://github.com/dpc/tau/security/advisories/new>) when available. If that path is unavailable, contact the maintainer privately first and avoid filing a public issue with exploit details.
 
 For technical trust boundaries, start with [ARCH-external-message-boundary](specs/ARCH-external-message-boundary.md) and the applicable project and component records under `specs/` and `crates/*/specs/`.
@@ -740,6 +746,24 @@ parsed JSONL items across all semantic families.
 Revisit this boundary before adding user-selected output files, redaction modes,
 provider HTTP-body or streaming-delta capture, new timing authority, or any
 persisted trace state.
+
+## Tau Swarm extension
+
+`std-swarm` is a configured local extension that connects to one
+cryptographically pinned Iroh endpoint. The configured credential is sensitive;
+Tau supplies it only through the declared Configure secret and the extension
+must not log it. Relay and direct addresses are reachability hints and do not
+weaken endpoint identity verification.
+
+Remote prompts and blocker answers reach agents only through Tau's canonical
+internal-prompt path. The extension retains command deduplication, blocker
+history, and unacknowledged updates in process memory under configured bounds.
+Tau Swarm 0.1.0 cannot bind commands to an extension-process incarnation, so an
+ambiguous command may execute again after extension restart. A peer that sends
+many unique, otherwise valid commands can fill the no-eviction command table and
+deny later remote commands until session switch or process restart. Large
+configured bounds can exhaust extension memory; they are operator trust and
+capacity choices rather than untrusted local-IPC hardening boundaries.
 
 ### Compact semantic trace disclosure
 

@@ -773,6 +773,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge-ext-rhai",
             "tau-self-knowledge-ext-shell",
             "tau-self-knowledge-ext-slack",
+            "tau-self-knowledge-ext-swarm",
             "tau-self-knowledge-ext-std-notifications",
             "tau-self-knowledge-ext-test-dummy",
             "tau-self-knowledge-ext-websearch",
@@ -815,6 +816,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     assert!(skill.content.contains("tau-self-knowledge-ext-rhai"));
     assert!(skill.content.contains("tau-self-knowledge-ext-shell"));
     assert!(skill.content.contains("tau-self-knowledge-ext-slack"));
+    assert!(skill.content.contains("tau-self-knowledge-ext-swarm"));
     assert!(
         skill
             .content
@@ -924,6 +926,14 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     assert!(!shell.add_to_prompt);
     assert!(shell.content.contains("core-shell"));
     assert!(shell.content.contains("dir_lock"));
+
+    let swarm = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-ext-swarm")
+        .expect("built-in swarm extension skill");
+    assert!(!swarm.add_to_prompt);
+    assert!(swarm.content.contains("endpoint.peer_id"));
+    assert!(swarm.content.contains("process memory"));
 
     let notifications = skills
         .iter()

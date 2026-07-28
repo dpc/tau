@@ -17,6 +17,7 @@ members = [
   "crates/tau-ext-shell",
   "crates/tau-ext-slack",
   "crates/tau-ext-std-notifications",
+  "crates/tau-ext-swarm",
   "crates/tau-ext-telegram",
   "crates/tau-ext-test-dummy",
   "crates/tau-ext-utils",
@@ -48,7 +49,7 @@ keywords = ["agent", "cli", "coding-agent", "llm"]
 license = "MPL-2.0"
 readme = "README.md"
 repository = "https://github.com/dpc/tau-agent"
-rust-version = "1.89"
+rust-version = "1.91"
 version = "0.1.0"
 
 [workspace.lints.rust]
@@ -79,6 +80,7 @@ tau-ext-rhai = { path = "crates/tau-ext-rhai" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
 tau-ext-slack = { path = "crates/tau-ext-slack" }
 tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
+tau-ext-swarm = { path = "crates/tau-ext-swarm" }
 tau-ext-telegram = { path = "crates/tau-ext-telegram" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
 tau-ext-utils = { path = "crates/tau-ext-utils" }
@@ -103,11 +105,13 @@ tau-vcr = { path = "crates/tau-vcr" }
 async-imap = { version = "0.11", default-features = false, features = [
   "runtime-tokio",
 ] }
+async-trait = "0.1.91"
 backon = { version = "1", default-features = false, features = [
   "std",
   "std-blocking-sleep",
 ] }
 base64 = { version = "0.22", default-features = false, features = ["std"] }
+bincode = { version = "2.0.1", default-features = false, features = ["alloc"] }
 blake3 = { version = "1", default-features = false, features = ["std"] }
 bon = { version = "3", default-features = false }
 built = { version = "0.8", default-features = false, features = [
@@ -150,6 +154,7 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 indexmap = { version = "2", default-features = false, features = ["serde"] }
 ipnet = { version = "2", default-features = false, features = ["std"] }
+iroh = { version = "1.0.3", default-features = false, features = ["tls-ring"] }
 json5 = { version = "0.4", default-features = false }
 lettre = { version = "0.11", default-features = false, features = [
   "builder",
@@ -215,6 +220,11 @@ serde_yaml_ng = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 similar = { version = "2", default-features = false, features = ["text"] }
 socket2 = { version = "0.6", default-features = false }
+tau-swarm-api = { version = "0.1.0" }
+tau-swarm-client = { version = "0.1.0" }
+tau-swarm-client-api = { version = "0.1.0" }
+tau-swarm-core = { version = "0.1.0" }
+tau-swarm-iroh = { version = "0.1.0" }
 tempfile = { version = "3", default-features = false }
 time = { version = "0.3", default-features = false, features = [
   "formatting",
