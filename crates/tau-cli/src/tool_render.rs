@@ -43,9 +43,21 @@ pub(crate) fn render_turn_stats_block(
 }
 
 const CACHE_HIT_WARNING_PERCENT: u8 = 90;
-// Prompt-cache hits only accrue in coarse provider cache blocks; allow
-// the last partial block to miss without flagging the turn.
-const CACHE_GRANULARITY_TOKENS: u64 = 512;
+
+enum CacheEfficiency {
+    Exact {
+        cached: u64,
+        ceiling: u64,
+        percent: u8,
+    },
+    NoOpportunity,
+    Unknown {
+        cached: u64,
+    },
+    Invalid {
+        cached: u64,
+    },
+}
 
 struct TurnStatsPart {
     text: String,
@@ -77,17 +89,39 @@ fn turn_stats_parts(
     let new_prompt_tokens = usage.prompt_sent_tokens.saturating_sub(turn_cache_possible);
     let mut parts = Vec::new();
 
-    parts.push(TurnStatsPart::new("Δ", names::TOKEN_STATS_DELTA));
-    let turn_cache_hit_percent =
-        cache_hit_percent(Some(turn_cache_possible), Some(usage.prompt_cached_tokens)).unwrap_or(0);
-    parts.push(TurnStatsPart::new(
-        format!(
-            "{turn_cache_hit_percent}% {}/{}",
-            format_token_count(usage.prompt_cached_tokens),
-            format_token_count(turn_cache_possible),
+    let efficiency = cache_efficiency(usage);
+    let (marker, detail, style) = match efficiency {
+        CacheEfficiency::Exact {
+            cached,
+            ceiling,
+            percent,
+        } => (
+            format!("Δ{percent}%"),
+            format!(
+                " {}/{}",
+                format_token_count(cached),
+                format_token_count(ceiling)
+            ),
+            cache_hit_style_name(percent),
         ),
-        cache_hit_style_name(turn_cache_possible, usage.prompt_cached_tokens),
-    ));
+        CacheEfficiency::NoOpportunity => (
+            "Δ—".to_owned(),
+            " 0/0".to_owned(),
+            names::TOKEN_STATS_CACHE_HIT,
+        ),
+        CacheEfficiency::Unknown { cached } => (
+            "Δ?".to_owned(),
+            format!(" {}/?", format_token_count(cached)),
+            names::TOKEN_STATS_CACHE_MISS,
+        ),
+        CacheEfficiency::Invalid { cached } => (
+            "Δ!".to_owned(),
+            format!(" {}/?", format_token_count(cached)),
+            names::TOKEN_STATS_CACHE_MISS,
+        ),
+    };
+    parts.push(TurnStatsPart::new(marker, names::TOKEN_STATS_DELTA));
+    parts.push(TurnStatsPart::new(detail, style));
     parts.push(TurnStatsPart::new(" ↑", names::TOKEN_STATS_UP));
     parts.push(TurnStatsPart::new(
         format_token_count(new_prompt_tokens),
@@ -147,34 +181,39 @@ impl fmt::Display for StatusBarDuration {
     }
 }
 
-fn cache_hit_style_name(possible_cached_tokens: u64, cached_tokens: u64) -> &'static str {
+fn cache_hit_style_name(percent: u8) -> &'static str {
     use tau_themes::names;
 
-    let cacheable_prefix_floor =
-        possible_cached_tokens / CACHE_GRANULARITY_TOKENS * CACHE_GRANULARITY_TOKENS;
-    if cacheable_prefix_floor <= cached_tokens {
+    if percent == 100 {
         names::TOKEN_STATS_CACHE_HIT
-    } else if cache_hit_percent(Some(possible_cached_tokens), Some(cached_tokens))
-        .is_some_and(|percent| CACHE_HIT_WARNING_PERCENT < percent)
-    {
+    } else if CACHE_HIT_WARNING_PERCENT < percent {
         names::TOKEN_STATS_CACHE_WARN
     } else {
         names::TOKEN_STATS_CACHE_MISS
     }
 }
 
-pub(crate) fn cache_hit_percent(
-    possible_cached_tokens: Option<u64>,
-    cached_tokens: Option<u64>,
-) -> Option<u8> {
-    let possible_cached_tokens = possible_cached_tokens?;
-    let cached_tokens = cached_tokens?;
-    if possible_cached_tokens == 0 {
-        return Some(0);
+fn cache_efficiency(usage: &tau_proto::ProviderTokenUsage) -> CacheEfficiency {
+    let cached = usage.prompt_cached_tokens;
+    let sent = usage.prompt_sent_tokens;
+    if sent < cached {
+        return CacheEfficiency::Invalid { cached };
     }
-    let clamped_cached_tokens = cached_tokens.min(possible_cached_tokens);
-    let percent = clamped_cached_tokens.saturating_mul(100) / possible_cached_tokens;
-    Some(percent.min(100) as u8)
+    let Some(ceiling) = usage.prompt_cache_read_ceiling_tokens else {
+        return CacheEfficiency::Unknown { cached };
+    };
+    if sent < ceiling || ceiling < cached {
+        return CacheEfficiency::Invalid { cached };
+    }
+    if ceiling == 0 {
+        return CacheEfficiency::NoOpportunity;
+    }
+    let percent = (u128::from(cached) * 100 / u128::from(ceiling)) as u8;
+    CacheEfficiency::Exact {
+        cached,
+        ceiling,
+        percent,
+    }
 }
 
 pub(crate) fn format_token_count(tokens: u64) -> String {

@@ -111,10 +111,10 @@ fn priority_header_text(block: &tau_cli_term::StyledBlock, width: usize) -> Stri
 
 use super::tool_render::{
     CompactionStatus, ToolLineElement, ToolStatus, build_delegate_completion_display,
-    cache_hit_percent, format_turn_stats_line, render_action_error_block,
-    render_action_output_block, render_compaction_block, render_diff_tool_block,
-    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_use_state, render_turn_stats_block, streaming_block, synthesize_fallback_display,
+    format_turn_stats_line, render_action_error_block, render_action_output_block,
+    render_compaction_block, render_diff_tool_block, render_harness_notice,
+    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
+    render_turn_stats_block, streaming_block, synthesize_fallback_display,
 };
 
 #[test]
@@ -3050,10 +3050,9 @@ fn clearing_selected_agent_clears_response_editor_context() {
 }
 
 #[test]
-fn switching_agents_preserves_turn_stats_cache_hit_baseline() {
-    // Regression: switching away and back re-renders turn-stats blocks, so the
-    // second response must keep the previous same-agent response as its cache-hit
-    // denominator instead of falling back to the no-baseline `Δ0% .../0` display.
+fn switching_agents_preserves_unknown_cache_efficiency() {
+    // Switching away and back must not invent a denominator when the durable
+    // provider usage has no validated cache-read ceiling.
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -3087,15 +3086,14 @@ fn switching_agents_preserves_turn_stats_cache_hit_baseline() {
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "Δ95% 19k/20k"));
-    assert!(!vt.screen_contains(80, "Δ0% 19k/0"));
+    assert!(vt.screen_contains(80, "Δ? 19k/?"));
 }
 
 #[test]
-fn switching_to_hidden_agent_preserves_turn_stats_cache_hit_baseline() {
+fn switching_to_hidden_agent_preserves_unknown_cache_efficiency() {
     // Regression: hidden side-agent responses are recorded in that agent's UI
     // state and later replayed by a full transcript re-render when selected, so
-    // they must also retain their per-entry cache-hit baseline.
+    // they must also retain the absence of a provider-authored denominator.
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -3128,8 +3126,7 @@ fn switching_to_hidden_agent_preserves_turn_stats_cache_hit_baseline() {
     renderer.switch_agent("worker-2".to_owned());
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "Δ95% 19k/20k"));
-    assert!(!vt.screen_contains(80, "Δ0% 19k/0"));
+    assert!(vt.screen_contains(80, "Δ? 19k/?"));
 }
 
 #[test]
@@ -11887,7 +11884,7 @@ fn format_turn_stats_line_formats_short_latencies_as_millis() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 17_341,
         prompt_cached_tokens: 16_896,
-        prompt_cache_read_ceiling_tokens: None,
+        prompt_cache_read_ceiling_tokens: Some(17_341),
         response_received_tokens: 29,
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
@@ -11917,6 +11914,7 @@ fn format_turn_stats_line_formats_short_latencies_as_millis() {
 #[test]
 fn format_turn_stats_line_formats_long_latencies_compactly() {
     let usage = tau_proto::ProviderTokenUsage {
+        prompt_cache_read_ceiling_tokens: Some(0),
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
                 sent_tokens: 1_000,
@@ -11933,7 +11931,7 @@ fn format_turn_stats_line_formats_long_latencies_compactly() {
         Some(Duration::from_secs(5 * 60 + 1)),
     );
 
-    assert_eq!(line, "Δ0% 0/0 ↑0 ↓0 18s Σ↑0/1k ↓0 5m");
+    assert_eq!(line, "Δ— 0/0 ↑0 ↓0 18s Σ↑0/1k ↓0 5m");
 }
 
 #[test]
@@ -11941,7 +11939,7 @@ fn format_turn_stats_line_uses_previous_turn_for_hit_percent() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 20_100,
         prompt_cached_tokens: 19_000,
-        prompt_cache_read_ceiling_tokens: None,
+        prompt_cache_read_ceiling_tokens: Some(20_000),
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
                 sent_tokens: 40_100,
@@ -11968,7 +11966,7 @@ fn format_turn_stats_line_caps_cache_possible_after_chain_reset() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 13_659,
         prompt_cached_tokens: 3_840,
-        prompt_cache_read_ceiling_tokens: None,
+        prompt_cache_read_ceiling_tokens: Some(13_659),
         response_received_tokens: 116,
         ..Default::default()
     };
@@ -11997,7 +11995,7 @@ fn format_turn_stats_line_shows_zero_hit_when_nothing_could_be_cached() {
     };
     let line = format_turn_stats_line(&usage, None, None, None);
 
-    assert_eq!(line, "Δ0% 0/0 ↑1k ↓0 Σ↑0/1k ↓0");
+    assert_eq!(line, "Δ? 0/? ↑1k ↓0 Σ↑0/1k ↓0");
 }
 
 #[test]
@@ -12005,7 +12003,7 @@ fn format_turn_stats_line_shows_zero_hit_when_no_prompt_sent() {
     let usage = tau_proto::ProviderTokenUsage::default();
     let line = format_turn_stats_line(&usage, None, None, None);
 
-    assert_eq!(line, "Δ0% 0/0 ↑0 ↓0 Σ↑0/0 ↓0");
+    assert_eq!(line, "Δ? 0/? ↑0 ↓0 Σ↑0/0 ↓0");
 }
 
 #[test]
@@ -12061,7 +12059,7 @@ fn render_turn_stats_block_uses_dedicated_styles() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 1_000,
         prompt_cached_tokens: 900,
-        prompt_cache_read_ceiling_tokens: None,
+        prompt_cache_read_ceiling_tokens: Some(1_000),
         response_received_tokens: 42,
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
@@ -12082,12 +12080,12 @@ fn render_turn_stats_block_uses_dedicated_styles() {
         render_turn_stats_block(&cli_test_theme(), &usage, Some(&previous_usage), None, None);
     let spans = block.content.spans();
 
-    assert_eq!(spans[0].text, "Δ");
+    assert_eq!(spans[0].text, "Δ90%");
     assert!(spans[0].style.bold);
     assert_eq!(spans[0].style.fg, Some(Color::DarkGrey));
-    assert_eq!(spans[1].text, "90% 900/1k");
+    assert_eq!(spans[1].text, " 900/1k");
     assert!(!spans[1].style.bold);
-    assert_eq!(spans[1].style.fg, Some(Color::DarkGrey));
+    assert_eq!(spans[1].style.fg, Some(Color::Red));
     let sigma = spans
         .iter()
         .find(|span| span.text == " Σ")
@@ -12097,11 +12095,11 @@ fn render_turn_stats_block_uses_dedicated_styles() {
 }
 
 #[test]
-fn render_turn_stats_block_greys_cache_hit_within_512_rounding_bucket() {
+fn render_turn_stats_block_warns_for_exact_99_percent_efficiency() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 20_100,
         prompt_cached_tokens: 19_456,
-        prompt_cache_read_ceiling_tokens: None,
+        prompt_cache_read_ceiling_tokens: Some(19_500),
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
                 sent_tokens: 40_100,
@@ -12120,8 +12118,9 @@ fn render_turn_stats_block_greys_cache_hit_within_512_rounding_bucket() {
         render_turn_stats_block(&cli_test_theme(), &usage, Some(&previous_usage), None, None);
     let spans = block.content.spans();
 
-    assert_eq!(spans[1].text, "99% 19.4k/19.5k");
-    assert_eq!(spans[1].style.fg, Some(Color::DarkGrey));
+    assert_eq!(spans[0].text, "Δ99%");
+    assert_eq!(spans[1].text, " 19.4k/19.5k");
+    assert_eq!(spans[1].style.fg, Some(Color::DarkYellow));
 }
 
 #[test]
@@ -12129,7 +12128,7 @@ fn render_turn_stats_block_warns_cache_hit_above_90_percent() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 10_100,
         prompt_cached_tokens: 9_100,
-        prompt_cache_read_ceiling_tokens: None,
+        prompt_cache_read_ceiling_tokens: Some(10_000),
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
                 sent_tokens: 20_100,
@@ -12148,7 +12147,8 @@ fn render_turn_stats_block_warns_cache_hit_above_90_percent() {
         render_turn_stats_block(&cli_test_theme(), &usage, Some(&previous_usage), None, None);
     let spans = block.content.spans();
 
-    assert_eq!(spans[1].text, "91% 9.1k/10k");
+    assert_eq!(spans[0].text, "Δ91%");
+    assert_eq!(spans[1].text, " 9.1k/10k");
     assert_eq!(spans[1].style.fg, Some(Color::DarkYellow));
 }
 
@@ -12157,7 +12157,7 @@ fn render_turn_stats_block_highlights_cache_hit_at_or_below_90_percent() {
     let usage = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 10_100,
         prompt_cached_tokens: 9_000,
-        prompt_cache_read_ceiling_tokens: None,
+        prompt_cache_read_ceiling_tokens: Some(10_000),
         stats: tau_proto::TokenUsageStats {
             total: tau_proto::TokenUsageCounts {
                 sent_tokens: 20_100,
@@ -12176,16 +12176,26 @@ fn render_turn_stats_block_highlights_cache_hit_at_or_below_90_percent() {
         render_turn_stats_block(&cli_test_theme(), &usage, Some(&previous_usage), None, None);
     let spans = block.content.spans();
 
-    assert_eq!(spans[1].text, "90% 9k/10k");
+    assert_eq!(spans[0].text, "Δ90%");
+    assert_eq!(spans[1].text, " 9k/10k");
     assert_eq!(spans[1].style.fg, Some(Color::Red));
 }
 
 #[test]
-fn cache_hit_percent_clamps_to_possible_cached_tokens() {
-    assert_eq!(cache_hit_percent(Some(2_000), Some(1_500)), Some(75));
-    assert_eq!(cache_hit_percent(Some(2_000), Some(3_000)), Some(100));
-    assert_eq!(cache_hit_percent(Some(0), Some(0)), Some(0));
-    assert_eq!(cache_hit_percent(Some(2_000), None), None);
+fn format_turn_stats_line_distinguishes_unknown_and_invalid_cache_opportunity() {
+    let unknown = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 2_000,
+        prompt_cached_tokens: 1_500,
+        ..Default::default()
+    };
+    let invalid = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 2_000,
+        prompt_cached_tokens: 1_500,
+        prompt_cache_read_ceiling_tokens: Some(1_000),
+        ..Default::default()
+    };
+    assert!(format_turn_stats_line(&unknown, None, None, None).starts_with("Δ? 1.5k/?"));
+    assert!(format_turn_stats_line(&invalid, None, None, None).starts_with("Δ! 1.5k/?"));
 }
 
 #[test]
