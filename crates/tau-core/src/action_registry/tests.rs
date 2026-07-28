@@ -36,7 +36,7 @@ fn schema(action_id: &str) -> ActionSchema {
 
 fn invoke(action_id: &str, instance_id: u64) -> ActionInvoke {
     ActionInvoke {
-        invocation_id: ActionInvocationId::from("act-1"),
+        invocation_id: ActionInvocationId::parse("act-1").expect("test identifier must be valid"),
         session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
         extension_name: ExtensionName::from("std-email"),
         instance_id: ExtensionInstanceId::from(instance_id),

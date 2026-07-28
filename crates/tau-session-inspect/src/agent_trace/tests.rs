@@ -243,7 +243,7 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         &mut store,
         sent,
         Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: "message-semantic".into(),
+            message_id: tau_proto::AgentMessageId::parse("message-semantic").unwrap(),
             sender_id: agent_id.clone(),
             recipient: tau_proto::AgentMessageRecipient::User,
             kind: tau_proto::AgentMessageKind::Message,
@@ -256,7 +256,7 @@ fn public_compact_exports_project_persisted_explicit_observations() {
         &mut store,
         received,
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "message-semantic".into(),
+            message_id: tau_proto::AgentMessageId::parse("message-semantic").unwrap(),
             sender_id: AgentId::parse("agent-remote").expect("agent"),
             sender_session_id: None,
             recipient_id: agent_id.clone(),

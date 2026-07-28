@@ -6,24 +6,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AgentId, SessionId, SkillName};
 
-/// Opaque correlation for one attempt to initialize a loaded agent's context.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AgentInitializationId(String);
-
-impl AgentInitializationId {
-    /// Construct an initialization correlation from a harness-minted value.
-    #[must_use]
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// Borrow the opaque initialization correlation.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+crate::validated_string_newtype!(
+    /// Opaque correlation for one attempt to initialize a loaded agent's context.
+    AgentInitializationId,
+    AgentInitializationIdParseError,
+    "agent initialization id",
+    64
+);
 
 /// A signed skill-file modification time in microseconds from the Unix epoch.
 ///

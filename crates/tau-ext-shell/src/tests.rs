@@ -654,7 +654,7 @@ fn targeted_user_shell_runs_from_agent_workdir() {
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
-            command_id: "ui-targeted-pwd".into(),
+            command_id: tau_proto::ShellCommandId::parse("ui-targeted-pwd").unwrap(),
             command: "pwd".to_owned(),
             include_in_context: false,
             target_agent_id: Some(agent_id),
@@ -2833,7 +2833,8 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
 
     dispatch_session_agent_loaded(
         tau_proto::SessionAgentLoaded {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: tau_proto::SessionId::parse("session-1")
                 .expect("known-safe SessionId must be valid"),
@@ -2880,7 +2881,7 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
         metadata.agent_id,
-        tau_proto::AgentInitializationId::new("init-1"),
+        tau_proto::AgentInitializationId::parse("init-1").expect("test identifier must be valid"),
         &cwd,
         &cwd_state,
     );
@@ -3339,7 +3340,8 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()
@@ -6241,7 +6243,7 @@ fn model_and_user_shells_share_protected_pager_environment() {
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        command_id: "ui-sh-pager-env".into(),
+        command_id: tau_proto::ShellCommandId::parse("ui-sh-pager-env").unwrap(),
         command: command.to_owned(),
         include_in_context: true,
         target_agent_id: None,
@@ -6898,7 +6900,7 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_output_endp
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        command_id: "ui-sh-bg".into(),
+        command_id: tau_proto::ShellCommandId::parse("ui-sh-bg").unwrap(),
         command: "setsid sh -c 'sleep 5; printf late' & printf early".to_owned(),
         include_in_context: true,
         target_agent_id: None,
@@ -8478,7 +8480,7 @@ fn two_shell_instance_workdirs_are_independent_and_prefix_associated() {
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
         agent_id.clone(),
-        tau_proto::AgentInitializationId::new("init-1"),
+        tau_proto::AgentInitializationId::parse("init-1").expect("test identifier must be valid"),
         &first.get(&agent_id).expect("first path"),
         &first,
     ) else {
@@ -8489,7 +8491,7 @@ fn two_shell_instance_workdirs_are_independent_and_prefix_associated() {
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
         agent_id,
-        tau_proto::AgentInitializationId::new("init-1"),
+        tau_proto::AgentInitializationId::parse("init-1").expect("test identifier must be valid"),
         &second
             .get(&tau_proto::AgentId::parse("agent-two-shells").expect("agent id"))
             .expect("second path"),
@@ -9101,7 +9103,8 @@ fn replayed_session_agent_loaded_restores_workdir_context_and_ready() {
         .write_frame(&HarnessOutputMessage::deliver_replay(
             tau_proto::UnixMicros::new(2),
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
@@ -9163,7 +9166,8 @@ fn live_loaded_existing_agent_uses_replayed_workdir_before_ready() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()
@@ -9239,7 +9243,8 @@ fn live_loaded_agent_defaults_workdir_after_replay_boundary_without_metadata() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()
@@ -9289,7 +9294,8 @@ fn live_loaded_agent_does_not_default_workdir_after_replay_error() {
     runtime
         .handle_event(
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
@@ -9370,7 +9376,7 @@ fn live_loaded_agent_does_not_default_workdir_after_replay_error() {
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
-                command_id: "replay-failed-shell".into(),
+                command_id: tau_proto::ShellCommandId::parse("replay-failed-shell").unwrap(),
                 command: "pwd".to_owned(),
                 include_in_context: false,
                 target_agent_id: Some(agent_id),
@@ -9397,7 +9403,8 @@ fn malformed_workdir_metadata_does_not_wedge_context_ready() {
 
     writer
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()

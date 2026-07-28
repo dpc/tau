@@ -391,7 +391,7 @@ fn published_action_invoke_redacts_gmail_oauth_redirect_url() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let event = Event::ActionInvoke(tau_proto::ActionInvoke {
-        invocation_id: ActionInvocationId::from("action-1"),
+        invocation_id: ActionInvocationId::parse("action-1").expect("test identifier must be valid"),
         session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
         extension_name: ExtensionName::from("tau-ext-pim"),
         instance_id: ExtensionInstanceId::from(0),

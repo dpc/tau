@@ -94,7 +94,8 @@ fn discovery_snapshot_declarations_never_enter_semantic_history() {
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
                 agent_id: parse_agent_id("agent-1"),
-                agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
+                    .expect("test identifier must be valid"),
                 skills: Vec::new(),
                 agents_files: Vec::new(),
             },
@@ -117,14 +118,16 @@ fn per_agent_context_events_never_enter_semantic_history() {
         Event::ExtAgentContextPublish(tau_proto::ExtAgentContextPublish {
             session_id: tau_proto::SessionId::parse("test-session")
                 .expect("known-safe SessionId must be valid"),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             key: "workdir".into(),
             value: tau_proto::AgentContextValue(serde_json::json!("/tmp")),
         }),
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: "session-1"
                 .parse::<tau_proto::SessionId>()
@@ -387,13 +390,13 @@ fn tool_progress_never_enters_semantic_history() {
 #[test]
 fn shell_reports_never_enter_semantic_history() {
     let progress = tau_proto::ShellCommandProgress {
-        command_id: "shell-route".into(),
+        command_id: tau_proto::ShellCommandId::parse("shell-route").unwrap(),
         stream: tau_proto::ShellStream::Stdout,
         chunk: "chunk".to_owned(),
         target_agent_id: Some(parse_agent_id("agent-1")),
     };
     let finished = tau_proto::ShellCommandFinished {
-        command_id: "shell-route".into(),
+        command_id: tau_proto::ShellCommandId::parse("shell-route").unwrap(),
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
@@ -631,7 +634,8 @@ fn inverted_wire_metadata_preserves_persistence_exceptions() {
 #[test]
 fn session_membership_events_route_to_session_log() {
     let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
-        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()

@@ -56,7 +56,7 @@ fn watch_turn_state_event(
     state: tau_proto::AgentRuntimeState,
 ) -> tau_proto::Event {
     tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: message_id.into(),
+        message_id: tau_proto::AgentMessageId::parse(message_id).unwrap(),
         sender_id: agent_id("worker"),
         sender_session_id: None,
         recipient_id: agent_id("manager"),
@@ -529,7 +529,7 @@ fn agent_id_for_event_resolves_shell_progress_from_learned_metadata() {
         .insert("cmd-1".to_owned(), "shell-agent".to_owned());
 
     let progress = tau_proto::Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
-        command_id: "cmd-1".into(),
+        command_id: tau_proto::ShellCommandId::parse("cmd-1").unwrap(),
         stream: tau_proto::ShellStream::Stdout,
         chunk: "output".to_owned(),
         target_agent_id: None,
@@ -743,7 +743,7 @@ fn peer_message_names_require_endpoint_authority() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.remember_agent_display_name("agent-b", "local worker");
     let event = tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: "peer-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("peer-message").unwrap(),
         sender_id: agent_id("agent-a"),
         recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
             session_id: "remote-session"
@@ -862,7 +862,7 @@ fn resumed_session_clears_agent_display_name_authority() {
 #[test]
 fn watch_turn_state_renders_as_compact_typed_status() {
     let mut event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: "watch-state-1".into(),
+        message_id: tau_proto::AgentMessageId::parse("watch-state-1").unwrap(),
         sender_id: agent_id("researcher"),
         sender_session_id: None,
         recipient_id: agent_id("manager"),

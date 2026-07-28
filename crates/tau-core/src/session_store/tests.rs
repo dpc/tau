@@ -11,7 +11,8 @@ use crate::record_log::AppendFault;
 /// Builds one fold-changing durable membership fact.
 fn loaded_event(session_id: &str, agent_id: &str) -> Event {
     Event::SessionAgentLoaded(SessionAgentLoaded {
-        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         session_id: SessionId::parse(session_id).expect("known-safe SessionId must be valid"),
         agent_id: AgentId::parse(agent_id).expect("agent id"),

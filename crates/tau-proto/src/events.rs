@@ -2405,37 +2405,21 @@ impl std::ops::Deref for AgentOuterTurnId {
     }
 }
 
-/// Opaque stable correlation captured when a non-journaled input is accepted.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AgentActivationCorrelationId(String);
+crate::validated_string_newtype!(
+    /// Opaque stable correlation captured when a non-journaled input is accepted.
+    AgentActivationCorrelationId,
+    AgentActivationCorrelationIdParseError,
+    "agent activation correlation id",
+    128
+);
 
-impl AgentActivationCorrelationId {
-    /// Construct a harness-minted opaque accepted-input correlation.
-    #[must_use]
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-}
-
-/// Unique identity for one harness accounting runtime.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AccountingRuntimeId(String);
-
-impl AccountingRuntimeId {
-    /// Construct a runtime identity from harness-generated entropy.
-    #[must_use]
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// Borrow the opaque runtime identity.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+crate::validated_string_newtype!(
+    /// Unique identity for one harness accounting runtime.
+    AccountingRuntimeId,
+    AccountingRuntimeIdParseError,
+    "accounting runtime id",
+    32
+);
 
 /// Stable initiating occurrence for an outer turn.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

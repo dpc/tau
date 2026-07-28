@@ -672,7 +672,8 @@ mod tests {
         runtime
             .handle_event(
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                    agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                    agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                        .expect("test identifier must be valid"),
 
                     session_id: "session-1"
                         .parse::<tau_proto::SessionId>()
@@ -744,7 +745,8 @@ mod tests {
         runtime
             .handle_event(
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                    agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                    agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                        .expect("test identifier must be valid"),
 
                     session_id: "session-1"
                         .parse::<tau_proto::SessionId>()
@@ -828,7 +830,7 @@ mod tests {
                 session_id: "session-1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
-                command_id: "command-1".into(),
+                command_id: tau_proto::ShellCommandId::parse("command-1").unwrap(),
                 command: "pwd".to_owned(),
                 include_in_context: false,
                 target_agent_id: Some(agent_id),
@@ -857,14 +859,15 @@ mod tests {
             "session-1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
-            tau_proto::AgentInitializationId::new("init-1"),
+            tau_proto::AgentInitializationId::parse("init-1")
+                .expect("test identifier must be valid"),
         );
         runtime
             .handle_ui_shell_command(tau_proto::UiShellCommand {
                 session_id: "session-1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
-                command_id: "command-pending".into(),
+                command_id: tau_proto::ShellCommandId::parse("command-pending").unwrap(),
                 command: "touch must-not-exist".to_owned(),
                 include_in_context: false,
                 target_agent_id: Some(agent_id),

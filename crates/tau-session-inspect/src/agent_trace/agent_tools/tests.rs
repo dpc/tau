@@ -102,7 +102,7 @@ fn semantic_items_share_global_journal_timing_and_order() {
         2,
         20,
         Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: "message-1".into(),
+            message_id: tau_proto::AgentMessageId::parse("message-1").unwrap(),
             sender_id: AgentId::parse("agent-a").expect("agent"),
             recipient: AgentMessageRecipient::Agent {
                 agent_id: AgentId::parse("agent-b").expect("agent"),
@@ -117,7 +117,7 @@ fn semantic_items_share_global_journal_timing_and_order() {
         0,
         15,
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "message-1".into(),
+            message_id: tau_proto::AgentMessageId::parse("message-1").unwrap(),
             sender_id: AgentId::parse("agent-a").expect("agent"),
             sender_session_id: None,
             recipient_id: AgentId::parse("agent-b").expect("agent"),
@@ -1933,7 +1933,7 @@ fn toon_frames_control_bearing_payload_fields() {
     let arguments = serde_json::json!({"nested": "arg\u{1b}[31m"});
     let semantic = semantic::project_message_event(
         &Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: "message\u{1b}".into(),
+            message_id: tau_proto::AgentMessageId::parse("message\u{1b}").unwrap(),
             sender_id: root_agent_id.clone(),
             recipient: AgentMessageRecipient::User,
             kind: AgentMessageKind::Message,

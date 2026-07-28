@@ -328,7 +328,8 @@ fn set_test_agent_context_wait(
     h.pending_agent_discovery.insert(
         agent_id,
         PendingAgentDiscovery {
-            initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
             skill_candidates: h.discovered_skill_candidates.clone(),
             skills: h.discovered_skills.clone(),
             agents_files: h.discovered_agents_files.clone(),

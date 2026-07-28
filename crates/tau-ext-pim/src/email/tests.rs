@@ -564,7 +564,8 @@ fn split_tool_started(tool_name: &str, args: Vec<(&str, CborValue)>) -> ToolStar
 
 fn email_action_invoke(invocation_id: &str) -> ActionInvoke {
     ActionInvoke {
-        invocation_id: tau_proto::ActionInvocationId::new(invocation_id),
+        invocation_id: tau_proto::ActionInvocationId::parse(invocation_id)
+            .expect("test identifier must be valid"),
         session_id: tau_proto::SessionId::parse("session-1")
             .expect("known-safe SessionId must be valid"),
         extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
@@ -954,7 +955,7 @@ fn email_run_skips_replayed_actions_and_dispatches_live_action() {
 
     assert_eq!(
         invocation_id,
-        tau_proto::ActionInvocationId::new("live-action")
+        tau_proto::ActionInvocationId::parse("live-action").expect("test identifier must be valid")
     );
     assert_eq!(action_id, "email.in.list");
 }
@@ -3977,7 +3978,8 @@ fn runtime_action_invoke_returns_action_error_for_bad_id() {
         },
     };
     let event = runtime.dispatch_action(ActionInvoke {
-        invocation_id: tau_proto::ActionInvocationId::new("invoke-1"),
+        invocation_id: tau_proto::ActionInvocationId::parse("invoke-1")
+            .expect("test identifier must be valid"),
         session_id: tau_proto::SessionId::parse("session-1")
             .expect("known-safe SessionId must be valid"),
         extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),

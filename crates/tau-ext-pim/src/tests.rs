@@ -974,13 +974,17 @@ fn public_run_installs_storage_and_skips_replayed_actions() {
     assert_eq!(config_errors, Vec::<String>::new());
     assert_eq!(
         action_errors,
-        vec![tau_proto::ActionInvocationId::new("live-action")]
+        vec![
+            tau_proto::ActionInvocationId::parse("live-action")
+                .expect("test identifier must be valid")
+        ]
     );
 }
 
 fn unknown_action(invocation_id: &str) -> Event {
     Event::ActionInvoke(tau_proto::ActionInvoke {
-        invocation_id: tau_proto::ActionInvocationId::new(invocation_id),
+        invocation_id: tau_proto::ActionInvocationId::parse(invocation_id)
+            .expect("test identifier must be valid"),
         session_id: tau_proto::SessionId::parse("session-1")
             .expect("known-safe SessionId must be valid"),
         extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),

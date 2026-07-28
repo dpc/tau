@@ -302,7 +302,8 @@ fn agent_prompt(agent_id: &str, text: &str) -> Event {
 
 fn session_loaded(session_id: &str, agent_id: &str, ephemeral: bool) -> Event {
     Event::SessionAgentLoaded(SessionAgentLoaded {
-        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         session_id: SessionId::parse(session_id).expect("known-safe SessionId must be valid"),
         agent_id: AgentId::parse(agent_id).expect("agent id"),
@@ -1439,7 +1440,8 @@ fn session_store_persists_membership_facts() {
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
 
     let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
-        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         session_id: SessionId::parse("session-1").expect("known-safe SessionId must be valid"),
         agent_id: AgentId::parse("agent-1").expect("agent id"),
@@ -1619,7 +1621,8 @@ fn session_store_persists_fallback_message_facts_without_membership_fold() {
             "session-1",
             None,
             Event::SessionAgentLoaded(SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: SessionId::parse("session-1")
                     .expect("known-safe SessionId must be valid"),
@@ -1693,7 +1696,8 @@ fn ephemeral_session_retains_fallback_message_facts_in_memory() {
             "session-1",
             None,
             Event::SessionAgentLoaded(SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: SessionId::parse("session-1")
                     .expect("known-safe SessionId must be valid"),
@@ -1874,7 +1878,8 @@ fn session_restore_append_recovers_wrong_existing_event_kind() {
         seq: PersistedSessionEventSeq::new(0),
         source: None,
         event: Event::SessionAgentLoaded(SessionAgentLoaded {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: SessionId::parse("session-1").expect("known-safe SessionId must be valid"),
             agent_id: AgentId::parse("agent-1").expect("agent id"),
@@ -1912,7 +1917,8 @@ fn session_store_can_fold_one_membership_fact_without_persisting_it() {
     let sessions_dir = temp_dir("sessions-one-ephemeral");
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
     let event = Event::SessionAgentLoaded(SessionAgentLoaded {
-        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         session_id: SessionId::parse("session-1").expect("known-safe SessionId must be valid"),
         agent_id: AgentId::parse("agent-ephemeral").expect("agent id"),
@@ -2164,7 +2170,8 @@ fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
             seq: PersistedSessionEventSeq::new(1),
             source: None,
             event: Event::SessionAgentLoaded(SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: SessionId::parse("session-1")
                     .expect("known-safe SessionId must be valid"),
@@ -2463,7 +2470,8 @@ fn agent_store_rejects_non_agent_transcript_events() {
     let mut store = AgentStore::open(&agents_dir).expect("open agent store");
 
     let session_event = Event::SessionAgentLoaded(SessionAgentLoaded {
-        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         session_id: SessionId::parse("session-1").expect("known-safe SessionId must be valid"),
         agent_id: AgentId::parse("agent-1").expect("agent id"),

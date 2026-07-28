@@ -147,7 +147,8 @@ pub(crate) fn shell_command(
     );
     Event::UiShellCommand(tau_proto::UiShellCommand {
         session_id: session_id.clone(),
-        command_id: command_id.into(),
+        command_id: tau_proto::ShellCommandId::parse(command_id)
+            .expect("Tau-generated shell command id must be valid"),
         command: command.to_owned(),
         include_in_context,
         target_agent_id,

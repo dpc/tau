@@ -4142,7 +4142,8 @@ fn prepare_dynamic_action_invocation(
     };
     let dispatch = dispatch.map_err(|error| error.to_string())?;
     let parsed = dispatch.parsed;
-    let invocation_id: tau_proto::ActionInvocationId = crate::mint_short_id("action").into();
+    let invocation_id = tau_proto::ActionInvocationId::parse(crate::mint_short_id("action"))
+        .expect("Tau-generated action invocation id must be valid");
     let owner_agent_id = routing.selected_agent_id();
     let event = Event::ActionInvoke(tau_proto::ActionInvoke {
         invocation_id: invocation_id.clone(),

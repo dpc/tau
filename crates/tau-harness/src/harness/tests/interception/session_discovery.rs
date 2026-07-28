@@ -374,7 +374,8 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
         tau_proto::ClientKind::Core,
     );
     let agent_id = tau_proto::AgentId::parse("snapshot-agent").expect("agent");
-    let initialization_id = tau_proto::AgentInitializationId::new("current-init");
+    let initialization_id = tau_proto::AgentInitializationId::parse("current-init")
+        .expect("test identifier must be valid");
     h.pending_agent_discovery.insert(
         agent_id.clone(),
         PendingAgentDiscovery {
@@ -401,7 +402,10 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
     };
     h.handle_extension_event_inner(
         "agent-snapshot-owner",
-        event(tau_proto::AgentInitializationId::new("stale-init")),
+        event(
+            tau_proto::AgentInitializationId::parse("stale-init")
+                .expect("test identifier must be valid"),
+        ),
     )
     .expect("stale");
     assert!(h.pending_agent_discovery[&agent_id].skills.is_empty());
@@ -511,7 +515,8 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
         tau_proto::EventName::EXTENSION_AGENT_DISCOVERY_SNAPSHOT_DECLARED,
     );
     let agent_id = tau_proto::AgentId::parse("snapshot-agent").expect("agent");
-    let initialization_id = tau_proto::AgentInitializationId::new("init");
+    let initialization_id =
+        tau_proto::AgentInitializationId::parse("init").expect("test identifier must be valid");
     h.pending_agent_discovery.insert(
         agent_id.clone(),
         PendingAgentDiscovery {

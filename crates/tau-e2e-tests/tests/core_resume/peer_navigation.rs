@@ -80,7 +80,7 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
 
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: REQUEST_ID.to_owned(),
-        message_id: "peer-navigation-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("peer-navigation-message").unwrap(),
         capability: "peer-navigation-capability".to_owned(),
         sender_session_id: sender_session.clone(),
         sender_id: sender_id.clone(),

@@ -1275,7 +1275,7 @@ fn watch_response(
     content: &str,
 ) -> AgentMessageReceived {
     AgentMessageReceived {
-        message_id: "watch-response".into(),
+        message_id: tau_proto::AgentMessageId::parse("watch-response").unwrap(),
         sender_id: child.clone(),
         sender_session_id: None,
         recipient_id: parent.clone(),
@@ -1292,7 +1292,7 @@ fn watch_prompt(
     content: &str,
 ) -> AgentMessageReceived {
     AgentMessageReceived {
-        message_id: "watch-prompt".into(),
+        message_id: tau_proto::AgentMessageId::parse("watch-prompt").unwrap(),
         sender_id: child.clone(),
         sender_session_id: None,
         recipient_id: parent.clone(),

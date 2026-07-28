@@ -704,7 +704,7 @@ fn shell_report_ephemeral_classification_uses_private_route_identity() {
             provider_id: "shell-owner".into(),
             command: tau_proto::UiShellCommand {
                 session_id: harness.current_session_id.clone(),
-                command_id: "ephemeral-shell-ui".into(),
+                command_id: tau_proto::ShellCommandId::parse("ephemeral-shell-ui").unwrap(),
                 command: "pwd".to_owned(),
                 include_in_context: false,
                 target_agent_id: None,
@@ -720,7 +720,7 @@ fn shell_report_ephemeral_classification_uses_private_route_identity() {
         .insert("ephemeral-shell-ui".into(), std::num::NonZeroUsize::MIN);
     let report = progress_report(&route_id, None, "private output");
     let canonical = Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
-        command_id: "ephemeral-shell-ui".into(),
+        command_id: tau_proto::ShellCommandId::parse("ephemeral-shell-ui").unwrap(),
         stream: tau_proto::ShellStream::Stdout,
         chunk: "private output".to_owned(),
         target_agent_id: None,
@@ -793,7 +793,7 @@ fn shell_report_ephemeral_classification_ignores_peer_target_claim() {
             provider_id: "shell-owner".into(),
             command: tau_proto::UiShellCommand {
                 session_id: harness.current_session_id.clone(),
-                command_id: "durable-ui-id".into(),
+                command_id: tau_proto::ShellCommandId::parse("durable-ui-id").unwrap(),
                 command: "pwd".to_owned(),
                 include_in_context: false,
                 target_agent_id: None,

@@ -4222,7 +4222,8 @@ fn interception_cannot_retarget_user_interaction_fact() {
 #[test]
 fn discovery_canonical_events_are_protected() {
     let agent_id = crate::parse_agent_id("agent-1");
-    let initialization_id = tau_proto::AgentInitializationId::new("init-1");
+    let initialization_id =
+        tau_proto::AgentInitializationId::parse("init-1").expect("test identifier must be valid");
     let events = [
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
             session_id: "session-1"
@@ -4555,7 +4556,8 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
 
 fn session_agent_loaded_event(agent_id: &str) -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         session_id: "session-intercept"
             .parse::<tau_proto::SessionId>()
@@ -5856,7 +5858,7 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
 
     let agent_id = tau_proto::AgentId::parse("shell-agent").expect("agent id");
     let progress = Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
-        command_id: "shell-progress".into(),
+        command_id: tau_proto::ShellCommandId::parse("shell-progress").unwrap(),
         stream: tau_proto::ShellStream::Stdout,
         chunk: "original".to_owned(),
         target_agent_id: Some(agent_id.clone()),
@@ -5868,7 +5870,7 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(Some(Box::new(Event::ShellCommandProgress(
                 tau_proto::ShellCommandProgress {
-                    command_id: "redirected".into(),
+                    command_id: tau_proto::ShellCommandId::parse("redirected").unwrap(),
                     stream: tau_proto::ShellStream::Stderr,
                     chunk: "rewritten".to_owned(),
                     target_agent_id: Some(
@@ -5890,7 +5892,7 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
 
     interceptor.lock().expect("events").clear();
     let finished = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
-        command_id: "shell-finished".into(),
+        command_id: tau_proto::ShellCommandId::parse("shell-finished").unwrap(),
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
@@ -5908,7 +5910,7 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(Some(Box::new(Event::ShellCommandFinished(
                 tau_proto::ShellCommandFinished {
-                    command_id: "redirected".into(),
+                    command_id: tau_proto::ShellCommandId::parse("redirected").unwrap(),
                     session_id: "other-session"
                         .parse::<tau_proto::SessionId>()
                         .expect("known-safe SessionId must be valid"),
@@ -5940,7 +5942,7 @@ fn shell_command_interception_preserves_identity_and_terminal_delivery() {
 
     interceptor.lock().expect("events").clear();
     let must_pass = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
-        command_id: "shell-must-pass".into(),
+        command_id: tau_proto::ShellCommandId::parse("shell-must-pass").unwrap(),
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
@@ -5997,7 +5999,7 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
     );
     let command = tau_proto::UiShellCommand {
         session_id: h.current_session_id.clone(),
-        command_id: "parked-ui-id".into(),
+        command_id: tau_proto::ShellCommandId::parse("parked-ui-id").unwrap(),
         command: "pwd".to_owned(),
         include_in_context: false,
         target_agent_id: Some(agent_id.clone()),
@@ -6098,10 +6100,9 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         })),
     )
     .expect("commit second terminal");
-    assert!(
-        !h.active_ui_shell_command_ids
-            .contains(&tau_proto::ShellCommandId::new("parked-ui-id"))
-    );
+    assert!(!h.active_ui_shell_command_ids.contains(
+        &tau_proto::ShellCommandId::parse("parked-ui-id").expect("test identifier must be valid")
+    ));
 }
 
 #[test]

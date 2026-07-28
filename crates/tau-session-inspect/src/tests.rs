@@ -1304,7 +1304,8 @@ fn session_list_isolates_invalid_session_journals() {
                 session_id,
                 None,
                 Event::SessionAgentLoaded(SessionAgentLoaded {
-                    agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                    agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                        .expect("test identifier must be valid"),
 
                     session_id: SessionId::parse(session_id)
                         .expect("known-safe SessionId must be valid"),

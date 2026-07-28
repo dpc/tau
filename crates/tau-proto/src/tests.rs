@@ -101,7 +101,8 @@ fn outer_turn_activation_shapes_round_trip_in_json_and_cbor() {
         ),
         (
             AgentOuterTurnActivation::External {
-                correlation_id: AgentActivationCorrelationId::new("accepted-7"),
+                correlation_id: AgentActivationCorrelationId::parse("accepted-7")
+                    .expect("test identifier must be valid"),
             },
             serde_json::json!({
                 "kind": "external",
@@ -159,7 +160,7 @@ fn outer_turn_started_event_preserves_nested_activation_shape() {
         session_id: test_session_id("session-7"),
         outer_turn_id: AgentOuterTurnId::for_prompt(&test_agent_prompt_id("ap-agent-7-0")),
         agent_prompt_id: test_agent_prompt_id("ap-agent-7-0"),
-        runtime_id: AccountingRuntimeId::new("runtime-7"),
+        runtime_id: AccountingRuntimeId::parse("runtime-7").expect("test identifier must be valid"),
         activation: AgentOuterTurnActivation::Journal {
             occurrence: AgentHead::Node(NodeId::new(7)),
         },
@@ -848,7 +849,7 @@ fn representative_events() -> Vec<Event> {
             schema: action_schema_fixture(),
         }),
         Event::ActionInvoke(ActionInvoke {
-            invocation_id: "act-1".into(),
+            invocation_id: ActionInvocationId::parse("act-1").unwrap(),
             session_id: test_session_id("s1"),
             extension_name: "std-email".into(),
             instance_id: 7.into(),
@@ -858,14 +859,14 @@ fn representative_events() -> Vec<Event> {
             arguments: CborValue::Map(Vec::new()),
         }),
         Event::ActionResult(ActionResult {
-            invocation_id: "act-1".into(),
+            invocation_id: ActionInvocationId::parse("act-1").unwrap(),
             action_id: "email.out.list".to_owned(),
             output: ActionOutput::Text {
                 text: "no queued mail".to_owned(),
             },
         }),
         Event::ActionError(ActionError {
-            invocation_id: "act-2".into(),
+            invocation_id: ActionInvocationId::parse("act-2").unwrap(),
             action_id: "email.out.list".to_owned(),
             message: "approval queue unavailable".to_owned(),
             details: None,
@@ -1002,7 +1003,8 @@ fn representative_events() -> Vec<Event> {
             reason: SessionStartReason::Initial,
         }),
         Event::SessionAgentLoaded(SessionAgentLoaded {
-            agent_initialization_id: AgentInitializationId::new("test-init"),
+            agent_initialization_id: AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: test_session_id("s1"),
             agent_id: agent_id("engineer_abcd1234"),
@@ -1303,7 +1305,8 @@ fn representative_events() -> Vec<Event> {
         Event::ExtensionAgentDiscoverySnapshotDeclared(ExtensionAgentDiscoverySnapshotDeclared {
             session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
-            agent_initialization_id: AgentInitializationId::new("init-1"),
+            agent_initialization_id: AgentInitializationId::parse("init-1")
+                .expect("test identifier must be valid"),
             skills: vec![DiscoverySkillCandidate {
                 name: "local-search".into(),
                 description: "Search locally".to_owned(),
@@ -1322,7 +1325,8 @@ fn representative_events() -> Vec<Event> {
         Event::ExtensionContextProviderRegister(ExtensionContextProviderRegister {}),
         Event::ExtensionSessionContextProviderRegister(ExtensionSessionContextProviderRegister {}),
         Event::ExtensionContextReady(ExtensionContextReady {
-            agent_initialization_id: AgentInitializationId::new("test-init"),
+            agent_initialization_id: AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
@@ -1332,7 +1336,8 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ExtAgentContextPublish(ExtAgentContextPublish {
             session_id: test_session_id("test-session"),
-            agent_initialization_id: AgentInitializationId::new("test-init"),
+            agent_initialization_id: AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             agent_id: agent_id("agent-1"),
             key: "cwd".into(),
@@ -1372,7 +1377,8 @@ fn representative_events() -> Vec<Event> {
         Event::AgentInitializationContextSet(AgentInitializationContextSet {
             session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
-            agent_initialization_id: AgentInitializationId::new("init-1"),
+            agent_initialization_id: AgentInitializationId::parse("init-1")
+                .expect("test identifier must be valid"),
             agents_message: Some("project instructions".to_owned()),
             effective_skills: vec![
                 DiscoveryEffectiveSkill {
@@ -1437,7 +1443,8 @@ fn representative_events() -> Vec<Event> {
         Event::HarnessAgentContextInitialized(HarnessAgentContextInitialized {
             session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
-            agent_initialization_id: AgentInitializationId::new("init-1"),
+            agent_initialization_id: AgentInitializationId::parse("init-1")
+                .expect("test identifier must be valid"),
             listed_skills: vec![DiscoveryEffectiveSkill {
                 name: "tau-self-knowledge".into(),
                 description: "Explain Tau".to_owned(),
@@ -1602,7 +1609,7 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::UiShellCommand(UiShellCommand {
             session_id: test_session_id("s1"),
-            command_id: "shell-1".into(),
+            command_id: ShellCommandId::parse("shell-1").unwrap(),
             command: "pwd".to_owned(),
             include_in_context: true,
             target_agent_id: Some(agent_id("agent-1")),
@@ -1666,13 +1673,13 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::TermBell(TermBell {}),
         Event::ShellCommandProgress(ShellCommandProgress {
-            command_id: "shell-1".into(),
+            command_id: ShellCommandId::parse("shell-1").unwrap(),
             stream: ShellStream::Stdout,
             chunk: "/tmp\n".to_owned(),
             target_agent_id: Some(agent_id("agent-1")),
         }),
         Event::ShellCommandFinished(ShellCommandFinished {
-            command_id: "shell-1".into(),
+            command_id: ShellCommandId::parse("shell-1").unwrap(),
             session_id: test_session_id("s1"),
             command: "pwd".to_owned(),
             include_in_context: true,
@@ -1682,13 +1689,13 @@ fn representative_events() -> Vec<Event> {
             cancelled: false,
         }),
         Event::ShellCommandProgressReported(ShellCommandProgress {
-            command_id: "shell-report-1".into(),
+            command_id: ShellCommandId::parse("shell-report-1").unwrap(),
             stream: ShellStream::Stderr,
             chunk: "working\n".to_owned(),
             target_agent_id: Some(agent_id("agent-1")),
         }),
         Event::ShellCommandFinishedReported(ShellCommandFinished {
-            command_id: "shell-report-1".into(),
+            command_id: ShellCommandId::parse("shell-report-1").unwrap(),
             session_id: test_session_id("s1"),
             command: "pwd".to_owned(),
             include_in_context: true,
@@ -2171,7 +2178,8 @@ fn discovery_snapshot_timestamp_and_empty_replacement_wire_shapes_are_stable() {
     let empty = Event::AgentInitializationContextSet(AgentInitializationContextSet {
         session_id: test_session_id("s1"),
         agent_id: agent_id("agent-1"),
-        agent_initialization_id: AgentInitializationId::new("init-empty"),
+        agent_initialization_id: AgentInitializationId::parse("init-empty")
+            .expect("test identifier must be valid"),
         agents_message: None,
         effective_skills: Vec::new(),
         agents_files: Vec::new(),
@@ -3947,13 +3955,13 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             display: None,
         }),
         Event::ShellCommandProgressReported(ShellCommandProgress {
-            command_id: "shell-progress".into(),
+            command_id: ShellCommandId::parse("shell-progress").unwrap(),
             stream: ShellStream::Stdout,
             chunk: "provider running".to_owned(),
             target_agent_id: Some(agent_id("worker")),
         }),
         Event::ShellCommandFinishedReported(ShellCommandFinished {
-            command_id: "shell-finished".into(),
+            command_id: ShellCommandId::parse("shell-finished").unwrap(),
             session_id: test_session_id("s1"),
             command: "pwd".to_owned(),
             include_in_context: false,
@@ -3977,7 +3985,7 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             schema: action_schema_fixture(),
         }),
         Event::ActionInvoke(ActionInvoke {
-            invocation_id: "act-1".into(),
+            invocation_id: ActionInvocationId::parse("act-1").unwrap(),
             session_id: test_session_id("s1"),
             extension_name: "std-email".into(),
             instance_id: 7.into(),
@@ -3987,14 +3995,14 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             arguments: CborValue::Map(Vec::new()),
         }),
         Event::ActionResult(ActionResult {
-            invocation_id: "act-1".into(),
+            invocation_id: ActionInvocationId::parse("act-1").unwrap(),
             action_id: "email.out.list".to_owned(),
             output: ActionOutput::Text {
                 text: "ok".to_owned(),
             },
         }),
         Event::ActionError(ActionError {
-            invocation_id: "act-2".into(),
+            invocation_id: ActionInvocationId::parse("act-2").unwrap(),
             action_id: "email.out.list".to_owned(),
             message: "nope".to_owned(),
             details: None,
@@ -4061,7 +4069,8 @@ fn event_defaults_to_persist_separates_live_only_and_durable_kinds() {
             ctx_id: None,
         }),
         Event::SessionAgentLoaded(SessionAgentLoaded {
-            agent_initialization_id: AgentInitializationId::new("test-init"),
+            agent_initialization_id: AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: test_session_id("s1"),
             agent_id: agent_id("worker"),
@@ -4251,7 +4260,8 @@ fn ephemeral_agent_fields_default_false_and_skip_serializing() {
     assert!(json.get("ephemeral").is_none());
 
     let loaded = SessionAgentLoaded {
-        agent_initialization_id: AgentInitializationId::new("test-init"),
+        agent_initialization_id: AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         session_id: test_session_id("s1"),
         agent_id: AgentId::parse("agent-1").expect("agent id"),

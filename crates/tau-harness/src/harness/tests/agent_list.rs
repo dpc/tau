@@ -10,7 +10,8 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
     harness.publish_event(
         None,
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()

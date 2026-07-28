@@ -777,7 +777,8 @@ fn agent_message_fact_replay_projects_without_wake() {
                 "s1",
                 None,
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                    agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                    agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                        .expect("test identifier must be valid"),
 
                     session_id: "s1"
                         .parse::<tau_proto::SessionId>()
@@ -950,7 +951,8 @@ fn member_agent_message_fact_uses_agent_journal() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
@@ -1145,7 +1147,8 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
@@ -1180,7 +1183,8 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
             seq: tau_core::PersistedSessionEventSeq::new(2),
             source: None,
             event: Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: "wrong-session"
                     .parse::<tau_proto::SessionId>()
@@ -1231,7 +1235,8 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
@@ -1445,7 +1450,8 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
@@ -1522,7 +1528,8 @@ fn restore_rejects_membership_without_committed_agent_creation() {
                 "s1",
                 None,
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                    agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                    agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                        .expect("test identifier must be valid"),
 
                     session_id: "s1"
                         .parse::<tau_proto::SessionId>()
@@ -1613,7 +1620,8 @@ fn seed_restored_tool_round_for_agent(
             session_id,
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: session_id
                     .parse::<tau_proto::SessionId>()
@@ -1813,7 +1821,8 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
             "s1",
             Some(HARNESS_CONNECTION_ID.into()),
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
@@ -2244,7 +2253,8 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
     h.publish_event(
         None,
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()
@@ -2397,7 +2407,8 @@ fn replay_complete_boundaries_report_agent_log_errors() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()
@@ -3434,7 +3445,8 @@ fn replay_emits_latest_agent_metadata_without_stale_values() {
                 "s1",
                 None,
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                    agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                    agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                        .expect("test identifier must be valid"),
 
                     session_id: "s1"
                         .parse::<tau_proto::SessionId>()

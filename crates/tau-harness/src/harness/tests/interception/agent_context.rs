@@ -6,7 +6,8 @@ use super::*;
 fn context(agent_id: &str, value: &str) -> Event {
     Event::ExtAgentContextPublish(tau_proto::ExtAgentContextPublish {
         session_id: tau_proto::SessionId::parse("s1").expect("known-safe SessionId must be valid"),
-        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         key: "test".into(),
@@ -145,7 +146,8 @@ fn parked_context_value_prevents_readiness_overtake() {
     h.handle_extension_event_inner(
         "context-owner",
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()
@@ -531,7 +533,8 @@ fn pre_ready_context_readiness_after_rollover_is_observation_only() {
         "context-owner",
         TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: "replacement"
                     .parse::<tau_proto::SessionId>()
@@ -603,7 +606,8 @@ fn context_ready_does_not_release_session_wait() {
     h.handle_extension_event_inner(
         "context-owner",
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()
@@ -646,7 +650,8 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
     );
     let ready = |session_id: &str| {
         Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: session_id
                 .parse::<tau_proto::SessionId>()

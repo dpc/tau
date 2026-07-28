@@ -282,7 +282,7 @@ fn post_hello_stall_is_bounded_and_cleans_metadata() -> Result<(), Box<dyn std::
 fn fixture_request(sender_session: &SessionId) -> tau_proto::ExternalAgentMessageRequest {
     tau_proto::ExternalAgentMessageRequest {
         request_id: REQUEST_ID.to_owned(),
-        message_id: "fixture-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("fixture-message").unwrap(),
         capability: "fixture-capability".to_owned(),
         sender_session_id: sender_session.clone(),
         sender_id: tau_proto::AgentId::parse("fixture-sender").expect("static agent id"),

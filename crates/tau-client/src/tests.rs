@@ -474,7 +474,8 @@ impl TauExtension for ContextReadyEmitExtension {
                 tau_proto::SessionId::parse("session-1")
                     .expect("known-safe SessionId must be valid"),
                 tau_proto::AgentId::parse("agent-1").expect("agent id"),
-                tau_proto::AgentInitializationId::new("init-1"),
+                tau_proto::AgentInitializationId::parse("init-1")
+                    .expect("test identifier must be valid"),
             )?;
             cx.handle().emit_session_context_ready(
                 tau_proto::SessionId::parse("session-1")
@@ -493,7 +494,8 @@ impl TauExtension for ContextReadyEmitExtension {
                     session_id: tau_proto::SessionId::parse("session-1")
                         .expect("known-safe SessionId must be valid"),
                     agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-                    agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+                    agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
+                        .expect("test identifier must be valid"),
                     skills: Vec::new(),
                     agents_files: Vec::new(),
                 },
@@ -1104,7 +1106,10 @@ fn latest_extension_data_request(writer: &SharedWriter) -> tau_proto::ExtensionD
 
 fn action_invoke(extension_name: &str, action_id: &str) -> Event {
     Event::ActionInvoke(tau_proto::ActionInvoke {
-        invocation_id: format!("invoke-{extension_name}-{action_id}").into(),
+        invocation_id: tau_proto::ActionInvocationId::parse(format!(
+            "invoke-{extension_name}-{action_id}"
+        ))
+        .unwrap(),
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
@@ -1153,7 +1158,8 @@ fn metadata_unset() -> Event {
 
 fn session_agent_loaded() -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
@@ -1198,7 +1204,7 @@ fn ui_shell_command() -> Event {
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        command_id: "cmd-1".into(),
+        command_id: tau_proto::ShellCommandId::parse("cmd-1").unwrap(),
         command: "pwd".to_owned(),
         include_in_context: true,
         target_agent_id: Some(agent_id()),
@@ -1697,7 +1703,8 @@ fn discovery_payloads_support_typed_subscriptions() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
+                .expect("test identifier must be valid"),
             skills: Vec::new(),
             agents_files: Vec::new(),
         },
@@ -1713,7 +1720,8 @@ fn discovery_payloads_support_typed_subscriptions() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
+                .expect("test identifier must be valid"),
             agents_message: None,
             effective_skills: Vec::new(),
             agents_files: Vec::new(),
@@ -1729,7 +1737,8 @@ fn discovery_payloads_support_typed_subscriptions() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
+                .expect("test identifier must be valid"),
             listed_skills: Vec::new(),
             agents_files: Vec::new(),
         });

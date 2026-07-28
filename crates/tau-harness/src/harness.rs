@@ -3028,10 +3028,11 @@ impl Harness {
             current_session_generation: 0,
             next_agent_runtime_incarnation: 1,
             next_agent_initialization_id: 1,
-            accounting_runtime_id: tau_proto::AccountingRuntimeId::new(format!(
+            accounting_runtime_id: tau_proto::AccountingRuntimeId::parse(format!(
                 "{:016x}",
                 rand::random::<u64>()
-            )),
+            ))
+            .expect("Tau-generated accounting runtime id must be valid"),
             current_session_start_reason: parts.current_session_start_reason,
             agent_id_rng: StdRng::from_entropy(),
             ui_shell_route_rng: StdRng::from_entropy(),
@@ -13314,11 +13315,14 @@ impl Harness {
 
     fn next_ui_shell_route_id(&mut self) -> UiShellRouteId {
         loop {
-            let route_id = UiShellRouteId::new(tau_proto::ShellCommandId::new(format!(
-                "harness-shell-{:016x}{:016x}",
-                self.ui_shell_route_rng.next_u64(),
-                self.ui_shell_route_rng.next_u64()
-            )));
+            let route_id = UiShellRouteId::new(
+                tau_proto::ShellCommandId::parse(format!(
+                    "harness-shell-{:016x}{:016x}",
+                    self.ui_shell_route_rng.next_u64(),
+                    self.ui_shell_route_rng.next_u64()
+                ))
+                .expect("Tau-generated shell command id must be valid"),
+            );
             if !self.pending_ui_shell_commands.contains_key(&route_id)
                 && !self.ephemeral_ui_shell_route_ids.contains(&route_id)
             {
@@ -16443,12 +16447,13 @@ impl Harness {
     fn mint_agent_initialization_id(&mut self) -> tau_proto::AgentInitializationId {
         let next = self.next_agent_initialization_id;
         self.next_agent_initialization_id = self.next_agent_initialization_id.saturating_add(1);
-        tau_proto::AgentInitializationId::new(format!(
+        tau_proto::AgentInitializationId::parse(format!(
             "{}-{:016x}-{:016x}",
             self.accounting_runtime_id.as_str(),
             self.current_session_generation,
             next
         ))
+        .expect("Tau-generated agent initialization id must be valid")
     }
 
     fn tool_connections_subscribed_to(&self, event: &Event) -> HashSet<tau_proto::ConnectionId> {

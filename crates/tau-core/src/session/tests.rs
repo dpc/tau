@@ -120,9 +120,11 @@ fn outer_turn_fold_distinguishes_crash_recovery_from_runtime_overlap() {
                 .expect("known-safe SessionId must be valid"),
             outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(&prompt_id),
             agent_prompt_id: prompt_id,
-            runtime_id: tau_proto::AccountingRuntimeId::new(runtime),
+            runtime_id: tau_proto::AccountingRuntimeId::parse(runtime)
+                .expect("test identifier must be valid"),
             activation: tau_proto::AgentOuterTurnActivation::External {
-                correlation_id: tau_proto::AgentActivationCorrelationId::new(id),
+                correlation_id: tau_proto::AgentActivationCorrelationId::parse(id)
+                    .expect("test identifier must be valid"),
             },
         })
     };
@@ -1322,7 +1324,7 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
         (AgentMessageKind::Message, Some(payload)),
     ] {
         let event = Event::AgentMessageReceived(AgentMessageReceived {
-            message_id: "msg-invalid-watch-state".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-invalid-watch-state").unwrap(),
             sender_id: other_agent_id(),
             sender_session_id: None,
             recipient_id: id.clone(),
@@ -1358,7 +1360,8 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
         (AgentMessageKind::Message, Some(provider_payload)),
     ] {
         let event = Event::AgentMessageReceived(AgentMessageReceived {
-            message_id: "msg-invalid-watch-provider-status".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-invalid-watch-provider-status")
+                .unwrap(),
             sender_id: other_agent_id(),
             sender_session_id: None,
             recipient_id: id.clone(),
@@ -1483,7 +1486,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         &mut tree,
         AgentEventParent::InheritHead,
         Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: "agent-sent-during-tool".into(),
+            message_id: tau_proto::AgentMessageId::parse("agent-sent-during-tool").unwrap(),
             sender_id: agent_id.clone(),
             recipient: tau_proto::AgentMessageRecipient::Agent {
                 agent_id: other_agent_id(),
@@ -1520,7 +1523,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
         &mut tree,
         AgentEventParent::InheritHead,
         Event::AgentMessageReceived(AgentMessageReceived {
-            message_id: "agent-received-during-tool".into(),
+            message_id: tau_proto::AgentMessageId::parse("agent-received-during-tool").unwrap(),
             sender_id: other_agent_id(),
             sender_session_id: None,
             recipient_id: agent_id.clone(),
@@ -1670,7 +1673,7 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
     assert!(error.to_string().contains("already has an open"));
 
     let sibling_message = Event::AgentMessageReceived(AgentMessageReceived {
-        message_id: "sibling-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("sibling-message").unwrap(),
         sender_id: other_agent_id(),
         sender_session_id: None,
         recipient_id: agent_id.clone(),
@@ -1693,7 +1696,7 @@ fn provider_tool_round_is_tree_global_and_branch_applicable() {
     );
 
     let descendant_message = Event::AgentMessageReceived(AgentMessageReceived {
-        message_id: "descendant-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("descendant-message").unwrap(),
         sender_id: other_agent_id(),
         sender_session_id: None,
         recipient_id: agent_id,
@@ -1746,7 +1749,7 @@ fn synthetic_agent_message_folds_advance_occurrence_sequence() {
     let mut tree = AgentTree::from_events(agent_id.clone(), &[]);
     for (message_id, message) in [("sent-one", "one"), ("sent-two", "two")] {
         tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
-            message_id: message_id.into(),
+            message_id: tau_proto::AgentMessageId::parse(message_id).unwrap(),
             sender_id: agent_id.clone(),
             recipient: AgentMessageRecipient::Agent {
                 agent_id: other_agent_id(),

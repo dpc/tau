@@ -135,8 +135,9 @@ macro_rules! string_newtype {
 /// Maximum length for validated session and prompt identifiers.
 pub const SESSION_SCOPED_ID_MAX_LEN: usize = 128;
 
+#[macro_export]
 macro_rules! validated_string_newtype {
-    ($(#[$meta:meta])* $name:ident, $error:ident, $label:literal) => {
+    ($(#[$meta:meta])* $name:ident, $error:ident, $label:literal, $max:expr) => {
         $(#[$meta])*
         #[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, serde::Serialize)]
         #[serde(transparent)]
@@ -192,9 +193,9 @@ macro_rules! validated_string_newtype {
                 if value.is_empty() {
                     return Err($error::Empty);
                 }
-                if SESSION_SCOPED_ID_MAX_LEN < value.len() {
+                if $max < value.len() {
                     return Err($error::TooLong {
-                        max: SESSION_SCOPED_ID_MAX_LEN,
+                        max: $max,
                         actual: value.len(),
                     });
                 }
@@ -290,7 +291,8 @@ validated_string_newtype!(
     /// `-`. Construction and deserialization validate this grammar.
     SessionId,
     SessionIdParseError,
-    "session id"
+    "session id",
+    SESSION_SCOPED_ID_MAX_LEN
 );
 /// Maximum length for a durable agent identifier.
 pub const AGENT_ID_MAX_LEN: usize = 64;
@@ -428,7 +430,8 @@ validated_string_newtype!(
     /// `-`. Construction and deserialization validate this grammar.
     AgentPromptId,
     AgentPromptIdParseError,
-    "agent prompt id"
+    "agent prompt id",
+    SESSION_SCOPED_ID_MAX_LEN
 );
 validated_string_newtype!(
     /// Stable identifier for one global agent message.
@@ -437,13 +440,19 @@ validated_string_newtype!(
     /// `-`. Construction and deserialization validate this grammar.
     AgentMessageId,
     AgentMessageIdParseError,
-    "agent message id"
+    "agent message id",
+    128
 );
 // ToolName is defined manually below with validation.
 string_newtype!(/// Tool call identifier.
     ToolCallId);
-string_newtype!(/// User-interface action invocation identifier.
-    ActionInvocationId);
+validated_string_newtype!(
+    /// User-interface action invocation identifier.
+    ActionInvocationId,
+    ActionInvocationIdParseError,
+    "action invocation id",
+    64
+);
 string_newtype!(/// Connection identifier.
     ConnectionId);
 
@@ -524,9 +533,14 @@ impl std::error::Error for InvalidAgentMetadataMutationId {}
 // the codebase can stop re-parsing `"provider/model"` strings.
 string_newtype!(/// Skill name (e.g. `"jujutsu"`, `"preview-site"`).
     SkillName);
-string_newtype!(/// Identifier correlating a user-initiated `!`/`!!` shell
-    /// command's lifecycle events (progress, finished).
-    ShellCommandId);
+validated_string_newtype!(
+    /// Identifier correlating a user-initiated `!`/`!!` shell command's
+    /// lifecycle events (progress, finished).
+    ShellCommandId,
+    ShellCommandIdParseError,
+    "shell command id",
+    64
+);
 
 // ---------------------------------------------------------------------------
 // ProviderName / ModelName / ModelId

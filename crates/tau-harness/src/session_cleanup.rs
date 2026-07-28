@@ -297,7 +297,8 @@ mod tests {
                 "old",
                 None,
                 Event::SessionAgentLoaded(SessionAgentLoaded {
-                    agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                    agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                        .expect("test identifier must be valid"),
 
                     session_id: SessionId::parse("old")
                         .expect("known-safe SessionId must be valid"),
@@ -338,9 +339,10 @@ mod tests {
                         "old",
                         None,
                         Event::SessionAgentLoaded(SessionAgentLoaded {
-                            agent_initialization_id: tau_proto::AgentInitializationId::new(
+                            agent_initialization_id: tau_proto::AgentInitializationId::parse(
                                 "test-init",
-                            ),
+                            )
+                            .expect("test identifier must be valid"),
 
                             session_id: SessionId::parse("old")
                                 .expect("known-safe SessionId must be valid"),

@@ -3140,7 +3140,8 @@ fn extension_context_ready_routes_to_agent_ui_state() {
     renderer.apply_setting("notice-level", "debug");
     renderer.handle(&Event::ExtensionContextReady(
         tau_proto::ExtensionContextReady {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             session_id: test_session_id("s1"),
             agent_id: agent_id("worker-1"),
@@ -3172,7 +3173,8 @@ fn agent_context_initialization_summary_is_concise_and_literal() {
     let initialized = tau_proto::HarnessAgentContextInitialized {
         session_id: test_session_id("session-1"),
         agent_id: agent_id("agent-1"),
-        agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
+            .expect("test identifier must be valid"),
         listed_skills: vec![advertised],
         agents_files: vec![
             tau_proto::DiscoveryAgentsFileSummary {
@@ -3218,7 +3220,8 @@ fn agent_context_initialization_skill_stats_measure_prompt_description() {
     let initialized = tau_proto::HarnessAgentContextInitialized {
         session_id: test_session_id("session-1"),
         agent_id: agent_id("agent-1"),
-        agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
+            .expect("test identifier must be valid"),
         listed_skills: vec![
             tau_proto::DiscoveryEffectiveSkill {
                 name: "focused".into(),
@@ -3266,7 +3269,8 @@ fn agent_context_initialization_summary_omits_empty_sections() {
     let initialized = tau_proto::HarnessAgentContextInitialized {
         session_id: test_session_id("session-1"),
         agent_id: agent_id("agent-1"),
-        agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
+            .expect("test identifier must be valid"),
         listed_skills: Vec::new(),
         agents_files: Vec::new(),
     };
@@ -3316,7 +3320,8 @@ fn agent_context_initialization_event_aggregates_session_skills() {
         tau_proto::HarnessAgentContextInitialized {
             session_id: test_session_id("session-1"),
             agent_id: agent_id("agent-1"),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("init-1"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("init-1")
+                .expect("test identifier must be valid"),
             listed_skills: vec![skill("advertised")],
             agents_files: vec![tau_proto::DiscoveryAgentsFileSummary {
                 file_path: "/repo/AGENTS.md".into(),
@@ -3350,7 +3355,10 @@ fn agent_context_initialization_is_visible_only_in_selected_agent_transcript() {
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
             session_id: test_session_id("session-1"),
             agent_id: agent_id(agent),
-            agent_initialization_id: tau_proto::AgentInitializationId::new(format!("{agent}-init")),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse(format!(
+                "{agent}-init"
+            ))
+            .expect("test identifier must be valid"),
             listed_skills: vec![tau_proto::DiscoveryEffectiveSkill {
                 name: skill.into(),
                 description: format!("{skill} description"),
@@ -3420,7 +3428,8 @@ fn catch_up_agent_context_initialization_waits_for_agent_selection() {
         tau_proto::HarnessAgentContextInitialized {
             session_id: test_session_id("session-1"),
             agent_id: agent_id("restored"),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("restored-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("restored-init")
+                .expect("test identifier must be valid"),
             listed_skills: Vec::new(),
             agents_files: vec![tau_proto::DiscoveryAgentsFileSummary {
                 file_path: "/restored/AGENTS.md".into(),
@@ -3431,7 +3440,8 @@ fn catch_up_agent_context_initialization_waits_for_agent_selection() {
     ));
     renderer.handle(&Event::ExtensionContextReady(
         tau_proto::ExtensionContextReady {
-            agent_initialization_id: tau_proto::AgentInitializationId::new("restored-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("restored-init")
+                .expect("test identifier must be valid"),
             session_id: test_session_id("session-1"),
             agent_id: agent_id("restored"),
         },
@@ -4722,7 +4732,7 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
     renderer.switch_agent("worker-1".to_owned());
     renderer.handle(&Event::UiShellCommand(tau_proto::UiShellCommand {
         session_id: test_session_id("s1"),
-        command_id: "ui-sh-1".into(),
+        command_id: tau_proto::ShellCommandId::parse("ui-sh-1").unwrap(),
         command: "printf worker-output".into(),
         include_in_context: false,
         target_agent_id: Some(agent_id("worker-1")),
@@ -4731,7 +4741,7 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
 
     renderer.handle(&Event::ShellCommandProgress(
         tau_proto::ShellCommandProgress {
-            command_id: "ui-sh-1".into(),
+            command_id: tau_proto::ShellCommandId::parse("ui-sh-1").unwrap(),
             stream: tau_proto::ShellStream::Stdout,
             chunk: "worker-output".into(),
             target_agent_id: Some(agent_id("worker-1")),
@@ -4739,7 +4749,7 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
     ));
     renderer.handle(&Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
-            command_id: "ui-sh-1".into(),
+            command_id: tau_proto::ShellCommandId::parse("ui-sh-1").unwrap(),
             session_id: test_session_id("s1"),
             command: "printf worker-output".into(),
             include_in_context: false,
@@ -4775,14 +4785,14 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     // selected transcript is main by the time the renderer processes the echo.
     renderer.handle(&Event::UiShellCommand(tau_proto::UiShellCommand {
         session_id: test_session_id("s1"),
-        command_id: "ui-sh-race".into(),
+        command_id: tau_proto::ShellCommandId::parse("ui-sh-race").unwrap(),
         command: "printf race-output".into(),
         include_in_context: false,
         target_agent_id: Some(agent_id("worker-1")),
     }));
     renderer.handle(&Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
-            command_id: "ui-sh-race".into(),
+            command_id: tau_proto::ShellCommandId::parse("ui-sh-race").unwrap(),
             session_id: test_session_id("s1"),
             command: "printf race-output".into(),
             include_in_context: false,
@@ -4811,7 +4821,7 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     }));
     replay.handle(&Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
-            command_id: "ui-sh-replay".into(),
+            command_id: tau_proto::ShellCommandId::parse("ui-sh-replay").unwrap(),
             session_id: test_session_id("s1"),
             command: "printf replay-output".into(),
             include_in_context: false,
@@ -5566,7 +5576,8 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
     ));
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: "msg-sender-agent-recipient-agent".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-sender-agent-recipient-agent")
+                .unwrap(),
             sender_id: agent_id("sender-agent"),
             sender_session_id: None,
             recipient_id: agent_id("recipient-agent"),
@@ -5639,7 +5650,7 @@ fn no_agent_overview_excludes_structured_watch_status() {
     );
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: "watch-turn".into(),
+            message_id: tau_proto::AgentMessageId::parse("watch-turn").unwrap(),
             sender_id: agent_id("watched-agent"),
             sender_session_id: None,
             recipient_id: agent_id("watcher-agent"),
@@ -5662,7 +5673,7 @@ fn no_agent_overview_excludes_structured_watch_status() {
     let provider_status_body = "watched provider is blocked";
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: "watch-provider".into(),
+            message_id: tau_proto::AgentMessageId::parse("watch-provider").unwrap(),
             sender_id: agent_id("watched-agent"),
             sender_session_id: None,
             recipient_id: agent_id("watcher-agent"),
@@ -5729,7 +5740,7 @@ fn external_agent_messages_render_session_agent_labels() {
     ));
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: "msg-inbound-external".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-inbound-external").unwrap(),
             sender_id: agent_id("reviewer_33333333"),
             sender_session_id: Some(test_session_id("my_project-cafe-abc123")),
             recipient_id: agent_id("manager_11111111"),
@@ -5778,7 +5789,7 @@ fn watched_turn_transition_renders_as_compact_status() {
 
     renderer.handle(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: "msg-watch-turn-start".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-watch-turn-start").unwrap(),
             sender_id: agent_id("researcher"),
             sender_session_id: None,
             recipient_id: agent_id("manager"),
@@ -9198,7 +9209,7 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
     ));
     let watch_state = |message_id: &str, state| {
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: message_id.into(),
+            message_id: tau_proto::AgentMessageId::parse(message_id).unwrap(),
             sender_id: agent_id("engineer_1"),
             sender_session_id: None,
             recipient_id: agent_id("parent_1"),

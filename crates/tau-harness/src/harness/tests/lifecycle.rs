@@ -4503,7 +4503,7 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
         PendingUiShellCommand {
             provider_id: "operational-owner".into(),
             command: tau_proto::UiShellCommand {
-                command_id: "startup-shell".into(),
+                command_id: tau_proto::ShellCommandId::parse("startup-shell").unwrap(),
                 session_id: test_session_id("s1"),
                 command: "printf held".to_owned(),
                 include_in_context: false,
@@ -4517,7 +4517,7 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
         "operational-owner",
         TestProtocolItem::Event(Event::ShellCommandFinishedReported(
             tau_proto::ShellCommandFinished {
-                command_id: "startup-shell".into(),
+                command_id: tau_proto::ShellCommandId::parse("startup-shell").unwrap(),
                 session_id: test_session_id("s1"),
                 command: "printf held".to_owned(),
                 include_in_context: false,
@@ -5902,7 +5902,7 @@ fn targetless_shell_output_injects_into_default_agent() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
     h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
-        command_id: "shell-1".into(),
+        command_id: tau_proto::ShellCommandId::parse("shell-1").unwrap(),
         session_id: test_session_id("s1"),
         command: "printf hello".to_owned(),
         include_in_context: true,
@@ -5938,7 +5938,7 @@ fn terminating_agent_rejects_late_shell_output() {
 
     for target_agent_id in [Some(agent_id.clone()), None] {
         h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
-            command_id: "late-shell".into(),
+            command_id: tau_proto::ShellCommandId::parse("late-shell").unwrap(),
             session_id: test_session_id("s1"),
             command: "printf late".to_owned(),
             include_in_context: true,
@@ -5969,7 +5969,7 @@ fn shell_output_for_wrong_session_is_ignored() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
     h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
-        command_id: "shell-2".into(),
+        command_id: tau_proto::ShellCommandId::parse("shell-2").unwrap(),
         session_id: test_session_id("other-session"),
         command: "printf wrong".to_owned(),
         include_in_context: true,
@@ -7784,7 +7784,8 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
         "ctx-ext",
         tau_proto::ExtAgentContextPublish {
             session_id: test_session_id("test-session"),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             agent_id: agent_id.clone(),
             key: tau_proto::AgentContextKey::from("skills"),
@@ -7831,7 +7832,8 @@ fn switch_session_clears_session_scoped_extension_context() {
         "ctx-ext",
         tau_proto::ExtAgentContextPublish {
             session_id: test_session_id("test-session"),
-            agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("test identifier must be valid"),
 
             agent_id: agent_id.clone(),
             key: tau_proto::AgentContextKey::from("skills"),

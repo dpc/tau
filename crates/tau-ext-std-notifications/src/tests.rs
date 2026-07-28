@@ -393,7 +393,8 @@ fn user_prompt_submitted(
 
 fn session_agent_loaded(session_id: &str, agent_id: &str) -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-        agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+        agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+            .expect("test identifier must be valid"),
 
         session_id: session_id
             .parse::<tau_proto::SessionId>()

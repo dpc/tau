@@ -98,7 +98,8 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
                 agent_prompt_id: "ap-engineer_0-0"
                     .parse::<tau_proto::AgentPromptId>()
                     .expect("known-safe AgentPromptId must be valid"),
-                runtime_id: tau_proto::AccountingRuntimeId::new("runtime-1"),
+                runtime_id: tau_proto::AccountingRuntimeId::parse("runtime-1")
+                    .expect("test identifier must be valid"),
                 activation: tau_proto::AgentOuterTurnActivation::Journal {
                     occurrence: AgentHead::Node(tau_core::NodeId::new(0)),
                 },
@@ -384,7 +385,8 @@ fn persisted_traversal_reports_missing_member_journal() {
             "s1",
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                agent_initialization_id: tau_proto::AgentInitializationId::new("test-init"),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
 
                 session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
                 agent_id: AgentId::parse("missing_0").expect("agent id"),
