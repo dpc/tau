@@ -1703,7 +1703,7 @@ fn assemble_conversation_preserves_agent_phase() {
 fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: "msg-user".into(),
+        message_id: tau_proto::AgentMessageId::parse("msg-user").unwrap(),
         sender_id: tau_proto::AgentId::parse("main").expect("agent id"),
         recipient: tau_proto::AgentMessageRecipient::User,
         kind: tau_proto::AgentMessageKind::Message,
@@ -1711,7 +1711,7 @@ fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
     }));
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: "msg-agent".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-agent").unwrap(),
             sender_id: tau_proto::AgentId::parse("manager").expect("agent id"),
             sender_session_id: None,
             recipient_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -1750,7 +1750,7 @@ fn assemble_conversation_escapes_authenticated_peer_message_envelope() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: "peer-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("peer-message").unwrap(),
             sender_id: tau_proto::AgentId::parse("peer_agent").expect("agent id"),
             sender_session_id: Some(
                 "peer-session"
@@ -1790,7 +1790,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
     let mut watcher_tree = tau_core::AgentTree::from_events(main.clone(), &[]);
     watcher_tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: "msg-watch".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-watch").unwrap(),
             sender_id: watched.clone(),
             sender_session_id: None,
             recipient_id: main,
@@ -1816,7 +1816,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
 
     let mut watched_tree = tau_core::AgentTree::from_events(watched.clone(), &[]);
     watched_tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: "msg-watch".into(),
+        message_id: tau_proto::AgentMessageId::parse("msg-watch").unwrap(),
         sender_id: watched,
         recipient: tau_proto::AgentMessageRecipient::Agent {
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -1839,7 +1839,7 @@ fn assemble_conversation_replays_watch_turn_state_as_notification_only() {
     let mut tree = tau_core::AgentTree::from_events(watcher.clone(), &[]);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: "msg-watch-state".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-watch-state").unwrap(),
             sender_id: watched,
             sender_session_id: None,
             recipient_id: watcher,
@@ -1877,7 +1877,7 @@ fn assemble_conversation_omits_initial_watch_turn_state() {
     let mut tree = tau_core::AgentTree::from_events(watcher.clone(), &[]);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
-            message_id: "msg-initial-watch-state".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-initial-watch-state").unwrap(),
             sender_id: watched,
             sender_session_id: None,
             recipient_id: watcher,

@@ -979,7 +979,7 @@ fn queue_intercepted_peer_receive(
         h.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: format!("peer-request-{suffix}"),
-            message_id: format!("peer-message-{suffix}").into(),
+            message_id: tau_proto::AgentMessageId::parse(format!("peer-message-{suffix}")).unwrap(),
             capability: "test-capability".to_owned(),
             sender_session_id: "sender-session"
                 .parse::<tau_proto::SessionId>()
@@ -1301,7 +1301,7 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
         h.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: "coalesce-remote".to_owned(),
-            message_id: "coalesce-remote-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("coalesce-remote-message").unwrap(),
             capability: "capability".to_owned(),
             sender_session_id: "sender-session"
                 .parse::<tau_proto::SessionId>()
@@ -1341,7 +1341,7 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
     configure_inter_session_receivers(&mut h, &[("engineer", true)]);
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "auth-before-spend".to_owned(),
-        message_id: "auth-before-spend-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("auth-before-spend-message").unwrap(),
         capability: "invalid".to_owned(),
         sender_session_id: "sender-session"
             .parse::<tau_proto::SessionId>()
@@ -1380,7 +1380,8 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
     let target_session = h.current_session_id.clone();
     let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
         request_id: format!("stale-auth-{suffix}"),
-        message_id: format!("stale-auth-message-{suffix}").into(),
+        message_id: tau_proto::AgentMessageId::parse(format!("stale-auth-message-{suffix}"))
+            .unwrap(),
         capability: "valid".to_owned(),
         sender_session_id: "sender-session"
             .parse::<tau_proto::SessionId>()
@@ -1498,7 +1499,7 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
         h.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: "bare-revoke".to_owned(),
-            message_id: "bare-revoke-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("bare-revoke-message").unwrap(),
             capability: "capability".to_owned(),
             sender_session_id: "sender-session"
                 .parse::<tau_proto::SessionId>()
@@ -1557,7 +1558,7 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
         h.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: "bare-reselect".to_owned(),
-            message_id: "bare-reselect-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("bare-reselect-message").unwrap(),
             capability: "capability".to_owned(),
             sender_session_id: "sender-session"
                 .parse::<tau_proto::SessionId>()
@@ -4684,7 +4685,7 @@ fn session_shutdown_event(session_id: &str) -> Event {
 
 fn agent_message_sent_event(message: &str) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: tau_proto::AgentMessageId::from("msg-intercept"),
+        message_id: tau_proto::AgentMessageId::parse("msg-intercept").unwrap(),
         sender_id: tau_proto::AgentId::parse("agent-message-sender").expect("agent id"),
         recipient: tau_proto::AgentMessageRecipient::Agent {
             agent_id: tau_proto::AgentId::parse("agent-message-recipient").expect("agent id"),
@@ -4696,7 +4697,7 @@ fn agent_message_sent_event(message: &str) -> Event {
 
 fn agent_message_received_event(recipient_id: &str) -> Event {
     Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: tau_proto::AgentMessageId::from("msg-intercept"),
+        message_id: tau_proto::AgentMessageId::parse("msg-intercept").unwrap(),
         sender_id: tau_proto::AgentId::parse("agent-message-sender").expect("agent id"),
         sender_session_id: None,
         recipient_id: tau_proto::AgentId::parse(recipient_id).expect("agent id"),

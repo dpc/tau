@@ -2328,9 +2328,31 @@ pub enum AgentCreator {
 }
 
 /// Stable identity of one non-overlapping outer agent turn.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct AgentOuterTurnId(String);
+
+/// Error returned when parsing an outer-turn identifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentOuterTurnIdParseError {
+    /// The identifier did not begin with the required `ot-` prefix.
+    InvalidPrefix,
+    /// The prompt-identifier suffix was invalid.
+    InvalidPromptId(crate::AgentPromptIdParseError),
+}
+
+impl std::fmt::Display for AgentOuterTurnIdParseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPrefix => formatter.write_str("outer turn id must start with `ot-`"),
+            Self::InvalidPromptId(error) => {
+                write!(formatter, "invalid outer turn prompt id: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AgentOuterTurnIdParseError {}
 
 impl AgentOuterTurnId {
     /// Derive the turn identity from its unique durable inference prompt.
@@ -2338,17 +2360,34 @@ impl AgentOuterTurnId {
     pub fn for_prompt(prompt_id: &AgentPromptId) -> Self {
         Self(format!("ot-{prompt_id}"))
     }
-}
 
-impl From<String> for AgentOuterTurnId {
-    fn from(value: String) -> Self {
-        Self(value)
+    /// Parse an outer-turn identifier in its exact derived representation.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, AgentOuterTurnIdParseError> {
+        let value = value.as_ref();
+        let prompt_id = value
+            .strip_prefix("ot-")
+            .ok_or(AgentOuterTurnIdParseError::InvalidPrefix)?
+            .parse()
+            .map_err(AgentOuterTurnIdParseError::InvalidPromptId)?;
+        Ok(Self::for_prompt(&prompt_id))
     }
 }
 
-impl From<&str> for AgentOuterTurnId {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::str::FromStr for AgentOuterTurnId {
+    type Err = AgentOuterTurnIdParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AgentOuterTurnId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
     }
 }
 

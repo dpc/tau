@@ -872,7 +872,7 @@ fn received_agent_message_replay_restores_context_without_wake() {
         h.publish_event(
             Some(HARNESS_CONNECTION_ID),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-                message_id: "replay-agent-message".into(),
+                message_id: tau_proto::AgentMessageId::parse("replay-agent-message").unwrap(),
                 sender_id: crate::parse_agent_id("manager"),
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(&agent_id),
@@ -1828,7 +1828,7 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
             "agent-1",
             Some(HARNESS_CONNECTION_ID.into()),
             Event::AgentMessageSent(tau_proto::AgentMessageSent {
-                message_id: "test-message".into(),
+                message_id: tau_proto::AgentMessageId::parse("test-message").unwrap(),
                 sender_id: crate::parse_agent_id("agent-1"),
                 recipient: tau_proto::AgentMessageRecipient::User,
                 kind: tau_proto::AgentMessageKind::Message,

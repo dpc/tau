@@ -4134,7 +4134,7 @@ fn loop_guard_block_preserves_canonical_agent_message_wake() {
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "loop-guard-agent-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("loop-guard-agent-message").unwrap(),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
@@ -13089,7 +13089,7 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
         h.publish_event(
             Some(HARNESS_CONNECTION_ID),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-                message_id: message_id.into(),
+                message_id: tau_proto::AgentMessageId::parse(message_id).unwrap(),
                 sender_id: crate::parse_agent_id("manager"),
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(&agent_id),
@@ -13211,7 +13211,7 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
         h.publish_event(
             Some(HARNESS_CONNECTION_ID),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-                message_id: message_id.into(),
+                message_id: tau_proto::AgentMessageId::parse(message_id).unwrap(),
                 sender_id: crate::parse_agent_id("manager"),
                 sender_session_id: None,
                 recipient_id: crate::parse_agent_id(&agent_id),
@@ -14426,7 +14426,7 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "readiness-message-wake".into(),
+            message_id: tau_proto::AgentMessageId::parse("readiness-message-wake").unwrap(),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&agent_id),
@@ -15359,7 +15359,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
     h.publish_for_agent(
         &cid,
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "branch-b-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("branch-b-message").unwrap(),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: agent_id.clone(),
@@ -19914,7 +19914,7 @@ fn agent_message_interrupts_recipient_active_wait() {
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "test-message-interrupts-wait".into(),
+            message_id: tau_proto::AgentMessageId::parse("test-message-interrupts-wait").unwrap(),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
@@ -20074,7 +20074,7 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "queued-manager-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("queued-manager-message").unwrap(),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
@@ -21376,7 +21376,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "test-message-to-target-owner".into(),
+            message_id: tau_proto::AgentMessageId::parse("test-message-to-target-owner").unwrap(),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&target_agent_id),
@@ -21397,7 +21397,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "test-message-to-wait-owner".into(),
+            message_id: tau_proto::AgentMessageId::parse("test-message-to-wait-owner").unwrap(),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&waiter_agent_id),
@@ -21944,7 +21944,7 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
         h.publish_event(
             Some(HARNESS_CONNECTION_ID),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-                message_id: "message-cut-delivery".into(),
+                message_id: tau_proto::AgentMessageId::parse("message-cut-delivery").unwrap(),
                 sender_id: crate::parse_agent_id("sender"),
                 sender_session_id: None,
                 recipient_id: worker_agent_id.clone(),
@@ -22405,7 +22405,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "test-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("test-message").unwrap(),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
@@ -26744,7 +26744,7 @@ fn watch_chain_mixed_lifecycle_turn_emits_paired_state() {
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "watch-chain-lifecycle".into(),
+            message_id: tau_proto::AgentMessageId::parse("watch-chain-lifecycle").unwrap(),
             sender_id: crate::parse_agent_id(&c_id),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&b_id),
@@ -28350,7 +28350,7 @@ fn external_agent_message_request_publishes_received_projection() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "external-ok".to_owned(),
-            message_id: "msg-external-ok".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-external-ok").unwrap(),
             capability: "cap-ok".to_owned(),
             sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -28415,7 +28415,7 @@ fn external_agent_message_request_rejects_wrong_active_session() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "external-wrong-session".to_owned(),
-            message_id: "msg-external-wrong-session".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-external-wrong-session").unwrap(),
             capability: "cap-wrong-session".to_owned(),
             sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -28446,7 +28446,7 @@ fn external_agent_message_request_rejects_unknown_recipient() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "external-unknown".to_owned(),
-            message_id: "msg-external-unknown".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-external-unknown").unwrap(),
             capability: "cap-unknown".to_owned(),
             sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -28484,7 +28484,7 @@ fn external_agent_message_request_rejects_empty_message() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "external-empty".to_owned(),
-            message_id: "msg-external-empty".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-external-empty").unwrap(),
             capability: "cap-empty".to_owned(),
             sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -28519,7 +28519,7 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
 
     let base = tau_proto::ExternalAgentMessageRequest {
         request_id: "external-preauth".to_owned(),
-        message_id: "msg-external-preauth".into(),
+        message_id: tau_proto::AgentMessageId::parse("msg-external-preauth").unwrap(),
         capability: "cap-preauth".to_owned(),
         sender_session_id: test_session_id("other-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -28583,7 +28583,7 @@ fn external_agent_message_auth_binds_sender_identity_and_kind() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let message_id: tau_proto::AgentMessageId = "msg-auth".into();
+    let message_id = tau_proto::AgentMessageId::parse("msg-auth").unwrap();
     h.pending_external_message_auth.insert(
         message_id.clone(),
         crate::harness::PendingExternalAgentMessageAuth {
@@ -28658,7 +28658,7 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "external-forged".to_owned(),
-        message_id: "msg-external-forged".into(),
+        message_id: tau_proto::AgentMessageId::parse("msg-external-forged").unwrap(),
         capability: "cap-forged".to_owned(),
         sender_session_id: test_session_id("other-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -28756,7 +28756,7 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
     peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessage(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "socket-external-ok".to_owned(),
-            message_id: "socket-message-ok".into(),
+            message_id: tau_proto::AgentMessageId::parse("socket-message-ok").unwrap(),
             capability: "socket-capability".to_owned(),
             sender_session_id: sender.current_session_id.clone(),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -28833,7 +28833,8 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
             .expect("sender id"),
     );
     configure_inter_session_receivers(&mut target, &[("engineer", true)]);
-    let message_id: tau_proto::AgentMessageId = "two-harness-message".into();
+    let message_id: tau_proto::AgentMessageId =
+        tau_proto::AgentMessageId::parse("two-harness-message").unwrap();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "two-harness-request".to_owned(),
         message_id: message_id.clone(),
@@ -29089,7 +29090,8 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
         tau_proto::HarnessInputMessage::ExternalAgentMessage(
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "external-nonblocking-auth".to_owned(),
-                message_id: "msg-external-nonblocking-auth".into(),
+                message_id: tau_proto::AgentMessageId::parse("msg-external-nonblocking-auth")
+                    .unwrap(),
                 capability: "cap-nonblocking".to_owned(),
                 sender_session_id: test_session_id("missing-sender-session"),
                 sender_id: crate::parse_agent_id("sender_agent"),
@@ -29204,7 +29206,7 @@ fn external_message_success_completion_publishes_sent_projection_and_tool_result
             tool_type: tau_proto::ToolType::Function,
             result: Ok((crate::parse_agent_id("recipient_agent"), false)),
             details: CborValue::Null,
-            auth_message_id: "delivered-message".into(),
+            auth_message_id: tau_proto::AgentMessageId::parse("delivered-message").unwrap(),
             publish_sent: true,
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: test_session_id("other-session"),
@@ -29247,7 +29249,7 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
     let idle_id = h.ensure_agent_id_for_agent(&idle).expect("idle id");
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "bare-select".to_owned(),
-        message_id: "bare-select-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("bare-select-message").unwrap(),
         capability: "test-only".to_owned(),
         sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -29282,7 +29284,7 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
     h.provider_model_info.clear();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "model-revoked".to_owned(),
-        message_id: "model-revoked-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("model-revoked-message").unwrap(),
         capability: "test-only".to_owned(),
         sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -29312,7 +29314,7 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
     let agents_before = h.agents.len();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "auto-start".to_owned(),
-        message_id: "auto-start-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("auto-start-message").unwrap(),
         capability: "test-only".to_owned(),
         sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -29388,7 +29390,7 @@ fn bare_peer_auto_start_uses_first_configured_candidate() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "ordered-auto-start".to_owned(),
-            message_id: "ordered-auto-start-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("ordered-auto-start-message").unwrap(),
             capability: "test-only".to_owned(),
             sender_session_id: test_session_id("sender-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -29431,7 +29433,8 @@ fn bare_peer_auto_start_skips_unavailable_role_model() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "skip-unavailable-auto-start".to_owned(),
-            message_id: "skip-unavailable-auto-start-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("skip-unavailable-auto-start-message")
+                .unwrap(),
             capability: "test-only".to_owned(),
             sender_session_id: test_session_id("sender-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -29473,7 +29476,7 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
         let result = h.handle_external_agent_message_request_without_auth_for_test(
             tau_proto::ExternalAgentMessageRequest {
                 request_id: "restore-peer".to_owned(),
-                message_id: "restore-peer-message".into(),
+                message_id: tau_proto::AgentMessageId::parse("restore-peer-message").unwrap(),
                 capability: "test-only".to_owned(),
                 sender_session_id: test_session_id("sender-session"),
                 sender_id: crate::parse_agent_id("sender_agent"),
@@ -29544,7 +29547,7 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
     let result = h.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "peer-tool".to_owned(),
-            message_id: "peer-tool-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("peer-tool-message").unwrap(),
             capability: "test-only".to_owned(),
             sender_session_id: test_session_id("sender-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -29619,7 +29622,8 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
     let target_session = h.current_session_id.clone();
     let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
         request_id: format!("single-flight-{suffix}"),
-        message_id: format!("single-flight-message-{suffix}").into(),
+        message_id: tau_proto::AgentMessageId::parse(format!("single-flight-message-{suffix}"))
+            .unwrap(),
         capability: "test-only".to_owned(),
         sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -29677,7 +29681,7 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
     let agents_before = h.agents.len();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "queue-full".to_owned(),
-        message_id: "queue-full-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("queue-full-message").unwrap(),
         capability: "test-only".to_owned(),
         sender_session_id: test_session_id("sender-session"),
         sender_id: crate::parse_agent_id("sender_agent"),
@@ -29796,7 +29800,8 @@ fn external_message_auth_rejects_bare_exact_capability_substitution() {
         h.ensure_agent_id_for_agent(&sender)
             .expect("sender public id"),
     );
-    let message_id: tau_proto::AgentMessageId = "typed-auth-message".into();
+    let message_id: tau_proto::AgentMessageId =
+        tau_proto::AgentMessageId::parse("typed-auth-message").unwrap();
     h.pending_external_message_auth.insert(
         message_id.clone(),
         crate::harness::PendingExternalAgentMessageAuth {
@@ -29859,7 +29864,7 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
             tool_type: tau_proto::ToolType::Function,
             result: Ok((crate::parse_agent_id("recipient_agent"), false)),
             details: CborValue::Null,
-            auth_message_id: "stale-message".into(),
+            auth_message_id: tau_proto::AgentMessageId::parse("stale-message").unwrap(),
             publish_sent: true,
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: test_session_id("other-session"),
@@ -30028,7 +30033,7 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
     let result = resumed.handle_external_agent_message_request_without_auth_for_test(
         tau_proto::ExternalAgentMessageRequest {
             request_id: "external-cold-stopped".to_owned(),
-            message_id: "msg-external-cold-stopped".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-external-cold-stopped").unwrap(),
             capability: "cap-cold-stopped".to_owned(),
             sender_session_id: test_session_id("other-session"),
             sender_id: crate::parse_agent_id("sender_agent"),
@@ -30317,7 +30322,7 @@ fn terminating_agent_route_rejects_direct_work() {
     );
     h.activate_received_agent_message(
         &tau_proto::AgentMessageReceived {
-            message_id: "msg-during-termination".into(),
+            message_id: tau_proto::AgentMessageId::parse("msg-during-termination").unwrap(),
             sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
             sender_session_id: None,
             recipient_id: tau_proto::AgentId::parse(&recipient_id).expect("agent id"),
@@ -30448,7 +30453,7 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "branch-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("branch-message").unwrap(),
             sender_id: crate::parse_agent_id("manager"),
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
@@ -31178,14 +31183,14 @@ fn inbound_agent_message_events_are_ignored() {
     let mut h = echo_harness(&sp).expect("start");
 
     let forged_sent = Event::AgentMessageSent(tau_proto::AgentMessageSent {
-        message_id: "test-message".into(),
+        message_id: tau_proto::AgentMessageId::parse("test-message").unwrap(),
         sender_id: crate::parse_agent_id("attacker"),
         recipient: tau_proto::AgentMessageRecipient::User,
         kind: tau_proto::AgentMessageKind::Message,
         message: "forged".to_owned(),
     });
     let forged_received = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-        message_id: "test-message-received".into(),
+        message_id: tau_proto::AgentMessageId::parse("test-message-received").unwrap(),
         sender_id: crate::parse_agent_id("attacker"),
         sender_session_id: Some(test_session_id("other-session")),
         recipient_id: crate::parse_agent_id("victim"),

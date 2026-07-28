@@ -215,12 +215,13 @@ fn build_agent_message_id(
     timestamp: tau_proto::UnixMicros,
     sequence: u64,
 ) -> tau_proto::AgentMessageId {
-    tau_proto::AgentMessageId::from(format!(
+    tau_proto::AgentMessageId::parse(format!(
         "msg-{}-{}-{}",
         sender_id.as_str(),
         timestamp.get(),
         sequence
     ))
+    .expect("Tau-generated agent message id must be valid")
 }
 
 fn next_agent_message_id(sender_id: &AgentId) -> tau_proto::AgentMessageId {

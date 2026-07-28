@@ -430,8 +430,15 @@ validated_string_newtype!(
     AgentPromptIdParseError,
     "agent prompt id"
 );
-string_newtype!(/// Stable identifier for one global agent message.
-    AgentMessageId);
+validated_string_newtype!(
+    /// Stable identifier for one global agent message.
+    ///
+    /// Values contain 1 through 128 bytes of ASCII letters, digits, `_`, or
+    /// `-`. Construction and deserialization validate this grammar.
+    AgentMessageId,
+    AgentMessageIdParseError,
+    "agent message id"
+);
 // ToolName is defined manually below with validation.
 string_newtype!(/// Tool call identifier.
     ToolCallId);

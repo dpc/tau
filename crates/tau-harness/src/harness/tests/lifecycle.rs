@@ -7656,7 +7656,7 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: "query-pending-message".into(),
+            message_id: tau_proto::AgentMessageId::parse("query-pending-message").unwrap(),
             sender_id: tau_proto::AgentId::parse("manager").expect("sender id"),
             sender_session_id: None,
             recipient_id: durable_agent_id.clone(),

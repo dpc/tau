@@ -962,14 +962,14 @@ fn representative_events() -> Vec<Event> {
             ctx_id: None,
         }),
         Event::AgentMessageSent(AgentMessageSent {
-            message_id: "msg-1".into(),
+            message_id: AgentMessageId::parse("msg-1").unwrap(),
             sender_id: agent_id("engineer_abcd1234"),
             recipient: AgentMessageRecipient::User,
             kind: AgentMessageKind::Message,
             message: "hello".to_owned(),
         }),
         Event::AgentMessageReceived(AgentMessageReceived {
-            message_id: "msg-2".into(),
+            message_id: AgentMessageId::parse("msg-2").unwrap(),
             sender_id: agent_id("engineer_abcd1234"),
             sender_session_id: None,
             recipient_id: agent_id("reviewer_efgh5678"),
@@ -1828,7 +1828,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         }),
         HarnessInputMessage::ExternalAgentMessage(ExternalAgentMessageRequest {
             request_id: "external-1".to_owned(),
-            message_id: "msg-external-1".into(),
+            message_id: AgentMessageId::parse("msg-external-1").unwrap(),
             capability: "capability-1".to_owned(),
             sender_session_id: test_session_id("sender-session"),
             sender_id: agent_id("sender_agent"),
@@ -1839,7 +1839,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
         }),
         HarnessInputMessage::ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest {
             request_id: "external-auth-1".to_owned(),
-            message_id: "msg-external-1".into(),
+            message_id: AgentMessageId::parse("msg-external-1").unwrap(),
             capability: "capability-1".to_owned(),
             sender_session_id: test_session_id("sender-session"),
             sender_id: agent_id("sender_agent"),
@@ -2418,7 +2418,7 @@ fn event_name_rejects_empty_segments() {
 #[test]
 fn agent_message_events_have_names_and_persistence_defaults() {
     let sent = Event::AgentMessageSent(AgentMessageSent {
-        message_id: "msg-1".into(),
+        message_id: AgentMessageId::parse("msg-1").unwrap(),
         sender_id: agent_id("engineer_abcd1234"),
         recipient: AgentMessageRecipient::User,
         kind: AgentMessageKind::Message,
@@ -2429,7 +2429,7 @@ fn agent_message_events_have_names_and_persistence_defaults() {
     assert!(sent.defaults_to_persist());
 
     let received = Event::AgentMessageReceived(AgentMessageReceived {
-        message_id: "msg-2".into(),
+        message_id: AgentMessageId::parse("msg-2").unwrap(),
         sender_id: agent_id("engineer_abcd1234"),
         sender_session_id: None,
         recipient_id: agent_id("reviewer_efgh5678"),
@@ -2457,7 +2457,7 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
     assert_eq!(legacy.kind, AgentMessageKind::Message);
 
     let explicit_message = AgentMessageReceived {
-        message_id: "msg-message".into(),
+        message_id: AgentMessageId::parse("msg-message").unwrap(),
         sender_id: agent_id("engineer_abcd1234"),
         sender_session_id: None,
         recipient_id: agent_id("reviewer_efgh5678"),
