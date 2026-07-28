@@ -45,22 +45,52 @@ const COMPLETION_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::fro
 const PROMPT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 const AGENT_PICKER_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 const AGENT_PICKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-// Keep these fixed display columns synchronized with the ten-field contract in
-// docs/list-agents.md#output. A final presentation-only field is removed after
-// fzf returns the complete input row.
+// Keep the first ten fields synchronized with docs/list-agents.md#output. The
+// eleventh source field is picker-only cost; the final presentation-only field
+// is removed after fzf returns the complete input row.
 const AGENT_PICKER_FZF_ARGS: &[&str] = &[
     "--height=100%",
     "--delimiter=\t",
-    "--with-nth=11",
+    "--with-nth=12",
     "--no-multi",
     "--no-hscroll",
     "--prompt=agent> ",
 ];
-const AGENT_PICKER_SOURCE_FIELDS: usize = 10;
-const AGENT_PICKER_DISPLAY_FIELDS: [usize; 5] = [0, 6, 9, 1, 2];
+const AGENT_PICKER_SOURCE_FIELDS: usize = 11;
+
+const AGENT_PICKER_COLUMNS: [AgentPickerColumn; 6] = [
+    AgentPickerColumn {
+        source_field: 0,
+        preferred_width: 16,
+        max_width: 32,
+    },
+    AgentPickerColumn {
+        source_field: 10,
+        preferred_width: 4,
+        max_width: 4,
+    },
+    AgentPickerColumn {
+        source_field: 6,
+        preferred_width: 12,
+        max_width: 20,
+    },
+    AgentPickerColumn {
+        source_field: 9,
+        preferred_width: 24,
+        max_width: 40,
+    },
+    AgentPickerColumn {
+        source_field: 1,
+        preferred_width: 11,
+        max_width: 11,
+    },
+    AgentPickerColumn {
+        source_field: 2,
+        preferred_width: 7,
+        max_width: 7,
+    },
+];
 const AGENT_PICKER_COLUMN_GAP: &str = "  ";
-const AGENT_PICKER_COLUMN_PREFERRED_WIDTHS: [usize; 5] = [16, 12, 24, 11, 7];
-const AGENT_PICKER_COLUMN_MAX_WIDTHS: [usize; 5] = [32, 20, 40, 11, 7];
 // fzf reserves screen columns for its pointer, marker, and gutter.
 const AGENT_PICKER_FZF_DECORATION_WIDTH: usize = 4;
 const PROMPT_HISTORY_SEARCH_MAX_ROWS: usize = 200;
@@ -68,6 +98,16 @@ const PROMPT_HISTORY_SUMMARY_MAX_CHARS: usize = 240;
 const PROMPT_HISTORY_PREVIEW_MAX_BYTES: usize = 64 * 1024;
 const PROMPT_HISTORY_PREVIEW_TOTAL_BYTES: usize = 1024 * 1024;
 const COMPLETION_MENU_BLOCK_ID: BlockId = BlockId(u64::MAX);
+
+/// One width-aware picker presentation column.
+struct AgentPickerColumn {
+    /// Zero-based index in the source TSV row.
+    source_field: usize,
+    /// Width targeted before distributing spare space toward natural width.
+    preferred_width: usize,
+    /// Maximum display width even when the terminal has spare space.
+    max_width: usize,
+}
 
 /// Re-acquires raw terminal state on every external-command exit path.
 struct ExternalResumeGuard<'a> {
@@ -691,11 +731,11 @@ fn format_agent_picker_rows(rows: &str, terminal_width: usize) -> Result<String,
     let column_widths = agent_picker_column_widths(&fields, content_width);
     let mut output = String::new();
     for fields in fields {
-        let display = AGENT_PICKER_DISPLAY_FIELDS
+        let display = AGENT_PICKER_COLUMNS
             .iter()
             .zip(&column_widths)
-            .map(|(&field, &width)| {
-                let value = truncate_to_width(fields[field], width);
+            .map(|(column, &width)| {
+                let value = truncate_to_width(fields[column.source_field], width);
                 let padding = width.saturating_sub(display_width(&value));
                 format!("{value}{}", " ".repeat(padding))
             })
@@ -712,7 +752,7 @@ fn format_agent_picker_rows(rows: &str, terminal_width: usize) -> Result<String,
 }
 
 fn agent_picker_column_widths(rows: &[Vec<&str>], content_width: usize) -> Vec<usize> {
-    let mut column_count = AGENT_PICKER_DISPLAY_FIELDS.len();
+    let mut column_count = AGENT_PICKER_COLUMNS.len();
     while column_count > 1
         && content_width
             < column_count + AGENT_PICKER_COLUMN_GAP.len() * column_count.saturating_sub(1)
@@ -724,22 +764,24 @@ fn agent_picker_column_widths(rows: &[Vec<&str>], content_width: usize) -> Vec<u
     }
     let gap_width = AGENT_PICKER_COLUMN_GAP.len() * column_count.saturating_sub(1);
     let available = content_width.saturating_sub(gap_width);
-    let natural = AGENT_PICKER_DISPLAY_FIELDS[..column_count]
+    let natural = AGENT_PICKER_COLUMNS[..column_count]
         .iter()
-        .enumerate()
-        .map(|(column, &field)| {
+        .map(|column| {
             rows.iter()
-                .map(|row| display_width(row[field]))
+                .map(|row| display_width(row[column.source_field]))
                 .max()
                 .unwrap_or(1)
                 .max(1)
-                .min(AGENT_PICKER_COLUMN_MAX_WIDTHS[column])
+                .min(column.max_width)
         })
         .collect::<Vec<_>>();
     let mut widths = vec![1; column_count];
     let mut remaining = available.saturating_sub(column_count);
     for targets in [
-        &AGENT_PICKER_COLUMN_PREFERRED_WIDTHS[..column_count],
+        &AGENT_PICKER_COLUMNS[..column_count]
+            .iter()
+            .map(|column| column.preferred_width)
+            .collect::<Vec<_>>(),
         natural.as_slice(),
     ] {
         while remaining > 0 {

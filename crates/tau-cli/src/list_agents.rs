@@ -230,9 +230,30 @@ pub(crate) fn picker_selection_is_current(
 
 /// Formats rows as stable, headerless, escaped TSV.
 pub(crate) fn format_rows(agents: &[SessionAgentListEntry]) -> String {
+    format_rows_with(agents, |_| None)
+}
+
+/// Formats picker rows with each agent's canonical runtime cost appended.
+pub(crate) fn format_picker_rows(
+    agents: &[SessionAgentListEntry],
+    cost_for_agent: impl Fn(&tau_proto::AgentId) -> Option<tau_proto::EstimatedApiCost>,
+) -> String {
+    format_rows_with(agents, |agent| {
+        Some(
+            cost_for_agent(&agent.agent_id)
+                .map(crate::estimated_cost::format_compact)
+                .unwrap_or_else(dash),
+        )
+    })
+}
+
+fn format_rows_with(
+    agents: &[SessionAgentListEntry],
+    extra_field: impl Fn(&SessionAgentListEntry) -> Option<String>,
+) -> String {
     let mut output = String::new();
     for agent in agents {
-        let fields = [
+        let mut fields = vec![
             agent.agent_id.to_string(),
             lifecycle_name(agent.lifecycle).to_owned(),
             lifecycle_runtime(agent.lifecycle)
@@ -259,6 +280,9 @@ pub(crate) fn format_rows(agents: &[SessionAgentListEntry]) -> String {
                 .map(crate::line_output::escape_field)
                 .unwrap_or_else(dash),
         ];
+        if let Some(extra_field) = extra_field(agent) {
+            fields.push(extra_field);
+        }
         output.push_str(&fields.join("\t"));
         output.push('\n');
     }

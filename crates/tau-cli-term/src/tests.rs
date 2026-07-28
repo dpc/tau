@@ -770,11 +770,11 @@ fn dismiss_completion_menu_closes_rendered_completion_menu() {
 fn agent_fzf_output_parses_one_row() {
     assert_eq!(
         parse_agent_fzf_output(
-            b"agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\tdisplay\n"
+            b"agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tdisplay\n"
                 .to_vec()
         )
         .expect("valid output"),
-        Some("agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname".to_owned())
+        Some("agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00".to_owned())
     );
     assert_eq!(
         parse_agent_fzf_output(Vec::new()).expect("empty output"),
@@ -795,9 +795,9 @@ fn agent_fzf_output_rejects_malformed_selection() {
 #[test]
 fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
     let rows = concat!(
-        "agent-a\tlive\tidle\tactive\tdurable\tavailable\tdev\t-\t1\t短名\n",
-        "agent-longer\tlive\trunning\tactive_auto\tephemeral\tavailable\t研究員\tparent\t2\t-\n",
-        "é\tlive\tidle\tactive\tdurable\tavailable\tline\\nrole\t-\t3\twide界\n",
+        "agent-a\tlive\tidle\tactive\tdurable\tavailable\tdev\t-\t1\t短名\t$.00\n",
+        "agent-longer\tlive\trunning\tactive_auto\tephemeral\tavailable\t研究員\tparent\t2\t-\t$2.1\n",
+        "é\tlive\tidle\tactive\tdurable\tavailable\tline\\nrole\t-\t3\twide界\t-\n",
     );
     let formatted = format_agent_picker_rows(rows, 100).expect("valid picker rows");
     let formatted_rows = formatted.lines().collect::<Vec<_>>();
@@ -807,6 +807,18 @@ fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
         .iter()
         .map(|row| row.rsplit_once('\t').expect("display field").1)
         .collect::<Vec<_>>();
+    assert_eq!(
+        displays[0].split_whitespace().take(3).collect::<Vec<_>>(),
+        ["agent-a", "$.00", "dev"]
+    );
+    assert_eq!(
+        displays[1].split_whitespace().take(3).collect::<Vec<_>>(),
+        ["agent-longer", "$2.1", "研究員"]
+    );
+    assert_eq!(
+        displays[2].split_whitespace().take(3).collect::<Vec<_>>(),
+        ["é", "-", "line\\nrole"]
+    );
     for display in &displays {
         assert!(display_width(display) <= 96);
     }
@@ -836,12 +848,27 @@ fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
     }
 }
 
+/// Width pressure retains identity first and cost second, then omits later
+/// descriptive columns without changing the source row.
+#[test]
+fn agent_picker_cost_has_second_narrow_column_priority() {
+    let row = "agent-a\tlive\trunning\tactive\tdurable\tavailable\tengineer\t-\t1\tname\t$2.1\n";
+    let display = format_agent_picker_rows(row, 10)
+        .expect("valid picker row")
+        .trim_end()
+        .rsplit_once('\t')
+        .expect("display field")
+        .1
+        .to_owned();
+    assert_eq!(display, "a…  $…");
+}
+
 /// Narrow terminals truncate safely to their display budget and progressively
 /// omit trailing columns rather than allowing fzf horizontal scrolling.
 #[test]
 fn agent_picker_rows_fit_narrow_and_long_values() {
     let rows = format!(
-        "{}\tlive\trunning\tactive_auto\tdurable\tavailable\t{}\t-\t1\t{}\n",
+        "{}\tlive\trunning\tactive_auto\tdurable\tavailable\t{}\t-\t1\t{}\t$2.1\n",
         "agent-id-".repeat(20),
         "役割".repeat(30),
         "display-name-".repeat(20),
@@ -888,24 +915,24 @@ fn agent_fzf_command_uses_bounded_direct_process() {
 test "$#" -eq 6
 test "$1" = "--height=100%"
 test "$2" = "$(printf '%s\t' '--delimiter=')"
-test "$3" = "--with-nth=11"
+test "$3" = "--with-nth=12"
 test "$4" = "--no-multi"
 test "$5" = "--no-hscroll"
 test "$6" = "--prompt=agent> "
 cat >/dev/null
-printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\tdisplay\n'"#,
+printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tdisplay\n'"#,
     );
 
     let selected = run_agent_fzf_command_with_ownership(
         program.as_os_str(),
-        "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\tdisplay\n",
+        "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tdisplay\n",
         ProcessOwnership::ProcessGroup,
     )
     .expect("fake fzf succeeds");
 
     assert_eq!(
         selected.as_deref(),
-        Some("agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname")
+        Some("agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00")
     );
 }
 

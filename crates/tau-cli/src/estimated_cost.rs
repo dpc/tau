@@ -1,6 +1,34 @@
-//! Compact presentation for estimated equivalent API cost.
+//! Shared per-agent projection and compact estimated API cost presentation.
 
 use tau_proto::EstimatedApiCost;
+
+/// Thread-safe latest canonical cumulative cost projection keyed by agent.
+#[derive(Clone, Default)]
+pub(crate) struct AgentCostProjection {
+    /// Latest harness-authored cumulative cost keyed by canonical agent id.
+    costs: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<tau_proto::AgentId, EstimatedApiCost>>,
+    >,
+}
+
+impl AgentCostProjection {
+    /// Records the latest harness-authored cumulative cost for an agent.
+    pub(crate) fn record(&self, agent_id: tau_proto::AgentId, cost: EstimatedApiCost) {
+        crate::locked(&self.costs).insert(agent_id, cost);
+    }
+
+    /// Clears all costs when the renderer changes sessions.
+    pub(crate) fn clear(&self) {
+        crate::locked(&self.costs).clear();
+    }
+
+    /// Takes a coherent snapshot for one picker interaction.
+    pub(crate) fn snapshot(
+        &self,
+    ) -> std::collections::HashMap<tau_proto::AgentId, EstimatedApiCost> {
+        crate::locked(&self.costs).clone()
+    }
+}
 
 const PICODOLLARS_PER_CENT: u64 = 10_000_000_000;
 const PICODOLLARS_PER_TENTH_DOLLAR: u64 = 100_000_000_000;

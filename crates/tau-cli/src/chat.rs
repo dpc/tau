@@ -1946,6 +1946,7 @@ pub(crate) fn run_chat(
     let agent_display_names = renderer.agent_display_names();
     let agent_navigation = renderer.agent_navigation();
     let ephemeral_agents = renderer.ephemeral_agents();
+    let agent_estimated_api_costs = renderer.agent_estimated_api_costs();
     let input_routing = InputRoutingState::new(
         current_agent_state.clone(),
         known_agents.clone(),
@@ -2102,6 +2103,7 @@ pub(crate) fn run_chat(
             custom_prompts,
             ui_io_meter: ui_io_meter.clone(),
             harness_socket_path,
+            agent_estimated_api_costs,
         },
     )?;
 
@@ -2314,6 +2316,8 @@ struct TerminalInputLoopCtx {
     ui_io_meter: UiIoMeter,
     /// Socket used for requester-directed roster snapshots.
     harness_socket_path: std::path::PathBuf,
+    /// Canonical cumulative costs projected by the event renderer.
+    agent_estimated_api_costs: crate::estimated_cost::AgentCostProjection,
 }
 
 #[derive(Clone)]
@@ -3782,9 +3786,11 @@ impl<'a> TerminalInputSession<'a> {
                 return;
             }
         };
+        let costs = self.ctx.agent_estimated_api_costs.snapshot();
         let resolution = resolve_agent_picker(
             agents,
             filter,
+            |agent_id| costs.get(agent_id).copied(),
             |rows| self.term.pick_agent_row_with_fzf(rows),
             || {
                 crate::list_agents::request_at_socket(
@@ -3996,6 +4002,7 @@ enum AgentPickerResolution {
 fn resolve_agent_picker(
     agents: Vec<tau_proto::SessionAgentListEntry>,
     filter: crate::list_agents::AgentPickerFilter,
+    cost_for_agent: impl Fn(&tau_proto::AgentId) -> Option<tau_proto::EstimatedApiCost>,
     pick: impl FnOnce(&str) -> Result<Option<String>, String>,
     refresh: impl FnOnce() -> Option<Vec<tau_proto::SessionAgentListEntry>>,
     session_is_current: impl FnOnce() -> bool,
@@ -4005,7 +4012,7 @@ fn resolve_agent_picker(
     if visible.is_empty() {
         return AgentPickerResolution::Notice("no agents available".to_owned());
     }
-    let rows = crate::list_agents::format_rows(&visible);
+    let rows = crate::list_agents::format_picker_rows(&visible, cost_for_agent);
     let selected = match pick(&rows) {
         Ok(Some(row)) => row,
         Ok(None) => return AgentPickerResolution::NoChange,

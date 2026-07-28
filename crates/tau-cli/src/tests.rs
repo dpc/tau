@@ -4070,6 +4070,56 @@ fn agent_stats_does_not_overwrite_display_name() {
     );
 }
 
+/// Renderer stats forwarding preserves exact canonical costs, rejects foreign
+/// sessions, and clears the picker projection across New and Resume switches.
+#[test]
+fn agent_cost_projection_tracks_renderer_session_authority() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let projection = renderer.agent_estimated_api_costs();
+    let cost = tau_proto::EstimatedApiCost::from_picodollars(2_140_000_000_000);
+    let stats = |session: &str, agent: &str| {
+        Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+            session_id: test_session_id(session),
+            agent_id: agent_id(agent),
+            navigation_mode: tau_proto::AgentNavigationMode::Active,
+            runtime_state: tau_proto::AgentRuntimeState::Idle,
+            tools: tau_proto::AgentToolStats::default(),
+            context: tau_proto::AgentContextStats::default(),
+            estimated_api_cost: cost,
+        })
+    };
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: SessionStartReason::Initial,
+    }));
+    renderer.handle(&stats("s1", "agent-a"));
+    assert_eq!(projection.snapshot().get(&agent_id("agent-a")), Some(&cost));
+    renderer.handle(&stats("s2", "foreign"));
+    assert!(!projection.snapshot().contains_key(&agent_id("foreign")));
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s2"),
+        reason: SessionStartReason::New,
+    }));
+    assert!(projection.snapshot().is_empty());
+    renderer.handle(&stats("s2", "agent-b"));
+    assert_eq!(projection.snapshot().get(&agent_id("agent-b")), Some(&cost));
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s3"),
+        reason: SessionStartReason::Resume,
+    }));
+    assert!(projection.snapshot().is_empty());
+    renderer.handle(&stats("s3", "agent-c"));
+    assert_eq!(projection.snapshot().get(&agent_id("agent-c")), Some(&cost));
+}
+
 /// Ensures prompt echoes, transcript facts, and terminal events never replace
 /// complete harness stats as the CLI's navigation-cache authority.
 #[test]

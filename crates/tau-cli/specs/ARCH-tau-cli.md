@@ -256,8 +256,13 @@ the harness's directed current-session roster RPC, then owns filtering, stable
 parent-before-child TSV ordering, and escaping. The C-b binding and
 `:pick-agent` command invoke the active picker; `:pick-agent-all` invokes the
 all-agent picker. Both invoke `fzf` directly through `tau-cli-term`, which
-projects width-aware aligned display columns without changing the stable TSV
-selection row. Active filtering uses navigation mode plus runtime eligibility
+projects width-aware aligned display columns, including each agent's canonical
+cumulative estimated cost when available, without changing stable row identity.
+Membership comes from the fresh roster RPC, while cost comes from the input
+loop's latest renderer-processed `agent.stats_updated` projection. The cost may
+therefore be absent or lag the roster; the picker neither creates an atomic
+cross-source snapshot nor locally reprices usage.
+Active filtering uses navigation mode plus runtime eligibility
 without replacing the independent running/idle display column; the all-agent
 action includes every current live navigation mode. The underlying actions
 remain configurable, and the all-agent action has no built-in key binding. The

@@ -207,6 +207,8 @@ pub(crate) struct EventRenderer {
     agent_watchers: HashMap<String, Vec<String>>,
     /// Latest generic operational stats keyed by agent id.
     agent_stats: HashMap<String, tau_proto::AgentStatsUpdated>,
+    /// Canonical cumulative costs shared with terminal-local picker actions.
+    agent_estimated_api_costs: crate::estimated_cost::AgentCostProjection,
     /// Last exact dispatched model per browsable agent.
     agent_models: HashMap<String, tau_proto::ModelId>,
     /// Latest harness-authored agent-turn state keyed by `(watcher, watched)`.
@@ -1458,6 +1460,7 @@ impl EventRenderer {
             watched_agents: HashMap::new(),
             agent_watchers: HashMap::new(),
             agent_stats: HashMap::new(),
+            agent_estimated_api_costs: crate::estimated_cost::AgentCostProjection::default(),
             agent_models: HashMap::new(),
             watched_agent_turn_states: HashMap::new(),
             active_agent_prompts: HashMap::new(),
@@ -1586,6 +1589,12 @@ impl EventRenderer {
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<HashMap<String, String>>> {
         self.agent_display_names.clone()
+    }
+
+    /// Returns the canonical cumulative per-agent costs shared with input
+    /// actions.
+    pub(crate) fn agent_estimated_api_costs(&self) -> crate::estimated_cost::AgentCostProjection {
+        self.agent_estimated_api_costs.clone()
     }
 
     pub(crate) fn ephemeral_agents(&self) -> std::sync::Arc<std::sync::Mutex<HashSet<String>>> {
@@ -1886,6 +1895,8 @@ impl EventRenderer {
         }
         self.agent_stats
             .insert(updated.agent_id.to_string(), updated.clone());
+        self.agent_estimated_api_costs
+            .record(updated.agent_id.clone(), updated.estimated_api_cost);
         self.render_model_status_if_present();
         if self.current_agent_id.as_deref() == Some(updated.agent_id.as_str()) {
             self.refresh_prompt_placeholder();
@@ -3014,6 +3025,7 @@ impl EventRenderer {
         self.watched_agents.clear();
         self.agent_watchers.clear();
         self.agent_stats.clear();
+        self.agent_estimated_api_costs.clear();
         self.watched_agent_turn_states.clear();
         self.active_agent_prompts.clear();
         self.terminal_agent_prompts.clear();
@@ -5040,6 +5052,7 @@ impl EventRenderer {
 
     fn handle_existing_session_started(&mut self, started: &tau_proto::SessionStarted) {
         if self.current_session_id.as_ref() != Some(&started.session_id) {
+            self.agent_estimated_api_costs.clear();
             self.clear_agent_display_names();
             self.rerender_message_history();
         }

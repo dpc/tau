@@ -1,5 +1,18 @@
 use super::*;
 
+/// The shared picker projection records exact canonical values, snapshots them,
+/// and drops every value at a session boundary.
+#[test]
+fn agent_cost_projection_records_snapshots_and_clears() {
+    let projection = AgentCostProjection::default();
+    let agent_id = tau_proto::AgentId::parse("agent-a").expect("valid agent id");
+    let cost = EstimatedApiCost::from_picodollars(2_140_000_000_000);
+    projection.record(agent_id.clone(), cost);
+    assert_eq!(projection.snapshot().get(&agent_id), Some(&cost));
+    projection.clear();
+    assert!(projection.snapshot().is_empty());
+}
+
 fn dollars(value: u64) -> EstimatedApiCost {
     EstimatedApiCost::from_picodollars(value.saturating_mul(PICODOLLARS_PER_DOLLAR))
 }

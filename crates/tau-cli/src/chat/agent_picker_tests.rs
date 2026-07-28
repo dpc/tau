@@ -26,12 +26,14 @@ fn picker_orchestration_revalidates_with_initiating_category() {
     let idle = auto_entry(tau_proto::AgentRuntimeState::Idle);
     let pick_auto = |rows: &str| {
         assert!(rows.contains("auto\tlive\trunning\tactive_auto\t"));
+        assert!(rows.lines().all(|row| row.ends_with("\t$.00")));
         Ok(Some("auto\tlive\trunning\tactive_auto".to_owned()))
     };
 
     let active = resolve_agent_picker(
         vec![running.clone()],
         crate::list_agents::AgentPickerFilter::Active,
+        |_| Some(tau_proto::EstimatedApiCost::default()),
         pick_auto,
         || Some(vec![idle.clone()]),
         || true,
@@ -45,6 +47,7 @@ fn picker_orchestration_revalidates_with_initiating_category() {
     let all = resolve_agent_picker(
         vec![running],
         crate::list_agents::AgentPickerFilter::All,
+        |_| Some(tau_proto::EstimatedApiCost::default()),
         pick_auto,
         || Some(vec![idle]),
         || true,

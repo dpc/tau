@@ -150,6 +150,29 @@ fn all_picker_includes_suspended_agents_and_preserves_runtime_column() {
     assert!(output.contains("auto-idle\tlive\tidle\tactive_auto\tdurable\tmissing\t"));
 }
 
+/// Picker rows distinguish known zero, known nonzero, and unavailable canonical
+/// per-agent costs without changing the shared roster fields or ordering.
+#[test]
+fn picker_rows_append_canonical_cost_states() {
+    let zero = entry("zero", None, Some(1));
+    let nonzero = entry("nonzero", None, Some(2));
+    let unavailable = entry("unavailable", None, Some(3));
+    let output = format_picker_rows(&[zero, nonzero, unavailable], |agent_id| {
+        match agent_id.as_str() {
+            "zero" => Some(tau_proto::EstimatedApiCost::default()),
+            "nonzero" => Some(tau_proto::EstimatedApiCost::from_picodollars(
+                2_140_000_000_000,
+            )),
+            _ => None,
+        }
+    });
+    let costs = output
+        .lines()
+        .map(|row| row.rsplit_once('\t').expect("cost field").1)
+        .collect::<Vec<_>>();
+    assert_eq!(costs, ["$.00", "$2.1", "-"]);
+}
+
 /// Picker membership uses live lifecycle authority even when independent
 /// creation-fact enrichment is missing, invalid, or unreadable.
 #[test]
