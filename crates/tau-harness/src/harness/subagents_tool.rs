@@ -479,6 +479,42 @@ impl Harness {
         self.publish_wait_replies(replies);
     }
 
+    /// Atomically claim an installed harness-owned wait for manual compaction.
+    pub(crate) fn claim_wait_for_manual_compaction(
+        &mut self,
+        owner: &AgentId,
+        call_id: &ToolCallId,
+    ) -> bool {
+        self.subagents
+            .wait_tracker
+            .claim_wait_for_manual_compaction(owner, call_id)
+    }
+
+    /// Restore a claimed wait after its canonical cancellation failed to
+    /// append.
+    pub(crate) fn rollback_manual_compaction_wait_claim(
+        &mut self,
+        owner: &AgentId,
+        call_id: &ToolCallId,
+    ) {
+        let replies = self
+            .subagents
+            .wait_tracker
+            .rollback_manual_compaction_claim(owner, call_id);
+        self.publish_wait_replies(replies);
+    }
+
+    /// Report whether the named wait is already claimed for manual compaction.
+    pub(crate) fn wait_claimed_for_manual_compaction(
+        &self,
+        owner: &AgentId,
+        call_id: &ToolCallId,
+    ) -> bool {
+        self.subagents
+            .wait_tracker
+            .wait_claimed_for_manual_compaction(owner, call_id)
+    }
+
     #[cfg(test)]
     /// Reports whether one agent owns an installed input waiter.
     pub(crate) fn input_wait_pending_for(&self, owner: &AgentId) -> bool {

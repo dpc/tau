@@ -2408,6 +2408,8 @@ pub struct Harness {
     /// Accepted manual requests waiting for a safe start boundary.
     accepted_manual_compaction_tools:
         HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
+    /// UI compactions waiting for one claimed wait cancellation to commit.
+    pending_ui_compactions_after_wait: HashMap<AgentId, PendingUiCompactionAfterWait>,
     /// Standalone inference checkpoints currently queued through publication.
     enqueued_standalone_inference_checkpoints:
         HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
@@ -2763,6 +2765,16 @@ struct PendingTerminalObservation {
     observation_id: tau_proto::ObservationId,
     /// Runtime cause whose classification owns this candidate.
     cause: tau_proto::ToolTerminalCause,
+}
+
+/// One UI compaction waiting for a claimed wait cancellation to commit.
+struct PendingUiCompactionAfterWait {
+    /// Session generation in which the request claimed the waiter.
+    session_generation: u64,
+    /// Durable public identity used to reject a new runtime incarnation.
+    agent_id: tau_proto::AgentId,
+    /// Wait call whose terminal must close the foreground round.
+    wait_call_id: ToolCallId,
 }
 
 struct CancelTarget {
@@ -3136,6 +3148,7 @@ impl Harness {
             cancelled_compaction_claims: HashSet::new(),
             pending_manual_compaction_tools: HashMap::new(),
             accepted_manual_compaction_tools: HashMap::new(),
+            pending_ui_compactions_after_wait: HashMap::new(),
             enqueued_standalone_inference_checkpoints: HashSet::new(),
             pending_agent_publish_completions: HashMap::new(),
             prompt_operations: HashMap::new(),
@@ -5087,6 +5100,7 @@ impl Harness {
             return false;
         };
         if agent.terminating
+            || agent.pending_cancel.is_some()
             || agent.runtime_incarnation != continuation.runtime_incarnation
             || agent.session_id != self.current_session_id
             || agent.agent_id.as_deref() != Some(continuation.started.agent_id.as_str())
@@ -5478,6 +5492,7 @@ impl Harness {
             Err(error) => {
                 commit_timing.result = CommitEventTimingResult::SemanticPersistError;
                 self.rollback_rejected_activation_successor(&event);
+                self.rollback_failed_wait_compaction_terminal(&event);
                 self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
                 if semantic_event_router::session_membership_id_for_event(&event)
                     .is_some_and(|session_id| session_id == self.current_session_id)
@@ -5787,6 +5802,28 @@ impl Harness {
         self.complete_pending_external_receive(&event);
         commit_timing.post_commit = post_commit_started.elapsed();
         commit_timing.result = CommitEventTimingResult::Ok;
+    }
+
+    /// Restore a claimed wait when its canonical preemption terminal did not
+    /// cross the semantic append boundary.
+    fn rollback_failed_wait_compaction_terminal(&mut self, event: &Event) {
+        let Event::ToolCancelled(cancelled) = event else {
+            return;
+        };
+        let Some(cid) = self.tool_agents.get(&cancelled.call_id).cloned() else {
+            return;
+        };
+        let Some(pending) = self.pending_ui_compactions_after_wait.get(&cid) else {
+            return;
+        };
+        if pending.wait_call_id != cancelled.call_id {
+            return;
+        }
+        self.pending_ui_compactions_after_wait.remove(&cid);
+        self.pending_terminal_observations
+            .remove(&cancelled.call_id);
+        self.rollback_manual_compaction_wait_claim(&cid, &cancelled.call_id);
+        self.process_input_wait_deadlines(Instant::now());
     }
 
     /// Require an exact live `AwaitingCheckpoint` owner for every delayed
@@ -14537,6 +14574,7 @@ impl Harness {
                 self.try_advance_queue();
             }
             AgentTurnState::ToolsRunning { remaining_calls } => {
+                self.pending_ui_compactions_after_wait.remove(cid);
                 let mut cancelled_calls = remaining_calls;
                 cancelled_calls.extend(self.tool_turn.backgrounded_calls_for(cid));
                 cancelled_calls.sort();
@@ -17255,15 +17293,17 @@ impl Harness {
             self.emit_info("unknown agent for compaction");
             return;
         };
-        if self.agents.get(&cid).is_none_or(|agent| {
-            agent.terminating
-                || !matches!(agent.turn_state, AgentTurnState::Idle)
-                || !matches!(
-                    agent.activation_dispatch,
-                    crate::agent::ActivationDispatchState::None
-                        | crate::agent::ActivationDispatchState::Blocked { .. }
-                )
-        }) {
+        let Some(agent) = self.agents.get(&cid) else {
+            self.emit_info("target user agent is missing");
+            return;
+        };
+        if agent.terminating
+            || !matches!(
+                agent.activation_dispatch,
+                crate::agent::ActivationDispatchState::None
+                    | crate::agent::ActivationDispatchState::Blocked { .. }
+            )
+        {
             self.emit_info("cannot compact while a prompt or tool turn is in flight");
             return;
         }
@@ -17271,14 +17311,77 @@ impl Harness {
             self.emit_info("selected model does not support compaction");
             return;
         }
-        let Some(conv) = self.agents.get(&cid) else {
-            self.emit_info("target user agent is missing");
-            return;
-        };
-        let Some(agent_id) = conv.agent_id.clone() else {
+        let Some(agent_id) = agent.agent_id.as_deref().map(crate::parse_agent_id) else {
             self.emit_info("nothing to compact yet");
             return;
         };
+        if matches!(agent.turn_state, AgentTurnState::Idle) {
+            self.start_admitted_manual_compaction(&cid);
+            return;
+        }
+        let AgentTurnState::ToolsRunning { remaining_calls } = &agent.turn_state else {
+            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            return;
+        };
+        let [wait_call_id] = remaining_calls.as_slice() else {
+            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            return;
+        };
+        if let Some(pending) = self.pending_ui_compactions_after_wait.get(&cid)
+            && pending.wait_call_id == *wait_call_id
+            && self.wait_claimed_for_manual_compaction(&cid, wait_call_id)
+        {
+            self.emit_info("compaction already pending after wait cancellation");
+            return;
+        }
+        if self
+            .pending_terminal_observations
+            .contains_key(wait_call_id)
+        {
+            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            return;
+        }
+        let wait_call_id = wait_call_id.clone();
+        let Some(tool) = self.pending_tools.get(&wait_call_id).cloned() else {
+            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            return;
+        };
+        if tool.name.as_str() != crate::harness::subagents_tool::WAIT_TOOL_NAME
+            || !self.claim_wait_for_manual_compaction(&cid, &wait_call_id)
+        {
+            self.emit_info("cannot compact while a prompt or tool turn is in flight");
+            return;
+        }
+        self.pending_ui_compactions_after_wait.insert(
+            cid.clone(),
+            PendingUiCompactionAfterWait {
+                session_generation: self.current_session_generation,
+                agent_id,
+                wait_call_id: wait_call_id.clone(),
+            },
+        );
+        self.observe_tool_terminal(&cid, &wait_call_id, tau_proto::ToolTerminalCause::Unknown);
+        self.publish_for_agent(
+            &cid,
+            Event::ToolCancelled(ToolCancelled {
+                call_id: wait_call_id,
+                tool_name: tool.name,
+                tool_type: tool.tool_type,
+            }),
+        );
+    }
+
+    /// Start the existing manual compaction flow after all admission checks
+    /// have established an idle target.
+    fn start_admitted_manual_compaction(&mut self, cid: &AgentId) {
+        let conv = self
+            .agents
+            .get(cid)
+            .expect("admitted manual compaction has a loaded target");
+        let agent_id = conv
+            .agent_id
+            .clone()
+            .expect("admitted manual compaction has a durable target");
         let standalone_model = self.model_for_agent_role(conv).filter(|model| {
             self.provider_model_info
                 .get(model)
@@ -17326,11 +17429,11 @@ impl Harness {
             let compact_prompt_id =
                 tau_proto::AgentPromptId::from(format!("ap-{agent_id}-{}", conv.next_prompt_index));
             let originator = conv.originator.clone();
-            if let Some(agent) = self.agents.get_mut(&cid) {
+            if let Some(agent) = self.agents.get_mut(cid) {
                 agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
             }
             self.publish_for_agent(
-                &cid,
+                cid,
                 Event::AgentStandaloneCompactionStarted(
                     tau_proto::AgentStandaloneCompactionStarted {
                         compact_prompt_id,
@@ -17349,14 +17452,14 @@ impl Harness {
             return;
         }
         self.publish_for_agent(
-            &cid,
+            cid,
             Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
                 agent_id: crate::parse_agent_id(&agent_id),
                 originator: conv.originator.clone(),
                 resume_inference: false,
             }),
         );
-        self.dispatch_prompt_after_publish_idle(&cid);
+        self.dispatch_prompt_after_publish_idle(cid);
     }
 
     /// Validate and durably accept a model-authorized standalone compaction.
@@ -19285,6 +19388,7 @@ impl Harness {
         self.uncommitted_peer_auto_starts.clear();
         self.pending_manual_compaction_tools.clear();
         self.accepted_manual_compaction_tools.clear();
+        self.pending_ui_compactions_after_wait.clear();
         // Specialized cancellation paths above resolved accepted old-session
         // work. Suspend any responder whose publication is destructively
         // canceled, cancel transaction-owned checkpoints, and commit the queued
@@ -20524,6 +20628,7 @@ impl Harness {
     fn remove_agent(&mut self, cid: &AgentId) {
         self.tombstone_ephemeral_provider_prompts_for_agent(cid);
         self.pending_agent_publish_completions.remove(cid);
+        self.pending_ui_compactions_after_wait.remove(cid);
         self.pending_publish_idle_dispatches
             .retain(|dispatch| &dispatch.cid != cid);
         let mut peer_internal_calls = self
@@ -25825,6 +25930,22 @@ impl Harness {
             false
         };
         if should_send {
+            let pending_ui = self.pending_ui_compactions_after_wait.remove(cid);
+            if let Some(pending) = pending_ui
+                && pending.wait_call_id.as_str() == completed_call_id
+                && pending.session_generation == self.current_session_generation
+                && self.agents.get(cid).is_some_and(|agent| {
+                    !agent.terminating
+                        && agent.agent_id.as_deref() == Some(pending.agent_id.as_str())
+                        && matches!(agent.turn_state, AgentTurnState::Idle)
+                })
+            {
+                self.handle_compact_request(
+                    self.current_session_id.clone(),
+                    Some(pending.agent_id.as_str()),
+                );
+                return;
+            }
             let deferred_request = self
                 .agents
                 .get(cid)

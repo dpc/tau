@@ -117,6 +117,217 @@ fn call_ref(byte: u8, item_index: u32) -> ToolCallRef {
     }
 }
 
+/// A background completion that arrives while compaction holds an exact wait
+/// must remain the rollback winner even if activating input arrives afterward.
+#[test]
+fn compaction_claim_rollback_preserves_first_exact_completion_winner() {
+    let owner = conv("main");
+    let target: ToolCallId = "claimed-target".into();
+    let wait_call: ToolCallId = "claimed-exact-wait".into();
+    let mut tracker = WaitTracker::default();
+    tracker.record_tool_invoke(target.clone(), slow_tool_name(), owner.clone());
+    tracker.record_tool_result(
+        background_placeholder(target.as_str()),
+        owner.clone(),
+        observation(),
+    );
+    assert!(
+        start_wait_exact(&mut tracker, &owner, wait_call.as_str(), target.as_str())
+            .reply
+            .is_none()
+    );
+    assert!(tracker.claim_wait_for_manual_compaction(&owner, &wait_call));
+
+    assert!(
+        tracker
+            .record_background_result(
+                background_result(target.as_str(), "completed first"),
+                owner.clone(),
+                observation(),
+            )
+            .is_empty()
+    );
+    assert!(
+        tracker
+            .activate_waits_for(&owner, tau_proto::ObservationId::random())
+            .is_empty()
+    );
+    let replies = tracker.rollback_manual_compaction_claim(&owner, &wait_call);
+
+    assert_eq!(replies.len(), 1);
+    assert!(matches!(
+        &replies[0].kind,
+        WaitReplyKind::Result {
+            result: CborValue::Text(text),
+            display: _,
+        } if text == "completed first"
+    ));
+}
+
+/// Committing compact preemption after the exact source completes must restore
+/// that source's passive notification instead of leaving it suppressed.
+#[test]
+fn compaction_claim_cancellation_unsuppresses_completed_exact_source() {
+    let owner = conv("main");
+    let target: ToolCallId = "claimed-completed-target".into();
+    let wait_call: ToolCallId = "claimed-cancelled-wait".into();
+    let mut tracker = WaitTracker::default();
+    tracker.record_tool_invoke(target.clone(), slow_tool_name(), owner.clone());
+    tracker.record_tool_result(
+        background_placeholder(target.as_str()),
+        owner.clone(),
+        observation(),
+    );
+    assert!(
+        start_wait_exact(&mut tracker, &owner, wait_call.as_str(), target.as_str())
+            .reply
+            .is_none()
+    );
+    assert!(tracker.claim_wait_for_manual_compaction(&owner, &wait_call));
+    assert!(
+        tracker
+            .record_background_result(
+                background_result(target.as_str(), "source completed"),
+                owner,
+                observation(),
+            )
+            .is_empty()
+    );
+
+    let cancelled = tracker.record_tool_cancelled(&HashSet::from([wait_call]), None);
+
+    assert_eq!(cancelled.unsuppress_call_ids, vec![target]);
+    assert!(cancelled.replies.is_empty());
+}
+
+/// A background error racing a claimed exact wait has the same notification
+/// restoration contract as a successful source completion.
+#[test]
+fn compaction_claim_cancellation_unsuppresses_errored_exact_source() {
+    let owner = conv("main");
+    let target: ToolCallId = "claimed-errored-target".into();
+    let wait_call: ToolCallId = "claimed-error-wait".into();
+    let mut tracker = WaitTracker::default();
+    tracker.record_tool_invoke(target.clone(), slow_tool_name(), owner.clone());
+    tracker.record_tool_result(
+        background_placeholder(target.as_str()),
+        owner.clone(),
+        observation(),
+    );
+    assert!(
+        start_wait_exact(&mut tracker, &owner, wait_call.as_str(), target.as_str())
+            .reply
+            .is_none()
+    );
+    assert!(tracker.claim_wait_for_manual_compaction(&owner, &wait_call));
+    assert!(
+        tracker
+            .record_background_error(
+                background_error(target.as_str(), "source failed", None),
+                owner,
+                observation(),
+            )
+            .is_empty()
+    );
+
+    let cancelled = tracker.record_tool_cancelled(&HashSet::from([wait_call]), None);
+
+    assert_eq!(cancelled.unsuppress_call_ids, vec![target]);
+    assert!(cancelled.replies.is_empty());
+}
+
+/// Bare waits use the same exclusive claim and canonical cancellation path
+/// without consuming or cancelling their running background source.
+#[test]
+fn compaction_claim_cancels_bare_wait_without_source_consumption() {
+    let owner = conv("main");
+    let target: ToolCallId = "claimed-bare-target".into();
+    let wait_call: ToolCallId = "claimed-bare-wait".into();
+    let mut tracker = WaitTracker::default();
+    tracker.record_tool_invoke(target.clone(), slow_tool_name(), owner.clone());
+    tracker.record_tool_result(
+        background_placeholder(target.as_str()),
+        owner.clone(),
+        observation(),
+    );
+    assert!(
+        start_wait_any(&mut tracker, &owner, wait_call.as_str())
+            .reply
+            .is_none()
+    );
+    assert!(tracker.claim_wait_for_manual_compaction(&owner, &wait_call));
+
+    let cancelled = tracker.record_tool_cancelled(&HashSet::from([wait_call.clone()]), None);
+
+    assert_eq!(cancelled.cancelled_waits.len(), 1);
+    assert_eq!(cancelled.cancelled_waits[0].call_id, wait_call);
+    assert!(tracker.is_backgrounded(&target));
+}
+
+/// Activating input observed during an exclusive claim settles the restored
+/// input waiter exactly once if cancellation append rolls back.
+#[test]
+fn compaction_claim_rollback_replays_activation_winner() {
+    let owner = conv("main");
+    let wait_call: ToolCallId = "claimed-input-activation".into();
+    let mut tracker = WaitTracker::default();
+    assert!(
+        start_wait_input(&mut tracker, &owner, wait_call.as_str())
+            .reply
+            .is_none()
+    );
+    assert!(tracker.claim_wait_for_manual_compaction(&owner, &wait_call));
+    let activation = tau_proto::ObservationId::random();
+    assert!(tracker.activate_waits_for(&owner, activation).is_empty());
+
+    let replies = tracker.rollback_manual_compaction_claim(&owner, &wait_call);
+
+    assert_eq!(replies.len(), 1);
+    assert!(matches!(
+        &replies[0].kind,
+        WaitReplyKind::Result {
+            result: CborValue::Map(entries),
+            display: _,
+        } if entries == &vec![(
+            CborValue::Text("input_available".to_owned()),
+            CborValue::Bool(true),
+        )]
+    ));
+}
+
+/// A claimed input deadline stays scheduled but cannot publish until append
+/// rollback restores the waiter and its first timeout winner.
+#[test]
+fn compaction_claim_rollback_replays_timeout_winner() {
+    let owner = conv("main");
+    let wait_call: ToolCallId = "claimed-input-timeout".into();
+    let mut tracker = WaitTracker::default();
+    assert!(
+        start_wait_input(&mut tracker, &owner, wait_call.as_str())
+            .reply
+            .is_none()
+    );
+    assert!(tracker.claim_wait_for_manual_compaction(&owner, &wait_call));
+    let deadline = tracker
+        .next_input_wait_deadline()
+        .expect("claimed deadline remains scheduled");
+    assert!(tracker.expire_input_waits(deadline).is_empty());
+
+    let replies = tracker.rollback_manual_compaction_claim(&owner, &wait_call);
+
+    assert_eq!(replies.len(), 1);
+    assert!(matches!(
+        &replies[0].kind,
+        WaitReplyKind::Result {
+            result: CborValue::Map(entries),
+            display: Some(display),
+        } if entries == &vec![(
+            CborValue::Text("timed_out".to_owned()),
+            CborValue::Bool(true),
+        )] && display.status == ToolUseStatus::Warning
+    ));
+}
+
 /// Terminal wait-correlation tombstones retain recent duplicate diagnostics but
 /// cannot grow every correlation map without bound.
 #[test]

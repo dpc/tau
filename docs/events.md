@@ -691,7 +691,10 @@ intent.
   Prompt anchors are one-based; UI parsers should encode `:tree 0` as the
   explicit root target before the first prompt.
 - **`ui.compact_request`** — User typed `:compact`: request provider-side
-  compaction for the selected or targeted agent before the next prompt.
+  compaction for the selected or targeted agent before the next prompt. A busy
+  target remains rejected except when its sole remaining foreground call is the
+  same still-installed harness-owned wait; the harness commits that wait's
+  cancellation and closes its complete tool round before starting compaction.
 - **`ui.cancel_prompt`** — User requests cancellation of a prompt by session,
   optional target agent, and optional prompt id; applies to active or queued
   prompt work when still present.

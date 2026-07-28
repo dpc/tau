@@ -35,6 +35,12 @@ the output reference. A completion-delivering wait retains only that reference a
 its typed envelope; it never owns or copies the source payload or output counts.
 A terminal classification precedes the canonical terminal, and a wait settlement
 can survive only after that canonical terminal commits.
+When UI manual compaction preempts the sole installed harness-owned wait, its
+canonical null-output cancellation produces
+`agent.tool_wait_settled` with outcome `Cancelled`. Because no
+provider-declared cancel call exists, the harness emits no
+`agent.tool_cancellation_requested`; the terminal classification cause remains
+`Unknown`.
 
 Wait registration, settlement, activation, cancellation, and terminal causes use
 typed references. Missing crash-tail or selected-cut endpoints stay explicit as

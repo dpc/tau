@@ -99,6 +99,65 @@ struct InputWaitRequest {
     deadline: Instant,
 }
 
+/// First ordinary-arbitration event retained while a compaction claim is
+/// exclusive, for use only if canonical cancellation append rolls back.
+#[derive(Clone, Debug, PartialEq)]
+enum ClaimedWaitWake {
+    /// Activating input won ordinary arbitration while the claim was held.
+    Activation(tau_proto::ObservationId),
+    /// A matching background completion won ordinary arbitration.
+    Completion(
+        /// Source call whose completion won.
+        ToolCallId,
+    ),
+    /// The activating-input deadline won ordinary arbitration.
+    Timeout,
+}
+
+/// Installed waiter held exclusively while manual compaction publishes its
+/// canonical cancellation terminal.
+#[derive(Clone, Debug, PartialEq)]
+enum ClaimedWait {
+    /// Exact wait, including the source call whose notification was suppressed.
+    Exact {
+        /// Source call awaited by the claimed request.
+        target: ToolCallId,
+        /// Claimed wait request.
+        request: WaitRequest,
+        /// First activation, completion, or timeout observed while claimed.
+        wake: Option<ClaimedWaitWake>,
+    },
+    /// Bare background-completion wait.
+    AnyBackground {
+        /// Claimed wait request.
+        request: WaitRequest,
+        /// First activation, completion, or timeout observed while claimed.
+        wake: Option<ClaimedWaitWake>,
+    },
+    /// Activating-input wait, including its original deadline.
+    Input {
+        /// Claimed input waiter.
+        wait: InputWaitRequest,
+        /// First activation, completion, or timeout observed while claimed.
+        wake: Option<ClaimedWaitWake>,
+    },
+}
+
+impl ClaimedWait {
+    /// Return the common claimed wait request.
+    fn request(&self) -> &WaitRequest {
+        match self {
+            Self::Exact {
+                target: _,
+                request,
+                wake: _,
+            }
+            | Self::AnyBackground { request, wake: _ } => request,
+            Self::Input { wait, wake: _ } => &wait.request,
+        }
+    }
+}
+
 /// Runtime terminal reply for a wait invocation.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum WaitReplyKind {
@@ -185,6 +244,8 @@ pub(super) struct WaitTracker {
     any_waiters: HashMap<AgentId, WaitRequest>,
     /// Activating-input waiters by owning agent.
     input_waiters: HashMap<AgentId, InputWaitRequest>,
+    /// Owner-scoped wait registrations claimed by manual compaction.
+    claimed_waits: HashMap<AgentId, ClaimedWait>,
     /// Runtime call ownership.
     call_owners: HashMap<ToolCallId, AgentId>,
     /// Source tool names retained for wait display.
@@ -200,6 +261,114 @@ pub(super) struct WaitTracker {
 }
 
 impl WaitTracker {
+    /// Atomically claim the installed wait matching this owner and call.
+    ///
+    /// The harness caller must separately establish that this call is the sole
+    /// remaining foreground call before invoking this registration-only check.
+    pub(super) fn claim_wait_for_manual_compaction(
+        &mut self,
+        owner: &AgentId,
+        call_id: &ToolCallId,
+    ) -> bool {
+        if self.claimed_waits.contains_key(owner) {
+            return false;
+        }
+        let exact_target = self.waiters.iter().find_map(|(target, wait)| {
+            (&wait.owner == owner && &wait.call_id == call_id).then(|| target.clone())
+        });
+        let claimed = if let Some(target) = exact_target {
+            self.waiters
+                .remove(&target)
+                .map(|request| ClaimedWait::Exact {
+                    target,
+                    request,
+                    wake: None,
+                })
+        } else if self
+            .any_waiters
+            .get(owner)
+            .is_some_and(|wait| &wait.call_id == call_id)
+        {
+            self.any_waiters
+                .remove(owner)
+                .map(|request| ClaimedWait::AnyBackground {
+                    request,
+                    wake: None,
+                })
+        } else if self
+            .input_waiters
+            .get(owner)
+            .is_some_and(|wait| &wait.request.call_id == call_id)
+        {
+            self.input_waiters
+                .remove(owner)
+                .map(|wait| ClaimedWait::Input { wait, wake: None })
+        } else {
+            None
+        };
+        if let Some(claimed) = claimed {
+            self.claimed_waits.insert(owner.clone(), claimed);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Restore a provisionally claimed wait after its cancellation terminal
+    /// failed to append.
+    pub(super) fn rollback_manual_compaction_claim(
+        &mut self,
+        owner: &AgentId,
+        call_id: &ToolCallId,
+    ) -> Vec<WaitReply> {
+        let Some(claimed) = self.claimed_waits.remove(owner) else {
+            return Vec::new();
+        };
+        if &claimed.request().call_id != call_id {
+            self.claimed_waits.insert(owner.clone(), claimed);
+            return Vec::new();
+        }
+        let wake = match claimed {
+            ClaimedWait::Exact {
+                target,
+                request,
+                wake,
+            } => {
+                self.waiters.insert(target, request);
+                wake
+            }
+            ClaimedWait::AnyBackground { request, wake } => {
+                self.any_waiters.insert(owner.clone(), request);
+                wake
+            }
+            ClaimedWait::Input { wait, wake } => {
+                self.input_waiters.insert(owner.clone(), wait);
+                wake
+            }
+        };
+        match wake {
+            Some(ClaimedWaitWake::Activation(activation)) => {
+                self.activate_waits_for(owner, activation)
+            }
+            Some(ClaimedWaitWake::Completion(target)) => {
+                self.settle_restored_completion(owner, &target)
+            }
+            Some(ClaimedWaitWake::Timeout) => self.settle_restored_timeout(owner),
+            None => self.expire_input_waits(Instant::now()),
+        }
+    }
+
+    /// Report whether this owner already has the named wait claimed.
+    pub(super) fn wait_claimed_for_manual_compaction(
+        &self,
+        owner: &AgentId,
+        call_id: &ToolCallId,
+    ) -> bool {
+        self.claimed_waits
+            .get(owner)
+            .is_some_and(|wait| &wait.request().call_id == call_id)
+    }
+
     /// Replace correlation for a newly dispatched declaration occurrence.
     pub(super) fn reset_call_ref(&mut self, call_id: ToolCallId, call_ref: ToolCallRef) {
         self.terminal_observations.remove(&call_id);
@@ -629,11 +798,42 @@ impl WaitTracker {
 
     /// Return the earliest installed activating-input deadline.
     pub(super) fn next_input_wait_deadline(&self) -> Option<Instant> {
-        self.input_waiters.values().map(|wait| wait.deadline).min()
+        self.input_waiters
+            .values()
+            .map(|wait| wait.deadline)
+            .chain(
+                self.claimed_waits
+                    .values()
+                    .filter_map(|claimed| match claimed {
+                        ClaimedWait::Input { wait, wake: None } => Some(wait.deadline),
+                        ClaimedWait::Input {
+                            wait: _,
+                            wake: Some(_),
+                        }
+                        | ClaimedWait::Exact {
+                            target: _,
+                            request: _,
+                            wake: _,
+                        }
+                        | ClaimedWait::AnyBackground {
+                            request: _,
+                            wake: _,
+                        } => None,
+                    }),
+            )
+            .min()
     }
 
     /// Remove due input waiters and return one timeout reply for each.
     pub(super) fn expire_input_waits(&mut self, now: Instant) -> Vec<WaitReply> {
+        for claimed in self.claimed_waits.values_mut() {
+            if let ClaimedWait::Input { wait, wake } = claimed
+                && wait.deadline <= now
+                && wake.is_none()
+            {
+                *wake = Some(ClaimedWaitWake::Timeout);
+            }
+        }
         let due: Vec<AgentId> = self
             .input_waiters
             .iter()
@@ -880,7 +1080,8 @@ impl WaitTracker {
         }
         self.calls
             .insert(call_id.clone(), WaitCallState::BackgroundResult(result));
-        self.push_completed(call_id);
+        self.push_completed(call_id.clone());
+        self.note_claimed_completion(&owner, &call_id);
         Vec::new()
     }
 
@@ -950,8 +1151,80 @@ impl WaitTracker {
         }
         self.calls
             .insert(call_id.clone(), WaitCallState::BackgroundError(error));
-        self.push_completed(call_id);
+        self.push_completed(call_id.clone());
+        self.note_claimed_completion(&owner, &call_id);
         Vec::new()
+    }
+
+    /// Retain the first completion that would settle a currently claimed wait.
+    fn note_claimed_completion(&mut self, owner: &AgentId, call_id: &ToolCallId) {
+        let Some(claimed) = self.claimed_waits.get_mut(owner) else {
+            return;
+        };
+        let matches = match claimed {
+            ClaimedWait::Exact {
+                target,
+                request: _,
+                wake: _,
+            } => target == call_id,
+            ClaimedWait::AnyBackground {
+                request: _,
+                wake: _,
+            } => true,
+            ClaimedWait::Input { wait: _, wake: _ } => false,
+        };
+        if matches {
+            match claimed {
+                ClaimedWait::Exact {
+                    target: _,
+                    request: _,
+                    wake,
+                }
+                | ClaimedWait::AnyBackground { request: _, wake } => {
+                    if wake.is_none() {
+                        *wake = Some(ClaimedWaitWake::Completion(call_id.clone()));
+                    }
+                }
+                ClaimedWait::Input { wait: _, wake: _ } => {}
+            }
+        }
+    }
+
+    /// Settle the completion retained as the first rollback winner.
+    fn settle_restored_completion(
+        &mut self,
+        owner: &AgentId,
+        target: &ToolCallId,
+    ) -> Vec<WaitReply> {
+        match self.calls.get(target).cloned() {
+            Some(WaitCallState::BackgroundResult(result)) => self.record_background_result(
+                result,
+                owner.clone(),
+                self.terminal_observations.get(target).copied(),
+            ),
+            Some(WaitCallState::BackgroundError(error)) => self.record_background_error(
+                error,
+                owner.clone(),
+                self.terminal_observations.get(target).copied(),
+            ),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Settle the input timeout retained as the first rollback winner.
+    fn settle_restored_timeout(&mut self, owner: &AgentId) -> Vec<WaitReply> {
+        self.input_waiters
+            .remove(owner)
+            .map(|wait| {
+                wait_timed_out_reply(
+                    wait.request.call_id.clone(),
+                    wait.request.tool_name.clone(),
+                    wait.request.display_args.clone(),
+                )
+                .with_settlement(&wait.request, tau_proto::ToolWaitOutcome::TimedOut)
+            })
+            .into_iter()
+            .collect()
     }
 
     /// Retire cancelled calls and waits, returning replies and
@@ -974,6 +1247,35 @@ impl WaitTracker {
             .collect();
         let mut exact_consumed_cancelled = HashSet::new();
         let mut cancelled = WaitCancel::default();
+        let claimed_owners: Vec<_> = self
+            .claimed_waits
+            .iter()
+            .filter(|(_, wait)| call_ids.contains(&wait.request().call_id))
+            .map(|(owner, _)| owner.clone())
+            .collect();
+        for owner in claimed_owners {
+            let claimed = self
+                .claimed_waits
+                .remove(&owner)
+                .expect("selected claimed wait exists");
+            if let ClaimedWait::Exact {
+                target,
+                request: _,
+                wake: _,
+            } = &claimed
+            {
+                cancelled.unsuppress_call_ids.push(target.clone());
+            }
+            cancelled.cancelled_waits.push(match claimed {
+                ClaimedWait::Exact {
+                    target: _,
+                    request,
+                    wake: _,
+                }
+                | ClaimedWait::AnyBackground { request, wake: _ } => request,
+                ClaimedWait::Input { wait, wake: _ } => wait.request,
+            });
+        }
         let input_waiters = std::mem::take(&mut self.input_waiters);
         for (owner, wait) in input_waiters {
             if call_ids.contains(&wait.request.call_id) {
@@ -1139,6 +1441,22 @@ impl WaitTracker {
         owner: &AgentId,
         activation: tau_proto::ObservationId,
     ) -> Vec<WaitReply> {
+        if let Some(claimed) = self.claimed_waits.get_mut(owner) {
+            match claimed {
+                ClaimedWait::Exact {
+                    target: _,
+                    request: _,
+                    wake,
+                }
+                | ClaimedWait::AnyBackground { request: _, wake }
+                | ClaimedWait::Input { wait: _, wake } => {
+                    if wake.is_none() {
+                        *wake = Some(ClaimedWaitWake::Activation(activation));
+                    }
+                }
+            }
+            return Vec::new();
+        }
         let mut replies = self.interrupt_active_waits_for(owner, activation);
         if let Some(wait) = self.input_waiters.remove(owner) {
             let reply = wait_input_available_reply(

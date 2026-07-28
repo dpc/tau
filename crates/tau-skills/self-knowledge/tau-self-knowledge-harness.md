@@ -97,4 +97,7 @@ after its complete tool round. Role policy can disable it. The separately
 enabled `agent_compact {agent_id}` capability may compact any other loaded
 agent. Both return background acceptance and can be awaited with `wait`.
 `:compact` remains a distinct human/UI command; watches, messages, and ancestry
-do not grant either model tool.
+do not grant either model tool. It preserves the ordinary busy rejection except
+when the target's sole remaining foreground call is the same still-installed
+harness-owned wait; Tau commits that wait's cancellation and closes the tool
+round before starting compaction.

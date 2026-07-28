@@ -53,6 +53,24 @@ An ordinary inference that receives a canonical, no-output context-window reject
 
 ## Manual compaction
 
+UI `:compact` may preempt a busy target only when its sole remaining foreground
+call is the same still-installed harness-owned exact, bare, or activating-input
+`wait`. The harness exclusively claims that waiter, commits one canonical
+cancelled terminal with null provider output, and starts ordinary manual
+compaction only after that terminal closes the complete tool round. The
+compaction provider may therefore read the closed cancelled round; later
+inference sees the replacement window rather than an unresolved structural
+wait.
+
+Event-loop order chooses races. A wait result, activating input, timeout, or
+ordinary cancellation that settles first retains the normal busy rejection. A
+compaction claim that wins excludes those wait terminals, coalesces repeated
+requests, and runs before queued activation dispatch. Cancellation append
+failure restores ordinary wait arbitration and never starts compaction.
+Teardown clears the transient request and never starts compaction. Once
+cancellation commits, provider failure, route failure, transaction
+cancellation, or blocked recovery never resurrects the wait.
+
 Harness-owned `compact` and `agent_compact` requests persist acceptance before
 acknowledgement. Self requests start only from the complete tool-round
 continuation gate, preserving tool-call/result adjacency. Cross-agent requests

@@ -55,6 +55,18 @@ Agent-message replay reconstructs canonical context only; its runtime wake and
 automatic activation are intentionally not recreated, as specified by
 [SPEC-agent-message-delivery](../../../specs/SPEC-agent-message-delivery.md).
 
+UI `:compact` may exclusively claim an activating-input wait only when it is
+the target's sole remaining foreground call. The claim removes the deadline
+from ordinary arbitration until one canonical cancelled terminal commits or
+its append fails. A committed cancellation closes the tool round before manual
+compaction starts; queued input remains available afterward. Append failure
+restores the original waiter and deadline, while cancellation or teardown
+clears the transient compaction request and never starts compaction. Repeated
+requests coalesce while the cancellation is pending, and event-loop order
+decides whether input, timeout, cancellation, or the compaction claim wins.
+This locally refines the manual-compaction contract in
+[SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
+
 ## Authorization boundary
 
 Activating-input waits are scheduling, not a new input authority. They wake only

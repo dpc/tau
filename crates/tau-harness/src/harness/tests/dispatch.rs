@@ -11697,6 +11697,40 @@ pub(super) fn context_overflow_response(
     }
 }
 
+/// Build one successful standalone-compaction response with a single
+/// replacement summary.
+fn standalone_compaction_success_response(
+    prompt: &tau_proto::AgentPromptCreated,
+    summary: &str,
+) -> ProviderResponseFinished {
+    ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: prompt.agent_prompt_id.clone(),
+        agent_id: prompt.agent_id.clone(),
+        output_items: vec![ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::Assistant,
+            content: vec![tau_proto::ContentPart::Text {
+                text: summary.to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        originator: prompt.originator.clone(),
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
 /// A canonical no-output inference rejection commits the harness-authored plan
 /// before one durable claim, dispatches one compact request, and continues the
 /// owed activation exactly once after the accepted replacement boundary.
@@ -20169,6 +20203,502 @@ fn input_wait_timeout_completes_once_inside_running_turn() {
     h.activate_waits_for(&cid, tau_proto::ObservationId::random());
     assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
     h.shutdown().expect("shutdown");
+}
+
+/// Manual compaction may claim the sole installed input wait, but it must first
+/// commit one canonical cancellation that closes the provider tool round.
+/// A later provider compaction failure cannot resurrect that cancelled wait.
+#[test]
+fn manual_compaction_cancels_sole_input_wait_before_starting() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let wait = wait_input_call("wait-preempt-compact");
+    seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("install input wait");
+
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+
+    let events = event_log_events(&h);
+    let cancelled = events
+        .iter()
+        .position(|event| {
+            matches!(event, Event::ToolCancelled(cancelled) if cancelled.call_id == wait.id)
+        })
+        .expect("canonical wait cancellation");
+    let started = events
+        .iter()
+        .position(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+        .expect("standalone compaction start");
+    assert!(cancelled < started);
+    assert!(!h.input_wait_pending_for(&cid));
+    assert!(
+        !h.agent_store
+            .agent(&agent_id)
+            .expect("agent tree")
+            .has_open_foreground_tool_round()
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::AgentToolCancellationRequested(_)))
+    );
+    let compact_prompt = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(context_overflow_response(&compact_prompt))
+        .expect("compaction provider failure");
+    assert!(!h.input_wait_pending_for(&cid));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| {
+                matches!(event, Event::ToolCancelled(cancelled) if cancelled.call_id == wait.id)
+            })
+            .count(),
+        1
+    );
+}
+
+/// Successful preemption compacts the complete closed cancellation round, then
+/// releases queued activating input against the replacement window.
+#[test]
+fn successful_wait_preemption_installs_replacement_before_queued_activation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let wait = wait_input_call("wait-preempt-success");
+    seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("install input wait");
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    let compact_prompt = read_nth_prompt_created(&h, 0);
+
+    assert_eq!(
+        h.submit_prompt_to_agent(
+            "s1".into(),
+            agent_id.as_str(),
+            PendingPrompt::internal("queued after compact".to_owned()),
+        )
+        .expect("queue activating input"),
+        PromptSubmission::Queued
+    );
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(event, Event::AgentPromptSteered(prompt)
+            if prompt.text == "queued after compact")
+    }));
+    h.handle_provider_response_finished(standalone_compaction_success_response(
+        &compact_prompt,
+        "replacement summary",
+    ))
+    .expect("accept compaction");
+    h.drain_publish_idle_dispatches();
+    h.try_advance_queue();
+
+    assert!(
+        agent_tree_for_conversation(&h, &cid)
+            .current_branch()
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                tau_core::AgentEntry::Compaction {
+                    replacement_window,
+                    ..
+                } if matches!(
+                    replacement_window.as_slice(),
+                    [ContextItem::Message(message)]
+                        if matches!(
+                            message.content.as_slice(),
+                            [ContentPart::Text { text }] if text == "replacement summary"
+                        )
+                )
+            ))
+    );
+    let continuation = read_nth_prompt_created(&h, 1);
+    let continuation_text: Vec<_> = continuation
+        .context
+        .flatten()
+        .iter()
+        .filter_map(text_part)
+        .map(str::to_owned)
+        .collect();
+    assert!(continuation_text.contains(&"replacement summary".to_owned()));
+    assert!(continuation_text.contains(&"queued after compact".to_owned()));
+}
+
+/// A second compact request while cancellation is intercepted must coalesce
+/// without publishing another terminal or starting compaction early.
+#[test]
+fn repeated_manual_compaction_coalesces_while_wait_cancellation_is_parked() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let wait = wait_input_call("wait-preempt-coalesce");
+    seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("install input wait");
+    connect_test_tool(&mut h, "wait-compact-interceptor");
+    h.handle_extension_event(
+        "wait-compact-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_CANCELLED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register cancellation interceptor");
+
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+    h.handle_extension_event(
+        "wait-compact-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release cancellation");
+
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| {
+                matches!(event, Event::ToolCancelled(cancelled) if cancelled.call_id == wait.id)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+            .count(),
+        1
+    );
+}
+
+/// Explicit cancellation that arrives while compact preemption is parked owns
+/// teardown of the wait and suppresses the pending compaction start.
+#[test]
+fn explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let wait = wait_input_call("wait-preempt-explicit-cancel");
+    seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("install input wait");
+    connect_test_tool(&mut h, "wait-explicit-cancel-interceptor");
+    h.handle_extension_event(
+        "wait-explicit-cancel-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_CANCELLED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register cancellation interceptor");
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: Some(agent_id.clone()),
+        agent_prompt_id: None,
+    });
+    h.handle_extension_event(
+        "wait-explicit-cancel-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release parked cancellation");
+
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+    assert!(!h.pending_ui_compactions_after_wait.contains_key(&cid));
+}
+
+/// Session rollover clears a parked wait-preemption request and cannot leak a
+/// late compaction start into the replacement session.
+#[test]
+fn session_rollover_while_wait_preemption_is_parked_never_compacts() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let wait = wait_input_call("wait-preempt-rollover");
+    seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("install input wait");
+    connect_test_tool(&mut h, "wait-rollover-interceptor");
+    h.handle_extension_event(
+        "wait-rollover-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_CANCELLED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register cancellation interceptor");
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+
+    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+        .expect("roll over session");
+
+    assert!(h.pending_ui_compactions_after_wait.is_empty());
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+}
+
+/// Cancellation append failure restores the claimed waiter without starting
+/// compaction; a fresh request can retry and starts exactly one transaction.
+#[test]
+fn failed_wait_cancellation_append_rolls_back_without_compaction() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let wait = wait_input_call("wait-preempt-append-failure");
+    seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("install input wait");
+    connect_test_tool(&mut h, "wait-append-failure-interceptor");
+    h.handle_extension_event(
+        "wait-append-failure-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_CANCELLED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register cancellation interceptor");
+
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    let journal = h
+        .state_dir
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let backup = journal.with_extension("cbor.test-backup");
+    std::fs::rename(&journal, &backup).expect("park journal");
+    std::fs::create_dir(&journal).expect("block journal path");
+    h.handle_extension_event(
+        "wait-append-failure-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release cancellation into append failure");
+
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+    assert_eq!(tool_result_count(&h, wait.id.as_str()), 0);
+    assert!(h.input_wait_pending_for(&cid));
+    std::fs::remove_dir(&journal).expect("remove journal blocker");
+    std::fs::rename(&backup, &journal).expect("restore journal");
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+    h.handle_extension_event(
+        "wait-append-failure-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release fresh cancellation");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+            .count(),
+        1
+    );
+    assert!(!h.input_wait_pending_for(&cid));
+}
+
+/// Provider-declared wait correlation classifies compact preemption as an
+/// unknown-cause terminal plus a cancelled wait settlement, without inventing
+/// a provider cancellation request.
+///
+/// This protects `SPEC-durable-tool-observation-correlation`.
+#[test]
+fn manual_compaction_preserves_cancelled_wait_correlation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    seed_assistant_tool_round(&mut h, &cid, &[("wait-preempt-correlation", "wait")]);
+    let declaration = h
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent journal")
+        .into_iter()
+        .find_map(|record| {
+            matches!(record.event, Event::ProviderResponseFinished(_))
+                .then_some(record.observation_id)
+        })
+        .expect("assistant declaration");
+    let wait = AgentToolCall {
+        call_ref: Some(tau_proto::ToolCallRef {
+            declaration,
+            item_index: 0,
+        }),
+        id: "wait-preempt-correlation".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: wait_input_call("unused").arguments,
+    };
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("install provider-declared wait");
+
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+
+    let events: Vec<_> = h
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent journal")
+        .into_iter()
+        .map(|record| record.event)
+        .collect();
+    let terminal = events
+        .iter()
+        .position(|event| matches!(event, Event::ToolCancelled(_)))
+        .expect("canonical terminal");
+    let settled = events
+        .iter()
+        .position(|event| {
+            matches!(event, Event::AgentToolWaitSettled(settled)
+                if settled.outcome == tau_proto::ToolWaitOutcome::Cancelled)
+        })
+        .expect("cancelled wait settlement");
+    assert!(terminal < settled);
+    assert!(events.iter().any(|event| {
+        matches!(event, Event::AgentToolTerminalClassified(classified)
+            if classified.cause == tau_proto::ToolTerminalCause::Unknown)
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::AgentToolCancellationRequested(_)))
+    );
+}
+
+/// A terminal publication already owns the wait race, so a later compact
+/// request must retain the ordinary busy rejection without claiming the waiter.
+#[test]
+fn manual_compaction_rejects_already_terminalizing_wait() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let wait = wait_input_call("wait-terminalizing-before-compact");
+    seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("install input wait");
+    h.pending_terminal_observations.insert(
+        wait.id.clone(),
+        crate::harness::PendingTerminalObservation {
+            observation_id: tau_proto::ObservationId::random(),
+            cause: tau_proto::ToolTerminalCause::LifecycleTeardown,
+        },
+    );
+
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+
+    assert!(h.input_wait_pending_for(&cid));
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(event, Event::ToolCancelled(cancelled) if cancelled.call_id == wait.id)
+            || matches!(event, Event::AgentStandaloneCompactionStarted(_))
+    }));
+}
+
+/// Legacy inline compaction applies the same cancel-then-compact boundary as
+/// standalone provider compaction.
+#[test]
+fn manual_inline_compaction_cancels_sole_input_wait_first() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let wait = wait_input_call("wait-preempt-inline-compact");
+    seed_assistant_tool_round(&mut h, &cid, &[(wait.id.as_str(), "wait")]);
+    seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+        .expect("install input wait");
+
+    h.handle_compact_request("s1".into(), Some(agent_id.as_str()));
+
+    let events = event_log_events(&h);
+    let cancelled = events
+        .iter()
+        .position(|event| {
+            matches!(event, Event::ToolCancelled(cancelled) if cancelled.call_id == wait.id)
+        })
+        .expect("canonical wait cancellation");
+    let triggered = events
+        .iter()
+        .position(|event| matches!(event, Event::AgentCompactionTriggered(_)))
+        .expect("inline compaction trigger");
+    assert!(cancelled < triggered);
+    assert!(!h.input_wait_pending_for(&cid));
 }
 
 /// A stale generic publish-idle obligation must not checkpoint a continuation
