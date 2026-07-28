@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use tau_swarm_api::{
-    Agent, AgentActivity, AgentNavigationMode, CorrelationId, DeliveryOutcome, Hostname,
-    PromptRequest, SessionId,
+    Agent, AgentActivity, AgentNavigationMode, ApplicationIncarnationId, CorrelationId,
+    DeliveryOutcome, Hostname, PromptRequest, SessionId,
 };
 use tau_swarm_client::{
     Backoff, Connector, ErrorKind, ExpectedPeer, IncomingCommand, SessionTransport,
@@ -27,6 +27,10 @@ fn prompt(id: &str, message: &str) -> DeliverPromptRequest {
             message: message.into(),
         },
     }
+}
+
+fn incarnation(byte: u8) -> ApplicationIncarnationId {
+    ApplicationIncarnationId::from_bytes([byte; 32])
 }
 
 fn application(
@@ -139,6 +143,70 @@ async fn deduplicates_completed_prompt_and_rejects_payload_change() {
         Ok(AnswerBlockerResponse::Rejected(_))
     ));
     assert!(prompts.try_recv().is_err());
+}
+
+/// Process-lifetime command caching partitions identical command IDs by session
+/// while still deduplicating when the process returns to the original session.
+#[tokio::test]
+async fn scopes_shared_command_state_by_session_identity() {
+    let (first, mut first_prompts, _) = application(true);
+    let (second_prompts_tx, mut second_prompts) = mpsc::channel(4);
+    let (second_blockers_tx, _) = mpsc::channel(4);
+    let second = SwarmApplication::new(
+        SessionIdentity::new(Hostname::new("host"), SessionId::new("other-session")),
+        Arc::clone(&first.projection),
+        Arc::clone(&first.changed),
+        second_prompts_tx,
+        second_blockers_tx,
+    )
+    .with_command_state(Arc::clone(&first.commands), Duration::from_millis(25));
+    let request = prompt("same-id", "same payload");
+
+    let first_delivery = first.deliver_prompt(request.clone());
+    let first_accept = async {
+        first_prompts
+            .recv()
+            .await
+            .expect("first-session submission")
+            .completion
+            .send(Ok(()))
+            .expect("first-session acceptance");
+    };
+    let (first_result, ()) = tokio::join!(first_delivery, first_accept);
+    assert_eq!(
+        first_result.expect("first result"),
+        DeliverPromptResponse::Accepted
+    );
+
+    let second_delivery = second.deliver_prompt(request.clone());
+    let second_accept = async {
+        second_prompts
+            .recv()
+            .await
+            .expect("second-session submission")
+            .completion
+            .send(Ok(()))
+            .expect("second-session acceptance");
+    };
+    let (second_result, ()) = tokio::join!(second_delivery, second_accept);
+    assert_eq!(
+        second_result.expect("second result"),
+        DeliverPromptResponse::Accepted
+    );
+
+    assert_eq!(
+        first
+            .deliver_prompt(request)
+            .await
+            .expect("cached first-session result"),
+        DeliverPromptResponse::Accepted
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), first_prompts.recv())
+            .await
+            .is_err(),
+        "return to first session must not submit the command again"
+    );
 }
 
 /// An indeterminate timeout is terminal in process memory and exact retry does
@@ -300,6 +368,8 @@ impl SessionTransport for RejectingTransport {
 /// Connector whose generations synchronize then fail indeterminately.
 #[derive(Clone)]
 struct ResnapshotConnector {
+    /// Exact declarations observed across connection generations.
+    declarations: Arc<std::sync::Mutex<Vec<DeclareSessionRequest>>>,
     /// Exact snapshots observed across connection generations.
     snapshots: Arc<std::sync::Mutex<Vec<SubmitSnapshotRequest>>>,
     /// Releases the first synchronized generation after test mutation.
@@ -312,6 +382,7 @@ impl Connector for ResnapshotConnector {
 
     async fn connect(&self, _expected_peer: &ExpectedPeer) -> ClientResult<Self::Transport> {
         Ok(ResnapshotTransport {
+            declarations: Arc::clone(&self.declarations),
             snapshots: Arc::clone(&self.snapshots),
             disconnect: Arc::clone(&self.disconnect),
         })
@@ -320,6 +391,8 @@ impl Connector for ResnapshotConnector {
 
 /// Successful transport that drops after installing each snapshot.
 struct ResnapshotTransport {
+    /// Cross-generation exact declaration requests.
+    declarations: Arc<std::sync::Mutex<Vec<DeclareSessionRequest>>>,
     /// Cross-generation exact snapshot requests.
     snapshots: Arc<std::sync::Mutex<Vec<SubmitSnapshotRequest>>>,
     /// First-generation disconnect gate.
@@ -337,8 +410,12 @@ impl SessionTransport for ResnapshotTransport {
 
     async fn declare(
         &self,
-        _request: DeclareSessionRequest,
+        request: DeclareSessionRequest,
     ) -> ClientResult<DeclareSessionResponse> {
+        self.declarations
+            .lock()
+            .expect("declarations")
+            .push(request);
         Ok(DeclareSessionResponse::Accepted)
     }
 
@@ -380,6 +457,7 @@ async fn swarm_transport_reconnects_only_indeterminate_failures() {
     };
     let client = tau_swarm_client::Client::new(
         application,
+        incarnation(1),
         connector,
         ExpectedPeer::new(b"peer".to_vec()),
         Credential {
@@ -407,10 +485,14 @@ async fn synchronized_reconnect_installs_fresh_snapshot() {
             .into(),
     };
     let snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let declarations = Arc::new(std::sync::Mutex::new(Vec::new()));
     let disconnect = Arc::new(Notify::new());
+    let application_incarnation_id = incarnation(1);
     let client = tau_swarm_client::Client::new(
         Arc::clone(&application),
+        application_incarnation_id.clone(),
         ResnapshotConnector {
+            declarations: Arc::clone(&declarations),
             snapshots: Arc::clone(&snapshots),
             disconnect: Arc::clone(&disconnect),
         },
@@ -461,11 +543,18 @@ async fn synchronized_reconnect_installs_fresh_snapshot() {
         let snapshots = snapshots.lock().expect("snapshots");
         assert_eq!(snapshots.as_slice(), [expected_before, expected_after]);
     }
+    {
+        let declarations = declarations.lock().expect("declarations");
+        assert_eq!(declarations.len(), 2);
+        assert!(declarations.iter().all(|request| {
+            request.application_incarnation_id == application_incarnation_id.clone().into()
+        }));
+    }
     task.abort();
     let _ = task.await;
 }
 
-/// Exact published 0.1.0 server/core and Iroh crates exercise the successful
+/// Exact published 0.2.0 server/core and Iroh crates exercise the successful
 /// vertical path through authentication, declaration, snapshot publication,
 /// remote prompt dispatch, and canonical Tau acceptance completion.
 #[tokio::test]
@@ -488,12 +577,13 @@ async fn published_swarm_server_delivers_prompt_through_application_loopback() {
         .await
         .expect("client endpoint");
     let connector = IrohConnector::new(client_endpoint.clone(), server.addr());
-    let (application, mut prompts, _) = application(true);
+    let (initial_application, mut prompts, _) = application(true);
     let client = tau_swarm_client::Client::new(
-        application,
+        initial_application,
+        incarnation(1),
         connector,
         ExpectedPeer::new(server.addr().id.as_bytes()),
-        credential,
+        credential.clone(),
         Backoff::new(Duration::from_millis(1), Duration::from_millis(2), 0, 1),
     );
     let client_task = tokio::spawn(client.run());
@@ -536,8 +626,72 @@ async fn published_swarm_server_delivers_prompt_through_application_loopback() {
     .expect("bounded remote prompt");
     assert_eq!(outcome.expect("remote dispatch"), DeliveryOutcome::Accepted);
 
+    let ambiguous = PromptRequest {
+        correlation_id: CorrelationId::new("ambiguous-before-restart"),
+        agent_id: AgentId::new("agent"),
+        message: "maybe delivered".into(),
+    };
+    let dispatch = commands.prompt(&session, ambiguous.clone());
+    let lose_result = async {
+        let submission = prompts.recv().await.expect("ambiguous Tau submission");
+        drop(submission.completion);
+    };
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(dispatch, lose_result)
+    })
+    .await
+    .expect("bounded ambiguous prompt");
+    assert!(matches!(
+        outcome.expect("ambiguous dispatch result"),
+        DeliveryOutcome::Indeterminate(_)
+    ));
+
     client_task.abort();
     let _ = client_task.await;
     client_endpoint.close().await;
+
+    let replacement_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .bind()
+        .await
+        .expect("replacement endpoint");
+    let replacement_connector = IrohConnector::new(replacement_endpoint.clone(), server.addr());
+    let (replacement_application, mut replacement_prompts, _) = application(true);
+    let replacement_client = tau_swarm_client::Client::new(
+        replacement_application,
+        incarnation(2),
+        replacement_connector,
+        ExpectedPeer::new(server.addr().id.as_bytes()),
+        credential,
+        Backoff::new(Duration::from_millis(1), Duration::from_millis(2), 0, 1),
+    );
+    let replacement_task = tokio::spawn(replacement_client.run());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !server.view().snapshot().sessions.iter().any(|view| {
+            view.identity == session
+                && view.application_incarnation_id == incarnation(2)
+                && view.connection == tau_swarm_core::ConnectionState::Synchronized
+        }) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("replacement incarnation synchronized");
+
+    assert!(matches!(
+        commands.prompt(&session, ambiguous).await,
+        Err(tau_swarm_iroh::CommandError::Core(
+            tau_swarm_core::CoreError::Conflict(_)
+        ))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), replacement_prompts.recv())
+            .await
+            .is_err(),
+        "old ambiguous prompt must not enter replacement Tau application"
+    );
+
+    replacement_task.abort();
+    let _ = replacement_task.await;
+    replacement_endpoint.close().await;
     server.shutdown().await.expect("server shutdown");
 }

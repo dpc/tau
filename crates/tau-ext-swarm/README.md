@@ -97,10 +97,12 @@ it.
 
 All command deduplication, blocker history, updates, and acknowledgements live
 only in extension process memory. Iroh reconnect within that process preserves
-them. Session switch or extension restart clears them. Tau Swarm 0.1.0 has no
-application-incarnation field, so an ambiguous command from before restart may
-be delivered again. Local follow-up `g39w` and upstream `tau-swarm:1yh1` track
-the planned breaking 0.2.0 incarnation API.
+them. Session switches clear session-specific blocker history, updates, and
+acknowledgements but retain the process command table. Extension restart clears
+all of them. The extension generates one Tau Swarm application-incarnation ID at
+process startup and retains it across ordinary reconnects. A replacement process
+declares a new incarnation, so the server fences ambiguous commands and lifecycle
+state owned by the old process.
 
 ## Verification
 
@@ -113,7 +115,7 @@ test verifies paired historical/live startup selectors. A hermetic fake Swarm
 transport drives the real reconnecting client through credential
 authentication, indeterminate retry, and terminal rejection. A concrete
 `IrohConnector` test verifies that expected-peer mismatch fails before network
-connection. A test-only exact `tau-swarm-core` 0.1.0 dependency runs the real
+connection. A test-only exact `tau-swarm-core` 0.2.0 dependency runs the real
 published Iroh server through authentication, declaration, snapshot publication,
 remote prompt dispatch, and direct application loopback. A composed
 `TauExtensionRunner` vertical additionally drives Configure, replay boundaries,

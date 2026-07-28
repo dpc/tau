@@ -7,10 +7,15 @@ the published Tau Swarm client contract, and an owned worker runs the pinned
 Iroh client without blocking Tau's protocol reader.
 
 The extension waits for `session.replay_complete` before publishing. A session
-switch cancels and joins the previous worker and clears all incarnation-local
-commands, blocker history, updates, and acknowledgements. Ordinary Iroh
+switch cancels and joins the previous worker and clears session-local blocker
+history, updates, and acknowledgements while retaining the process-incarnation
+command table. Ordinary Iroh
 reconnects retain that process-memory state and restart publication from a
 coherent snapshot when retained changes no longer cover the reader revision.
+`SwarmRuntime` generates one collision-resistant application-incarnation ID at
+process startup and retains it across session workers and ordinary reconnects.
+A replacement process declares a fresh ID, allowing Tau Swarm to fence ambiguous
+old commands and supersede the previous process's active lifecycle state.
 
 Remote prompt and blocker-answer acceptance requires the matching canonical
 Tau `agent.prompt_submitted` or `agent.prompt_steered` event carrying the exact

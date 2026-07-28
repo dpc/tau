@@ -30,6 +30,8 @@ list:   {action} -> all owned records in opening order
 
 Command deduplication, blocker history, pending updates, and acknowledgements
 live only in extension process memory. An ordinary Iroh reconnect preserves
-them. A session switch, Tau restart, or extension restart clears them.
-Tau Swarm 0.1.0 has no process-incarnation declaration, so an ambiguous command
-from before a restart may be delivered again afterward.
+them. A session switch retains command deduplication but clears the other
+session-specific state. Tau restart or extension restart clears all of them.
+The extension retains one Tau Swarm application-incarnation ID across ordinary
+reconnects. A restarted process declares a fresh ID, which lets the server fence
+ambiguous commands and lifecycle state owned by the previous process.

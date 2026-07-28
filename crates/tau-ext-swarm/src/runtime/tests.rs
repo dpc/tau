@@ -42,6 +42,29 @@ fn bounds_terminal_worker_error() {
     assert!(bounded.is_char_boundary(bounded.len()));
 }
 
+/// An ordinary session reset retains the process incarnation, while a newly
+/// started extension runtime receives a distinct collision-resistant identity.
+#[test]
+fn scopes_application_incarnation_to_extension_process() {
+    let mut running = SwarmRuntime::new();
+    let incarnation = running.application_incarnation_id.clone();
+    let commands = Arc::new(tokio::sync::Mutex::new(CommandState::new(8, 1_024)));
+    running.commands = Some(Arc::clone(&commands));
+
+    running.reset_session(Some("first".parse().expect("session ID")));
+    running.reset_session(Some("second".parse().expect("session ID")));
+
+    assert_eq!(running.application_incarnation_id, incarnation);
+    assert!(Arc::ptr_eq(
+        running.commands.as_ref().expect("command state"),
+        &commands
+    ));
+    assert_ne!(
+        SwarmRuntime::new().application_incarnation_id,
+        running.application_incarnation_id
+    );
+}
+
 /// A loaded agent remains unpublished until its replay-valid boundary; a bound
 /// failure then clears all partial projection state and prevents later folds.
 #[test]
@@ -519,7 +542,7 @@ async fn iroh_connector_rejects_peer_mismatch_before_network() {
     endpoint.close().await;
 }
 
-/// The real Tau runner and published Swarm 0.1 server compose Configure,
+/// The real Tau runner and published Swarm 0.2 server compose Configure,
 /// replay folding, worker startup, snapshot publication, remote prompt routing,
 /// transient internal submission, canonical loopback, and accepted RPC result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

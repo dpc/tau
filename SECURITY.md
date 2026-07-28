@@ -771,10 +771,12 @@ weaken endpoint identity verification.
 Remote prompts and blocker answers reach agents only through Tau's canonical
 internal-prompt path. The extension retains command deduplication, blocker
 history, and unacknowledged updates in process memory under configured bounds.
-Tau Swarm 0.1.0 cannot bind commands to an extension-process incarnation, so an
-ambiguous command may execute again after extension restart. A peer that sends
-many unique, otherwise valid commands can fill the no-eviction command table and
-deny later remote commands until session switch or process restart. Large
+Tau Swarm 0.2.0 binds commands and active lifecycle state to a collision-resistant
+extension-process incarnation. Ordinary reconnects and session switches retain
+the process command table; a replacement process declares a fresh incarnation,
+so the server fences ambiguous old commands and supersedes old active lifecycle
+state. A peer that sends many unique, otherwise valid commands can fill the
+no-eviction command table and deny later remote commands until process restart. Large
 configured bounds can exhaust extension memory; they are operator trust and
 capacity choices rather than untrusted local-IPC hardening boundaries.
 

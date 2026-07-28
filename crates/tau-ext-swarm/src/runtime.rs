@@ -14,12 +14,13 @@ use tau_client::{
 };
 use tau_proto::{Event, EventSelector};
 use tau_swarm_api::{
-    Agent, AgentActivity, AgentId, AgentNavigationMode, Hostname, SessionId, SessionIdentity,
+    Agent, AgentActivity, AgentId, AgentNavigationMode, ApplicationIncarnationId, Hostname,
+    SessionId, SessionIdentity,
 };
 use tau_swarm_client::{Client, ExpectedPeer};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::application::{BlockerSubmission, PromptSubmission, SwarmApplication};
+use crate::application::{BlockerSubmission, CommandState, PromptSubmission, SwarmApplication};
 use crate::config::{ExtConfig, ResolvedConfig};
 use crate::projection::SessionProjection;
 use crate::tools::BlockerRecord;
@@ -99,6 +100,8 @@ impl Worker {
 
 /// Mutable Tau-side owner for one process and current session incarnation.
 pub(crate) struct SwarmRuntime {
+    /// Collision-resistant identity retained for this extension process.
+    pub(crate) application_incarnation_id: ApplicationIncarnationId,
     /// Outbound Tau handle installed by accepted Configure.
     handle: Option<ClientHandle>,
     /// Immutable resolved configuration for this process.
@@ -117,6 +120,8 @@ pub(crate) struct SwarmRuntime {
     pub(crate) changed: Arc<tokio::sync::Notify>,
     /// Exact target/context/text loopbacks awaiting canonical Tau facts.
     pending: Arc<Mutex<HashMap<PendingKey, Completion>>>,
+    /// No-eviction command results retained for this process incarnation.
+    commands: Option<Arc<tokio::sync::Mutex<CommandState>>>,
     /// Owned worker for the current replay-complete session.
     worker: Option<Worker>,
     /// Full current-session blocker lifecycle history in opening order.
@@ -126,7 +131,10 @@ pub(crate) struct SwarmRuntime {
 impl SwarmRuntime {
     /// Creates empty process state before Configure and session replay.
     pub(crate) fn new() -> Self {
+        let mut incarnation = [0_u8; 32];
+        OsRng.fill_bytes(&mut incarnation);
         Self {
+            application_incarnation_id: ApplicationIncarnationId::from_bytes(incarnation),
             handle: None,
             config: None,
             session_id: None,
@@ -136,6 +144,7 @@ impl SwarmRuntime {
             projection: Arc::new(tokio::sync::Mutex::new(SessionProjection::new(4_096))),
             changed: Arc::new(tokio::sync::Notify::new()),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            commands: None,
             worker: None,
             blocker_history: Arc::new(Mutex::new(Vec::new())),
         }
@@ -294,6 +303,12 @@ impl SwarmRuntime {
         let projection = Arc::clone(&self.projection);
         let changed = Arc::clone(&self.changed);
         let pending = Arc::clone(&self.pending);
+        let commands = Arc::clone(
+            self.commands
+                .as_ref()
+                .ok_or_else(|| "Swarm command state is unavailable".to_owned())?,
+        );
+        let application_incarnation_id = self.application_incarnation_id.clone();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (prompts_tx, prompts_rx) = mpsc::channel(config.limits.submission_queue_entries);
         let (blockers_tx, blockers_rx) = mpsc::channel(config.limits.submission_queue_entries);
@@ -301,15 +316,9 @@ impl SwarmRuntime {
             Hostname::new(config.hostname.clone()),
             SessionId::new(session_id.as_str()),
         );
-        // TODO(g39w; upstream tau-swarm:1yh1): Tau Swarm 0.1.0 declares only the
-        // stable identity. Add the planned 0.2.0 incarnation here after upgrading.
         let application = Arc::new(
             SwarmApplication::new(identity, projection, changed, prompts_tx, blockers_tx)
-                .with_command_policy(
-                    config.command_timeout,
-                    config.limits.command_entries,
-                    config.limits.command_bytes,
-                )
+                .with_command_state(commands, config.command_timeout)
                 .with_blocker_history(
                     Arc::clone(&self.blocker_history),
                     config.limits.blocker_bytes,
@@ -320,7 +329,7 @@ impl SwarmRuntime {
             .spawn(move || {
                 if let Err(error) = worker_main(
                     config,
-                    application,
+                    (application, application_incarnation_id),
                     handle.clone(),
                     pending,
                     prompts_rx,
@@ -418,7 +427,7 @@ fn submit_loopback(
 
 fn worker_main(
     config: ResolvedConfig,
-    application: Arc<SwarmApplication>,
+    application: (Arc<SwarmApplication>, ApplicationIncarnationId),
     handle: ClientHandle,
     pending: Arc<Mutex<HashMap<PendingKey, Completion>>>,
     mut prompts: mpsc::Receiver<PromptSubmission>,
@@ -446,7 +455,14 @@ fn worker_main(
             seed = 1;
         }
         let backoff = config.reconnect.backoff(seed);
-        let client = Client::new(application, connector, expected, config.credential, backoff);
+        let client = Client::new(
+            application.0,
+            application.1,
+            connector,
+            expected,
+            config.credential,
+            backoff,
+        );
         tokio::select! {
             result = client.run() => result.map_err(|error| {
                 format!("{:?}: {}", error.kind(), bounded_error(&error.to_string()))
@@ -545,6 +561,11 @@ fn handle_configure(cx: RawConfigureContext<'_, SwarmRuntime>) -> Result<(), Cli
         ),
     ));
     cx.state.config = Some(config);
+    let limits = &cx.state.config.as_ref().expect("installed config").limits;
+    cx.state.commands = Some(Arc::new(tokio::sync::Mutex::new(CommandState::new(
+        limits.command_entries,
+        limits.command_bytes,
+    ))));
     Ok(())
 }
 

@@ -59,15 +59,28 @@ enum CommandEntry {
 }
 
 /// Bounded no-eviction command table shared across remote command kinds.
-struct CommandState {
+pub(crate) struct CommandState {
     /// Tagged no-eviction table shared by both remote command kinds.
-    entries: HashMap<String, CommandEntry>,
+    entries: HashMap<(SessionIdentity, String), CommandEntry>,
     /// Retained logical request/result string bytes.
     bytes: usize,
     /// Configured no-eviction entry ceiling.
     maximum_entries: usize,
     /// Configured no-eviction logical byte ceiling.
     maximum_bytes: usize,
+}
+
+impl CommandState {
+    /// Creates an empty process-incarnation command table under configured
+    /// bounds.
+    pub(crate) fn new(maximum_entries: usize, maximum_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            bytes: 0,
+            maximum_entries,
+            maximum_bytes,
+        }
+    }
 }
 
 /// Tau-owned implementation consumed by the reconnecting Swarm client.
@@ -83,9 +96,7 @@ pub(crate) struct SwarmApplication {
     /// Sends blocker answers to the nonblocking Tau protocol owner.
     blockers: mpsc::Sender<BlockerSubmission>,
     /// In-flight and completed commands keyed across both command kinds.
-    // TODO(g39w; upstream tau-swarm:1yh1): These entries cannot protect a
-    // restarted extension until the planned 0.2.0 incarnation API is available.
-    commands: Mutex<CommandState>,
+    commands: Arc<Mutex<CommandState>>,
     /// Full owner-visible blocker lifecycle history.
     blocker_history: Option<Arc<std::sync::Mutex<Vec<BlockerRecord>>>>,
     /// End-to-end queue-admission and canonical-loopback deadline.
@@ -110,12 +121,7 @@ impl SwarmApplication {
             changed,
             prompts,
             blockers,
-            commands: Mutex::new(CommandState {
-                entries: HashMap::new(),
-                bytes: 0,
-                maximum_entries: 1_024,
-                maximum_bytes: 16 * 1024 * 1024,
-            }),
+            commands: Arc::new(Mutex::new(CommandState::new(1_024, 16 * 1024 * 1024))),
             blocker_history: None,
             command_timeout: Duration::from_secs(25),
             blocker_history_bytes: 4 * 1024 * 1024,
@@ -123,6 +129,7 @@ impl SwarmApplication {
     }
 
     /// Applies the configured command deadline and no-eviction table bounds.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn with_command_policy(
         mut self,
@@ -131,12 +138,22 @@ impl SwarmApplication {
         maximum_bytes: usize,
     ) -> Self {
         self.command_timeout = timeout;
-        self.commands = Mutex::new(CommandState {
-            entries: HashMap::new(),
-            bytes: 0,
+        self.commands = Arc::new(Mutex::new(CommandState::new(
             maximum_entries,
             maximum_bytes,
-        });
+        )));
+        self
+    }
+
+    /// Installs the process-incarnation command table retained across workers.
+    #[must_use]
+    pub(crate) fn with_command_state(
+        mut self,
+        commands: Arc<Mutex<CommandState>>,
+        timeout: Duration,
+    ) -> Self {
+        self.command_timeout = timeout;
+        self.commands = commands;
         self
     }
 
@@ -210,6 +227,7 @@ impl Application for SwarmApplication {
         request: DeliverPromptRequest,
     ) -> ClientResult<DeliverPromptResponse> {
         let key = request.prompt.correlation_id.as_str().to_owned();
+        let scoped_key = (self.identity.clone(), key.clone());
         if let Err(reason) = validate_id("correlation ID", &key) {
             return Ok(DeliverPromptResponse::Rejected(reason));
         }
@@ -224,7 +242,7 @@ impl Application for SwarmApplication {
             ));
         }
         let mut commands = self.commands.lock().await;
-        if let Some(command) = commands.entries.get(&key) {
+        if let Some(command) = commands.entries.get(&scoped_key) {
             let CommandEntry::Prompt {
                 request: existing,
                 result,
@@ -253,7 +271,9 @@ impl Application for SwarmApplication {
                 "target agent is not loaded".into(),
             ));
         }
-        let retained_bytes = match prompt_retained_bytes(&request) {
+        let retained_bytes = match prompt_retained_bytes(&request)
+            .and_then(|bytes| session_scoped_retained_bytes(&self.identity, bytes))
+        {
             Ok(bytes) => bytes,
             Err(reason) => return Ok(DeliverPromptResponse::Rejected(reason.into())),
         };
@@ -262,7 +282,7 @@ impl Application for SwarmApplication {
         }
         let (result_tx, result_rx) = watch::channel(None);
         commands.entries.insert(
-            key.clone(),
+            scoped_key,
             CommandEntry::Prompt {
                 request: request.clone(),
                 result: result_rx,
@@ -298,6 +318,7 @@ impl Application for SwarmApplication {
         request: AnswerBlockerRequest,
     ) -> ClientResult<AnswerBlockerResponse> {
         let key = request.command_id.clone();
+        let scoped_key = (self.identity.clone(), key.clone());
         if let Err(reason) = validate_id("command ID", &key)
             .and_then(|()| validate_id("blocker ID", &request.blocker_id))
         {
@@ -309,7 +330,7 @@ impl Application for SwarmApplication {
             ));
         }
         let mut commands = self.commands.lock().await;
-        if let Some(command) = commands.entries.get(&key) {
+        if let Some(command) = commands.entries.get(&scoped_key) {
             let CommandEntry::Blocker {
                 request: existing,
                 result,
@@ -374,7 +395,9 @@ impl Application for SwarmApplication {
             answer_kind,
             &request.response,
         );
-        let retained_bytes = match blocker_retained_bytes(&request, &owner, &text) {
+        let retained_bytes = match blocker_retained_bytes(&request, &owner, &text)
+            .and_then(|bytes| session_scoped_retained_bytes(&self.identity, bytes))
+        {
             Ok(bytes) => bytes,
             Err(reason) => return Ok(AnswerBlockerResponse::Rejected(reason.into())),
         };
@@ -387,7 +410,7 @@ impl Application for SwarmApplication {
         }
         let (result_tx, result_rx) = watch::channel(None);
         commands.entries.insert(
-            key.clone(),
+            scoped_key,
             CommandEntry::Blocker {
                 request: request.clone(),
                 result: result_rx,
@@ -572,6 +595,16 @@ fn prompt_retained_bytes(request: &DeliverPromptRequest) -> Result<usize, &'stat
     ])?
     .checked_add(MAXIMUM_CACHED_RESULT_BYTES)
     .ok_or("command byte accounting overflow")
+}
+
+fn session_scoped_retained_bytes(
+    identity: &SessionIdentity,
+    command_bytes: usize,
+) -> Result<usize, &'static str> {
+    command_bytes
+        .checked_add(identity.hostname.as_str().len())
+        .and_then(|bytes| bytes.checked_add(identity.session_id.as_str().len()))
+        .ok_or("command byte accounting overflow")
 }
 
 fn blocker_retained_bytes(
