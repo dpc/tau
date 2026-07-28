@@ -62,8 +62,8 @@ effective `PATH`.
 
 `tau-ext-shell` runs tool work through a bounded priority scheduler. Short bursts can queue instead of failing immediately when workers are busy; queued model tool calls can be canceled before they start; user `!` shell work and control-sensitive `dir_lock` calls have higher-priority lanes than bulk model work. If bounded queue or queued-argument budgets are exhausted, the tool reports a clear backpressure error instead of spawning unbounded threads.
 
-The `read`, `grep`, `find`, `ls`, edit-recovery, model `shell` /
-`shell_command`, and user `!` / `!!` surfaces cap visible output at 10 KiB
+The `read`, `grep`, `find`, `ls`, edit-recovery, and user `!` / `!!` surfaces
+cap visible output at 10 KiB; model `shell` / `shell_command` caps it at 15 KiB
 (and 2,000 lines where applicable). A truncated result includes complete totals, a compact
 efficiency warning, and an exact path to an ephemeral saved rendering of up to
 16 MiB. A complete artifact uses `full_output_path`; output that exceeds the

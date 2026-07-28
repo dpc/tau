@@ -670,12 +670,12 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
              they are read-only. When directory locking is disabled, shell commands run read-write. \
              Non-zero exits and timeouts are returned as structured command results with output details. \
              Model-visible output is capped at 2000 lines / \
-             10 KiB; truncated output keeps the first 1000 and last 1000 lines \
+             15 KiB; truncated output keeps the first 1000 and last 1000 lines \
              separated by a literal `...` line. Output lines are prefixed with `out ` \
              for stdout or `err ` for stderr; missing trailing newlines are marked, e.g. \
              `out(no_nl)`; CRLF and CR line endings are marked as `out(crlf)` \
              or `out(cr)`. Invalid UTF-8 is shown with Unicode replacement characters and \
-             an `invalid-utf8` line flag. Lines that would exceed the 10 KiB output budget \
+             an `invalid-utf8` line flag. Lines that would exceed the 15 KiB output budget \
              are marker-only, e.g. `err(truncated)`. Truncated results include complete totals, a warning, and normally an exact temporary path to up to 16 MiB of rendered output; output beyond that saved cap is explicitly marked incomplete, while platforms or filesystems that cannot enforce private storage report `saved_output_unavailable: true`. \
              Commands taking longer than 5 seconds include duration metadata. Prefer dedicated \
              tools like `read`, `grep`, and `find` when they fit."
@@ -721,7 +721,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
         description: Some(
-            "Run a shell command. Model-visible output is capped at 2000 lines / 10 KiB; \
+            "Run a shell command. Model-visible output is capped at 2000 lines / 15 KiB; \
              truncated results normally provide an exact temporary path to up to 16 MiB of rendered output and mark an incomplete saved artifact honestly; private-storage failures instead report `saved_output_unavailable: true`. \
              Output lines are prefixed with `out ` for stdout or `err ` for stderr; missing \
              trailing newlines are marked with `(no_nl)`. For file changes, prefer apply_patch."

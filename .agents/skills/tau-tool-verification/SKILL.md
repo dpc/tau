@@ -121,12 +121,12 @@ These total headers are omitted when output is not truncated, except `read` may 
 
 When output is truncated due to line number limit, first and last 1000 lines
 should be shown with `...` line separating them, instead of usual line prefix.
-If a single line would exceed the 10 KiB visible byte budget for ext-shell
-`read`, search/list/edit recovery, or shell output, show only the native prefix
-plus `(truncated)` rather than
+If a single line would exceed the visible byte budget for ext-shell `read`,
+search/list/edit recovery, or user shell output (10 KiB), or model `shell` /
+`shell_command` output (15 KiB), show only the native prefix plus `(truncated)` rather than
 partial content.
 
-Shared-visible-cap-truncated ext-shell output, including `read`, `grep`, `find`, `ls`, edit
+Visible-cap-truncated ext-shell output, including `read`, `grep`, `find`, `ls`, edit
 recovery, model shell, and user shell surfaces, must preserve native rendering
 and include complete
 `total_lines` and `total_bytes`, a compact warning to prefer narrower commands

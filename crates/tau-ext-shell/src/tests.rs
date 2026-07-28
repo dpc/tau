@@ -6567,6 +6567,102 @@ fn shell_tool_omits_truncation_marker_without_truncation() {
     );
 }
 
+/// Ensures model shell accepts output exactly at its 15 KiB byte boundary.
+#[test]
+fn shell_tool_accepts_exact_model_output_byte_cap() {
+    const EXPECTED_MODEL_SHELL_OUTPUT_BYTES: usize = 15 * 1024;
+    assert_eq!(
+        crate::tools::shell::MAX_MODEL_SHELL_OUTPUT_BYTES,
+        EXPECTED_MODEL_SHELL_OUTPUT_BYTES
+    );
+    let emoji = "🙂";
+    let emoji_count = (EXPECTED_MODEL_SHELL_OUTPUT_BYTES - "out ".len()) / emoji.len();
+    let expected = format!("out {}", emoji.repeat(emoji_count));
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text(format!(
+            "i=0; while [ \"$i\" -lt {emoji_count} ]; do printf '\\360\\237\\231\\202'; i=$((i + 1)); done; printf '\\n'"
+        )),
+    )]);
+
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
+    let combined = cbor_map_text(&output.result, "output").expect("output");
+    assert_eq!(combined, expected);
+    assert_eq!(combined.len(), EXPECTED_MODEL_SHELL_OUTPUT_BYTES);
+    assert!(cbor_map_field(&output.result, "truncated").is_none());
+    assert!(cbor_map_field(&output.result, "full_output_path").is_none());
+}
+
+/// Ensures byte-cap truncation preserves UTF-8 boundaries and saves the
+/// complete rendering.
+#[test]
+fn shell_tool_multibyte_output_over_model_cap_keeps_exact_artifact() {
+    const EXPECTED_MODEL_SHELL_OUTPUT_BYTES: usize = 15 * 1024;
+    assert_eq!(
+        crate::tools::shell::MAX_MODEL_SHELL_OUTPUT_BYTES,
+        EXPECTED_MODEL_SHELL_OUTPUT_BYTES
+    );
+    let emoji = "🙂";
+    const SECOND_LINE_EMOJI_COUNT: usize = 3;
+    const ONE_BYTE_OVER_CAP: usize = 1;
+    let output_prefix = "out ";
+    let second_line = format!("{output_prefix}{}", emoji.repeat(SECOND_LINE_EMOJI_COUNT));
+    let first_line_emoji_count = (EXPECTED_MODEL_SHELL_OUTPUT_BYTES + ONE_BYTE_OVER_CAP
+        - "\n".len()
+        - second_line.len()
+        - output_prefix.len())
+        / emoji.len();
+    let first_line = format!("{output_prefix}{}", emoji.repeat(first_line_emoji_count));
+    let expected = format!("{first_line}\n{second_line}");
+    assert_eq!(
+        expected.len(),
+        EXPECTED_MODEL_SHELL_OUTPUT_BYTES + ONE_BYTE_OVER_CAP
+    );
+    let command = format!(
+        "i=0; while [ \"$i\" -lt {first_line_emoji_count} ]; do printf '\\360\\237\\231\\202'; i=$((i + 1)); done; printf '\\n\\360\\237\\231\\202\\360\\237\\231\\202\\360\\237\\231\\202\\n'"
+    );
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text(command),
+    )]);
+
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
+    let combined = cbor_map_text(&output.result, "output").expect("output");
+    assert_eq!(combined, format!("{first_line}\nout(truncated)"));
+    assert_eq!(combined.len(), EXPECTED_MODEL_SHELL_OUTPUT_BYTES - 1);
+    assert!(!combined.contains('\u{FFFD}'));
+    assert_eq!(cbor_bool_field(&output.result, "truncated"), Some(true));
+    assert_eq!(
+        cbor_int_field(&output.result, "total_bytes"),
+        Some(expected.len() as i128)
+    );
+    let saved = std::fs::read_to_string(
+        cbor_map_text(&output.result, "full_output_path").expect("full output path"),
+    )
+    .expect("read complete saved output");
+    assert_eq!(saved, expected);
+}
+
 /// Ensures shell truncation publishes complete totals and a readable,
 /// privately contained complete saved rendering.
 #[test]

@@ -43,8 +43,9 @@ stdin EOF/readiness, separated stdout/stderr capture, foreground exit, timeout,
 cancellation, signals, bounded output, truncation, and descendants retaining PTY
 user endpoints. Unix-only helpers are gated and may skip when unavailable.
 
-Saved-output regressions cover representative native read/list/model-shell and
-user-shell renderings under the shared 10 KiB visible cap, the 16 MiB hard cap,
+Saved-output regressions cover representative native read/list/user-shell
+renderings under the 10 KiB visible cap and model-shell rendering under the
+15 KiB cap, the 16 MiB hard cap,
 honest complete/incomplete metadata, exact-path privacy,
 ordinary expiration only after both 32 later relevant calls and 15 minutes,
 and unconditional graceful shutdown. Remaining manual verification should

@@ -86,10 +86,10 @@ targets, retain pipe capture and closed stdin.
 See
 [SPEC-tau-ext-shell-process-lifecycle](SPEC-tau-ext-shell-process-lifecycle.md).
 
-All ext-shell surfaces that historically shared the 50 KiB bound now use a
-10 KiB visible bound, including `read`, `grep`, `find`, `ls`, edit recovery
-context, model `shell` / `shell_command`, and user `!` / `!!`. Each preserves
-its native rendering and metadata. When that cap truncates output, ext-shell
+The `read`, `grep`, `find`, `ls`, edit-recovery, and user `!` / `!!` surfaces
+use a 10 KiB visible bound. Model `shell` / `shell_command` uses a 15 KiB
+visible bound. Each preserves its native rendering and metadata. When a cap
+truncates output, ext-shell
 saves at most 16 MiB of the same ordered native rendering in a private
 temporary artifact. Complete saved artifacts use `full_output_path`; artifacts
 that hit the saved cap use `saved_output_path` plus explicit incomplete
