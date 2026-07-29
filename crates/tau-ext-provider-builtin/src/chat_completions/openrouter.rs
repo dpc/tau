@@ -288,13 +288,9 @@ fn cache_openrouter_models(models: &[ChatCompletionsModel], path: Option<&Path>)
         return;
     };
     if let Some(parent) = path.parent() {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(bytes) = serde_json::to_vec(models) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = tau_config::atomic::atomic_write_following_symlink(path, &bytes, None);
     }
 }

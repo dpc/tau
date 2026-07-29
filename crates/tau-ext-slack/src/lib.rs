@@ -1405,14 +1405,10 @@ impl Output {
 
     /// Emits one event through the harness output channel.
     fn emit(&self, event: Event) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.send(HarnessInputMessage::emit(event));
     }
 
     fn request_notice(&self, message: impl Into<String>, level: NoticeLevel) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.send(HarnessInputMessage::ExtensionNoticeRequest(
             tau_proto::ExtensionNoticeRequest {
                 message: message.into(),
@@ -1423,8 +1419,6 @@ impl Output {
 
     /// Submit one transient tool progress observation.
     fn report_tool_progress(&self, progress: ToolProgress) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.send(HarnessInputMessage::emit_with_persist(
             Event::ToolProgressReported(progress),
             false,
@@ -1443,13 +1437,9 @@ impl Output {
         };
         match self {
             Self::Client(handle) => {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = handle.report_tool_terminal_detached(outcome);
             }
             Self::Channel(tx) => {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = tx.send(HarnessInputMessage::emit_with_persist(
                     outcome.into_reported_event(),
                     false,
@@ -3477,8 +3467,6 @@ impl Extension {
                 },
             );
             if let Some(message_ts) = reaction_message_ts {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = state.reactions.insert_target(
                     reply_message_id.clone(),
                     ReactionTarget {

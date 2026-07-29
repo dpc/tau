@@ -351,8 +351,6 @@ fn spawn_extension_with_config(
     let (ext_stream, harness_stream) = UnixStream::pair().expect("pair");
     let reader_stream = ext_stream.try_clone().expect("clone");
     thread::spawn(move || {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = run(reader_stream, ext_stream);
     });
     let mut pair = FramePair {
@@ -3660,35 +3658,25 @@ fn email_log_records_agent_access_and_mutations() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = engine.dispatch(EmailCommand::ListFolders {
         account: String::new(),
     });
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = engine.dispatch(EmailCommand::Read {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         uid: "1".to_owned(),
     });
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = engine.dispatch(EmailCommand::RequestFull {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         uid: "1".to_owned(),
     });
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = engine.dispatch(EmailCommand::ManageMessage {
         command: MessageManagementCommand::MarkUnread,
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         uid: "1".to_owned(),
     });
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = engine.dispatch(EmailCommand::Send {
         account: Some("work".to_owned()),
         from: None,

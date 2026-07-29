@@ -175,8 +175,6 @@ fn init_test_tracing() {
         // Preserve this behavior; the structural alternative is not semantics-neutral
         // here. ast-grep-ignore: silent-unwrap-or-else
         let filter = EnvFilter::try_from_env("TAU_LOG").unwrap_or_else(|_| EnvFilter::new("off"));
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_test_writer()
@@ -2409,11 +2407,7 @@ fn idle_command_runs_with_rendered_template_args() {
     // Drain: end-sound, static fallback OSC. We don't care about
     // the exact contents — what we want is the command to run as a
     // side effect.
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = reader.read_event().expect("read").expect("end");
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = reader.read_event().expect("read").expect("fallback");
 
     // The command runs in a detached thread; poll the output

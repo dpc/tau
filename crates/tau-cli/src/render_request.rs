@@ -88,8 +88,6 @@ fn wait_for_preview_session(reader: &mut UiInputReader) -> Result<(), CliError> 
 }
 
 fn disconnect_render_client(writer: &mut UiOutputWriter) {
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = crate::ui_client::send_message(
         writer,
         &HarnessInputMessage::Disconnect(tau_proto::Disconnect {

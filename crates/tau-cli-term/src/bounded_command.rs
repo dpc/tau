@@ -322,8 +322,6 @@ impl BoundedStdoutRun {
     /// Terminates the direct child or its process group and reaps it.
     fn terminate(&mut self) {
         terminate_process_group_if_owned(self.process_group.child_pgid());
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.wait_for_child_after_terminate();
     }
 
@@ -335,8 +333,6 @@ impl BoundedStdoutRun {
 
     /// Waits briefly for an in-flight stdin writer after child termination.
     fn wait_for_stdin_writer(&mut self) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.wait_for_stdin_after_child_exit();
     }
 
@@ -379,8 +375,6 @@ fn spawn_stdout_reader(
     event_tx: std::sync::mpsc::Sender<BoundedStdoutEvent>,
 ) {
     std::thread::spawn(move || {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = event_tx.send(BoundedStdoutEvent::Stdout(read_to_limit(
             stdout,
             stdout_limit,
@@ -406,8 +400,6 @@ fn spawn_stdin_writer(
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
             Err(error) => Err(error),
         };
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = event_tx.send(BoundedStdoutEvent::Stdin(result));
     });
     StdinWriterState::Running
@@ -418,8 +410,6 @@ fn spawn_bounded_stdout_child_waiter(
     event_tx: std::sync::mpsc::Sender<BoundedStdoutEvent>,
 ) {
     std::thread::spawn(move || {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = event_tx.send(BoundedStdoutEvent::Child(child.wait()));
     });
 }
@@ -429,8 +419,6 @@ fn spawn_child_waiter(
 ) -> std::sync::mpsc::Receiver<io::Result<std::process::ExitStatus>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = tx.send(child.wait());
     });
     rx
@@ -483,8 +471,6 @@ pub(crate) fn run_with_inherited_stdio(
         }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             terminate_process_group_if_owned(process_group.child_pgid());
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = child_rx.recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT);
             Err(format!("command exceeded {}s timeout", timeout.as_secs()))
         }
@@ -551,12 +537,8 @@ fn terminate_child(child: &mut std::process::Child, child_pgid: Option<ChildProc
     if let Some(child_pgid) = child_pgid {
         terminate_process_group(child_pgid);
     } else {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = child.kill();
     }
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = child.wait();
 }
 
@@ -570,12 +552,8 @@ fn terminate_process_group(child_pgid: ChildProcessGroupId) {
     #[cfg(unix)]
     {
         let pgid = child_pgid.as_nix_pid();
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM);
         std::thread::sleep(std::time::Duration::from_millis(100));
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
     }
 }
@@ -664,8 +642,6 @@ impl ProcessGroupHandle {
         let child_pgid = ChildProcessGroupId::from_child_id(child_id);
         set_foreground_process_group(child_pgid.as_nix_pid())
             .map_err(|e| format!("could not hand terminal to prompt action: {e}"))?;
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ =
             nix::sys::signal::killpg(child_pgid.as_nix_pid(), nix::sys::signal::Signal::SIGCONT);
         Ok(Self {
@@ -683,8 +659,6 @@ impl ProcessGroupHandle {
 #[cfg(unix)]
 impl Drop for ProcessGroupHandle {
     fn drop(&mut self) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.restore_foreground();
     }
 }

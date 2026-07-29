@@ -62,8 +62,6 @@ where
                 match runtime.dispatch_one(message)? {
                     tau_client::DispatchOutcome::Continue => {}
                     tau_client::DispatchOutcome::Disconnect(_) => {
-                        // This call is intentionally best-effort; preserve the existing discarded
-                        // result. ast-grep-ignore: let-underscore-call
                         let _ = runtime.finish_detached();
                         return Ok(());
                     }

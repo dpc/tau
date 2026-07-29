@@ -232,8 +232,6 @@ impl Harness {
                     || self.has_ready_message_wake_on_selected_branch(&agent_id)
             });
             if has_durable_activation {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = self.ensure_agent_id_for_agent(&agent_id);
                 if self
                     .agents

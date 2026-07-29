@@ -975,8 +975,6 @@ fn live_stream_pads_complete_table_lines_before_blank_line() {
 fn live_stream_cache_resets_on_replacement() {
     let theme = markdown_test_theme();
     let mut cache = MarkdownStreamCache::default();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "*old*\n_live_\n", &mut cache);
     let block = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "_new_\n\n", &mut cache);
 
@@ -997,8 +995,6 @@ fn live_stream_cache_resets_on_replacement() {
 fn live_stream_replacement_reparses_same_boundary_live_lines() {
     let theme = markdown_test_theme();
     let mut cache = MarkdownStreamCache::default();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "*old*\n", &mut cache);
     let block = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "_new_\n", &mut cache);
     let spans = block.content.spans();
@@ -1039,8 +1035,6 @@ fn prompt_marker_uses_submitted_marker_style() {
 fn live_stream_preserves_fence_state_across_blank_lines() {
     let theme = markdown_test_theme();
     let mut cache = MarkdownStreamCache::default();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "```\n\n", &mut cache);
     let block = markdown_streaming_block(
         &theme,

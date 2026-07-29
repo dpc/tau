@@ -304,8 +304,6 @@ fn builtin_default_theme_styles_stay_palette_safe() {
 #[test]
 fn builtin_dpc_theme_parses() {
     let theme = Theme::builtin_dpc();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = theme.resolve_style(&StyleName::new("user.prompt"));
 }
 
@@ -332,8 +330,6 @@ fn theme_rejects_unknown_fields() {
 #[test]
 fn builtin_light_theme_parses() {
     let theme = Theme::builtin_light();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = theme.resolve_style(&StyleName::new("user.prompt"));
 }
 

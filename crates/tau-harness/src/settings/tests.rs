@@ -605,8 +605,6 @@ fn resolve_extensions_loads_from_yaml() {
 /// malformed file blows up here rather than at user startup.
 #[test]
 fn built_in_extensions_yaml_parses() {
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = built_in_extension_defs();
 }
 

@@ -312,8 +312,6 @@ impl Drop for JournalSyncWorker {
         self.shared.wake.notify_one();
         // A filesystem sync can block indefinitely. Detach rather than make store
         // destruction or the event loop wait for the worker.
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self
             .thread
             .lock()

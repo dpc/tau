@@ -541,8 +541,6 @@ fn wss_proxy_tls_failure_has_no_direct_fallback() {
             rustls::ServerConnection::new(Arc::new(proxy_tls)).expect("proxy TLS connection");
         let mut stream = rustls::StreamOwned::new(connection, socket);
         let mut byte = [0_u8; 1];
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = stream.read(&mut byte);
     });
     let address = proxy.address();
@@ -641,8 +639,6 @@ fn wss_target_tls_failure_has_no_direct_fallback() {
             rustls::ServerConnection::new(Arc::new(target_tls)).expect("target TLS connection");
         let mut tunnel = rustls::StreamOwned::new(connection, socket);
         let mut byte = [0_u8; 1];
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = tunnel.read(&mut byte);
         connect
     });

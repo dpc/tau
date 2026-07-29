@@ -60,8 +60,6 @@ impl AgentJournalLocks {
                 })?;
             if Fs2FileExt::try_lock_exclusive(&lock).is_err() {
                 let mut holder = String::new();
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = lock.by_ref().take(4 * 1024).read_to_string(&mut holder);
                 return Err(AgentStoreError::Locked {
                     path: lock_path,

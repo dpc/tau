@@ -304,8 +304,6 @@ impl VcrStore {
         }
         write_bytes_exclusive(&side_path, side)?;
         if let Err(error) = write_yaml_exclusive(&cassette_path, value) {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = std::fs::remove_file(&side_path);
             return Err(error);
         }
@@ -574,8 +572,6 @@ fn write_bytes_exclusive(path: &Path, bytes: &[u8]) -> Result<(), VcrError> {
         std::fs::hard_link(&temporary, path)?;
         Ok(())
     })();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_file(&temporary);
     result.map_err(|source| VcrError::Write {
         path: path.to_path_buf(),
@@ -832,8 +828,6 @@ where
         std::fs::hard_link(&temporary, path)?;
         Ok(())
     })();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_file(&temporary);
     result.map_err(|source| VcrError::Write {
         path: path.to_path_buf(),

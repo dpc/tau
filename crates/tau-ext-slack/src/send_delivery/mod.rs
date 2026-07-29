@@ -1081,8 +1081,6 @@ impl SendDeliveryWorker {
             }
             // Queue progress always notifies. The bounded timeout is only a
             // fail-safe against a panicking predecessor.
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self
                 .wake
                 .wait(generation, crate::send_delivery::wire::MAX_RETRY_AFTER);
@@ -1332,8 +1330,6 @@ impl SendDeliveryWorker {
         if result_sent {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.send_authority_is_current(prepared) {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = state.reactions.insert_target(
                     message_id.clone(),
                     ReactionTarget {

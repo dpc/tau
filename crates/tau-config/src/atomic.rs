@@ -90,8 +90,6 @@ impl PendingTempFile {
 impl Drop for PendingTempFile {
     fn drop(&mut self) {
         if self.armed {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = fs::remove_file(&self.path);
         }
     }

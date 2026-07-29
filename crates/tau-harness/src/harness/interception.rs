@@ -1088,8 +1088,6 @@ impl Harness {
         cid: &AgentId,
         captured_activation_cut: Option<tau_proto::AgentHead>,
     ) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.ensure_agent_id_for_agent(cid);
         let state = self
             .agents
@@ -1099,8 +1097,6 @@ impl Harness {
             state,
             Some(crate::agent::ActivationDispatchState::Running { .. })
         ) {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.send_prompt_to_agent_for(cid);
             return;
         }

@@ -830,8 +830,6 @@ impl AgentStore {
             // that case `holder` is empty, which Display handles
             // fine).
             let mut holder = String::new();
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = file.read_to_string(&mut holder);
             return Err(AgentStoreError::Locked {
                 path: lock_path,
@@ -1423,8 +1421,6 @@ pub fn agent_is_locked(agents_dir: &Path, agent_id: &str) -> io::Result<bool> {
     };
     match FileExt::try_lock_exclusive(&file) {
         Ok(()) => {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = FileExt::unlock(&file);
             Ok(false)
         }

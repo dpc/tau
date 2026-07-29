@@ -529,8 +529,6 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
         [crate::ManualCompactionRecovery::Waiting(request)]
             if request.request_id.to_string() == "cr-generation"
     ));
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -559,8 +557,6 @@ fn manual_compaction_request_replays_after_durable_reopen() {
         [crate::ManualCompactionRecovery::Waiting(request)]
             if request.request_id.to_string() == "cr-durable"
     ));
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -589,8 +585,6 @@ fn manual_compaction_request_stays_memory_only_for_ephemeral_agent() {
         [crate::ManualCompactionRecovery::Waiting(_)]
     ));
     assert!(!agents_dir.join("target-ephemeral").exists());
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -613,8 +607,6 @@ fn agent_store_rejects_empty_display_name() {
         .expect_err("blank display names are invalid");
 
     assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -703,8 +695,6 @@ fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
             .is_some()
     );
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -756,8 +746,6 @@ fn agent_checkpoint_lists_fresh_and_repairs_a_suffix() {
             .expect("journal metadata")
             .len()
     );
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -777,8 +765,6 @@ fn agent_checkpoint_listing_exposes_unrepairable_summary_state() {
     assert_eq!(entries[0].identity, crate::AgentListIdentity::JournalBacked);
     assert_eq!(entries[0].status, crate::AgentListStatus::CorruptSummary);
     assert!(entries[0].summary.is_none());
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -799,8 +785,6 @@ fn agent_checkpoint_repair_rejects_declared_frame_over_budget() {
     let entries = crate::list_agent_entries(&agents_dir).expect("bounded list");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].status, crate::AgentListStatus::RepairFailed);
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -845,8 +829,6 @@ fn agent_store_requires_committed_creation_for_routing_identity() {
         )
         .expect("commit creation");
     assert!(store.agent_is_known_for_routing("agent-1"));
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -884,8 +866,6 @@ fn agent_checkpoint_rejects_creationless_identity() {
         );
         assert_ne!(entries[0].status, crate::AgentListStatus::Fresh);
         assert!(!agents_dir.join("agent-1/meta.json").exists());
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = std::fs::remove_dir_all(agents_dir);
     }
 }
@@ -931,8 +911,6 @@ fn agent_checkpoint_full_rebuild_stops_before_record_65() {
     let entries = crate::list_agent_entries(&agents_dir).expect("bounded list");
     assert_eq!(entries[0].status, crate::AgentListStatus::CorruptSummary);
     assert_eq!(std::fs::read(&meta_path).expect("sidecar retained"), b"{");
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -962,8 +940,6 @@ fn agent_store_persists_transcript_under_agent_directory() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event, agent_prompt("agent-1", "hello"));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1004,8 +980,6 @@ fn agent_store_rejects_duplicate_background_completion_before_persisting() {
     let events = store.agent_events("agent-1").expect("agent events");
     assert_eq!(events.len(), 3);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1045,8 +1019,6 @@ fn agent_store_rejects_duplicate_background_error_before_persisting() {
     let events = store.agent_events("agent-1").expect("agent events");
     assert_eq!(events.len(), 3);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1103,8 +1075,6 @@ fn agent_store_accepts_background_completion_for_explicit_parent_branch() {
     let events = store.agent_events("agent-1").expect("agent events");
     assert_eq!(events.len(), 4);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1141,8 +1111,6 @@ fn agent_store_rejects_duplicate_background_completion_on_replay() {
     let error = AgentStore::open(&agents_dir).expect_err("duplicate completion must fail load");
     assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1192,8 +1160,6 @@ fn agent_store_replays_background_completion_for_explicit_parent_branch() {
     let events = store.agent_events("agent-1").expect("agent events");
     assert_eq!(events.len(), 4);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1246,8 +1212,6 @@ fn agent_store_ephemeral_transcript_folds_and_replays_without_files() {
         "ephemeral agent must be forgotten on store reopen"
     );
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1274,8 +1238,6 @@ fn agent_store_rejects_non_sequential_persisted_sequence_on_load() {
     let error = AgentStore::open(&agents_dir).expect_err("bad sequence must fail load");
     assert!(matches!(error, AgentStoreError::InvalidSequence { .. }));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1290,8 +1252,6 @@ fn agent_store_rejects_partial_persisted_record_header_on_load() {
     let error = AgentStore::open(&agents_dir).expect_err("torn header must fail load");
     assert!(matches!(error, AgentStoreError::Read { .. }));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1316,8 +1276,6 @@ fn agent_store_validates_persisted_parent_references_on_load() {
     let error = AgentStore::open(&agents_dir).expect_err("bad parent must fail load");
     assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1349,8 +1307,6 @@ fn agent_store_replays_explicit_root_parent_after_reopen() {
     assert_eq!(fresh_branch.parent_id, None);
     assert_eq!(tree.head(), Some(fresh_branch.id));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1384,8 +1340,6 @@ fn agent_store_rejects_unknown_explicit_parent_before_persisting() {
     let tree = store.agent("agent-1").expect("agent tree");
     assert_eq!(tree.nodes().len(), 1);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1428,8 +1382,6 @@ fn agent_store_restores_head_move_before_next_append() {
     let branched = tree.nodes().last().expect("branched node");
     assert_eq!(branched.parent_id, Some(NodeId::new(0)));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1473,8 +1425,6 @@ fn agent_store_restores_root_head_move_before_next_append() {
     let branched = tree.nodes().last().expect("branched node");
     assert_eq!(branched.parent_id, None);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1526,8 +1476,6 @@ fn session_store_persists_membership_facts() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].event, loaded);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -1575,8 +1523,6 @@ fn agent_store_raw_message_fact_append_projects_after_commit_and_replay() {
         live_projection
     );
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1611,8 +1557,6 @@ fn agent_store_raw_message_fact_append_enforces_category_and_owner() {
         AgentStoreError::MessageFactTargetMismatch { .. }
     ));
     assert!(!agents_dir.join("agent-1").join("events.cbor").exists());
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1635,8 +1579,6 @@ fn agent_store_replay_rejects_noncanonical_raw_message_parent() {
 
     let error = AgentStore::open(&agents_dir).expect_err("noncanonical raw parent must fail");
     assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1659,8 +1601,6 @@ fn ephemeral_agent_raw_message_fact_replays_without_files() {
         fact
     );
     assert!(!agents_dir.join("agent-1").exists());
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -1713,8 +1653,6 @@ fn session_store_persists_fallback_message_facts_without_membership_fold() {
     assert_eq!(events[1].seq.get(), 1);
     assert_eq!(events[1].event, fact);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -1739,8 +1677,6 @@ fn session_store_preserves_all_message_fact_variants_and_unresolved_refs() {
             .collect::<Vec<_>>(),
         facts
     );
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -1825,8 +1761,6 @@ fn session_restore_log_persists_tool_execution_facts_separately() {
     assert_eq!(events[0].event, request);
     assert_eq!(events[1].event, started);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -1898,8 +1832,6 @@ fn session_restore_append_rejects_invalid_existing_sequence() {
         bytes_before
     );
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -1929,8 +1861,6 @@ fn session_restore_append_recovers_truncated_existing_log() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].seq, PersistedSessionEventSeq::new(0));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -1973,8 +1903,6 @@ fn session_restore_append_rejects_wrong_existing_event_kind() {
         bytes_before
     );
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2033,8 +1961,6 @@ fn session_store_can_fold_one_membership_fact_without_persisting_it() {
         "memory-only membership must be absent from durable replay"
     );
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2068,8 +1994,6 @@ fn session_store_memory_only_fact_does_not_skip_later_durable_sequence() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].seq.get(), 0);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2112,8 +2036,6 @@ fn session_store_memory_only_fact_between_durable_facts_keeps_sequence_contiguou
     assert_eq!(events[0].seq.get(), 0);
     assert_eq!(events[1].seq.get(), 1);
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2228,8 +2150,6 @@ fn session_store_ephemeral_membership_overlay_is_strict_and_independently_sequen
         membership.contains_agent(&AgentId::parse("agent-ephemeral").expect("ephemeral agent id"))
     );
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2262,8 +2182,6 @@ fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
     let error = SessionStore::open(&sessions_dir).expect_err("bad sequence must fail load");
     assert!(matches!(error, SessionStoreError::InvalidSequence { .. }));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2303,8 +2221,6 @@ fn session_store_rejects_invalid_lock_time_reload() {
         bytes_before
     );
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2353,8 +2269,6 @@ fn session_store_replay_retry_preserves_ephemeral_membership_overlay() {
         bytes_before
     );
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2369,8 +2283,6 @@ fn session_store_rejects_partial_persisted_record_header_on_load() {
     let error = SessionStore::open(&sessions_dir).expect_err("torn header must fail load");
     assert!(matches!(error, SessionStoreError::Read { .. }));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2393,8 +2305,6 @@ fn session_store_validates_persisted_membership_events_on_load() {
     let error = SessionStore::open(&sessions_dir).expect_err("bad event must fail load");
     assert!(matches!(error, SessionStoreError::InvalidEvent { .. }));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2422,8 +2332,6 @@ fn session_store_rejects_path_escaping_session_ids() {
         .expect_err("absolute id must fail");
     assert!(matches!(error, SessionStoreError::InvalidSessionId { .. }));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2447,8 +2355,6 @@ fn session_store_rejects_identifiers_outside_the_shared_grammar() {
         assert!(matches!(error, SessionStoreError::InvalidSessionId { .. }));
     }
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2479,8 +2385,6 @@ fn list_session_metas_skips_invalid_session_directories() {
     assert_eq!(metas.len(), 1);
     assert_eq!(metas[0].0.as_str(), "valid-session");
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
@@ -2500,8 +2404,6 @@ fn agent_store_rejects_path_escaping_agent_ids_for_read_paths() {
     assert!(store.agent_meta("../escaped").is_err());
     assert!(crate::agent_is_locked(&agents_dir, "../escaped").is_err());
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -2529,8 +2431,6 @@ fn agent_store_rejects_invalid_agent_ids_without_panicking() {
         .expect_err("invalid interaction id must fail");
     assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -2555,8 +2455,6 @@ fn agent_store_rejects_invalid_agent_directory_names_on_open() {
     let error = AgentStore::open(&agents_dir).expect_err("invalid directory id must fail");
     assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -2585,8 +2483,6 @@ fn agent_store_rejects_non_agent_transcript_events() {
     assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
     assert!(!agents_dir.join("agent-1").join("events.cbor").exists());
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
@@ -2602,8 +2498,6 @@ fn session_store_rejects_transcript_events() {
     assert!(matches!(error, SessionStoreError::InvalidEvent { .. }));
     assert!(!sessions_dir.join("session-1").join("events.cbor").exists());
 
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 

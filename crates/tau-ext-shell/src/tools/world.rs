@@ -772,15 +772,11 @@ fn atomic_write_file_to_temp(target: &Path, temp_path: &Path, bytes: &[u8]) -> i
         drop(file);
         std::fs::rename(temp_path, target)?;
         if let Ok(dir) = std::fs::File::open(parent) {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = dir.sync_all();
         }
         Ok(())
     })();
     if result.is_err() && created_temp {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = std::fs::remove_file(temp_path);
     }
     result

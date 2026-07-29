@@ -267,8 +267,6 @@ impl Output {
 
     /// Enqueues one outbound protocol frame without waiting for writer flush.
     fn send(&self, message: HarnessInputMessage) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.handle.send_detached(message);
     }
 
@@ -279,22 +277,16 @@ impl Output {
 
     /// Enqueues one routine notice request.
     fn request_notice(&self, message: impl Into<String>, level: NoticeLevel) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.handle.request_notice_detached(message, level);
     }
 
     /// Enqueue one successful terminal tool report.
     fn report_tool_result(&self, result: ToolResult) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.handle.report_tool_result_detached(result);
     }
 
     /// Enqueue one failed terminal tool report.
     fn report_tool_error(&self, error: ToolError) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.handle.report_tool_error_detached(error);
     }
 
@@ -353,8 +345,6 @@ where
             return Ok(());
         }
         Err(error) => {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = manual.finish();
             return Err(error);
         }
@@ -367,8 +357,6 @@ where
         match load_initial_runtime(&configure, &mut manual, output.clone(), runtime_sender) {
             Ok(runtime) => runtime,
             Err(error) => {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = manual.finish();
                 return Err(error);
             }

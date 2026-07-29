@@ -3167,8 +3167,6 @@ fn custom_event_rejects_reserved_category_spelled_as_other() {
 #[test]
 #[should_panic(expected = "invalid event name segment")]
 fn event_name_new_panics_on_invalid_segments() {
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = EventName::new(EventCategory::Other("demo.extra".to_owned()), "progress");
 }
 
@@ -4260,8 +4258,6 @@ fn tool_name_rejects_invalid_names() {
 #[test]
 #[should_panic(expected = "invalid tool name")]
 fn tool_name_new_panics_on_invalid() {
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = ToolName::new("bad.name");
 }
 

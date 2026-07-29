@@ -417,8 +417,6 @@ fn spawn_extension_with_exit_and_prefix(
     thread::spawn(move || {
         let result = run_impl(reader_stream, runtime_stream)
             .map_err(|error| format!("extension should run: {error}"));
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = done_tx.send(result);
     });
     let reader = EventReader::new(BufReader::new(
@@ -9079,8 +9077,6 @@ fn overlapping_same_agent_workdir_setter_is_rejected_until_first_commit() {
         .write_event(&Event::AgentMetadataSet(first_metadata))
         .expect("commit first cwd");
     writer.flush().expect("flush commit");
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = reader.read_event().expect("read notice").expect("notice");
     let result = reader.read_event().expect("read result").expect("result");
     assert!(
@@ -9442,8 +9438,6 @@ fn malformed_workdir_metadata_does_not_wedge_context_ready() {
         )))
         .expect("agent replay boundary");
     writer.flush().expect("flush load");
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = reader
         .read_event()
         .expect("read initial metadata")

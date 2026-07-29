@@ -179,24 +179,16 @@ pub(crate) fn run_shell_command(
         watcher_cancel.wait_until_requested_or_completed();
         if watcher_cancel.should_report_cancel() {
             watcher_cancel.kill_process_group();
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = process_tx.send(ProcessEvent::Canceled);
         }
     });
     let child_waiter = std::thread::spawn(move || {
         let status = child.wait().ok();
         waiter_cancel.mark_completed();
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = waiter_tx.send(ProcessEvent::Exited(status));
     });
     let process_outcome = wait_for_process_event(&process_rx, deadline, &process_cancel);
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = child_waiter.join();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = cancel_watcher.join();
     // A shell can exit while background descendants keep inherited stdout/stderr
     // pipes open. Kill the process group before joining pipe readers so
@@ -440,8 +432,6 @@ impl PipeStop {
         // write is best-effort and intentionally ignores closed-pipe/full-pipe
         // errors because the flag itself carries the state.
         unsafe {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = libc::write(
                 self.wake_write.as_raw_fd(),
                 byte.as_ptr().cast(),
@@ -642,8 +632,6 @@ fn wait_for_pipe_readiness(pipe_fd: RawFd, wake_fd: Option<BorrowedFd<'_>>, time
     // SAFETY: `fds` contains borrowed file descriptors that remain valid for
     // the duration of the call. `poll` does not take ownership of them.
     unsafe {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = libc::poll(fds.as_mut_ptr(), nfds, timeout_ms);
     }
 }
@@ -658,8 +646,6 @@ fn set_nonblocking<R: std::os::fd::AsRawFd>(pipe: &R) {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
         if flags != -1 {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
     }

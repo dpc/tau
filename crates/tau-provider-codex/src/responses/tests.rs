@@ -49,8 +49,6 @@ impl CompactExitRelease {
 impl Drop for CompactExitRelease {
     fn drop(&mut self) {
         if let Some(sender) = self.sender.take() {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = sender.send(());
         }
     }

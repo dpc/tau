@@ -412,8 +412,6 @@ fn dispatch_tool_invoke(
     handle: &ClientHandle,
 ) {
     if let Some(display) = initial_display(&invoke, local_tool_name) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = handle.report_tool_progress_detached(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -445,8 +443,6 @@ fn dispatch_tool_invoke(
             originator: invoke.originator,
         }),
     };
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = report_terminal_detached(handle, event);
 }
 
@@ -988,8 +984,6 @@ fn redact_url(url: &Url) -> String {
 
 fn read_capped(reader: impl std::io::Read) -> String {
     let mut buf = Vec::new();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = reader
         .take(ERROR_BODY_MAX_BYTES as u64 + 1)
         .read_to_end(&mut buf);

@@ -448,8 +448,6 @@ impl StateStore {
         }
         let pending_path = self.change_path("pending", id)?;
         if let Err(error) = self.storage.delete_file(&pending_path) {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.storage.delete_file(&sending_path);
             return Err(error);
         }
@@ -491,8 +489,6 @@ impl StateStore {
     /// Deny a pending calendar change.
     pub(crate) fn deny_change(&self, id: &str) -> Result<(), String> {
         if self.change_denied_exists(id)? {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.storage.delete_file(&self.change_path("pending", id)?);
             return Ok(());
         }

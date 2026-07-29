@@ -103,8 +103,6 @@ impl Harness {
             let replay = self.replay_session_events(connection_id, &historical_selectors);
             self.replay_harness_notice(connection_id, &historical_selectors);
             self.emit_session_replay_complete(connection_id, replay.session_error());
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bus.finish_catch_up(connection_id);
         }
         Ok(())
@@ -202,8 +200,6 @@ impl Harness {
                 .source
                 .as_ref()
                 .and_then(tau_core::PersistedEventSource::connection_id);
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bus.send_to(client_id, source, frame);
         }
 
@@ -220,8 +216,6 @@ impl Harness {
                             .source
                             .as_ref()
                             .and_then(tau_core::PersistedEventSource::connection_id);
-                        // This call is intentionally best-effort; preserve the existing discarded
-                        // result. ast-grep-ignore: let-underscore-call
                         let _ = self.bus.send_to(client_id, source, frame);
                     }
                 }
@@ -302,8 +296,6 @@ impl Harness {
                         .source
                         .as_ref()
                         .and_then(tau_core::PersistedEventSource::connection_id);
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = self.bus.send_to(client_id, source, frame);
                 }
             }
@@ -362,16 +354,12 @@ impl Harness {
             })
             .collect();
         for (client_id, kind, selectors) in subscribers {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bus.begin_catch_up(&client_id);
             let replay = self.replay_session_history(&client_id, &selectors);
             if kind != tau_proto::ClientKind::Ui {
                 self.replay_harness_notice(&client_id, &selectors);
             }
             self.emit_session_replay_complete(&client_id, replay.session_error());
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bus.finish_catch_up(&client_id);
         }
     }
@@ -382,8 +370,6 @@ impl Harness {
         agent_id: tau_proto::AgentId,
         error: Option<String>,
     ) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             client_id,
             None,
@@ -402,8 +388,6 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         error: Option<String>,
     ) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             client_id,
             None,
@@ -482,8 +466,6 @@ impl Harness {
                                 .source
                                 .as_ref()
                                 .and_then(tau_core::PersistedEventSource::connection_id);
-                            // Intentionally discard this best-effort result.
-                            // ast-grep-ignore: let-underscore-call
                             let _ = self.bus.send_to(&client_id, source, frame);
                         }
                     }
@@ -528,8 +510,6 @@ impl Harness {
         source: Option<&tau_proto::ConnectionId>,
         event: Event,
     ) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             client_id,
             source,

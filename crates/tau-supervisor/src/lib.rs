@@ -473,8 +473,6 @@ impl Drop for SupervisedChild {
             Ok(Some(_)) => {}
             Ok(None) => {
                 if self.kill_child().is_ok() {
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = self.wait_for_exit(Duration::MAX);
                 }
             }
@@ -499,8 +497,6 @@ fn spawn_child_waiter(
         .name("tau-supervisor-child-wait".to_owned())
         .spawn(move || {
             let result = child_guard.wait_for_exit();
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = sender.send(result);
         })
         .map_err(SupervisionError::WaiterThread)?;
@@ -573,11 +569,7 @@ impl Drop for SpawnedChildGuard {
         if let Some(child) = &mut self.child
             && !self.waited
         {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = child.kill();
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = child.wait();
         }
     }
@@ -615,14 +607,10 @@ fn spawn_stdout_reader(
                         }
                     }
                     Ok(None) => {
-                        // This call is intentionally best-effort; preserve the existing discarded
-                        // result. ast-grep-ignore: let-underscore-call
                         let _ = sender.send(Ok(StdoutFrame::Closed));
                         return;
                     }
                     Err(error) => {
-                        // This call is intentionally best-effort; preserve the existing discarded
-                        // result. ast-grep-ignore: let-underscore-call
                         let _ = sender.send(Err(error));
                         return;
                     }

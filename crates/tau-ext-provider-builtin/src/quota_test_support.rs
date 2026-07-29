@@ -178,8 +178,6 @@ impl PumpGuard {
 
     /// Unblocks and joins the pump.
     fn stop(&mut self) -> Result<(), String> {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.shutdown.shutdown(Shutdown::Both);
         let Some(handle) = self.handle.take() else {
             return Ok(());
@@ -194,8 +192,6 @@ impl PumpGuard {
 
 impl Drop for PumpGuard {
     fn drop(&mut self) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.stop();
     }
 }

@@ -308,8 +308,6 @@ impl DirLockManager {
                     .expect("dir lock backend poisoned")
                     .take();
                 if let Some(backend) = removed_backend {
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = backend.shutdown();
                     self.notify_lock_waiters();
                 }
@@ -349,8 +347,6 @@ impl DirLockManager {
                     .replace(new_backend);
                 self.clear_memory_locks_and_waiters();
                 if let Some(old_backend) = old_backend {
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = old_backend.shutdown();
                 }
                 self.notify_lock_waiters();
@@ -1239,8 +1235,6 @@ fn dispatch_dir_lock_update(
         invoke.agent_id.clone(),
         request.dir.clone(),
         move || {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = wait_tx.report_tool_progress(waiting_progress(&wait_invoke, &[wait_dir], None));
         },
     );
@@ -1733,8 +1727,6 @@ fn cancelled_event(invoke: ToolStarted) -> Event {
 }
 
 fn send_event(tx: &Output, event: Event) {
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = tx.report_tool_terminal(event);
 }
 

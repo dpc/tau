@@ -678,8 +678,6 @@ fn active_same_owner_auto_prevents_abandoned_lock_error() {
                 || {},
                 fast_liveness_policy(),
             );
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = tx.send(());
             result
         }
@@ -1589,8 +1587,6 @@ fn filesystem_backend_reaps_abnormally_exited_subprocess() {
     let release = tempdir.path().join("release");
     let mut child = spawn_lock_holder(&state_dir, &ready, &release, true);
     wait_until(|| ready.exists());
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = child.wait().expect("child abort status");
 
     let manager = filesystem_lock_manager(&state_dir);

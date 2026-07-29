@@ -297,8 +297,6 @@ impl Drop for SocketListener {
             return;
         }
         if SocketIdentity::from_metadata(&metadata) == self.socket_identity {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = fs::remove_file(&self.path);
         }
     }
@@ -507,12 +505,8 @@ fn connect_unix_with_timeout(path: &Path, timeout: Duration) -> io::Result<UnixS
 impl Drop for SocketPeer {
     fn drop(&mut self) {
         self.reader_frames.take();
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.shutdown_stream.shutdown(std::net::Shutdown::Both);
         if let Some(reader_thread) = self.reader_thread.take() {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = reader_thread.join();
         }
     }
@@ -543,8 +537,6 @@ fn read_frames(stream: UnixStream, sender: SyncSender<Result<HarnessOutputMessag
             }
             Ok(None) => return,
             Err(error) => {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = sender.send(Err(error));
                 return;
             }

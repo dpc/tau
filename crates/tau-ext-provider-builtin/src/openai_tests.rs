@@ -35,8 +35,6 @@ impl SharedWriter {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return;
         };
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = cv
             .wait_timeout_while(bytes, remaining, |bytes| bytes.len() == previous_len)
             .expect("wait for shared writer");
@@ -409,8 +407,6 @@ fn silent_duplicate_prewarm_does_not_block_real_prompt() {
         executor_count.fetch_add(1, Ordering::SeqCst);
         let (wake_tx, wake_rx) = mpsc::channel();
         let _guard = execution.abort.register_waker(Arc::new(move || {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = wake_tx.send(());
         }));
         started_tx.send(()).expect("announce prewarm start");
@@ -492,8 +488,6 @@ fn session_shutdown_cancels_and_joins_silent_prewarm() {
     let prewarm_executor: PrewarmExecutor = Arc::new(move |mut execution| {
         let (wake_tx, wake_rx) = mpsc::channel();
         let _guard = execution.abort.register_waker(Arc::new(move || {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = wake_tx.send(());
         }));
         started_tx.send(()).expect("announce prewarm start");
@@ -551,8 +545,6 @@ fn profile_rotation_cancels_active_prewarm() {
     let prewarm_executor: PrewarmExecutor = Arc::new(move |mut execution| {
         let (wake_tx, wake_rx) = mpsc::channel();
         let _guard = execution.abort.register_waker(Arc::new(move || {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = wake_tx.send(());
         }));
         started_tx.send(()).expect("announce prewarm start");
@@ -4187,8 +4179,6 @@ fn real_repetition_failure_finishes_once_without_scheduler_retry() {
     let server = thread::spawn(move || {
         let (mut socket, _) = listener.accept().expect("accept repetition request");
         let mut request = [0_u8; 8192];
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = socket.read(&mut request).expect("read repetition request");
         let event = serde_json::json!({
             "choices": [{
@@ -4721,8 +4711,6 @@ fn worker_output_wakes_loop_before_prompt_done() {
             executor,
         )
         .map_err(|error| error.to_string());
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = result_tx.send(result);
     });
 

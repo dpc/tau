@@ -260,8 +260,6 @@ fn run_ripgrep(
     // If the limit fired we may have killed reading mid-stream; make
     // sure the child does not linger.
     if stream.match_limit_reached {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = stop_tx.send(());
     }
 
@@ -344,8 +342,6 @@ fn wait_ripgrep_linux(
     let stop_tx = event_tx.clone();
     std::thread::spawn(move || {
         if stop_rx.recv().is_ok() {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = stop_tx.send(RipgrepWaitEvent::MatchLimitReached);
         }
     });
@@ -354,8 +350,6 @@ fn wait_ripgrep_linux(
         let cancel_tx = event_tx;
         std::thread::spawn(move || {
             if cancel_rx.recv().is_ok() {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = cancel_tx.send(RipgrepWaitEvent::Cancelled);
             }
         });
@@ -371,8 +365,6 @@ fn wait_ripgrep_linux(
         }
         Ok(RipgrepWaitEvent::ExitWaitFailed(error)) => {
             kill_ripgrep_child(&mut child, pid);
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = child.wait();
             Err(ToolFailure::from(format!(
                 "failed to wait for ripgrep exit readiness: {error}"
@@ -417,8 +409,6 @@ fn spawn_ripgrep_exit_waiter(
                 if error.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = event_tx.send(RipgrepWaitEvent::ExitWaitFailed(error.to_string()));
                 return;
             }
@@ -426,14 +416,10 @@ fn spawn_ripgrep_exit_waiter(
                 continue;
             }
             if poll_fd.revents & libc::POLLIN != 0 {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = event_tx.send(RipgrepWaitEvent::Exited);
                 return;
             }
             if poll_fd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = event_tx.send(RipgrepWaitEvent::ExitWaitFailed(format!(
                     "pidfd poll failed with revents={}",
                     poll_fd.revents
@@ -477,8 +463,6 @@ fn kill_ripgrep_child(child: &mut std::process::Child, pid: u32) {
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = child.kill();
 }
 
@@ -500,14 +484,10 @@ fn wait_ripgrep_polling_fallback(
         }
         if cancel_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
             cancelled = true;
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = child.kill();
             return Ok((child.wait().ok(), cancelled));
         }
         if stop_rx.try_recv().is_ok() {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = child.kill();
             return Ok((child.wait().ok(), cancelled));
         }

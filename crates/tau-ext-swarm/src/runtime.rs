@@ -91,12 +91,8 @@ struct Worker {
 
 impl Worker {
     fn stop(mut self) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.shutdown.send(true);
         if let Some(thread) = self.thread.take() {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = thread.join();
         }
     }
@@ -264,8 +260,6 @@ impl SwarmRuntime {
         self.projection = Arc::new(tokio::sync::Mutex::new(projection));
         self.changed = Arc::new(tokio::sync::Notify::new());
         if let Some(handle) = &self.handle {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = handle.request_notice_detached(
                 "Tau Swarm projection exceeded configured agent/watch bounds; publication is disabled until a fresh session replay",
                 tau_proto::NoticeLevel::Warning,
@@ -286,8 +280,6 @@ impl SwarmRuntime {
             .unwrap_or_else(|error| error.into_inner())
             .remove(&key)
         {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = completion.send(Ok(()));
         }
     }
@@ -344,8 +336,6 @@ impl SwarmRuntime {
                     blockers_rx,
                     shutdown_rx,
                 ) {
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = handle.request_notice_detached(
                         format!("Tau Swarm worker stopped: {}", bounded_error(&error)),
                         tau_proto::NoticeLevel::Warning,
@@ -613,8 +603,6 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
         {
             let id = AgentId::new(event.agent_id.as_str());
             state.agents.remove(&id);
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = state.projection.blocking_lock().remove_agent(&id);
             state.changed.notify_waiters();
             state

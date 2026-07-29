@@ -275,8 +275,6 @@ fn writer_records_protocol_io_after_successful_flush() {
     .expect("queue output");
 
     let mut reader = tau_proto::HarnessOutputReader::new(BufReader::new(reader_stream));
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = reader.read_message().expect("read output");
 
     let stats = meter.cumulative_stats();

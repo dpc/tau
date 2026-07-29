@@ -481,8 +481,6 @@ impl WsConn {
         let _abort_waker = {
             let inbound_tx = self.inbound_tx.clone();
             abort.register_waker(Arc::new(move || {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = inbound_tx.send(InboundEvent::AbortWake);
             }))
         };
@@ -921,8 +919,6 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
     // Stream ended without a close frame (clean EOF). Surface it as
     // a `Closed` so the next `run_turn` call returns a retryable
     // error rather than hanging on `blocking_recv`.
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = tx.send(InboundEvent::Closed);
 }
 

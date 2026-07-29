@@ -1704,8 +1704,6 @@ async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
         let _ws = tokio_tungstenite::accept_async(stream)
             .await
             .expect("complete websocket handshake");
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = accepted_tx.send(());
         std::future::pending::<()>().await;
     });
@@ -1759,8 +1757,6 @@ async fn socket_worker_once_reconnects_after_missing_heartbeat_pong() {
         let _ws = tokio_tungstenite::accept_async(stream)
             .await
             .expect("complete websocket handshake");
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = accepted_tx.send(());
         std::future::pending::<()>().await;
     });
@@ -1816,8 +1812,6 @@ async fn socket_worker_once_keeps_responsive_idle_connection() {
         let mut ws = tokio_tungstenite::accept_async(stream)
             .await
             .expect("complete websocket handshake");
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = accepted_tx.send(());
         let mut ping_count = 0;
         let mut responsive_tx = Some(responsive_tx);
@@ -1829,8 +1823,6 @@ async fn socket_worker_once_keeps_responsive_idle_connection() {
                         .expect("answer client heartbeat");
                     ping_count += 1;
                     if ping_count == 12 {
-                        // This call is intentionally best-effort; preserve the existing discarded
-                        // result. ast-grep-ignore: let-underscore-call
                         let _ = responsive_tx.take().expect("single signal").send(());
                         std::future::pending::<()>().await;
                     }
@@ -1898,8 +1890,6 @@ async fn socket_worker_once_times_out_from_off_phase_pong_despite_other_traffic(
         let mut ws = tokio_tungstenite::accept_async(stream)
             .await
             .expect("complete websocket handshake");
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = accepted_tx.send(());
         let hello = Message::Text(r#"{"type":"hello"}"#.to_owned().into());
         ws.send(hello.clone()).await.expect("send initial hello");
@@ -1907,8 +1897,6 @@ async fn socket_worker_once_times_out_from_off_phase_pong_despite_other_traffic(
         ws.send(Message::Pong(Vec::new().into()))
             .await
             .expect("send off-phase pong");
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = pong_tx.send(tokio::time::Instant::now());
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -2089,8 +2077,6 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
             }
         }
         assert!(saw_ack && saw_pong);
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = reader_live_tx.send(());
         std::future::pending::<()>().await;
     });
@@ -2196,8 +2182,6 @@ async fn saturated_admission_does_not_ack_supported_envelope() {
             tokio::time::timeout(Duration::from_millis(200), ws.next()).await,
             Ok(Some(Ok(Message::Text(_))))
         );
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = result_tx.send(received_ack);
     });
     let (tx, _rx) = mpsc::channel();
@@ -4283,8 +4267,6 @@ fn reaction_http_errors_are_typed_and_body_safe() {
         ] {
             let (mut stream, _) = listener.accept().expect("accept reaction request");
             let mut request = [0_u8; 4096];
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = stream.read(&mut request).expect("read request");
             stream
                 .write_all(response.as_bytes())

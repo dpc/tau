@@ -28,8 +28,6 @@ pub fn init_stderr_from_env(default_filter: &str) {
         .with_level(true)
         .with_timer(tracing_subscriber::fmt::time::SystemTime)
         .finish();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
@@ -111,8 +109,6 @@ pub fn init(state_dir: &Path) -> io::Result<UiLogging> {
         .with_ansi(false)
         .with_timer(tracing_subscriber::fmt::time::SystemTime)
         .finish();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     Ok(UiLogging {
@@ -139,8 +135,6 @@ pub fn init_ephemeral() -> UiLogging {
         .with_ansi(false)
         .with_timer(tracing_subscriber::fmt::time::SystemTime)
         .finish();
-    // This call is intentionally best-effort; preserve the existing discarded
-    // result. ast-grep-ignore: let-underscore-call
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     UiLogging {

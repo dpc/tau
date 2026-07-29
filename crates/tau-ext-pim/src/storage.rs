@@ -162,8 +162,6 @@ impl Storage for FsStorage {
         let temp = self.temp_path(&path)?;
         self.write_private_temp(&temp, contents)?;
         if let Err(error) = std::fs::rename(&temp, &path) {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = std::fs::remove_file(&temp);
             return Err(error.to_string());
         }
@@ -187,14 +185,10 @@ impl Storage for FsStorage {
                     .map_err(StorageCreateError::Other)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = std::fs::remove_file(&temp);
                 Err(StorageCreateError::AlreadyExists)
             }
             Err(error) => {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = std::fs::remove_file(&temp);
                 Err(StorageCreateError::Other(error.to_string()))
             }

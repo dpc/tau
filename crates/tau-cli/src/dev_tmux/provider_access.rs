@@ -224,8 +224,6 @@ fn cleanup_allowed_scratch_profiles(
     for provider in allowed_profiles {
         let path = scratch_auth_dir.join(format!("{provider}.json"));
         if reject_symlink(&path).is_ok() {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = std::fs::remove_file(path);
         }
     }

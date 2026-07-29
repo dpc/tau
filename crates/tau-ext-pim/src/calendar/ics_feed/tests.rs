@@ -439,8 +439,6 @@ fn serve_ics_once(body: &'static str) -> (String, thread::JoinHandle<()>) {
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept request");
         let mut buf = [0_u8; 1024];
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = stream.read(&mut buf);
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/calendar\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -460,8 +458,6 @@ fn serve_redirect_once(location: &'static str) -> (String, thread::JoinHandle<()
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept request");
         let mut buf = [0_u8; 1024];
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = stream.read(&mut buf);
         let response =
             format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nConnection: close\r\n\r\n");

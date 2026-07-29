@@ -37,8 +37,6 @@ impl RawModeCleanup for RawModeGuard {
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.active {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = crossterm::terminal::disable_raw_mode();
         }
     }

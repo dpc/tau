@@ -4430,8 +4430,6 @@ impl Harness {
                     command.request,
                     command.result,
                 ) {
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = self.bus.send_to(
                         &client_id,
                         None,
@@ -4520,8 +4518,6 @@ impl Harness {
             self.extensions.pending_connects -= 1;
         }
         self.emit_extension_starting(&name);
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = initialized_ack.send(());
         Ok(())
     }
@@ -5439,8 +5435,6 @@ impl Harness {
         #[cfg(not(test))]
         let _ = seq;
         let frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.publish_from(source, frame);
         if let Some((agent_id, outcome)) = persisted_agent {
             self.activate_projected_message_fact(&agent_id, outcome, &event);
@@ -5889,8 +5883,6 @@ impl Harness {
             // payload via a directed route so replay/live delivery metadata
             // matches the subscribed-provider path.
             let execution_kinds = [ClientKind::Provider];
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self
                 .bus
                 .publish_from_excluding_kinds(source, observer_frame, &execution_kinds);
@@ -5938,8 +5930,6 @@ impl Harness {
             // exclude every provider and fail the exact durable owner before any
             // remote client can see the request.
             let execution_kinds = [ClientKind::Provider];
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self
                 .bus
                 .publish_from_excluding_kinds(source, observer_frame, &execution_kinds);
@@ -5956,14 +5946,10 @@ impl Harness {
         ) {
             // Raw provider and generic result data is not a UI payload. UIs
             // receive the separately published payload-free display projection.
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ =
                 self.bus
                     .publish_from_excluding_kinds(source, observer_frame, &[ClientKind::Ui]);
         } else {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bus.publish_from(source, observer_frame);
         }
         if let Event::AgentPromptCreated(prompt) = &event {
@@ -6638,8 +6624,6 @@ impl Harness {
                 client_id,
                 request_id,
             } => {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = self.bus.send_to(
                     &client_id,
                     None,
@@ -6685,8 +6669,6 @@ impl Harness {
                 client_id,
                 request_id,
             } => {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = self.bus.send_to(
                     &client_id,
                     None,
@@ -7285,8 +7267,6 @@ impl Harness {
                             activation_cut: started.activation_cut,
                         };
                 }
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = self.send_prompt_to_agent_for(&cid);
             }
         }
@@ -8967,8 +8947,6 @@ impl Harness {
         let Some(client_id) = client_id else {
             return;
         };
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             client_id,
             None,
@@ -8985,8 +8963,6 @@ impl Harness {
         };
         let (ack_tx, ack_rx) = mpsc::channel();
         if writer.send(WriterCommand::Flush(ack_tx)).is_ok() {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = ack_rx.recv_timeout(Duration::from_secs(2));
         }
     }
@@ -9000,8 +8976,6 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
         request: tau_proto::GetAgentPromptCreated,
     ) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             connection_id,
             None,
@@ -9032,8 +9006,6 @@ impl Harness {
                 ),
             }
         };
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             connection_id,
             None,
@@ -9063,8 +9035,6 @@ impl Harness {
                         prompt: None,
                         error: Some(format!("failed to render system prompt: {error}")),
                     };
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = self.bus.send_to(
                         connection_id,
                         None,
@@ -9089,8 +9059,6 @@ impl Harness {
                 None,
             )
         };
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             connection_id,
             None,
@@ -9129,8 +9097,6 @@ impl Harness {
                 None => (Some(self.tool_definitions_from_specs(&specs)), None),
             }
         };
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             connection_id,
             None,
@@ -9180,8 +9146,6 @@ impl Harness {
                 },
             ));
         }
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(connection_id, None, message);
     }
 
@@ -9321,8 +9285,6 @@ impl Harness {
         request_id: String,
         result: tau_proto::ExtensionDataResultPayload,
     ) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             connection_id,
             None,
@@ -12421,8 +12383,6 @@ impl Harness {
                 pending.target_label
             ),
         };
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             &pending.requester_client_id,
             Some(crate::harness::harness_connection_id()),
@@ -13686,8 +13646,6 @@ impl Harness {
         match message {
             HarnessInputMessage::Hello(hello) => {
                 if let Err(error) = validate_protocol_version(&hello) {
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = self.bus.send_to(
                         client_id,
                         None,
@@ -13712,8 +13670,6 @@ impl Harness {
                 ) {
                     Ok(()) => Ok(true),
                     Err(RouteError::SubscriptionDenied { reason, .. }) => {
-                        // This call is intentionally best-effort; preserve the existing discarded
-                        // result. ast-grep-ignore: let-underscore-call
                         let _ = self.bus.send_to(
                             client_id,
                             None,
@@ -13745,8 +13701,6 @@ impl Harness {
             }
             HarnessInputMessage::GetCurrentSession(request) => {
                 if self.is_ui_client(client_id) {
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = self.bus.send_to(
                         client_id,
                         None,
@@ -13785,8 +13739,6 @@ impl Harness {
                 if let Some(result) =
                     self.start_external_agent_message_auth(client_id.clone(), request)
                 {
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = self.bus.send_to(
                         client_id,
                         None,
@@ -13800,8 +13752,6 @@ impl Harness {
                     return Ok(true);
                 }
                 let result = self.handle_external_agent_message_auth_request(request);
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = self.bus.send_to(
                     client_id,
                     None,
@@ -13818,8 +13768,6 @@ impl Harness {
                     available: request.session_id == self.current_session_id
                         && self.has_peer_entrypoint(),
                 };
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = self.bus.send_to(
                     client_id,
                     None,
@@ -14009,8 +13957,6 @@ impl Harness {
             .into_iter()
             .filter(|connection| connection.kind == ClientKind::Ui)
         {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bus.send_to(
                 &ui.id,
                 Some(client_id),
@@ -14223,8 +14169,6 @@ impl Harness {
             always_show,
         });
         let frame = HarnessOutputMessage::deliver_live(tau_proto::UnixMicros::now(), event);
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(client_id, None, frame);
     }
 
@@ -15063,8 +15007,6 @@ impl Harness {
         const RETRY_TOMBSTONE_LIMIT: usize = 1024;
         const PENDING_RETRY_LIMIT: usize = 1024;
         let reject = |this: &mut Self, target_agent_id, label: String, message: &str| {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = this.bus.send_to(
                 client_id,
                 None,
@@ -15667,8 +15609,6 @@ impl Harness {
                 Event::StartAgentResult(result),
             );
         } else {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bus.send_to(
                 &source_id,
                 None,
@@ -15886,8 +15826,6 @@ impl Harness {
             .collect();
         for (request_id, pending) in failed_retries {
             self.pending_retry_prompts.remove(&request_id);
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bus.send_to(
                 &pending.requester_client_id,
                 None,
@@ -16142,8 +16080,6 @@ impl Harness {
             })
             .collect();
 
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.registry.unregister_connection(connection_id);
         for (internal_name, visible_name) in removing_tools {
             if self
@@ -16340,8 +16276,6 @@ impl Harness {
         action_id: String,
         message: String,
     ) {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             client_id,
             Some(crate::harness::harness_connection_id()),
@@ -16479,8 +16413,6 @@ impl Harness {
         }
         self.pending_action_invocations
             .remove(&result.invocation_id);
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             &pending.requester_client_id,
             Some(source_id),
@@ -16509,8 +16441,6 @@ impl Harness {
             return;
         }
         self.pending_action_invocations.remove(&error.invocation_id);
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             &pending.requester_client_id,
             Some(source_id),
@@ -16980,8 +16910,6 @@ impl Harness {
                         error = %error,
                         "refusing to configure extension with unsafe state directory name"
                     );
-                    // This call is intentionally best-effort; preserve the existing discarded
-                    // result. ast-grep-ignore: let-underscore-call
                     let _ = self.bus.send_to(
                         source_id,
                         None,
@@ -17000,8 +16928,6 @@ impl Harness {
                 "failed to create extension state directory before configure"
             );
         }
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             source_id,
             None,
@@ -17327,8 +17253,6 @@ impl Harness {
                 Event::StartAgentResult(result),
             );
         } else {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bus.send_to(
                 source_id,
                 None,
@@ -17360,8 +17284,6 @@ impl Harness {
             Some(crate::harness::harness_connection_id()),
             Event::StartAgentAccepted(accepted.clone()),
         );
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             source_id,
             None,
@@ -17385,8 +17307,6 @@ impl Harness {
             Some(crate::harness::harness_connection_id()),
             Event::StartAgentAccepted(accepted.clone()),
         );
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             source_id,
             None,
@@ -17413,8 +17333,6 @@ impl Harness {
             Some(crate::harness::harness_connection_id()),
             Event::StartAgentAccepted(accepted.clone()),
         );
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             crate::harness::harness_connection_id(),
             None,
@@ -18051,8 +17969,6 @@ impl Harness {
         } else {
             tau_proto::UiSetAgentNavigationModeOutcome::Applied
         };
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.bus.send_to(
             client_id,
             None,
@@ -20062,8 +19978,6 @@ impl Harness {
         // the shutdown event above concurrently tells providers to cancel the
         // scheduler-owned old-session jobs.
         for (_, pending) in std::mem::take(&mut self.pending_retry_prompts) {
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bus.send_to(
                 &pending.requester_client_id,
                 None,
@@ -20156,8 +20070,6 @@ impl Harness {
                 request_id,
             } = &pending.completion
             {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = self.bus.send_to(
                     client_id,
                     None,
@@ -20251,8 +20163,6 @@ impl Harness {
 
             // Send the new debug log to the new session's dir, so each
             // session is self-contained.
-            // This call is intentionally best-effort; preserve the existing discarded
-            // result. ast-grep-ignore: let-underscore-call
             let _ = self.enable_debug_log(&self.sessions_dir().join(new_session_id.as_str()));
         }
         if let Some(path) = &self.runtime_harness_path
@@ -23325,8 +23235,6 @@ impl Harness {
     /// is returned to the caller and retained only by the compact prompt fact's
     /// live continuation; semantic persistence never stores it.
     fn prepare_agent_prompt_for_dispatch(&mut self, cid: &AgentId) -> Option<AgentPromptCreated> {
-        // This call is intentionally best-effort; preserve the existing discarded
-        // result. ast-grep-ignore: let-underscore-call
         let _ = self.ensure_agent_id_for_agent(cid);
         let conv = self
             .agents
@@ -25914,8 +25822,6 @@ impl Harness {
                     Event::StartAgentResult(result),
                 );
             } else {
-                // This call is intentionally best-effort; preserve the existing discarded
-                // result. ast-grep-ignore: let-underscore-call
                 let _ = self.bus.send_to(
                     &source,
                     result_source,
