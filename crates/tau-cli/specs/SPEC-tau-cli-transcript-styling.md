@@ -35,6 +35,12 @@ URL detection to remain useful; autolinks and bare URLs continue to display the
 URL once. Link targets and labels remain subject to the terminal renderer
 control-character sanitization boundary.
 
+Bare URLs, autolinks, and explicit links nested inside supported strong,
+emphasis, combined strong-emphasis, or strikethrough delimiters retain both
+their hyperlink metadata and the surrounding semantic style. Delimiters remain
+visible under the same copy/paste-preserving rule. Inline code and escaped text
+inside those styles continue to suppress link recognition.
+
 Headings and list markers are structural emphasis: built-in themes make them
 bold without assigning a foreground, so they retain the surrounding user,
 assistant, or thinking foreground (and background). Strong and emphasis likewise

@@ -127,7 +127,6 @@ enum MarkdownStyle {
     PromptMarker,
     Code,
     Escape,
-    Link,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -433,13 +432,13 @@ fn styled_block_from_runs(
 
     let body_ts = theme.resolve_style(&StyleName::new(base_style_name));
     let mut rendered = themed_text(theme, &themed);
-    if osc8_links {
-        let targets = prefix
-            .iter()
-            .chain(runs)
-            .filter(|run| !run.text.is_empty())
-            .map(|run| run.hyperlink.as_deref());
-        for (span, target) in rendered.spans_mut().iter_mut().zip(targets) {
+    let targets = prefix
+        .iter()
+        .chain(runs)
+        .filter(|run| !run.text.is_empty())
+        .map(|run| run.hyperlink.as_deref());
+    for (span, target) in rendered.spans_mut().iter_mut().zip(targets) {
+        if osc8_links {
             span.hyperlink = target
                 .and_then(tau_cli_term::sanitize_hyperlink_target)
                 .map(std::sync::Arc::from);
@@ -485,77 +484,38 @@ fn push_runs(
 ) {
     for run in runs {
         if !(run.text.is_empty()) {
-            match run.style {
-                MarkdownStyle::Base => children.push(SpanTree::text(run.text.clone())),
-                MarkdownStyle::Strong => {
-                    children.push(SpanTree::span(
-                        styles.strong,
-                        vec![SpanTree::text(run.text.clone())],
-                    ));
-                }
-                MarkdownStyle::StrongEmphasis => {
-                    children.push(SpanTree::span(
-                        styles.strong,
-                        vec![SpanTree::span(
-                            styles.emphasis,
-                            vec![SpanTree::text(run.text.clone())],
-                        )],
-                    ));
-                }
-                MarkdownStyle::Emphasis => {
-                    children.push(SpanTree::span(
-                        styles.emphasis,
-                        vec![SpanTree::text(run.text.clone())],
-                    ));
-                }
-                MarkdownStyle::Strikethrough => {
-                    children.push(SpanTree::span(
-                        styles.strikethrough,
-                        vec![SpanTree::text(run.text.clone())],
-                    ));
-                }
-                MarkdownStyle::Heading => {
-                    children.push(SpanTree::span(
-                        styles.heading,
-                        vec![SpanTree::text(run.text.clone())],
-                    ));
-                }
-                MarkdownStyle::ListMarker => {
-                    children.push(SpanTree::span(
-                        styles.list_marker,
-                        vec![SpanTree::text(run.text.clone())],
-                    ));
-                }
-                MarkdownStyle::PromptMarker => {
-                    children.push(SpanTree::span(
-                        styles.prompt_marker,
-                        vec![SpanTree::text(run.text.clone())],
-                    ));
-                }
-                MarkdownStyle::Code => {
-                    children.push(SpanTree::span(
-                        styles.code,
-                        vec![SpanTree::text(run.text.clone())],
-                    ));
-                }
-                MarkdownStyle::Escape => {
-                    children.push(SpanTree::span(
-                        styles.escape,
-                        vec![SpanTree::text(run.text.clone())],
-                    ));
-                }
-                MarkdownStyle::Link => {
-                    let target = run.hyperlink.as_deref().unwrap_or_default();
-                    let needs_visible_target = show_link_target
-                        || tau_cli_term::sanitize_hyperlink_target(target).is_none();
-                    let text = if needs_visible_target && target != run.text {
-                        format!("{} ({target})", run.text)
-                    } else {
-                        run.text.clone()
-                    };
-                    children.push(SpanTree::span(styles.link, vec![SpanTree::text(text)]));
-                }
-            }
+            let target = run.hyperlink.as_deref();
+            let needs_visible_target = target.is_some_and(|target| {
+                show_link_target || tau_cli_term::sanitize_hyperlink_target(target).is_none()
+            });
+            let text = if let Some(target) = target.filter(|_| needs_visible_target)
+                && target != run.text
+            {
+                format!("{} ({target})", run.text)
+            } else {
+                run.text.clone()
+            };
+            let leaf = if target.is_some() {
+                SpanTree::span(styles.link, vec![SpanTree::text(text)])
+            } else {
+                SpanTree::text(text)
+            };
+            let node = match run.style {
+                MarkdownStyle::Base => leaf,
+                MarkdownStyle::Strong => SpanTree::span(styles.strong, vec![leaf]),
+                MarkdownStyle::StrongEmphasis => SpanTree::span(
+                    styles.strong,
+                    vec![SpanTree::span(styles.emphasis, vec![leaf])],
+                ),
+                MarkdownStyle::Emphasis => SpanTree::span(styles.emphasis, vec![leaf]),
+                MarkdownStyle::Strikethrough => SpanTree::span(styles.strikethrough, vec![leaf]),
+                MarkdownStyle::Heading => SpanTree::span(styles.heading, vec![leaf]),
+                MarkdownStyle::ListMarker => SpanTree::span(styles.list_marker, vec![leaf]),
+                MarkdownStyle::PromptMarker => SpanTree::span(styles.prompt_marker, vec![leaf]),
+                MarkdownStyle::Code => SpanTree::span(styles.code, vec![leaf]),
+                MarkdownStyle::Escape => SpanTree::span(styles.escape, vec![leaf]),
+            };
+            children.push(node);
         }
     }
 }
@@ -828,86 +788,124 @@ fn fence_marker(trimmed: &str) -> Option<FenceKind> {
 }
 
 fn parse_inline(text: &str, runs: &mut Vec<MarkdownRun>) {
+    parse_inline_with_style(text, runs, MarkdownStyle::Base, true);
+}
+
+fn parse_inline_with_style(
+    text: &str,
+    runs: &mut Vec<MarkdownRun>,
+    inherited_style: MarkdownStyle,
+    recognize_delimiters: bool,
+) {
     let mut index = 0;
     while index < text.len() {
         let rest = &text[index..];
-        if let Some(ch) = rest.chars().next() {
-            if ch == '\\' && escaped_len(rest).is_some() {
-                let len = escaped_len(rest).expect("checked escape");
-                push_run(runs, &rest[..len], MarkdownStyle::Escape);
-                index += len;
-                continue;
-            }
-            if ch == '`'
-                && let Some(end) = find_unescaped(&rest[1..], '`')
-            {
-                let len = 1 + end + 1;
-                push_run(runs, &rest[..len], MarkdownStyle::Code);
-                index += len;
-                continue;
-            }
-            if ch == '['
-                && let Some((label, target, len)) = parse_inline_link(rest)
-            {
-                push_link_run(runs, label, target);
-                index += len;
-                continue;
-            }
-            if ch == '<'
-                && let Some((target, len)) = parse_autolink(rest)
-            {
-                push_link_run(runs, target, target);
-                index += len;
-                continue;
-            }
-            if is_bare_url_start(text, index, rest) {
-                let len = bare_url_len(rest);
-                let target = &rest[..len];
-                if valid_http_target(target) {
-                    push_link_run(runs, target, target);
-                    index += len;
-                    continue;
-                }
-            }
-            if rest.starts_with("***")
-                && let Some(end) = find_closing_sequence(text, index, "***")
-            {
-                push_run(runs, &text[index..end], MarkdownStyle::StrongEmphasis);
-                index = end;
-                continue;
-            }
-            if rest.starts_with("**")
-                && let Some(end) = find_closing_sequence(text, index, "**")
-            {
-                push_run(runs, &text[index..end], MarkdownStyle::Strong);
-                index = end;
-                continue;
-            }
-            if rest.starts_with("~~")
-                && let Some(end) = find_closing_sequence(text, index, "~~")
-            {
-                push_run(runs, &text[index..end], MarkdownStyle::Strikethrough);
-                index = end;
-                continue;
-            }
-            if matches!(ch, '*' | '_')
-                && delimiter_allowed(text, index, ch)
-                && let Some(end) = find_closing_delimiter(text, index, ch)
-            {
-                let style = if ch == '*' {
-                    MarkdownStyle::Strong
-                } else {
-                    MarkdownStyle::Emphasis
-                };
-                push_run(runs, &text[index..end], style);
-                index = end;
-                continue;
-            }
-            let next = index + ch.len_utf8();
-            push_run(runs, &text[index..next], MarkdownStyle::Base);
-            index = next;
+        let ch = rest.chars().next().expect("non-empty remainder");
+        if ch == '\\'
+            && let Some(len) = escaped_len(rest)
+        {
+            let style = if inherited_style == MarkdownStyle::Base {
+                MarkdownStyle::Escape
+            } else {
+                inherited_style
+            };
+            push_run(runs, &rest[..len], style);
+            index += len;
+            continue;
         }
+        if ch == '`'
+            && let Some(end) = find_unescaped(&rest[1..], '`')
+        {
+            let len = 1 + end + 1;
+            let style = if inherited_style == MarkdownStyle::Base {
+                MarkdownStyle::Code
+            } else {
+                inherited_style
+            };
+            push_run(runs, &rest[..len], style);
+            index += len;
+            continue;
+        }
+        if ch == '['
+            && let Some((label, target, len)) = parse_inline_link(rest)
+        {
+            push_link_run(runs, label, target, inherited_style);
+            index += len;
+            continue;
+        }
+        if ch == '<'
+            && let Some((target, len)) = parse_autolink(rest)
+        {
+            push_link_run(runs, target, target, inherited_style);
+            index += len;
+            continue;
+        }
+        if is_bare_url_start(text, index, rest) {
+            let len = bare_url_len(rest);
+            let target = &rest[..len];
+            if valid_http_target(target) {
+                push_link_run(runs, target, target, inherited_style);
+                index += len;
+                continue;
+            }
+        }
+        if recognize_delimiters
+            && rest.starts_with("***")
+            && let Some(end) = find_closing_sequence(text, index, "***")
+        {
+            push_styled_inline(runs, &text[index..end], MarkdownStyle::StrongEmphasis);
+            index = end;
+            continue;
+        }
+        if recognize_delimiters
+            && rest.starts_with("**")
+            && let Some(end) = find_closing_sequence(text, index, "**")
+        {
+            push_styled_inline(runs, &text[index..end], MarkdownStyle::Strong);
+            index = end;
+            continue;
+        }
+        if recognize_delimiters
+            && rest.starts_with("~~")
+            && let Some(end) = find_closing_sequence(text, index, "~~")
+        {
+            push_styled_inline(runs, &text[index..end], MarkdownStyle::Strikethrough);
+            index = end;
+            continue;
+        }
+        if recognize_delimiters
+            && matches!(ch, '*' | '_')
+            && delimiter_allowed(text, index, ch)
+            && let Some(end) = find_closing_delimiter(text, index, ch)
+        {
+            let style = if ch == '*' {
+                MarkdownStyle::Strong
+            } else {
+                MarkdownStyle::Emphasis
+            };
+            push_styled_inline(runs, &text[index..end], style);
+            index = end;
+            continue;
+        }
+        let next = index + ch.len_utf8();
+        push_run(runs, &text[index..next], inherited_style);
+        index = next;
     }
+}
+
+/// Parses links inside a uniformly styled delimiter-preserving span.
+fn push_styled_inline(runs: &mut Vec<MarkdownRun>, text: &str, style: MarkdownStyle) {
+    let delimiter_len = match style {
+        MarkdownStyle::StrongEmphasis => 3,
+        MarkdownStyle::Strikethrough => 2,
+        MarkdownStyle::Strong if text.starts_with("**") => 2,
+        MarkdownStyle::Strong | MarkdownStyle::Emphasis => 1,
+        _ => 0,
+    };
+    let content_end = text.len().saturating_sub(delimiter_len);
+    push_run(runs, &text[..delimiter_len], style);
+    parse_inline_with_style(&text[delimiter_len..content_end], runs, style, false);
+    push_run(runs, &text[content_end..], style);
 }
 
 fn escaped_len(rest: &str) -> Option<usize> {
@@ -944,20 +942,22 @@ fn find_unescaped(text: &str, needle: char) -> Option<usize> {
 fn find_closing_sequence(text: &str, start: usize, delimiter: &str) -> Option<usize> {
     let after_open = start + delimiter.len();
     let rest = &text[after_open..];
-    let mut escaped = false;
-    for (relative, ch) in rest.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
+    let mut relative = 0;
+    while relative < rest.len() {
+        let candidate = &rest[relative..];
+        if let Some(len) = opaque_inline_len(candidate) {
+            relative += len;
             continue;
         }
         let close = after_open + relative;
-        if rest[relative..].starts_with(delimiter) && after_open < close {
+        if candidate.starts_with(delimiter) && after_open < close {
             return Some(close + delimiter.len());
         }
+        relative += candidate
+            .chars()
+            .next()
+            .expect("non-empty candidate")
+            .len_utf8();
     }
     None
 }
@@ -965,15 +965,43 @@ fn find_closing_sequence(text: &str, start: usize, delimiter: &str) -> Option<us
 fn find_closing_delimiter(text: &str, start: usize, delimiter: char) -> Option<usize> {
     let after_open = start + delimiter.len_utf8();
     let rest = &text[after_open..];
-    for (relative, ch) in rest.char_indices() {
-        if !(ch != delimiter) {
+    let mut relative = 0;
+    while relative < rest.len() {
+        let candidate = &rest[relative..];
+        if let Some(len) = opaque_inline_len(candidate) {
+            relative += len;
+            continue;
+        }
+        let ch = candidate.chars().next().expect("non-empty candidate");
+        if ch == delimiter {
             let close = after_open + relative;
             if delimiter_allowed(text, close, delimiter) && after_open < close {
                 return Some(close + delimiter.len_utf8());
             }
         }
+        relative += ch.len_utf8();
     }
     None
+}
+
+fn opaque_inline_len(text: &str) -> Option<usize> {
+    escaped_len(text)
+        .or_else(|| {
+            text.strip_prefix('`')
+                .and_then(|rest| find_unescaped(rest, '`').map(|end| end + 2))
+        })
+        .or_else(|| {
+            text.starts_with('[')
+                .then(|| parse_inline_link(text))
+                .flatten()
+                .map(|(_, _, len)| len)
+        })
+        .or_else(|| {
+            text.starts_with('<')
+                .then(|| parse_autolink(text))
+                .flatten()
+                .map(|(_, len)| len)
+        })
 }
 
 fn delimiter_allowed(text: &str, index: usize, delimiter: char) -> bool {
@@ -1003,10 +1031,10 @@ fn push_run(runs: &mut Vec<MarkdownRun>, text: &str, style: MarkdownStyle) {
     });
 }
 
-fn push_link_run(runs: &mut Vec<MarkdownRun>, text: &str, target: &str) {
+fn push_link_run(runs: &mut Vec<MarkdownRun>, text: &str, target: &str, style: MarkdownStyle) {
     runs.push(MarkdownRun {
         text: text.to_owned(),
-        style: MarkdownStyle::Link,
+        style,
         hyperlink: Some(target.to_owned()),
     });
 }

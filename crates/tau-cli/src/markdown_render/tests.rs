@@ -8,9 +8,9 @@ fn markdown_test_theme() -> tau_themes::Theme {
                 "user.prompt": { fg: "white", bg: "#101010" },
                 "agent.response": { fg: "cyan", bg: "#101010" },
                 "prompt.marker.submitted": { fg: "red" },
-                "markdown.strong": { bold: true },
+                "markdown.strong": { bold: true, underline: true },
                 "markdown.emphasis": { italic: true },
-                "markdown.strikethrough": { strikethrough: true },
+                "markdown.strikethrough": { fg: "gray", strikethrough: true },
                 "markdown.heading": { bold: true, underline: true },
                 "markdown.list.marker": { bold: true },
                 "markdown.code": { bg: "#111111" },
@@ -73,6 +73,165 @@ fn markdown_links_render_labels_and_targets() {
             b: 0x10,
         })
     );
+}
+
+/// Links nested in supported emphasis delimiters retain both the surrounding
+/// semantic style and their exact sanitized OSC 8 targets.
+#[test]
+fn markdown_links_compose_with_surrounding_inline_styles() {
+    let theme = markdown_test_theme();
+    let block = markdown_block(
+        &theme,
+        names::AGENT_RESPONSE,
+        "**https://strong.test/x** _[label](https://emphasis.test/y)_ \
+         ~~<https://strike.test/z>~~ ***https://both.test/q***",
+    );
+    let linked: Vec<_> = block
+        .content
+        .spans()
+        .iter()
+        .filter_map(|span| {
+            span.hyperlink.as_deref().map(|target| {
+                (
+                    span.text.as_str(),
+                    target,
+                    span.style.bold,
+                    span.style.italic,
+                    span.style.strikethrough,
+                )
+            })
+        })
+        .collect();
+
+    assert_eq!(
+        rendered_text(&block),
+        "**https://strong.test/x** _label_ ~~https://strike.test/z~~ \
+         ***https://both.test/q***"
+    );
+    assert_eq!(
+        linked,
+        [
+            (
+                "https://strong.test/x",
+                "https://strong.test/x",
+                true,
+                false,
+                false,
+            ),
+            ("label", "https://emphasis.test/y", true, true, false,),
+            (
+                "https://strike.test/z",
+                "https://strike.test/z",
+                true,
+                false,
+                true,
+            ),
+            (
+                "https://both.test/q",
+                "https://both.test/q",
+                true,
+                true,
+                false,
+            ),
+        ]
+    );
+    let strong_link = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.hyperlink.as_deref() == Some("https://strong.test/x"))
+        .expect("strong nested link");
+    assert!(strong_link.style.underline);
+    let strike_link = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.hyperlink.as_deref() == Some("https://strike.test/z"))
+        .expect("strikethrough nested link");
+    assert_eq!(strike_link.style.fg, Some(tau_cli_term::Color::Red));
+}
+
+/// Inline code nested in emphasis remains non-clickable even when it contains a
+/// URL, preventing the nested-link scan from weakening code suppression.
+#[test]
+fn markdown_nested_code_still_suppresses_links() {
+    let theme = markdown_test_theme();
+    let source = "**`https://not-a-link.test`**";
+    let block = markdown_block(&theme, names::AGENT_RESPONSE, source);
+
+    assert_eq!(rendered_text(&block), source);
+    assert!(
+        block
+            .content
+            .spans()
+            .iter()
+            .all(|span| span.hyperlink.is_none())
+    );
+}
+
+/// Style delimiters inside a code span stay opaque to the outer delimiter
+/// matcher, so they cannot expose a later URL as a link.
+#[test]
+fn markdown_outer_style_skips_code_delimiters() {
+    let theme = markdown_test_theme();
+    let source = "**`code https://not-a-link.test ** tail`**";
+    let block = markdown_block(&theme, names::AGENT_RESPONSE, source);
+
+    assert_eq!(rendered_text(&block), source);
+    assert!(
+        block
+            .content
+            .spans()
+            .iter()
+            .all(|span| span.hyperlink.is_none())
+    );
+}
+
+/// Style delimiters inside an explicit link target stay opaque, preserving one
+/// complete label hyperlink instead of exposing a partial bare URL.
+#[test]
+fn markdown_outer_style_skips_explicit_link_target_delimiters() {
+    let theme = markdown_test_theme();
+    let block = markdown_block(
+        &theme,
+        names::AGENT_RESPONSE,
+        "**[label](https://example.test/a**b)**",
+    );
+    let links: Vec<_> = block
+        .content
+        .spans()
+        .iter()
+        .filter_map(|span| {
+            span.hyperlink
+                .as_deref()
+                .map(|target| (span.text.as_str(), target))
+        })
+        .collect();
+
+    assert_eq!(links, [("label", "https://example.test/a**b")]);
+}
+
+/// Disabling OSC 8 on a nested explicit link retains its enclosing style while
+/// exposing the target exactly once for terminal URL detection.
+#[test]
+fn markdown_nested_explicit_link_exposes_target_without_osc8() {
+    let theme = markdown_test_theme();
+    let block = markdown_block_with_osc8(
+        &theme,
+        names::AGENT_RESPONSE,
+        "**[label](https://example.test/x)**",
+        false,
+    );
+
+    assert_eq!(rendered_text(&block), "**label (https://example.test/x)**");
+    let label = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text.contains("label"))
+        .expect("visible nested link");
+    assert!(label.style.underline);
+    assert!(label.hyperlink.is_none());
 }
 
 /// Disabling OSC 8 exposes the destination for terminal URL detection, removes
@@ -707,6 +866,45 @@ fn live_stream_formats_complete_lines_before_blank_line() {
         .expect("incomplete line span");
     assert!(!plain.style.bold);
     assert!(!plain.style.underline);
+}
+
+/// A nested URL becomes clickable when its streamed line completes, while the
+/// incomplete line remains governed by the existing plain-text streaming rule.
+#[test]
+fn live_stream_recognizes_nested_links_only_on_complete_lines() {
+    let theme = markdown_test_theme();
+    let mut cache = MarkdownStreamCache::default();
+    let incomplete = markdown_streaming_block(
+        &theme,
+        names::AGENT_RESPONSE,
+        "**https://example.test/incomplete**",
+        &mut cache,
+    );
+    assert!(
+        incomplete
+            .content
+            .spans()
+            .iter()
+            .all(|span| span.hyperlink.is_none())
+    );
+
+    let complete = markdown_streaming_block(
+        &theme,
+        names::AGENT_RESPONSE,
+        "**https://example.test/incomplete**\n",
+        &mut cache,
+    );
+    let link = complete
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.hyperlink.is_some())
+        .expect("completed nested link");
+    assert_eq!(
+        link.hyperlink.as_deref(),
+        Some("https://example.test/incomplete")
+    );
+    assert!(link.style.bold);
 }
 
 /// Ensures a syntactically complete-looking inline marker on the final
