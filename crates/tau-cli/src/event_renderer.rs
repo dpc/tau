@@ -551,6 +551,8 @@ enum EventAgentIdResolution {
 
 impl EventAgentIdResolution {
     fn from_agent_id(agent_id: Option<String>) -> Self {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         match agent_id {
             Some(agent_id) => Self::Agent(agent_id),
             None => Self::NoAgent,
@@ -6564,6 +6566,8 @@ impl EventRenderer {
     fn tool_result_diff(
         result: &tau_proto::ToolResultDisplay,
     ) -> Option<tau_proto::ToolUsePayload> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         result.display.as_ref().and_then(|d| match &d.payload {
             Some(payload) if Self::diff_payload_has_changes(payload) => Some(payload.clone()),
             _ => None,

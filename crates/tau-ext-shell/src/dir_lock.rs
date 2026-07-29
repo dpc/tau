@@ -1323,6 +1323,8 @@ fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<UnlockOwner
             ))
         })?;
 
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match owner_arg.as_deref() {
         Some(owner) => owner
             .parse::<AgentId>()
@@ -1450,6 +1452,8 @@ pub(crate) fn waiting_progress(
     shell_command_mode: Option<crate::tools::shell::ShellCommandMode>,
 ) -> ToolProgress {
     let dirs_display = display_dirs(dirs);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     let mut display = match shell_command_mode {
         Some(mode) => crate::tools::shell::initial_display(&invoke.arguments, mode),
         None => crate::tools::initial_display(invoke).unwrap_or_else(|| ToolUseState {

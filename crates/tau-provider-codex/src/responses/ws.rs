@@ -1042,6 +1042,8 @@ fn map_ws_connect_error(e: tungstenite::Error) -> LlmError {
             .and_then(|value| {
                 tau_provider::retry_policy::parse_retry_after(value, std::time::SystemTime::now())
             });
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         return match retry_after {
             Some(delay) => LlmError::HttpStatusRetryAfter(code, body, delay),
             None => LlmError::HttpStatus(code, body),

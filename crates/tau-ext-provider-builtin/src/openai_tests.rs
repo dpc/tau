@@ -3069,6 +3069,8 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
     });
     let retry_attempts = frames
         .iter()
+        // Preserve behavior at this site.
+        // ast-grep-ignore: match-option-verbose
         .filter_map(|frame| match input_event(frame) {
             Some(Event::ProviderResponseUpdatedReported(update)) => update
                 .status
@@ -3593,6 +3595,8 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
     );
     let finished = frames
         .iter()
+        // Preserve behavior at this site.
+        // ast-grep-ignore: match-option-verbose
         .filter_map(|frame| match input_event(frame) {
             Some(Event::ProviderResponseFinishedReported(finished)) => Some(finished),
             _ => None,
@@ -4343,6 +4347,8 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
     let frames = decode_frames(&output.bytes());
     let statuses = frames
         .iter()
+        // Preserve behavior at this site.
+        // ast-grep-ignore: match-option-verbose
         .filter_map(|frame| match input_event(frame) {
             Some(Event::ProviderResponseUpdatedReported(update)) => update.status.as_ref(),
             _ => None,

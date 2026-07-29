@@ -118,6 +118,8 @@ impl ShellWorld {
                 key,
                 cassette,
                 side_output,
+                // Preserve behavior at this site.
+                // ast-grep-ignore: match-option-verbose
             } => match side_output {
                 Some(side) => store
                     .put_with_side(

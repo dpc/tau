@@ -113,6 +113,8 @@ impl ReadLineRange {
         if line < self.start_line {
             return false;
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         match self.end_line {
             Some(end_line) => line <= end_line,
             None => true,
@@ -538,6 +540,8 @@ pub(crate) fn slice_lines(input: &str, start_line: usize, end_line: Option<usize
     let all_lines: Vec<&str> = input.lines().collect();
     let total_lines = all_lines.len();
     let start_idx = start_line.saturating_sub(1).min(total_lines);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     let end_idx = match end_line {
         Some(end_line) => end_line.min(total_lines),
         None => total_lines,

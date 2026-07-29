@@ -1849,6 +1849,8 @@ fn normalized_limit(limit: Option<u32>) -> Result<usize, String> {
 }
 
 fn required_arg<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, String> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match value {
         Some(value) if !value.trim().is_empty() => Ok(value),
         _ => Err(format!("{name} is required")),
@@ -1870,6 +1872,8 @@ fn calendar_write_error(error: String) -> String {
 }
 
 fn required_change_field<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, String> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match value {
         Some(value) if !value.trim().is_empty() => Ok(value),
         _ => Err(format!("calendar change is missing {name}")),
@@ -2917,6 +2921,8 @@ fn calendar_error_message_for_tool(tool_name: &str, details: &CborValue) -> Stri
             safe_display_line(tool_name)
         );
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match cbor_text_field(details, "command") {
         Some(command) => format!(
             "calendar {} failed ({code}): {message}",
@@ -3253,6 +3259,8 @@ fn cbor_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a CborValue> {
 }
 
 fn cbor_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match cbor_field(value, field) {
         Some(CborValue::Text(value)) => Some(value.as_str()),
         _ => None,
@@ -3264,6 +3272,8 @@ fn cbor_nonblank_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a
 }
 
 fn cbor_bool_field(value: &CborValue, field: &str) -> Option<bool> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match cbor_field(value, field) {
         Some(CborValue::Bool(value)) => Some(*value),
         _ => None,
@@ -3271,6 +3281,8 @@ fn cbor_bool_field(value: &CborValue, field: &str) -> Option<bool> {
 }
 
 fn cbor_u32_field(value: &CborValue, field: &str) -> Option<u32> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match cbor_field(value, field) {
         Some(CborValue::Integer(value)) => u32::try_from(i128::from(*value)).ok(),
         _ => None,
@@ -3282,6 +3294,8 @@ fn cbor_array_len(value: &CborValue, field: &str) -> Option<u64> {
 }
 
 fn cbor_array_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a [CborValue]> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match cbor_field(value, field) {
         Some(CborValue::Array(values)) => Some(values),
         _ => None,

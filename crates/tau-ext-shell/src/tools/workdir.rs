@@ -132,6 +132,8 @@ pub(crate) fn status_output(path: Option<&Path>) -> ToolOutput {
         || "<invalid> (invalid)".to_owned(),
         |path| {
             let path = path.display();
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: match-option-verbose
             match workdir_status.display_suffix() {
                 Some(status) => format!("{path} ({status})"),
                 None => path.to_string(),

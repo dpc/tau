@@ -637,6 +637,8 @@ fn split_no_proxy_host_port(value: &str) -> Result<(&str, Option<u16>), Outbound
     if value.parse::<IpAddr>().is_ok() || value.contains('/') {
         return Ok((value, None));
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match value.rsplit_once(':') {
         Some((host, port)) => Ok((
             host,

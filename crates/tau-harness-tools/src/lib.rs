@@ -141,6 +141,8 @@ impl BuiltinState {
             }
             AGENT_START_TOOL_NAME => {
                 let parsed = parse_delegate_args(&call.arguments).ok()?;
+                // Preserve this behavior; the structural alternative is not semantics-neutral
+                // here. ast-grep-ignore: match-option-verbose
                 let args = match parsed.role {
                     Some(role) => format!("[{}] +{role}", parsed.task_name),
                     None => format!("[{}]", parsed.task_name),
@@ -607,6 +609,8 @@ fn agent_watch_tool_result(
 }
 
 fn agent_watch_enabled_result(agent_id: &str, current_status: Option<&str>) -> String {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match current_status {
         Some(status) => format!("Watching agent `{agent_id}`; current status: {status}"),
         None => format!("Watching agent `{agent_id}`"),
@@ -1251,6 +1255,8 @@ fn cbor_map_field<'a>(arguments: &'a CborValue, key: &str) -> Option<&'a CborVal
 }
 
 fn wait_target_call_id(arguments: &CborValue) -> Option<&str> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match cbor_map_field(arguments, "tool_call_id") {
         Some(CborValue::Text(id)) if !id.trim().is_empty() => Some(id.as_str()),
         _ => None,

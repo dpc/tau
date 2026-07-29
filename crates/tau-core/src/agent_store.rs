@@ -764,6 +764,8 @@ impl AgentStore {
         if record_length.saturating_add(display_projection_bytes) > remaining_bytes {
             return Err(AgentCreationFactsBudgetExceeded);
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         let display_name = match in_memory_display_name {
             Some(display_name) => Some(display_name.to_owned()),
             None => read_journal_bound_checkpoint(

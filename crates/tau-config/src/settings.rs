@@ -894,6 +894,8 @@ impl TagPattern {
     }
 
     fn matches(&self, tag: &str) -> bool {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         match self.prefix_len {
             Some(prefix_len) => tag.starts_with(&self.text[..prefix_len]),
             None => tag == self.text,

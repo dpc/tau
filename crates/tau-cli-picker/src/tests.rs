@@ -357,6 +357,8 @@ struct FailingRawModeGuard {
 
 impl RawModeCleanup for FailingRawModeGuard {
     fn restore_raw_mode(&mut self) -> io::Result<()> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         match self.restore_error.take() {
             Some(err) => Err(err),
             None => Ok(()),

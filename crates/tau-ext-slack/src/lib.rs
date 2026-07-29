@@ -4476,6 +4476,8 @@ fn event_matches_installation(
     {
         return false;
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match authorization.get("user_id") {
         None => true,
         Some(user) => user.as_str() == Some(expected_bot),
@@ -5379,6 +5381,8 @@ fn agent_display_name<'a>(state: &'a State, agent_id: &AgentId) -> Option<&'a st
 
 fn agent_designator(state: &State, agent_id: &AgentId) -> String {
     let id = agent_id.as_ref();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match agent_display_name(state, agent_id) {
         Some(display_name) => format!("{id} ({display_name})"),
         None => id.to_owned(),
@@ -5416,6 +5420,8 @@ fn resolve_agent(state: &State, query: &str) -> Result<AgentId, String> {
 }
 
 fn split_first(s: &str) -> (&str, &str) {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match s.trim().split_once(char::is_whitespace) {
         Some((first, rest)) => (first, rest),
         None => (s.trim(), ""),

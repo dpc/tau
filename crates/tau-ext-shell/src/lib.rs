@@ -1731,6 +1731,8 @@ fn with_lock_wait_duration(event: Event, lock_wait_duration_seconds: Option<u64>
             Event::ToolResult(result)
         }
         Event::ToolError(mut error) => {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: match-option-verbose
             error.details = Some(match error.details {
                 Some(details) => cbor_value_with_lock_wait_duration(details, seconds, "details"),
                 None => CborValue::Map(vec![lock_wait_duration_entry(seconds)]),

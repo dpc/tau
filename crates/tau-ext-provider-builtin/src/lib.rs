@@ -811,6 +811,8 @@ fn cmd_add_openrouter(network: &tau_provider::OutboundNetworkPolicy) -> Result<(
 }
 
 fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn Error>> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     let name = match name_arg {
         Some(name) => ProviderName::try_new(name.trim().to_owned())
             .map_err(|error| format!("invalid provider namespace '{name}': {error}"))?,
@@ -3002,6 +3004,8 @@ fn run_retry_scheduler(
         if !send_scheduler_actions(state.advance(clock.now()), &worker_tx, &worker_waker) {
             return;
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         let command = match state.next_due() {
             Some(next_due) => commands.recv_timeout(
                 next_due

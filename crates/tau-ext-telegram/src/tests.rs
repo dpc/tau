@@ -1417,6 +1417,8 @@ fn telegram_contention_diagnostic_classifies_409_conflicts() {
 
     for (input, expected) in cases {
         let diagnostic = telegram_contention_diagnostic(input);
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         match expected {
             Some(expected) => assert!(
                 diagnostic

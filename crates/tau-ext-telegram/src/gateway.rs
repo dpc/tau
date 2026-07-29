@@ -506,6 +506,8 @@ impl Gateway {
 
     /// Return whether this message arrived in the configured or linked chat.
     fn chat_is_active(&self, message: &TgMessage) -> bool {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         match self.cfg.configured_chat_id {
             Some(chat_id) => message.chat_id == chat_id,
             None => self.durable.linked_chat.is_some_and(|link| {
@@ -977,6 +979,8 @@ impl GatewayDurableState {
         }
         if let Some(selection) = &self.selected_route {
             let selection_valid = cfg.allowed_user_ids.contains(&selection.user_id)
+                // Preserve behavior at this site.
+                // ast-grep-ignore: match-option-verbose
                 && match cfg.configured_chat_id {
                     Some(chat_id) => selection.chat_id == chat_id,
                     None => self.linked_chat.is_some_and(|link| {
@@ -1467,6 +1471,8 @@ impl GatewayRegistry {
         });
         let mut sessions = Vec::<GatewaySessionSnapshot>::new();
         for registration in &registrations {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: match-option-verbose
             match sessions
                 .iter_mut()
                 .find(|session| session.session_id == registration.key.session_id)

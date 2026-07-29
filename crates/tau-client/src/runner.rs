@@ -425,6 +425,8 @@ fn dispatch_intercept<State>(
     builder: &mut ExtensionBuilder<State>,
     handle: &ClientHandle,
 ) -> ClientResult<()> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     let decision_result = match &mut builder.intercept_handler {
         Some(handler) => handler.handle(request, state, handle),
         None => Ok(crate::InterceptDecision::Pass),

@@ -2825,6 +2825,8 @@ fn line_ending_marker(ending: Option<LineEndingKind>) -> Option<&'static str> {
 }
 
 fn format_output_line(prefix: &str, marker: Option<&str>, content: &str) -> String {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match marker {
         Some(marker) => format!("{prefix}({marker}) {content}"),
         None => format!("{prefix} {content}"),

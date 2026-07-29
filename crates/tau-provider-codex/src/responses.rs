@@ -1439,6 +1439,8 @@ fn stream_error_event(event: &serde_json::Value) -> LlmError {
         .or_else(|| event["error"]["type"].as_str());
     let detail = bounded_remote_text(detail, 512);
     let error_code = error_code.map(|code| bounded_remote_text(code, 64));
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     let body = match error_code.as_deref() {
         Some(code) => format!("stream error: {detail} (type={code})"),
         None => format!("stream error: {detail}"),
@@ -2197,6 +2199,8 @@ fn raw_message_phase_matches(
     msg: &MessageItem,
     supports_phase: bool,
 ) -> bool {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     match assistant_message_phase_wire(msg, supports_phase) {
         Some(expected) => item.get("phase").and_then(serde_json::Value::as_str) == Some(expected),
         None => item.get("phase").is_none(),

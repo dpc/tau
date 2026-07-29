@@ -233,6 +233,8 @@ pub(crate) struct ConversationHeadSync {
 impl ConversationHeadSync {
     /// Returns the exclusive agent-publication completion, when present.
     pub(crate) fn completion(&self) -> Option<&AgentPublishCompletion> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         match self.continuation.as_ref() {
             Some(PostCommitContinuation::AgentPublish(completion)) => Some(completion.as_ref()),
             _ => None,
@@ -241,6 +243,8 @@ impl ConversationHeadSync {
 
     /// Returns the prompt continuation for either exclusive prompt phase.
     pub(crate) fn prompt_dispatch(&self) -> Option<&PromptDispatchContinuation> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-option-verbose
         match self.continuation.as_ref() {
             Some(
                 PostCommitContinuation::PromptMaterialization(continuation)

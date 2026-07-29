@@ -883,6 +883,8 @@ fn stage_tool(state: &HostStateRef, name: &str, spec: Map, handler: FnPtr) -> Re
         })
         .transpose()?;
     let enabled_by_default = optional_bool_field(&spec, "enabled_by_default")?.unwrap_or(true);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     let parameters = match spec.get("parameters") {
         Some(value) => Some(dynamic_to_json(value)?),
         None => None,

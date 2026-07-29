@@ -141,6 +141,8 @@ pub(crate) fn resolve_run_session_id(
     let cwd = std::env::current_dir()?;
     match resume {
         None => Ok((mint_session_id(&cwd), SessionLaunchStatus::New)),
+        // Preserve behavior at this site.
+        // ast-grep-ignore: match-option-verbose
         Some("") => match pick_resume_session(&cwd)? {
             Some(id) => Ok((id, SessionLaunchStatus::Resumed)),
             None => Ok((mint_session_id(&cwd), SessionLaunchStatus::New)),

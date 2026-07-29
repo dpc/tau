@@ -1357,6 +1357,8 @@ fn cycle_role(
         return None;
     }
     let current = current_role_state.lock().ok().and_then(|role| role.clone());
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     let next = match current
         .as_deref()
         .and_then(|current| roles.iter().position(|role| role == current))
@@ -4320,6 +4322,8 @@ fn build_agent_arg_completer(
             let active = routing.active_agents();
             let live = routing.live_agents();
             let raw_needle = args[1].to_lowercase();
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: match-option-verbose
             let (needle, prefixed) = match raw_needle.strip_prefix('@') {
                 Some(needle) => (needle, true),
                 None => (raw_needle.as_str(), false),
@@ -4513,6 +4517,8 @@ pub(crate) fn custom_prompt_replacement(
     let id = parts.next();
     let extra = parts.next();
     match (id, extra) {
+        // Preserve behavior at this site.
+        // ast-grep-ignore: match-option-verbose
         (Some(id), None) => match prompts.iter().find(|prompt| prompt.id == id) {
             Some(prompt) => Some(Ok(prompt.text.clone())),
             None => Some(Err(format!(

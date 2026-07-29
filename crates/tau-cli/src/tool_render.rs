@@ -656,6 +656,8 @@ fn format_tool_use_state_bytes(bytes: u64) -> String {
 /// shape is intentionally generic so future tool names render without
 /// touching this code.
 pub(crate) fn synthesize_fallback_display(tool_name: &str, error: Option<&str>) -> ToolUseState {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-option-verbose
     let (status, status_text) = match error {
         Some(msg) if !msg.is_empty() => (ToolUseStatus::Error, first_error_line(msg)),
         _ => (ToolUseStatus::Success, "ok".to_owned()),

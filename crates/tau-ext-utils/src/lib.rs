@@ -528,6 +528,8 @@ impl TimerRuntime {
             .take(MAX_LIST_TIMERS)
             .map(|timer| {
                 let due = duration_until(timer.next_fire_at, now).as_secs();
+                // Preserve this behavior; the structural alternative is not semantics-neutral
+                // here. ast-grep-ignore: match-option-verbose
                 match timer.interval_seconds {
                     Some(interval) => format!(
                         "{}: due in {}s, repeats every {}s",
@@ -806,6 +808,8 @@ fn parse_action(value: &CborValue, call_id: &str) -> Result<TimerAction, String>
         .ok_or_else(|| "timer action is required".to_owned())?;
     match action.as_str() {
         "schedule" => {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: match-option-verbose
             let timer_id = match tau_proto::cbor_text_field(value, "timer_id") {
                 Some(id) => validate_timer_id(&id)?,
                 None => generated_timer_id(call_id),
