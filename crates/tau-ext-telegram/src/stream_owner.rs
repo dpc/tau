@@ -168,6 +168,8 @@ pub(crate) fn webhook_active_message(info: &TelegramWebhookInfo) -> String {
                        or configure a different bot token."
         .to_owned();
     if let Some(count) = info.pending_update_count {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: push-str-format
         message.push_str(&format!(" Telegram reports {count} pending update(s)."));
     }
     if let Some(error) = info

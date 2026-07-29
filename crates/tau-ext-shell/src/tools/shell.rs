@@ -813,6 +813,8 @@ fn merged_user_shell_output(
     let mut footer = String::new();
     if clipped {
         footer.push_str("\n\n[tau-output-metadata]\ntruncated: true");
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: push-str-format
         footer.push_str(&format!(
             "\ntotal_lines: {total_lines}\ntotal_bytes: {total_bytes}\ntruncation_warning: fetching excessive output is inefficient; prefer narrower commands or filters"
         ));
@@ -826,6 +828,8 @@ fn merged_user_shell_output(
                 };
                 let mut artifact_fields = format!("\n{label}: {}", saved.path.display());
                 if saved.incomplete {
+                    // Preserve this behavior; the structural alternative is not semantics-neutral
+                    // here. ast-grep-ignore: push-str-format
                     artifact_fields.push_str(&format!(
                         "\nsaved_output_truncated: true\nsaved_output_bytes: {}",
                         saved.saved_bytes

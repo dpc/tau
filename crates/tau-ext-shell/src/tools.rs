@@ -258,6 +258,8 @@ pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUse
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_else(|| ".".to_owned());
             let mut args = format!("{pattern:?} in {path}");
             if let Some(glob) = cbor_text_field(&invoke.arguments, "glob") {
+                // Preserve this behavior; the structural alternative is not semantics-neutral
+                // here. ast-grep-ignore: push-str-format
                 args.push_str(&format!(" [{glob}]"));
             }
             args

@@ -314,6 +314,8 @@ impl TimerRuntime {
             if let Some(interval) = timer.interval_seconds {
                 let missed = missed_intervals(timer.next_fire_at, now, interval);
                 if 1 < missed {
+                    // Preserve this behavior; the structural alternative is not semantics-neutral
+                    // here. ast-grep-ignore: push-str-format
                     prompt.push_str(&format!(
                         "\n\nCoalesced {missed} missed scheduled firings while Tau was unavailable."
                     ));

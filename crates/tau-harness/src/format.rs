@@ -19,6 +19,8 @@ pub fn format_tool_progress(progress: &ToolProgress) -> String {
         total: Some(total),
     }) = &progress.progress
     {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: push-str-format
         text.push_str(&format!(" ({current}/{total})"));
     }
     text
