@@ -23358,7 +23358,7 @@ impl Harness {
         self.prompt_tool_specs
             .insert(agent_prompt_id.clone(), tool_specs);
         if status_available && let Some(agent) = self.agents.get_mut(cid) {
-            agent.work_status.reset_ack_notice();
+            agent.work_status.prepare_ack_notice_for_snapshot();
         }
         let session_id = self
             .agents
@@ -26793,6 +26793,13 @@ impl Harness {
     /// Fold at most one acknowledgement into the complete foreground tool-round
     /// continuation, after every parallel terminal has settled.
     fn queue_status_acknowledgement_if_needed(&mut self, cid: &AgentId, completed_call_id: &str) {
+        if self
+            .agents
+            .get(cid)
+            .is_some_and(|agent| agent.lifecycle_notification_only_turn)
+        {
+            return;
+        }
         let status_was_available = self
             .prompt_tool_call_prompts
             .get(completed_call_id)

@@ -27063,9 +27063,8 @@ fn synthetic_dispatch_terminal_emits_one_unknown_without_reminder() {
     h.shutdown().expect("shutdown");
 }
 
-/// Each status-enabled effective snapshot owns one acknowledgement decision;
-/// same-turn snapshots repeat it, revocation suppresses it, and a changed-title
-/// Working report acknowledges the current snapshot.
+/// Status-enabled snapshots offer an initial acknowledgement, tool-policy
+/// revocation suppresses it, and Working survives routine tool continuations.
 #[test]
 fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
     let td = TempDir::new().expect("tempdir");
@@ -27086,7 +27085,7 @@ fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
             .get_mut(&cid)
             .expect("agent")
             .work_status
-            .reset_ack_notice();
+            .prepare_ack_notice_for_snapshot();
         h.queue_status_acknowledgement_if_needed(&cid, call);
     }
     assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
@@ -27108,7 +27107,7 @@ fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
         .get_mut(&cid)
         .expect("agent")
         .work_status
-        .reset_ack_notice();
+        .prepare_ack_notice_for_snapshot();
     h.report_agent_work_status(
         &cid,
         crate::WorkStatusReport::new(
@@ -27125,6 +27124,34 @@ fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
         .insert("ack-changed-call".into(), changed_prompt);
     h.queue_status_acknowledgement_if_needed(&cid, "ack-changed-call");
     assert!(h.agents[&cid].pending_prompts.is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Isolated watched-agent progress remains model-visible without steering the
+/// watcher to report Working for activity that is not user-addressed work.
+#[test]
+fn isolated_watch_notification_does_not_request_status_acknowledgement() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let prompt_id = test_agent_prompt_id("isolated-watch-status");
+    h.prompt_tool_specs
+        .insert(prompt_id.clone(), vec![shared_test_tool_spec("status")]);
+    h.prompt_tool_call_prompts
+        .insert("isolated-watch-call".into(), prompt_id);
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .lifecycle_notification_only_turn = true;
+
+    h.queue_status_acknowledgement_if_needed(&cid, "isolated-watch-call");
+
+    assert!(
+        h.agents[&cid].pending_prompts.is_empty(),
+        "isolated watched-agent progress must not demand a status acknowledgement"
+    );
     h.shutdown().expect("shutdown");
 }
 

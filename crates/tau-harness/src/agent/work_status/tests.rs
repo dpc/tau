@@ -23,22 +23,23 @@ fn report_validation_rejects_non_model_phases_and_titles() {
     }
 }
 
-/// Every effective snapshot gets a fresh acknowledgement decision, while a
-/// changed-title Working report acknowledges that current snapshot.
+/// A Working report acknowledges later routine tool-round snapshots while each
+/// still-unreported snapshot retains an acknowledgement opportunity.
 #[test]
-fn acknowledgement_tracks_effective_snapshots_and_changed_working_titles() {
+fn working_acknowledgement_survives_routine_snapshot_resets() {
     let mut status = WorkStatus::default();
-    status.reset_ack_notice();
+    status.prepare_ack_notice_for_snapshot();
     assert!(status.mark_ack_notice_delivered());
-    status.reset_ack_notice();
+    status.prepare_ack_notice_for_snapshot();
     assert!(status.mark_ack_notice_delivered());
-    status.reset_ack_notice();
+    status.prepare_ack_notice_for_snapshot();
     assert!(report(
         &mut status,
         AgentWorkStatusPhase::Working,
         "first title"
     ));
-    status.reset_ack_notice();
+    status.prepare_ack_notice_for_snapshot();
+    assert!(!status.mark_ack_notice_delivered());
     assert!(report(
         &mut status,
         AgentWorkStatusPhase::Working,

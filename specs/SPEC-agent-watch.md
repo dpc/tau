@@ -4,8 +4,8 @@
 
 Agent watch behavior spans harness-owned topology and dedupe state, typed
 protocol snapshots, provider-work observation, model-context rendering,
-cross-agent activation, replay, and endpoint cleanup. No one owning module can
-describe the complete observation and lifecycle contract coherently.
+cross-agent activation, replay, and endpoint cleanup, so no one owning module
+can describe the complete observation and lifecycle contract coherently.
 
 ## Topology and endpoint lifecycle
 
@@ -68,11 +68,12 @@ remains accepted only for compatibility and replay; the harness no longer
 produces lifecycle notifications.
 
 The default `status` tool remains subject to each effective prompt's ordinary
-tool policy. Each effective snapshot containing `status` owns one acknowledgement
-decision; an accepted Working report in that snapshot suppresses its reminder,
-including a changed Working title, while a later same-outer-turn snapshot receives
-a fresh decision. Done and Blocked mutate reported status only, never close a turn
-or install a wait, and a later activation does not silently change them.
+tool policy. An unreported ordinary work turn containing `status` receives an
+acknowledgement opportunity. An accepted Working report suppresses reminders
+across later routine tool-round snapshots, including after a changed Working
+title. Isolated watch-notification turns never request acknowledgement from the
+watcher. Done and Blocked mutate reported status only, never close a turn or
+install a wait, and a later activation does not silently change them.
 
 Successful no-tool finals while Working are durable candidate responses. Watch,
 delegated result, and detach projections remain withheld until the candidate's

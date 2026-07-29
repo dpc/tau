@@ -322,9 +322,16 @@ impl WorkStatus {
         Some(WorkingFinalDecision::Challenge)
     }
 
-    /// Reset acknowledgement delivery for a newly running outer turn.
-    pub(crate) fn reset_ack_notice(&mut self) {
-        self.ack_notice_delivered = false;
+    /// Reset acknowledgement delivery unless this work is already acknowledged.
+    ///
+    /// Provider continuations may materialize several effective snapshots for
+    /// one reported Working epoch. Retain that acknowledgement across those
+    /// routine tool rounds instead of repeatedly steering the model back to
+    /// `status`.
+    pub(crate) fn prepare_ack_notice_for_snapshot(&mut self) {
+        if self.phase != AgentWorkStatusPhase::Working {
+            self.ack_notice_delivered = false;
+        }
     }
 
     /// Mark the acknowledgement as delivered unless it was already delivered.
