@@ -2,6 +2,11 @@
 set -eou pipefail
 
 function job_lint() {
+  selfci step start "ast-grep"
+  if ! ast-grep scan --error --config sgconfig.yml; then
+    selfci step fail
+  fi
+
   selfci step start "treefmt"
   if ! treefmt --ci ; then
     selfci step fail

@@ -6,7 +6,7 @@
 
     flake-utils.url = "github:numtide/flake-utils";
     flakebox = {
-      url = "github:rustshop/flakebox?rev=8c53d26465c23449260d5ed5c3d5b2c733ae6885";
+      url = "github:rustshop/flakebox?rev=d2bd202562dbe10f491dbeebf547434dbd7c09ae";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     dpc-public-skills = {
