@@ -2689,7 +2689,6 @@ impl PendingNewAgentOptions {
         selected_agent_id: Option<tau_proto::AgentId>,
         model: tau_proto::ModelId,
     ) -> Option<Event> {
-        // ast-grep-ignore: if-let-some-else
         if let Some(target_agent_id) = selected_agent_id {
             Some(crate::ui_events::agent_model_select(
                 session_id,
@@ -3514,7 +3513,6 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_agent_new(&mut self, role: Option<&str>) {
-        // ast-grep-ignore: if-let-some-else
         if let Some(role) = role {
             self.pending_new_agent_options.stage_role(role);
             // This call is intentionally best-effort; preserve the existing discarded
@@ -3614,7 +3612,6 @@ impl<'a> TerminalInputSession<'a> {
             if !model.is_empty() {
                 match model.parse::<tau_proto::ModelId>() {
                     Ok(model) => {
-                        // ast-grep-ignore: if-let-some-else
                         if let Some(event) = self.pending_new_agent_options.apply_model_selection(
                             self.session_id,
                             self.ctx.routing.selected_side_agent_id(),
@@ -3744,7 +3741,6 @@ impl<'a> TerminalInputSession<'a> {
         self.ctx
             .agent_in_progress
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        // ast-grep-ignore: if-let-some-else
         let event = if let Some(target_agent_id) = selected_agent.map(|agent_id| {
             tau_proto::AgentId::parse(&agent_id).expect("UI stores valid agent ids")
         }) {
@@ -4210,8 +4206,10 @@ enum AgentCycleAction {
 fn agent_cycle_action(current: Option<&str>, next: Option<String>) -> AgentCycleAction {
     if current == next.as_deref() {
         AgentCycleAction::KeepSelection
+    } else if let Some(next) = next {
+        AgentCycleAction::Select(next)
     } else {
-        next.map_or(AgentCycleAction::ClearSelection, AgentCycleAction::Select)
+        AgentCycleAction::ClearSelection
     }
 }
 

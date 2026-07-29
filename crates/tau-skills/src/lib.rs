@@ -1028,7 +1028,6 @@ pub fn load_skills_from_skill_dirs(dirs: &[SkillDir]) -> LoadSkillsResult {
                     skill.add_to_prompt |= dir.add_to_prompt_by_default;
                 }
                 let modified = skill_modified_time(&skill.file_path);
-                // ast-grep-ignore: if-let-some-else
                 if let Some(existing) = skills_by_name.get_mut(&skill.name) {
                     let ordering = compare_skill_candidate(
                         dir.source_precedence,

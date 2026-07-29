@@ -205,7 +205,6 @@ impl DebugEventLog {
         }
 
         #[cfg(test)]
-        // ast-grep-ignore: if-let-some-else
         let result = if let Some(fault) = self.fault.take() {
             append_line(
                 &mut FaultInjectingFile::new(&mut self.file, fault, line.len()),

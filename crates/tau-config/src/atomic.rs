@@ -119,11 +119,10 @@ fn symlink_target_or_path(path: &Path) -> io::Result<PathBuf> {
     let target = fs::read_link(path)?;
     if target.is_absolute() {
         Ok(target)
+    } else if let Some(parent) = path.parent() {
+        Ok(parent.join(target))
     } else {
-        Ok(path
-            .parent()
-            .map(|parent| parent.join(&target))
-            .unwrap_or(target))
+        Ok(target)
     }
 }
 

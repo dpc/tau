@@ -134,7 +134,6 @@ pub(crate) fn connect_daemon_ui_client(
     daemon: &mut DaemonHandle,
     client_name: impl AsRef<str>,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
-    // ast-grep-ignore: if-let-some-else
     if let Some(initial_ui) = daemon.take_initial_ui_stdio() {
         connect_ui_streams(initial_ui.stdout, initial_ui.stdin, client_name)
     } else {

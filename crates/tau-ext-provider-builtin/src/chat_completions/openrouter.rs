@@ -189,12 +189,13 @@ fn fetch_openrouter_models_from(
             // Preserve this behavior; the structural alternative is not semantics-neutral
             // here. ast-grep-ignore: match-result-verbose
             let error = match err {
-                Ok(resp) => network
-                    .proxy_response_error(url, resp.status().as_u16())
-                    .map_or_else(
-                        || OpenRouterDiscoveryError::Status(resp.status().as_u16()),
-                        OpenRouterDiscoveryError::Outbound,
-                    ),
+                Ok(resp) => {
+                    if let Some(error) = network.proxy_response_error(url, resp.status().as_u16()) {
+                        OpenRouterDiscoveryError::Outbound(error)
+                    } else {
+                        OpenRouterDiscoveryError::Status(resp.status().as_u16())
+                    }
+                }
                 Err(error) => error,
             };
             cached_or_error(cache_path, error)

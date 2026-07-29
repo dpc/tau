@@ -324,7 +324,6 @@ pub(crate) fn run_command_live_for_surface(
             .unwrap_or_else(|| "unknown".to_owned());
         let status_text = if wait.timed_out {
             "timeout".to_owned()
-        // ast-grep-ignore: if-let-some-else
         } else if let Some(signal) = signal {
             format!("signal {signal}")
         } else {
@@ -1420,7 +1419,6 @@ fn dispatch_user_shell_command_blocking(
     let progress = std::sync::Arc::new(std::sync::Mutex::new(UserProgressBudget::default()));
     let saved_capture = std::sync::Arc::new(std::sync::Mutex::new(UserSavedCapture::default()));
     let (pipe_done_tx, pipe_done_rx) = mpsc::channel();
-    // ast-grep-ignore: if-let-some-else
     if let Some(p) = stdout_pipe {
         pump(
             p,
@@ -1440,7 +1438,6 @@ fn dispatch_user_shell_command_blocking(
         // result. ast-grep-ignore: let-underscore-call
         let _ = pipe_done_tx.send(());
     }
-    // ast-grep-ignore: if-let-some-else
     if let Some(p) = stderr_pipe {
         pump(
             p,
@@ -2673,7 +2670,6 @@ impl StreamDecoder {
                             &mut lines,
                         );
                     }
-                    // ast-grep-ignore: if-let-some-else
                     if let Some(error_len) = error.error_len() {
                         self.flush_pending_cr_as_cr(&mut lines);
                         self.had_invalid_utf8 = true;

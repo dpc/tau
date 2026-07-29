@@ -548,7 +548,6 @@ impl ChildProcessGroupId {
 }
 
 fn terminate_child(child: &mut std::process::Child, child_pgid: Option<ChildProcessGroupId>) {
-    // ast-grep-ignore: if-let-some-else
     if let Some(child_pgid) = child_pgid {
         terminate_process_group(child_pgid);
     } else {

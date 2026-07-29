@@ -318,10 +318,12 @@ impl WaitTracker {
         } else {
             None
         };
-        claimed.is_some_and(|claimed| {
+        if let Some(claimed) = claimed {
             self.claimed_waits.insert(owner.clone(), claimed);
             true
-        })
+        } else {
+            false
+        }
     }
 
     /// Restore a provisionally claimed wait after its cancellation terminal

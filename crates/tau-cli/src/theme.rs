@@ -21,19 +21,15 @@ pub(crate) fn active_prompt_marker(
     let base_style = text.add_style(tau_themes::names::PROMPT_MARKER);
     let marker = format!("{prompt_symbol} ");
 
-    let marker = role.map_or_else(
-        || SpanTree::span(base_style, vec![SpanTree::text(marker.clone())]),
-        |role| {
-            let role_style = text.add_style(prompt_marker_role_style(role));
-            SpanTree::span(
-                base_style,
-                vec![SpanTree::span(
-                    role_style,
-                    vec![SpanTree::text(marker.clone())],
-                )],
-            )
-        },
-    );
+    let marker = if let Some(role) = role {
+        let role_style = text.add_style(prompt_marker_role_style(role));
+        SpanTree::span(
+            base_style,
+            vec![SpanTree::span(role_style, vec![SpanTree::text(marker)])],
+        )
+    } else {
+        SpanTree::span(base_style, vec![SpanTree::text(marker)])
+    };
 
     text.push_tree(marker);
     tau_cli_term::resolve::themed_text(theme, &text)

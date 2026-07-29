@@ -132,7 +132,6 @@ impl FramedAppendState {
     ) -> io::Result<FrameAppend> {
         self.ensure_appendable(path)?;
         #[cfg(test)]
-        // ast-grep-ignore: if-let-some-else
         let result = if let Some(fault) = self.faults.remove(path) {
             append_frame(&mut FaultInjectingFile::new(file, fault), payload)
         } else {

@@ -280,7 +280,6 @@ pub(crate) fn normalize_feed_url(url: &str, allow_plain_http: bool) -> Result<St
         return Err("iCalendar feed URL must not contain control characters".to_owned());
     }
     let normalized;
-    // ast-grep-ignore: if-let-some-else
     let candidate = if let Some(rest) = trimmed.strip_prefix("webcal://") {
         normalized = format!("https://{rest}");
         normalized.as_str()
@@ -509,7 +508,6 @@ fn expand_calendar_events_in_range(
         let Some(seed) = build_range_event_seed(component, index, &resolver) else {
             continue;
         };
-        // ast-grep-ignore: if-let-some-else
         if let Some(recurrence_id) = seed.recurrence_id {
             overrides
                 .entry(seed.uid.clone())
@@ -705,7 +703,6 @@ fn expand_master_in_range(
         if master.exdates.contains(&timestamp) {
             continue;
         }
-        // ast-grep-ignore: if-let-some-else
         if let Some(override_seed) = overrides.and_then(|overrides| overrides.get(&timestamp)) {
             emitted_override_ids.insert(override_event_key(&override_seed.uid, timestamp));
             if is_cancelled(override_seed.component) {

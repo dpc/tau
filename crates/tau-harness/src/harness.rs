@@ -2756,7 +2756,6 @@ where
                         raw_arguments_json: None,
                         responses_envelope: None,
                     }
-                // ast-grep-ignore: if-let-some-else
                 } else if let Some(cmd) = user_text.strip_prefix("shell ") {
                     ToolCallItem {
                         call_id: call_id.into(),
@@ -4586,7 +4585,6 @@ impl Harness {
         let Some(conv) = self.agents.get_mut(cid) else {
             return;
         };
-        // ast-grep-ignore: if-let-some-else
         if let Some(original_call_id) = conv.result_dedup.lookup(&hash).cloned() {
             // Belt-and-suspenders: refuse to point a call at itself.
             // This can't happen in practice — `tool_agents`
@@ -4628,7 +4626,6 @@ impl Harness {
         let Some(conv) = self.agents.get_mut(cid) else {
             return;
         };
-        // ast-grep-ignore: if-let-some-else
         if let Some(original_call_id) = conv.result_dedup.lookup(&hash).cloned() {
             if original_call_id == error.call_id {
                 return;
@@ -4981,7 +4978,6 @@ impl Harness {
         // map `call_id` back to a conversation themselves. Construction
         // sites can leave `originator` as the default — this is the
         // single point of truth.
-        // ast-grep-ignore: if-let-some-else
         let event = if let Some(originator) = self.agents.get(cid).map(|c| c.originator.clone()) {
             stamp_tool_event_originator(event, originator)
         } else {
@@ -5261,7 +5257,6 @@ impl Harness {
             );
             return;
         };
-        // ast-grep-ignore: if-let-some-else
         if let Some(cid) = cid {
             if self.agents.get(&cid).is_some_and(|agent| {
                 matches!(
@@ -8653,7 +8648,6 @@ impl Harness {
                 Err(mpsc::TryRecvError::Disconnected) => RuntimeEventWait::Disconnected,
             };
         }
-        // ast-grep-ignore: if-let-some-else
         if let Some(deadline) = self.next_runtime_deadline() {
             let timeout = deadline.saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(timeout) {
@@ -12073,7 +12067,6 @@ impl Harness {
         peer_context: &interception::PeerPublicationContext,
         event: &Event,
     ) {
-        // ast-grep-ignore: if-let-some-else
         let source_is_current = if let Some(extension) = peer_context.extension.as_ref() {
             self.extensions
                 .entries
@@ -13015,7 +13008,6 @@ impl Harness {
                 &mut self.extensions.pending_agent_context_declarations
             }
         };
-        // ast-grep-ignore: if-let-some-else
         let remove = if let Some(count) = pending.get_mut(&source_id) {
             *count = count.saturating_sub(1);
             *count == 0
@@ -13614,7 +13606,6 @@ impl Harness {
         let persist = persist_override.unwrap_or_else(|| event.defaults_to_persist());
         if self.should_stage_extension_capabilities(source_id) {
             self.stage_extension_publish(source_id, event, persist);
-        // ast-grep-ignore: if-let-some-else
         } else if let Some(admission) = admission {
             self.enqueue_publish_with_admission(
                 Some(source_id),
@@ -14044,7 +14035,6 @@ impl Harness {
             self.finish_unroutable_ui_shell(command, reason, false);
             return;
         }
-        // ast-grep-ignore: if-let-some-else
         let target_agent_id = if let Some(agent_id) = command.target_agent_id.as_ref() {
             self.agent_routes
                 .get(agent_id.as_str())
@@ -14306,23 +14296,22 @@ impl Harness {
             self.emit_info(&format!("unknown model: {}", select.model));
             return Ok(true);
         }
-        let cid = select.target_agent_id.as_deref().map_or_else(
-            || {
-                let mut matches = self.agents.iter().filter_map(|(cid, conv)| {
-                    (conv.session_id == select.session_id
-                        && conv.originator.is_user()
-                        && conv.agent_id.is_some())
-                    .then_some(cid.clone())
-                });
-                let first = matches.next();
-                if matches.next().is_some() {
-                    None
-                } else {
-                    first
-                }
-            },
-            |target_agent_id| self.runtime_agent_id_for_target_agent(Some(target_agent_id)),
-        );
+        let cid = if let Some(target_agent_id) = select.target_agent_id.as_deref() {
+            self.runtime_agent_id_for_target_agent(Some(target_agent_id))
+        } else {
+            let mut matches = self.agents.iter().filter_map(|(cid, conv)| {
+                (conv.session_id == select.session_id
+                    && conv.originator.is_user()
+                    && conv.agent_id.is_some())
+                .then_some(cid.clone())
+            });
+            let first = matches.next();
+            if matches.next().is_some() {
+                None
+            } else {
+                first
+            }
+        };
         let Some(cid) = cid else {
             self.emit_info(":model: no selected agent to update");
             return Ok(true);
@@ -16315,7 +16304,6 @@ impl Harness {
             // the scheduler and completes turns after all interrupted calls
             // have been terminalized.
             let owner = self.tool_agents.get(call_id.as_str()).cloned();
-            // ast-grep-ignore: if-let-some-else
             if let Some(cid) = owner.as_ref() {
                 let settlement = self.publish_terminal_tool_error_with_cause(
                     Some(cid),
@@ -17170,7 +17158,6 @@ impl Harness {
             .discovered_skill_candidates
             .get(name)
             .and_then(|candidates| selected_skill_candidate(candidates).cloned());
-        // ast-grep-ignore: if-let-some-else
         if let Some(winner) = winner {
             self.discovered_skills.insert(name.clone(), winner);
         } else {
@@ -19259,16 +19246,15 @@ impl Harness {
     fn publish_current_model_state(&mut self) {
         let selected_model = self.selected_model.clone();
         let (effort_levels, verbosity_levels, thinking_levels) =
-            selected_model.as_ref().map_or_else(
-                || (Vec::new(), Vec::new(), Vec::new()),
-                |model| {
-                    (
-                        efforts_for_model(&self.provider_model_info, model),
-                        verbosities_for_model(&self.provider_model_info, model),
-                        thinking_summaries_for_model(&self.provider_model_info, model),
-                    )
-                },
-            );
+            if let Some(model) = selected_model.as_ref() {
+                (
+                    efforts_for_model(&self.provider_model_info, model),
+                    verbosities_for_model(&self.provider_model_info, model),
+                    thinking_summaries_for_model(&self.provider_model_info, model),
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
         let context_window = selected_model
             .as_ref()
             .and_then(|model| context_window_for_model(&self.provider_model_info, model));
@@ -21735,7 +21721,6 @@ impl Harness {
                             )
                     )
                 });
-            // ast-grep-ignore: if-let-some-else
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.agent_id = Some(agent_id_string.clone());
                 conv.head = head;
@@ -25922,7 +25907,6 @@ impl Harness {
             .agents
             .get(cid)
             .and_then(|c| c.source_connection.clone());
-        // ast-grep-ignore: if-let-some-else
         if let Some(source) = source {
             if &source == harness_connection_id() {
                 self.publish_event(
@@ -26058,7 +26042,6 @@ impl Harness {
         // for calls that are safe to dispatch.
         for entry in normalized_tool_calls.calls {
             let call = entry.call;
-            // ast-grep-ignore: if-let-some-else
             if let Some(message) = normalized_tool_calls.invalid_errors.remove(&call.id) {
                 self.reject_agent_tool_call_before_dispatch_from(
                     cid,
@@ -26781,7 +26764,6 @@ impl Harness {
         }
         let prompt = background_completion_prompt(call_id);
         let activation = tau_proto::ObservationId::random();
-        // ast-grep-ignore: if-let-some-else
         let queued = if let Some(conv) = self.agents.get_mut(cid) {
             if conv
                 .pending_prompts
@@ -26938,7 +26920,6 @@ impl Harness {
     }
 
     fn maybe_complete_agent_turn_for(&mut self, cid: &AgentId, completed_call_id: &str) {
-        // ast-grep-ignore: if-let-some-else
         let should_send = if let Some(conv) = self.agents.get_mut(cid) {
             if let AgentTurnState::ToolsRunning { remaining_calls } = &mut conv.turn_state {
                 remaining_calls.retain(|id| id.as_str() != completed_call_id);
@@ -27184,7 +27165,6 @@ impl Harness {
             .unwrap_or_default();
         // These markers request a turn only; their payload is already folded by
         // the canonical incoming fact.
-        // ast-grep-ignore: if-let-some-else
         if let Some(user_prompt_pos) = pending.iter().position(|prompt| !prompt.is_internal()) {
             self.reset_loop_guard_for_progress(cid);
             pending.retain(|prompt| !prompt.is_loop_guard());

@@ -776,7 +776,6 @@ impl SendDeliveryWorker {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.active_send_workers = state.active_send_workers.saturating_sub(1);
         let channel_id = &prepared.route.channel_id;
-        // ast-grep-ignore: if-let-some-else
         let remove_queue = if let Some(queue) = state.channel_send_queues.get_mut(channel_id) {
             queue.retain(|reservation| {
                 reservation.call_id != prepared.invoke.call_id

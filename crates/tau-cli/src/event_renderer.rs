@@ -1797,7 +1797,6 @@ impl EventRenderer {
 
     fn store_visible_agent_state(&mut self) {
         let state = self.take_visible_agent_state();
-        // ast-grep-ignore: if-let-some-else
         if let Some(displayed) = self.displayed_agent_id.clone() {
             self.agents_ui_state.insert(displayed, state);
         } else {
@@ -2020,7 +2019,6 @@ impl EventRenderer {
         }
         for (index, agent_id) in active.iter().enumerate() {
             let block = self.watched_agent_block(&current, agent_id, &projection);
-            // ast-grep-ignore: if-let-some-else
             let block_id = if let Some(block_id) = self.watched_agent_blocks.get(agent_id).copied()
             {
                 self.handle.set_block(block_id, block);
@@ -3063,7 +3061,6 @@ impl EventRenderer {
         let mut live_updates = Vec::new();
         for state in self.tool_calls.values_mut() {
             if let Some(block_id) = state.block_id {
-                // ast-grep-ignore: if-let-some-else
                 let display = if let Some(display) = state.live_display.as_ref() {
                     let mut display = display.clone();
                     let duration = Self::live_tool_duration(state);
@@ -5466,7 +5463,6 @@ impl EventRenderer {
         // round (alongside tool results) instead of waiting for `Idle`.
         // Promote the "(queued)" rendering to a regular user prompt so the
         // transcript reads naturally above the agent's continuing response.
-        // ast-grep-ignore: if-let-some-else
         if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
             self.handle.remove_block(queued_id);
             self.handle.print_output(
@@ -5760,7 +5756,6 @@ impl EventRenderer {
             self.osc8_links,
         );
         let existing_tbid = self.prompts.get(spid).and_then(|s| s.thinking_block_id);
-        // ast-grep-ignore: if-let-some-else
         if let Some(tbid) = existing_tbid {
             self.handle.set_block(tbid, block);
         } else {
@@ -5794,7 +5789,6 @@ impl EventRenderer {
         };
         let block = render_compaction_block(&self.theme, text, status);
         let existing_id = self.prompts.get(spid).and_then(|s| s.compaction_block_id);
-        // ast-grep-ignore: if-let-some-else
         if let Some(block_id) = existing_id {
             self.handle.set_block(block_id, block);
         } else {
@@ -6630,15 +6624,14 @@ impl EventRenderer {
     }
 
     fn tool_result_display(result: &tau_proto::ToolResultDisplay) -> ToolCallDisplay {
-        result.display.as_ref().map_or_else(
-            || {
-                render_tool_use_state(
-                    &result.tool_name,
-                    &synthesize_fallback_display(&result.tool_name, None),
-                )
-            },
-            |descriptor| render_tool_use_state(&result.tool_name, descriptor),
-        )
+        if let Some(descriptor) = &result.display {
+            render_tool_use_state(&result.tool_name, descriptor)
+        } else {
+            render_tool_use_state(
+                &result.tool_name,
+                &synthesize_fallback_display(&result.tool_name, None),
+            )
+        }
     }
 
     fn finished_tool_duration(prior: &ToolCallState, finished_at: UnixMicros) -> Option<Duration> {
@@ -6669,7 +6662,6 @@ impl EventRenderer {
         display: ToolCallDisplay,
         diff: Option<tau_proto::ToolUsePayload>,
     ) {
-        // ast-grep-ignore: if-let-some-else
         if let Some(diff) = diff {
             let block = self.render_diff_history_block(&display, &diff);
             let bid =
@@ -6746,15 +6738,12 @@ impl EventRenderer {
                 Some(&error.message),
             );
             render_tool_use_state(&error.tool_name, &descriptor)
+        } else if let Some(descriptor) = &error.display {
+            render_tool_use_state(&error.tool_name, descriptor)
         } else {
-            error.display.as_ref().map_or_else(
-                || {
-                    render_tool_use_state(
-                        &error.tool_name,
-                        &synthesize_fallback_display(&error.tool_name, Some(&error.message)),
-                    )
-                },
-                |descriptor| render_tool_use_state(&error.tool_name, descriptor),
+            render_tool_use_state(
+                &error.tool_name,
+                &synthesize_fallback_display(&error.tool_name, Some(&error.message)),
             )
         }
     }
@@ -6800,7 +6789,6 @@ impl EventRenderer {
         label: &'static str,
         block: tau_cli_term::StyledBlock,
     ) -> tau_cli_term::BlockId {
-        // ast-grep-ignore: if-let-some-else
         if let Some(bid) = existing_block_id {
             self.handle.set_block(bid, block);
             self.handle.redraw();
@@ -6877,7 +6865,6 @@ impl EventRenderer {
 
     fn handle_shell_command_finished(&mut self, finished: &tau_proto::ShellCommandFinished) {
         let include_in_context =
-            // ast-grep-ignore: if-let-some-else
             if let Some(state) = self.shell_blocks.remove(finished.command_id.as_str()) {
                 // Use the final, post-truncation output from the extension rather
                 // than our streaming buffer so the UI matches what the harness
@@ -7064,7 +7051,6 @@ impl EventRenderer {
     }
 
     fn handle_extension_ready(&mut self, ready: &tau_proto::ExtensionReady) {
-        // ast-grep-ignore: if-let-some-else
         let removed_starting = if let Some(state) = self.extension_blocks.remove(&ready.instance_id)
         {
             self.handle.remove_block(state.block_id);
@@ -7088,7 +7074,6 @@ impl EventRenderer {
 
     fn handle_extension_exited(&mut self, exited: &tau_proto::ExtensionExited) {
         let removed_starting =
-            // ast-grep-ignore: if-let-some-else
             if let Some(state) = self.extension_blocks.remove(&exited.instance_id) {
                 self.handle.remove_block(state.block_id);
                 true

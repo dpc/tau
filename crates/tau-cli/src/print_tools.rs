@@ -59,17 +59,15 @@ fn get_rendered_tool_definitions(
             HarnessOutputMessage::RenderedToolDefinitionsResult(result)
                 if result.request_id == request_id =>
             {
-                let (error, tools) = (result.error, result.tools);
-                let tools = error.map_or_else(
-                    || {
-                        tools.ok_or_else(|| {
-                            CliError::Participant(
-                                "daemon returned no rendered tool definitions".to_owned(),
-                            )
-                        })
-                    },
-                    |error| Err(CliError::Participant(error)),
-                );
+                let tools = if let Some(error) = result.error {
+                    Err(CliError::Participant(error))
+                } else {
+                    result.tools.ok_or_else(|| {
+                        CliError::Participant(
+                            "daemon returned no rendered tool definitions".to_owned(),
+                        )
+                    })
+                };
                 RenderResponse::Matched(tools)
             }
             _ => RenderResponse::Ignore,

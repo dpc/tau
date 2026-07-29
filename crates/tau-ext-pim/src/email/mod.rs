@@ -5236,9 +5236,11 @@ fn allow_record(pattern: &str, note: &str) -> Result<StatePattern, String> {
         AddressPattern::Glob { .. } => "glob",
         AddressPattern::Regex { .. } => "regex",
     };
-    let pattern = pattern
-        .strip_prefix("re:")
-        .map_or_else(|| pattern.to_owned(), ToOwned::to_owned);
+    let pattern = if let Some(regex) = pattern.strip_prefix("re:") {
+        regex.to_owned()
+    } else {
+        pattern.to_owned()
+    };
     Ok(StatePattern {
         kind: kind.to_owned(),
         pattern,

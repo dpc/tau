@@ -1640,26 +1640,26 @@ fn default_calendar_id_for_account(account: &ValidatedAccount) -> Option<&str> {
 
 fn parse_range(args: &CalendarRangeArgs, account: &ValidatedAccount) -> Result<TimeRange, String> {
     let start_value = optional_trimmed_line(args.start.as_deref(), "start")?;
-    let (start, default_end) = start_value.as_deref().map_or_else(
-        || {
-            let (start, end) = default_read_range(account.timezone.as_deref())?;
-            Ok::<_, String>((start, Some(end)))
-        },
-        |start_value| {
-            Ok((
-                parse_read_bound(start_value, "start", account.timezone.as_deref())?,
-                None,
-            ))
-        },
-    )?;
+    let (start, default_end) = if let Some(start_value) = start_value.as_deref() {
+        (
+            parse_read_bound(start_value, "start", account.timezone.as_deref())?,
+            None,
+        )
+    } else {
+        let (start, end) = default_read_range(account.timezone.as_deref())?;
+        (start, Some(end))
+    };
     let end = match args.end.as_deref() {
         Some(end) if !end.trim().is_empty() => {
             parse_read_bound(end, "end", account.timezone.as_deref())?
         }
-        _ => start_value.as_deref().map_or_else(
-            || Ok(default_end.expect("default end present when start is absent")),
-            |start_value| default_read_end_bound(start_value, start, account.timezone.as_deref()),
-        )?,
+        _ => {
+            if let Some(start_value) = start_value.as_deref() {
+                default_read_end_bound(start_value, start, account.timezone.as_deref())?
+            } else {
+                default_end.expect("default end present when start is absent")
+            }
+        }
     };
     if !is_datetime_before(start, end) {
         return Err("start must be before end".to_owned());
@@ -3219,7 +3219,11 @@ fn display_date_bound(value: &str) -> String {
     if !looks_like_iso_minute_prefix(&value) {
         return value;
     }
-    value.get(..16).map(ToOwned::to_owned).unwrap_or(value)
+    if let Some(compact) = value.get(..16) {
+        compact.to_owned()
+    } else {
+        value
+    }
 }
 
 fn is_date_only_or_midnight_bound(value: &str) -> bool {

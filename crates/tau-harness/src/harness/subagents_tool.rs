@@ -467,7 +467,6 @@ impl Harness {
 
     /// Settle runtime accounting and clear one harness-owned internal call.
     pub(crate) fn finish_harness_owned_tool_tracking(&mut self, call_id: &ToolCallId) {
-        // ast-grep-ignore: if-let-some-else
         if let Some(cid) = self.peer_internal_tool_agents.get(call_id).cloned() {
             self.tool_turn.mark_complete(call_id);
             if let Some(agent) = self.agents.get_mut(&cid) {

@@ -310,7 +310,6 @@ impl DeterministicFixture {
             }),
         );
         let dummy_enabled = dummy_tool_bin.is_some();
-        // ast-grep-ignore: if-let-some-else
         let tools = if let Some(dummy_tool_bin) = dummy_tool_bin {
             extensions.insert(
                 "e2e-test-dummy".to_owned(),
@@ -774,7 +773,6 @@ impl DeterministicFixture {
 }
 
 fn exact_tau_binary() -> Result<String, Box<dyn std::error::Error>> {
-    // ast-grep-ignore: if-let-some-else
     let candidate = if let Some(path) = std::env::var_os("TAU_E2E_TAU_BIN") {
         PathBuf::from(path)
     } else {

@@ -140,7 +140,6 @@ impl<'a> InternalToolHost<'a> {
 
     /// Register a harness-process internal tool.
     pub fn register_internal_tool(&mut self, spec: ToolSpec, group: Option<tau_proto::ToolGroup>) {
-        // ast-grep-ignore: if-let-some-else
         if let Some(group) = group {
             // This call is intentionally best-effort; preserve the existing discarded
             // result. ast-grep-ignore: let-underscore-call

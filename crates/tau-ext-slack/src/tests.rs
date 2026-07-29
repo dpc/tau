@@ -410,7 +410,6 @@ fn reindex_receive_routes(config: &mut RuntimeConfig) {
         .values()
         .filter(|policy| policy.receive.is_some())
     {
-        // ast-grep-ignore: if-let-some-else
         if let Some(root) = &policy.thread_ts {
             config.thread_receives.insert(
                 (policy.conversation_id.clone(), root.clone()),

@@ -308,11 +308,13 @@ impl DaemonHandle {
 }
 
 fn panic_payload_label<'a>(payload: &'a (dyn std::any::Any + Send + 'static)) -> &'a str {
-    payload
-        .downcast_ref::<&'static str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("non-string panic payload")
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "non-string panic payload"
+    }
 }
 
 /// Waits until one filesystem path exists.

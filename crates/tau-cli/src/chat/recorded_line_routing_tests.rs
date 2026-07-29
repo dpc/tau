@@ -433,7 +433,6 @@ impl RecordedLineHandlers for TestNewRoleCommandHandlers {
         if text == ":new" || text.starts_with(":new ") {
             match new_alias_command_effect(text) {
                 NewAliasCommandEffect::StartNewAgent { role } => {
-                    // ast-grep-ignore: if-let-some-else
                     if let Some(role) = role {
                         self.pending.stage_role(role);
                         self.outputs.push(format!("role-select:{role}"));

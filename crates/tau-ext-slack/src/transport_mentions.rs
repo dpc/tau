@@ -86,7 +86,6 @@ fn complete_backtick_ranges(text: &str) -> Vec<(usize, usize)> {
             }
             cursor = candidate_end;
         }
-        // ast-grep-ignore: if-let-some-else
         if let Some(close_end) = close {
             ranges.push((open, close_end));
             open = close_end;

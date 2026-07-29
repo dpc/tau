@@ -532,7 +532,6 @@ fn write_debug_job(
             .expect("append file was initialized")
             .file;
         #[cfg(test)]
-        // ast-grep-ignore: if-let-some-else
         let result = if let Some(fault) = job.fault {
             append_line(
                 &mut FaultInjectingFile::new(file, fault, job.line.len()),
