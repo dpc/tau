@@ -48,8 +48,10 @@ from its prompt, model, operation, policy, and branch state.
 Profile files, OAuth tokens, and API keys are local secrets. They must not enter
 model-visible output, notices, traces, debug logs, or fixtures. Debug captures
 may contain full prompt and tool-result content and therefore remain gated by
-explicit durable-session policy. Detailed credential and response controls are
-owned by [`SECURITY.md`](../SECURITY.md).
+explicit durable-session policy. New captures are zstd-compressed on one
+bounded best-effort background writer; overload, write failure, or process
+shutdown can omit captures but never delay provider or UI work. Detailed
+credential and response controls are owned by [`SECURITY.md`](../SECURITY.md).
 
 ## Runtime and worker flow
 

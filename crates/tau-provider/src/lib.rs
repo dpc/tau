@@ -6,6 +6,7 @@
 //! can use [`StreamRepetitionGuard`] to abort high-confidence tight exact
 //! output loops before they become durable assistant output.
 
+pub mod debug_capture_writer;
 pub mod outbound_network;
 pub mod repetition_guard;
 pub mod retry_policy;

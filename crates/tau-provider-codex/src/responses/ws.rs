@@ -333,7 +333,7 @@ impl WsConn {
             }
         }
         let request_body = recorded_request_body(&envelope, recording_stream.is_some())?;
-        super::maybe_debug_write_provider_request(
+        super::maybe_debug_submit_provider_request(
             agent_prompt_id,
             config,
             request,

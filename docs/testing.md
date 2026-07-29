@@ -440,7 +440,7 @@ Responses-style parsers must also cover final snapshot/done events (for example
 `response.output_item.done`) because providers can send complete content there
 without earlier deltas.
 
-## Debug JSONL writer
+## Best-effort diagnostic workers
 
 Keep serialization/redaction and failure-atomic append-primitive fault coverage
 in the synchronous debug-log test writer. Exercise process-wide admission,
@@ -454,12 +454,24 @@ no-drain/no-join behavior is a structural review invariant: the singleton drops
 the production join handle immediately, exposes no shutdown/drain API, and no
 lifecycle code may wait for it.
 
-Startup JSONL-retention tests live beside `diagnostic_cleanup`. Use the injected
-clock/removal seam for exact age, scope, symlink, and per-file failure behavior.
+Startup diagnostic-retention tests live beside `diagnostic_cleanup`. Use the injected
+clock/removal seam for exact age, scope, symlink, and per-file failure behavior
+across `events.jsonl` and legacy/compressed provider captures.
 Use the returned test join handle only to verify startup gating: durable configured
 cleanup launches and protects the current session, while disabled retention and
 ephemeral sessions do not launch. Production drops that handle and never blocks
 startup on cleanup.
+
+Provider-capture filename grammar tests live in
+`tau-config::provider_debug_capture`, the dependency-neutral contract used by
+writers and cleanup. Worker and producer-integration tests live in
+`tau-provider::debug_capture_writer` and the concrete provider backends.
+Exercise immediate bounded admission, per-job write-failure isolation, zstd
+round trips, and refusal of missing or symlinked session/debug/capture
+directories. The process-wide sender deliberately
+has no shutdown or join API: process exit can interrupt queued or in-flight
+captures. A local-channel worker-drain test covers only the worker loop after
+test producers disconnect and is not a production shutdown guarantee.
 
 
 ## Skill discovery and loading

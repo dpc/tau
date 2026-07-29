@@ -286,6 +286,7 @@ vt100 = { version = "0.16", default-features = false }
 webpki-roots = { version = "1", default-features = false }
 which = { version = "8", default-features = false, features = ["real-sys"] }
 xmpp-parsers = { version = "0.23", default-features = false }
+zstd = { version = "0.13", default-features = false }
 
 [profile.dev]
 debug = false

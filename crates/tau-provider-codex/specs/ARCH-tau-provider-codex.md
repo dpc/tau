@@ -184,6 +184,15 @@ This crate sends prompt/tool context to ChatGPT/Codex endpoints and parses provi
 responses back into Tau stream state. Treat upstream responses and diagnostics as
 crossing an external-provider trust boundary.
 
+Explicitly enabled durable-session request and response captures serialize on
+the producer and enter the shared
+[`tau-provider`](../../tau-provider/specs/ARCH-tau-provider.md) bounded
+process-wide FIFO
+without waiting. Its detached worker performs zstd compression and filesystem
+I/O; overload, worker startup/write failure, and process exit may omit captures
+but cannot fail or wait for provider/UI work. The process-lifetime sender has no
+shutdown, drain, or join API.
+
 ## Streaming status boundary
 
 ChatGPT/Codex output implements

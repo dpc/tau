@@ -12,3 +12,12 @@ selected proxy. Cancellation drops the active async response future/socket;
 header, body, and idle waits retain finite bounds. Error bodies remain bounded
 and provider content must never enter retry status, ordinary logs, or watcher
 events.
+
+Explicit durable-session debug captures can contain complete prompts, tool
+results, model output, and bounded HTTP error bodies. They remain private
+sensitive `.json.zst` diagnostics; compression is not redaction. The shared
+bounded writer can omit them on overload, failure, or process exit and never
+blocks provider work to guarantee persistence.
+Tau does not intentionally include auth headers or API-key configuration, but
+provider-controlled responses/errors and configured request fields can reflect
+credentials, so every capture must be treated as potentially credential-bearing.

@@ -4,7 +4,6 @@
 //! retained only for the unary compact operation.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -282,14 +281,19 @@ pub struct ResponsesConfig {
     pub supports_prompt_cache_key: bool,
 }
 
-/// Write the exact Responses request body Tau is about to send upstream.
+/// Serialize and submit the exact Responses request body Tau is about to send.
 ///
 /// This records the full prompt transcript, including tool results. It never
 /// writes credentials or request headers. Files are written under the session
 /// debug directory:
 ///
 /// `~/.local/state/tau/sessions/<session_id>/debug/provider-requests/`.
-pub(super) fn maybe_debug_write_provider_request(
+///
+/// Return does not imply persistence. Serialization remains local and fallible,
+/// but bounded queue admission is
+/// immediate. Compression and every filesystem operation run on the detached
+/// capture worker.
+pub(super) fn maybe_debug_submit_provider_request(
     agent_prompt_id: &str,
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
@@ -299,69 +303,35 @@ pub(super) fn maybe_debug_write_provider_request(
     if !request.debug_provider_requests {
         return;
     }
-    if let Err(error) =
-        debug_write_provider_request(agent_prompt_id, config, request, transport, body)
-    {
+    if let Err(error) = serialize_and_submit_provider_request_with(
+        agent_prompt_id,
+        config,
+        request,
+        transport,
+        body,
+        tau_provider::debug_capture_writer::submit_provider_debug_capture,
+    ) {
         tracing::warn!(
             target: crate::LOG_TARGET,
             session_id = %request.session_id,
             agent_prompt_id,
-            "failed to write provider request debug log: {error}",
+            "failed to serialize provider request debug capture: {error}",
         );
     }
 }
 
-/// Return the provider request debug directory for an explicitly durable
-/// session.
-///
-/// This helper intentionally returns `None` unless the caller passes an
-/// explicit durable-session signal and the session directory already exists.
-/// Provider diagnostics must not infer persistence from filesystem shape or
-/// create per-session state directories on their own, because ephemeral
-/// sessions can reuse a session id with older durable state and must not gain
-/// durable debug artifacts as a side effect of provider execution.
-pub fn debug_provider_request_dir(
-    session_id: &str,
-    debug_provider_requests: bool,
-) -> Option<PathBuf> {
-    let state = tau_config::settings::state_dir()?;
-    debug_provider_request_dir_in(&state, session_id, debug_provider_requests)
-}
-
-fn debug_provider_request_dir_in(
-    state: &std::path::Path,
-    session_id: &str,
-    debug_provider_requests: bool,
-) -> Option<PathBuf> {
-    if !debug_provider_requests {
-        return None;
-    }
-    let session_dir = tau_config::settings::sessions_dir_of(state).join(session_id);
-    session_dir
-        .is_dir()
-        .then(|| session_dir.join("debug").join("provider-requests"))
-}
-
-fn debug_write_provider_request(
+fn serialize_and_submit_provider_request_with(
     agent_prompt_id: &str,
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
     transport: tau_proto::ProviderBackendTransport,
     body: &impl Serialize,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(dir) = debug_provider_request_dir(request.session_id, request.debug_provider_requests)
-    else {
+    submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+) -> serde_json::Result<()> {
+    if !request.debug_provider_requests {
         return Ok(());
-    };
-    std::fs::create_dir_all(&dir)?;
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
+    }
     let transport_label = provider_backend_transport_label(transport);
-    let path = dir.join(format!(
-        "{ts}-{agent_prompt_id}-{transport_label}-request.json"
-    ));
     let mut body = serde_json::to_value(body)?;
     redact_image_data_urls(&mut body);
     let metadata = serde_json::json!({
@@ -375,7 +345,28 @@ fn debug_write_provider_request(
         "tool_choice": request.tool_choice,
         "body": body,
     });
-    std::fs::write(path, serde_json::to_vec_pretty(&metadata)?)?;
+    let Ok(agent_prompt_id) = tau_proto::AgentPromptId::parse(agent_prompt_id) else {
+        tracing::warn!(
+            target: crate::LOG_TARGET,
+            "invalid provider debug capture prompt id; dropping capture"
+        );
+        return Ok(());
+    };
+    submit(
+        tau_provider::debug_capture_writer::ProviderDebugCapture::new(
+            request.session_id.clone(),
+            agent_prompt_id,
+            match transport {
+                tau_proto::ProviderBackendTransport::HttpSse => {
+                    tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest
+                }
+                tau_proto::ProviderBackendTransport::Websocket => {
+                    tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketRequest
+                }
+            },
+            serde_json::to_vec_pretty(&metadata)?,
+        ),
+    );
     Ok(())
 }
 
@@ -454,7 +445,7 @@ fn send_compact_request_inner(
     network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
     #[cfg(test)] worker_exit_gate: Option<CompactWorkerExitGate>,
 ) -> Result<Vec<ContextItem>, LlmError> {
-    maybe_debug_write_provider_request(
+    maybe_debug_submit_provider_request(
         agent_prompt_id,
         config,
         request,

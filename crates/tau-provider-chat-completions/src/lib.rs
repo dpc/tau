@@ -6,8 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::io::Read;
-use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
 use tau_proto::{
@@ -786,7 +785,7 @@ fn chat_completions_stream(
     );
     let body = try_build_request(provider, model, prompt)?;
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
-    maybe_debug_write_provider_request(prompt, model, debug_provider_requests, &body);
+    maybe_debug_submit_provider_request(prompt, model, debug_provider_requests, &body);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -805,7 +804,7 @@ fn chat_completions_stream(
         network,
     ))?;
     flush_pending_content(&mut state, on_update)?;
-    maybe_debug_write_provider_response(
+    maybe_debug_submit_provider_response(
         prompt,
         model,
         debug_provider_requests,
@@ -907,7 +906,7 @@ async fn chat_completions_stream_async(
             }
         }
         let body = String::from_utf8_lossy(&bytes).into_owned();
-        maybe_debug_write_provider_http_error(
+        maybe_debug_submit_provider_http_error(
             context.prompt,
             context.model,
             context.debug_provider_requests,
@@ -1083,25 +1082,6 @@ fn build_request(
     try_build_request(provider, model, prompt).expect("test request tools must be supported")
 }
 
-fn debug_provider_request_dir(session_id: &str, debug_provider_requests: bool) -> Option<PathBuf> {
-    let state = tau_config::settings::state_dir()?;
-    debug_provider_request_dir_in(&state, session_id, debug_provider_requests)
-}
-
-fn debug_provider_request_dir_in(
-    state: &std::path::Path,
-    session_id: &str,
-    debug_provider_requests: bool,
-) -> Option<PathBuf> {
-    if !debug_provider_requests {
-        return None;
-    }
-    let session_dir = tau_config::settings::sessions_dir_of(state).join(session_id);
-    session_dir
-        .is_dir()
-        .then(|| session_dir.join("debug").join("provider-requests"))
-}
-
 fn debug_file_prefix(
     prompt: &tau_proto::AgentPromptCreated,
     model: &AttemptModel,
@@ -1115,40 +1095,33 @@ fn debug_file_prefix(
     })
 }
 
-fn debug_timestamp_micros() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros()
-}
-
-fn write_debug_json(
+fn submit_debug_json_with(
     prompt: &tau_proto::AgentPromptCreated,
-    suffix: &str,
+    class: tau_provider::debug_capture_writer::ProviderDebugCaptureClass,
     debug_provider_requests: bool,
     metadata: &serde_json::Value,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(dir) = debug_provider_request_dir(prompt.session_id.as_str(), debug_provider_requests)
-    else {
+    submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+) -> serde_json::Result<()> {
+    if !debug_provider_requests {
         return Ok(());
-    };
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!(
-        "{}-{}-http-sse-{suffix}.json",
-        debug_timestamp_micros(),
-        prompt.agent_prompt_id,
-    ));
-    std::fs::write(path, serde_json::to_vec_pretty(metadata)?)?;
+    }
+    submit(
+        tau_provider::debug_capture_writer::ProviderDebugCapture::new(
+            prompt.session_id.clone(),
+            prompt.agent_prompt_id.clone(),
+            class,
+            serde_json::to_vec_pretty(metadata)?,
+        ),
+    );
     Ok(())
 }
 
-fn maybe_debug_write_provider_request(
+fn provider_request_debug_metadata(
     prompt: &tau_proto::AgentPromptCreated,
     model: &AttemptModel,
-    debug_provider_requests: bool,
     body: &ChatRequest,
-) {
-    let metadata = serde_json::json!({
+) -> serde_json::Value {
+    serde_json::json!({
         "session_id": prompt.session_id,
         "agent_prompt_id": prompt.agent_prompt_id,
         "transport": "http-sse",
@@ -1158,24 +1131,96 @@ fn maybe_debug_write_provider_request(
         "tool_count": prompt.tools.len(),
         "tool_choice": prompt.tool_choice,
         "body": body,
-    });
-    if let Err(error) = write_debug_json(prompt, "request", debug_provider_requests, &metadata) {
+    })
+}
+
+fn maybe_debug_submit_provider_request(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &AttemptModel,
+    debug_provider_requests: bool,
+    body: &ChatRequest,
+) {
+    maybe_debug_submit_provider_request_with(
+        prompt,
+        model,
+        debug_provider_requests,
+        body,
+        tau_provider::debug_capture_writer::submit_provider_debug_capture,
+    );
+}
+
+fn maybe_debug_submit_provider_request_with(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &AttemptModel,
+    debug_provider_requests: bool,
+    body: &ChatRequest,
+    submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+) {
+    let metadata = provider_request_debug_metadata(prompt, model, body);
+    if let Err(error) = submit_debug_json_with(
+        prompt,
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest,
+        debug_provider_requests,
+        &metadata,
+        submit,
+    ) {
         tracing::warn!(
             target: LOG_TARGET,
             session_id = %prompt.session_id,
             agent_prompt_id = %prompt.agent_prompt_id,
-            "failed to write chat completions provider request debug log: {error}",
+            "failed to serialize chat completions provider request debug capture: {error}",
         );
     }
 }
 
-fn maybe_debug_write_provider_response(
+fn maybe_debug_submit_provider_response(
     prompt: &tau_proto::AgentPromptCreated,
     model: &AttemptModel,
     debug_provider_requests: bool,
     state: &StreamState,
     raw_events: &[serde_json::Value],
 ) {
+    maybe_debug_submit_provider_response_with(
+        prompt,
+        model,
+        debug_provider_requests,
+        state,
+        raw_events,
+        tau_provider::debug_capture_writer::submit_provider_debug_capture,
+    );
+}
+
+fn maybe_debug_submit_provider_response_with(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &AttemptModel,
+    debug_provider_requests: bool,
+    state: &StreamState,
+    raw_events: &[serde_json::Value],
+    submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+) {
+    let metadata = provider_response_debug_metadata(prompt, model, state, raw_events);
+    if let Err(error) = submit_debug_json_with(
+        prompt,
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse,
+        debug_provider_requests,
+        &metadata,
+        submit,
+    ) {
+        tracing::warn!(
+            target: LOG_TARGET,
+            session_id = %prompt.session_id,
+            agent_prompt_id = %prompt.agent_prompt_id,
+            "failed to serialize chat completions provider response debug capture: {error}",
+        );
+    }
+}
+
+fn provider_response_debug_metadata(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &AttemptModel,
+    state: &StreamState,
+    raw_events: &[serde_json::Value],
+) -> serde_json::Value {
     let mut metadata = debug_file_prefix(prompt, model);
     if let serde_json::Value::Object(map) = &mut metadata {
         map.insert(
@@ -1195,36 +1240,63 @@ fn maybe_debug_write_provider_response(
             serde_json::Value::Array(raw_events.to_vec()),
         );
     }
-    if let Err(error) = write_debug_json(prompt, "response", debug_provider_requests, &metadata) {
-        tracing::warn!(
-            target: LOG_TARGET,
-            session_id = %prompt.session_id,
-            agent_prompt_id = %prompt.agent_prompt_id,
-            "failed to write chat completions provider response debug log: {error}",
-        );
-    }
+    metadata
 }
 
-fn maybe_debug_write_provider_http_error(
+fn maybe_debug_submit_provider_http_error(
     prompt: &tau_proto::AgentPromptCreated,
     model: &AttemptModel,
     debug_provider_requests: bool,
     status: u16,
     body: &str,
 ) {
+    maybe_debug_submit_provider_http_error_with(
+        prompt,
+        model,
+        debug_provider_requests,
+        status,
+        body,
+        tau_provider::debug_capture_writer::submit_provider_debug_capture,
+    );
+}
+
+fn maybe_debug_submit_provider_http_error_with(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &AttemptModel,
+    debug_provider_requests: bool,
+    status: u16,
+    body: &str,
+    submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+) {
+    let metadata = provider_http_error_debug_metadata(prompt, model, status, body);
+    if let Err(error) = submit_debug_json_with(
+        prompt,
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse,
+        debug_provider_requests,
+        &metadata,
+        submit,
+    ) {
+        tracing::warn!(
+            target: LOG_TARGET,
+            session_id = %prompt.session_id,
+            agent_prompt_id = %prompt.agent_prompt_id,
+            "failed to serialize chat completions provider HTTP-error debug capture: {error}",
+        );
+    }
+}
+
+fn provider_http_error_debug_metadata(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &AttemptModel,
+    status: u16,
+    body: &str,
+) -> serde_json::Value {
     let mut metadata = debug_file_prefix(prompt, model);
     if let serde_json::Value::Object(map) = &mut metadata {
         map.insert("http_status".to_owned(), serde_json::json!(status));
         map.insert("body".to_owned(), serde_json::json!(body));
     }
-    if let Err(error) = write_debug_json(prompt, "response", debug_provider_requests, &metadata) {
-        tracing::warn!(
-            target: LOG_TARGET,
-            session_id = %prompt.session_id,
-            agent_prompt_id = %prompt.agent_prompt_id,
-            "failed to write chat completions provider response debug log: {error}",
-        );
-    }
+    metadata
 }
 
 fn reasoning_text_context_item(reasoning: &str) -> Option<ContextItem> {

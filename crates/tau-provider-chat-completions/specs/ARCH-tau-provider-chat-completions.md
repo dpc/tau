@@ -103,6 +103,13 @@ providers and parses provider responses back into Tau stream state. Treat
 upstream responses and diagnostics as crossing an external-provider trust
 boundary.
 
+Explicitly enabled durable-session request, successful-response, and HTTP-error
+captures are serialized by this adapter and submitted to the shared
+[`tau-provider`](../../tau-provider/specs/ARCH-tau-provider.md) bounded writer.
+Submission never implies persistence; background
+zstd compression, filesystem failures, overload, or process exit may omit these
+best-effort diagnostics without delaying provider/UI work.
+
 ## Streaming status boundary
 
 Providers must not copy raw streamed text, reasoning, or function-call argument

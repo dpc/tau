@@ -12,4 +12,5 @@
 //! live in `tau-harness` — this crate just owns the on-disk schema.
 
 pub mod atomic;
+pub mod provider_debug_capture;
 pub mod settings;

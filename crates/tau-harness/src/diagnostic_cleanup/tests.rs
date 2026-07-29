@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 use fs2::FileExt as _;
 use tempfile::TempDir;
 
-use super::{cleanup_diagnostic_jsonl_with, spawn_diagnostic_jsonl_cleanup_for_test};
+use super::{cleanup_diagnostics_with, spawn_diagnostic_cleanup_for_test};
 
 /// Ensures the startup entry point launches only for durable configured
 /// retention and protects the session being opened.
@@ -19,7 +19,7 @@ fn startup_cleanup_honors_persistence_retention_and_current_session() {
     }
     let current = tau_proto::SessionId::parse("current").expect("session id");
 
-    spawn_diagnostic_jsonl_cleanup_for_test(
+    spawn_diagnostic_cleanup_for_test(
         sessions.clone(),
         Some(Duration::ZERO),
         tau_core::SessionPersistenceMode::Durable,
@@ -33,7 +33,7 @@ fn startup_cleanup_honors_persistence_retention_and_current_session() {
     assert!(sessions.join("current/events.jsonl").exists());
     assert!(!sessions.join("old/events.jsonl").exists());
     assert!(
-        spawn_diagnostic_jsonl_cleanup_for_test(
+        spawn_diagnostic_cleanup_for_test(
             sessions.clone(),
             None,
             tau_core::SessionPersistenceMode::Durable,
@@ -43,7 +43,7 @@ fn startup_cleanup_honors_persistence_retention_and_current_session() {
         .is_none()
     );
     assert!(
-        spawn_diagnostic_jsonl_cleanup_for_test(
+        spawn_diagnostic_cleanup_for_test(
             sessions,
             Some(Duration::ZERO),
             tau_core::SessionPersistenceMode::Ephemeral,
@@ -54,10 +54,10 @@ fn startup_cleanup_honors_persistence_retention_and_current_session() {
     );
 }
 
-/// Ensures cleanup removes only the known non-authoritative JSONL filename
-/// and leaves canonical journals and unrelated diagnostic files untouched.
+/// Ensures cleanup removes legacy and compressed provider captures alongside
+/// the JSONL mirror while preserving canonical and unrelated files.
 #[test]
-fn cleanup_scope_is_limited_to_session_events_jsonl() {
+fn cleanup_scope_is_limited_to_known_diagnostic_paths_and_names() {
     let temp = TempDir::new().expect("temp state");
     let sessions = temp.path().join("sessions");
     let session = sessions.join("one");
@@ -65,8 +65,28 @@ fn cleanup_scope_is_limited_to_session_events_jsonl() {
     std::fs::write(session.join("events.jsonl"), b"debug").expect("debug JSONL");
     std::fs::write(session.join("events.cbor"), b"canonical").expect("canonical journal");
     std::fs::write(session.join("other.jsonl"), b"private").expect("unrelated JSONL");
+    let captures = session.join("debug/provider-requests");
+    std::fs::create_dir_all(&captures).expect("capture dir");
+    for name in [
+        "1-prompt-http-sse-request.json",
+        "2-prompt-http-sse-response.json",
+        "3-prompt-websocket-request.json.zst",
+        "4-prompt-websocket-response.json.zst",
+    ] {
+        std::fs::write(captures.join(name), b"capture").expect("provider capture");
+    }
+    for name in [
+        "unrelated.json",
+        "request.json",
+        "x-response.json",
+        "x-request.json.gz",
+        "1-prompt-websocket-response.json.zstd",
+    ] {
+        std::fs::write(captures.join(name), b"unrelated").expect("unrelated capture");
+    }
+    std::fs::write(session.join("debug/canonical.cbor"), b"canonical").expect("nested canonical");
 
-    cleanup_diagnostic_jsonl_with(
+    cleanup_diagnostics_with(
         &sessions,
         Duration::ZERO,
         SystemTime::now() + Duration::from_secs(1),
@@ -77,6 +97,24 @@ fn cleanup_scope_is_limited_to_session_events_jsonl() {
     assert!(!session.join("events.jsonl").exists());
     assert!(session.join("events.cbor").exists());
     assert!(session.join("other.jsonl").exists());
+    assert!(session.join("debug/canonical.cbor").exists());
+    for name in [
+        "1-prompt-http-sse-request.json",
+        "2-prompt-http-sse-response.json",
+        "3-prompt-websocket-request.json.zst",
+        "4-prompt-websocket-response.json.zst",
+    ] {
+        assert!(!captures.join(name).exists(), "{name} must be removed");
+    }
+    for name in [
+        "unrelated.json",
+        "request.json",
+        "x-response.json",
+        "x-request.json.gz",
+        "1-prompt-websocket-response.json.zstd",
+    ] {
+        assert!(captures.join(name).exists(), "{name} must remain");
+    }
 }
 
 /// Ensures a diagnostic newer than the configured window remains available.
@@ -88,7 +126,7 @@ fn cleanup_keeps_recent_diagnostic_jsonl() {
     std::fs::create_dir_all(&session).expect("session dir");
     std::fs::write(session.join("events.jsonl"), b"debug").expect("debug JSONL");
 
-    cleanup_diagnostic_jsonl_with(
+    cleanup_diagnostics_with(
         &sessions,
         Duration::from_secs(14 * 24 * 60 * 60),
         SystemTime::now() + Duration::from_secs(1),
@@ -97,6 +135,52 @@ fn cleanup_keeps_recent_diagnostic_jsonl() {
     );
 
     assert!(session.join("events.jsonl").exists());
+}
+
+/// Ensures the shared cutoff removes JSONL, legacy captures, and compressed
+/// captures at the exact boundary while keeping each one just below it.
+#[test]
+fn cleanup_applies_exact_shared_cutoff_to_every_diagnostic_class() {
+    let retention = Duration::from_secs(60);
+    for relative in [
+        "events.jsonl",
+        "debug/provider-requests/1-prompt-http-sse-request.json",
+        "debug/provider-requests/1-prompt-websocket-response.json.zst",
+    ] {
+        for (label, age, removed) in [
+            ("exact", retention, true),
+            ("younger", retention - Duration::from_secs(1), false),
+        ] {
+            let temp = TempDir::new().expect("temp state");
+            let sessions = temp.path().join("sessions");
+            let path = sessions.join(label).join(relative);
+            std::fs::create_dir_all(path.parent().expect("diagnostic parent"))
+                .expect("diagnostic parent");
+            std::fs::write(&path, b"diagnostic").expect("diagnostic");
+            let modified = std::fs::symlink_metadata(&path)
+                .expect("diagnostic metadata")
+                .modified()
+                .expect("modified time");
+
+            cleanup_diagnostics_with(&sessions, retention, modified + age, &[], |path| {
+                std::fs::remove_file(path)
+            });
+
+            assert_eq!(!path.exists(), removed, "{relative} at {label} cutoff");
+        }
+    }
+}
+
+/// Ensures cleanup delegates capture recognition to the shared filename
+/// contract rather than maintaining a second grammar.
+#[test]
+fn cleanup_uses_shared_provider_capture_filename_contract() {
+    assert!(super::is_provider_capture_filename(
+        "123-sp-6-http-sse-request.json.zst"
+    ));
+    assert!(!super::is_provider_capture_filename(
+        "notes-http-sse-request.json"
+    ));
 }
 
 /// Ensures cleanup does not follow a symlink that appears in the session
@@ -114,7 +198,7 @@ fn cleanup_preserves_symlinked_session_directory_target() {
     std::fs::write(external.join("events.jsonl"), b"external").expect("external JSONL");
     symlink(&external, sessions.join("linked")).expect("session symlink");
 
-    cleanup_diagnostic_jsonl_with(
+    cleanup_diagnostics_with(
         &sessions,
         Duration::ZERO,
         SystemTime::now() + Duration::from_secs(1),
@@ -140,7 +224,7 @@ fn cleanup_preserves_symlinked_diagnostic_target() {
     std::fs::write(&external, b"external").expect("external JSONL");
     symlink(&external, session.join("events.jsonl")).expect("diagnostic symlink");
 
-    cleanup_diagnostic_jsonl_with(
+    cleanup_diagnostics_with(
         &sessions,
         Duration::ZERO,
         SystemTime::now() + Duration::from_secs(1),
@@ -150,6 +234,55 @@ fn cleanup_preserves_symlinked_diagnostic_target() {
 
     assert!(external.exists());
     assert!(session.join("events.jsonl").is_symlink());
+}
+
+/// Ensures cleanup does not traverse symlinked debug or provider-capture
+/// directories and does not remove a symlink with a capture-like filename.
+#[cfg(unix)]
+#[test]
+fn cleanup_preserves_symlinked_capture_paths_and_targets() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().expect("temp state");
+    let sessions = temp.path().join("sessions");
+    let external = temp.path().join("external");
+    std::fs::create_dir_all(&external).expect("external dir");
+    let external_capture = external.join("1-prompt-http-sse-request.json.zst");
+    std::fs::write(&external_capture, b"external").expect("external capture");
+
+    let linked_debug = sessions.join("linked-debug");
+    std::fs::create_dir_all(&linked_debug).expect("linked-debug session");
+    symlink(&external, linked_debug.join("debug")).expect("debug symlink");
+
+    let linked_capture_dir = sessions.join("linked-capture/debug");
+    std::fs::create_dir_all(&linked_capture_dir).expect("linked-capture debug");
+    symlink(&external, linked_capture_dir.join("provider-requests"))
+        .expect("provider capture symlink");
+
+    let linked_file_dir = sessions.join("linked-file/debug/provider-requests");
+    std::fs::create_dir_all(&linked_file_dir).expect("linked-file capture dir");
+    symlink(
+        &external_capture,
+        linked_file_dir.join("1-prompt-websocket-response.json.zst"),
+    )
+    .expect("capture file symlink");
+
+    cleanup_diagnostics_with(
+        &sessions,
+        Duration::ZERO,
+        SystemTime::now() + Duration::from_secs(1),
+        &[],
+        |path| std::fs::remove_file(path),
+    );
+
+    assert!(external_capture.exists());
+    assert!(linked_debug.join("debug").is_symlink());
+    assert!(linked_capture_dir.join("provider-requests").is_symlink());
+    assert!(
+        linked_file_dir
+            .join("1-prompt-websocket-response.json.zst")
+            .is_symlink()
+    );
 }
 
 /// Ensures a removal failure for one session does not prevent cleanup from
@@ -165,7 +298,7 @@ fn cleanup_isolates_per_file_removal_errors() {
     }
     let mut attempts = Vec::new();
 
-    cleanup_diagnostic_jsonl_with(
+    cleanup_diagnostics_with(
         &sessions,
         Duration::ZERO,
         SystemTime::now() + Duration::from_secs(1),
@@ -188,6 +321,46 @@ fn cleanup_isolates_per_file_removal_errors() {
     assert!(!sessions.join("two/events.jsonl").exists());
 }
 
+/// Ensures one failed removal does not suppress a later capture in the same
+/// provider diagnostic directory.
+#[test]
+fn cleanup_isolates_removal_errors_within_one_session() {
+    let temp = TempDir::new().expect("temp state");
+    let sessions = temp.path().join("sessions");
+    let captures = sessions.join("one/debug/provider-requests");
+    std::fs::create_dir_all(&captures).expect("capture dir");
+    let first = captures.join("1-prompt-http-sse-request.json");
+    let second = captures.join("2-prompt-unknown-response.json.zst");
+    std::fs::write(&first, b"first").expect("first capture");
+    std::fs::write(&second, b"second").expect("second capture");
+    let mut attempts = Vec::new();
+
+    cleanup_diagnostics_with(
+        &sessions,
+        Duration::ZERO,
+        SystemTime::now() + Duration::from_secs(1),
+        &[],
+        |path| {
+            attempts.push(path.to_path_buf());
+            if path == first {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied",
+                ))
+            } else {
+                std::fs::remove_file(path)
+            }
+        },
+    );
+
+    attempts.sort();
+    let mut expected = vec![first.clone(), second.clone()];
+    expected.sort();
+    assert_eq!(attempts, expected);
+    assert!(first.exists());
+    assert!(!second.exists());
+}
+
 /// Ensures cleanup skips the current session and sessions locked by another
 /// harness while still removing an independent expired diagnostic.
 #[test]
@@ -198,6 +371,13 @@ fn cleanup_skips_protected_and_locked_sessions() {
         let session = sessions.join(name);
         std::fs::create_dir_all(&session).expect("session dir");
         std::fs::write(session.join("events.jsonl"), b"debug").expect("debug JSONL");
+        let captures = session.join("debug/provider-requests");
+        std::fs::create_dir_all(&captures).expect("capture dir");
+        std::fs::write(
+            captures.join("1-prompt-http-sse-request.json.zst"),
+            b"capture",
+        )
+        .expect("provider capture");
     }
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -209,7 +389,7 @@ fn cleanup_skips_protected_and_locked_sessions() {
     lock.try_lock_exclusive().expect("hold session lock");
     let current = tau_proto::SessionId::parse("current").expect("session id");
 
-    cleanup_diagnostic_jsonl_with(
+    cleanup_diagnostics_with(
         &sessions,
         Duration::ZERO,
         SystemTime::now() + Duration::from_secs(1),
@@ -220,5 +400,20 @@ fn cleanup_skips_protected_and_locked_sessions() {
     assert!(sessions.join("current/events.jsonl").exists());
     assert!(sessions.join("locked/events.jsonl").exists());
     assert!(!sessions.join("old/events.jsonl").exists());
+    assert!(
+        sessions
+            .join("current/debug/provider-requests/1-prompt-http-sse-request.json.zst")
+            .exists()
+    );
+    assert!(
+        sessions
+            .join("locked/debug/provider-requests/1-prompt-http-sse-request.json.zst")
+            .exists()
+    );
+    assert!(
+        !sessions
+            .join("old/debug/provider-requests/1-prompt-http-sse-request.json.zst")
+            .exists()
+    );
     lock.unlock().expect("unlock");
 }

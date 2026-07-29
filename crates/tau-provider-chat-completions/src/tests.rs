@@ -56,16 +56,6 @@ fn outbound_categories_map_to_retry_classes() {
     }
 }
 
-fn unique_temp_state_dir(label: &str) -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "tau-provider-chat-completions-state-{label}-{}-{nanos}",
-        std::process::id()
-    ))
-}
 fn provider() -> TestProvider {
     TestProvider {
         base_url: "http://localhost:1234/v1".to_owned(),
@@ -94,47 +84,6 @@ struct TestProvider {
     compat: AttemptCompat,
 }
 
-#[test]
-fn debug_provider_request_dir_requires_existing_session_dir() {
-    // Provider diagnostics are allowed to create their own debug subdirectory,
-    // but must not create durable per-session roots for ephemeral sessions.
-    let state_dir = unique_temp_state_dir("missing-session");
-    let session_id = "session-missing";
-
-    assert!(debug_provider_request_dir_in(&state_dir, session_id, true).is_none());
-    assert!(
-        !state_dir.join("sessions").join(session_id).exists(),
-        "missing session dir should not be created"
-    );
-}
-
-#[test]
-fn debug_provider_request_dir_returns_debug_dir_for_existing_session() {
-    // Durable sessions create their session directory before provider calls; in
-    // that case provider diagnostics can write under the standard debug path.
-    let state_dir = unique_temp_state_dir("existing-session");
-    let session_id = "session-existing";
-    let session_dir = state_dir.join("sessions").join(session_id);
-    std::fs::create_dir_all(&session_dir).expect("create durable session dir");
-
-    assert_eq!(
-        debug_provider_request_dir_in(&state_dir, session_id, true),
-        Some(session_dir.join("debug").join("provider-requests"))
-    );
-}
-
-#[test]
-fn debug_provider_request_dir_rejects_ephemeral_session_with_existing_dir() {
-    // Explicit session persistence state wins over filesystem shape: an
-    // ephemeral current session can reuse an id that has an old durable
-    // directory, and provider diagnostics must still stay disabled.
-    let state_dir = unique_temp_state_dir("ephemeral-reuse");
-    let session_id = "session-reused";
-    let session_dir = state_dir.join("sessions").join(session_id);
-    std::fs::create_dir_all(&session_dir).expect("create old durable session dir");
-
-    assert!(debug_provider_request_dir_in(&state_dir, session_id, false).is_none());
-}
 fn resolved_provider(provider: &TestProvider) -> AttemptConfig {
     AttemptConfig {
         base_url: provider.base_url.clone(),
@@ -480,6 +429,63 @@ fn prompt() -> tau_proto::AgentPromptCreated {
         compaction: None,
         operation: tau_proto::PromptOperation::Inference,
     }
+}
+
+/// Ensures real request, successful-response, and HTTP-error producers submit
+/// the expected metadata through the shared compressed-capture job boundary.
+#[test]
+fn debug_capture_producers_submit_typed_http_sse_jobs() {
+    let prompt = prompt();
+    let provider = provider();
+    let model = &provider.models[0];
+    let request = build_request(&resolved_provider(&provider), model, &prompt);
+    let state = StreamState::new();
+    let raw_event = serde_json::json!({"done": true});
+    let mut submitted = Vec::new();
+    let mut record = |capture: tau_provider::debug_capture_writer::ProviderDebugCapture| {
+        assert_eq!(capture.session_id(), &prompt.session_id);
+        assert_eq!(capture.agent_prompt_id(), &prompt.agent_prompt_id);
+        submitted.push((
+            capture.class(),
+            serde_json::from_slice::<serde_json::Value>(capture.json()).expect("capture JSON"),
+        ));
+    };
+
+    maybe_debug_submit_provider_request_with(&prompt, model, true, &request, &mut record);
+    maybe_debug_submit_provider_response_with(
+        &prompt,
+        model,
+        true,
+        &state,
+        std::slice::from_ref(&raw_event),
+        &mut record,
+    );
+    maybe_debug_submit_provider_http_error_with(
+        &prompt,
+        model,
+        true,
+        429,
+        "bounded error",
+        &mut record,
+    );
+
+    assert_eq!(submitted.len(), 3);
+    assert_eq!(
+        submitted[0].0,
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest
+    );
+    assert_eq!(submitted[0].1["body"]["model"], "test-model");
+    assert_eq!(
+        submitted[1].0,
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse
+    );
+    assert_eq!(submitted[1].1["raw_events"][0], raw_event);
+    assert_eq!(
+        submitted[2].0,
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse
+    );
+    assert_eq!(submitted[2].1["http_status"], 429);
+    assert_eq!(submitted[2].1["body"], "bounded error");
 }
 
 /// Chat Completions must reject Custom tools visibly rather than silently

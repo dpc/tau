@@ -4576,7 +4576,7 @@ where
                 dispatch.state.stale_chain_fallback(),
             );
             finish_stream(
-                prompt.session_id.as_str(),
+                &prompt.session_id,
                 agent_prompt_id,
                 prompt,
                 &request,
@@ -4865,13 +4865,13 @@ fn backend_descriptor(
     }
 }
 
-fn maybe_debug_write_provider_response(
-    session_id: &str,
+fn maybe_debug_submit_provider_response(
+    session_id: &tau_proto::SessionId,
     response: &ProviderResponseFinished,
     debug_provider_requests: bool,
     capture: Option<&tau_provider_codex::CodexDebugCapture>,
 ) {
-    tau_provider_codex::write_response_debug(
+    tau_provider_codex::submit_response_debug(
         session_id,
         debug_provider_requests,
         response,
@@ -4881,7 +4881,7 @@ fn maybe_debug_write_provider_response(
 
 #[allow(clippy::too_many_arguments)]
 fn finish_stream<W: Write>(
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     request: &CodexPrompt<'_>,
@@ -4927,7 +4927,7 @@ fn finish_stream<W: Write>(
         provider_response_id,
         ws_pool_delta,
     };
-    maybe_debug_write_provider_response(
+    maybe_debug_submit_provider_response(
         session_id,
         &finished,
         debug_provider_requests,
@@ -5017,8 +5017,8 @@ fn finish_error<W: Write>(
         provider_response_id: None,
         ws_pool_delta,
     };
-    maybe_debug_write_provider_response(
-        prompt.session_id.as_str(),
+    maybe_debug_submit_provider_response(
+        &prompt.session_id,
         &finished,
         debug_provider_requests,
         None,

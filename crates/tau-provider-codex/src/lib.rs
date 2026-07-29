@@ -742,40 +742,51 @@ impl CodexRuntime {
     }
 }
 
-/// Writes one explicitly permitted Codex response debug record while keeping
+/// Serialize and submit one explicitly permitted Codex response debug record
+/// while keeping
 /// raw provider JSON inside the backend boundary.
-pub fn write_response_debug(
-    session_id: &str,
+///
+/// Return does not imply persistence. Compression and filesystem work run on a
+/// bounded detached worker. Queue
+/// overload, worker failure, and process shutdown may omit this best-effort
+/// diagnostic without delaying or failing provider protocol work.
+pub fn submit_response_debug(
+    session_id: &tau_proto::SessionId,
     enabled: bool,
     response: &tau_proto::ProviderResponseFinished,
     capture: Option<&CodexDebugCapture>,
 ) {
+    submit_response_debug_with(
+        session_id,
+        enabled,
+        response,
+        capture,
+        tau_provider::debug_capture_writer::submit_provider_debug_capture,
+    );
+}
+
+fn submit_response_debug_with(
+    session_id: &tau_proto::SessionId,
+    enabled: bool,
+    response: &tau_proto::ProviderResponseFinished,
+    capture: Option<&CodexDebugCapture>,
+    submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+) {
     if !enabled {
         return;
     }
-    let Some(dir) = responses::debug_provider_request_dir(session_id, enabled) else {
-        return;
-    };
-    if let Err(error) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(target: LOG_TARGET, "failed to create provider response debug directory: {error}");
-        return;
-    }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
     let transport = response
         .backend
         .as_ref()
         .map(|backend| match backend.transport {
-            ProviderBackendTransport::HttpSse => "http-sse",
-            ProviderBackendTransport::Websocket => "websocket",
+            ProviderBackendTransport::HttpSse => {
+                tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse
+            }
+            ProviderBackendTransport::Websocket => {
+                tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketResponse
+            }
         })
-        .unwrap_or("unknown");
-    let path = dir.join(format!(
-        "{ts}-{}-{transport}-response.json",
-        response.agent_prompt_id
-    ));
+        .unwrap_or(tau_provider::debug_capture_writer::ProviderDebugCaptureClass::UnknownResponse);
     let metadata = serde_json::json!({
         "session_id": session_id,
         "agent_prompt_id": response.agent_prompt_id,
@@ -785,11 +796,18 @@ pub fn write_response_debug(
         "provider_response_finished": response,
         "provider_terminal_event": capture.and_then(|capture| capture.terminal_event.as_ref()),
     });
-    if let Err(error) = serde_json::to_vec_pretty(&metadata)
-        .map_err(std::io::Error::other)
-        .and_then(|bytes| std::fs::write(path, bytes))
-    {
-        tracing::warn!(target: LOG_TARGET, "failed to write provider response debug record: {error}");
+    match serde_json::to_vec_pretty(&metadata) {
+        Ok(json) => submit(
+            tau_provider::debug_capture_writer::ProviderDebugCapture::new(
+                session_id.clone(),
+                response.agent_prompt_id.clone(),
+                transport,
+                json,
+            ),
+        ),
+        Err(error) => {
+            tracing::warn!(target: LOG_TARGET, "failed to serialize provider response debug record: {error}");
+        }
     }
 }
 

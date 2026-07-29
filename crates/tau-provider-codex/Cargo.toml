@@ -28,7 +28,6 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tau-config.workspace = true
 tau-proto.workspace = true
 tau-provider.workspace = true
 tau-vcr.workspace = true

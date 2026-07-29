@@ -29,6 +29,7 @@ tau-config.workspace = true
 tau-proto.workspace = true
 tracing.workspace = true
 url.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true

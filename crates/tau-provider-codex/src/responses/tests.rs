@@ -127,17 +127,6 @@ fn shell_command_wire_definition_uses_only_call_local_workdir() {
     );
 }
 
-fn unique_temp_state_dir(label: &str) -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "tau-provider-codex-state-{label}-{}-{nanos}",
-        std::process::id()
-    ))
-}
-
 /// Ensures both GPT-5.6 modes receive native image function output while only
 /// standard Responses preserves the audited high-detail wire field.
 #[test]
@@ -408,48 +397,6 @@ fn terminal_vcr_stream(response_id: &str) -> ProviderRawEventStream {
 }
 
 #[test]
-fn debug_provider_request_dir_requires_existing_session_dir() {
-    // Provider diagnostics are allowed to create their own debug subdirectory,
-    // but must not create durable per-session roots for ephemeral sessions.
-    let state_dir = unique_temp_state_dir("missing-session");
-    let session_id = "session-missing";
-
-    assert!(debug_provider_request_dir_in(&state_dir, session_id, true).is_none());
-    assert!(
-        !state_dir.join("sessions").join(session_id).exists(),
-        "missing session dir should not be created"
-    );
-}
-
-#[test]
-fn debug_provider_request_dir_returns_debug_dir_for_existing_session() {
-    // Durable sessions create their session directory before provider calls; in
-    // that case provider diagnostics can write under the standard debug path.
-    let state_dir = unique_temp_state_dir("existing-session");
-    let session_id = "session-existing";
-    let session_dir = state_dir.join("sessions").join(session_id);
-    std::fs::create_dir_all(&session_dir).expect("create durable session dir");
-
-    assert_eq!(
-        debug_provider_request_dir_in(&state_dir, session_id, true),
-        Some(session_dir.join("debug").join("provider-requests"))
-    );
-}
-
-#[test]
-fn debug_provider_request_dir_rejects_ephemeral_session_with_existing_dir() {
-    // Explicit session persistence state wins over filesystem shape: an
-    // ephemeral current session can reuse an id that has an old durable
-    // directory, and provider diagnostics must still stay disabled.
-    let state_dir = unique_temp_state_dir("ephemeral-reuse");
-    let session_id = "session-reused";
-    let session_dir = state_dir.join("sessions").join(session_id);
-    std::fs::create_dir_all(&session_dir).expect("create old durable session dir");
-
-    assert!(debug_provider_request_dir_in(&state_dir, session_id, false).is_none());
-}
-
-#[test]
 fn build_request_includes_prompt_cache_key_when_supported() {
     let config = ResponsesConfig {
         profile_namespace: "chatgpt".to_owned(),
@@ -486,6 +433,52 @@ fn build_request_includes_prompt_cache_key_when_supported() {
     let prompt_cache_key = body["prompt_cache_key"].as_str().expect("prompt_cache_key");
 
     assert!(uuid::Uuid::parse_str(prompt_cache_key).is_ok());
+}
+
+/// Ensures the enabled real Responses request producer submits typed WebSocket
+/// request metadata through the shared capture boundary.
+#[test]
+fn debug_request_producer_submits_typed_compressed_capture_job() {
+    let config = chain_test_config();
+    let session_id = tau_proto::SessionId::parse("session-test").expect("session id");
+    let agent_id = tau_proto::AgentId::parse("agent-test").expect("agent id");
+    let request = PromptPayload {
+        system_prompt: "system",
+        context: context(&[]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: true,
+    };
+    let body = serde_json::json!({"input": [{"role": "user"}]});
+    let mut submitted = None;
+
+    serialize_and_submit_provider_request_with(
+        "prompt-test",
+        &config,
+        &request,
+        tau_proto::ProviderBackendTransport::Websocket,
+        &body,
+        |capture| submitted = Some(capture),
+    )
+    .expect("serialize request capture");
+
+    let capture = submitted.expect("capture submitted");
+    assert_eq!(capture.session_id(), &session_id);
+    assert_eq!(capture.agent_prompt_id().as_str(), "prompt-test");
+    assert_eq!(
+        capture.class(),
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketRequest
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(capture.json()).expect("capture JSON");
+    assert_eq!(metadata["backend"], "responses");
+    assert_eq!(metadata["transport"], "websocket");
+    assert_eq!(metadata["body"], body);
 }
 
 #[test]

@@ -73,7 +73,8 @@ publication so stale work cannot reinstall credential-bearing transport state.
 
 Raw provider captures are private sensitive test artifacts and may contain
 prompts, credentials, identifiers, reasoning, tool output, or host paths. They
-must never be copied directly into the public fixture corpus. Public cassettes
+are stored as private `.json.zst` diagnostics but compression does not redact
+or reduce their sensitivity. They must never be copied directly into the public fixture corpus. Public cassettes
 are synthetic, structurally allowlisted, bounded, and require exact terminal
 and frame consumption through replay-only production loading with no live
 fallback. Fixture publication or replay/capture changes require independent

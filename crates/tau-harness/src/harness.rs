@@ -3418,9 +3418,9 @@ impl Harness {
                 ],
             );
         }
-        crate::diagnostic_cleanup::spawn_diagnostic_jsonl_cleanup(
+        crate::diagnostic_cleanup::spawn_diagnostic_cleanup(
             sessions_dir.clone(),
-            harness_settings.diagnostic_jsonl_retention(),
+            harness_settings.diagnostic_retention(),
             session_persistence,
             vec![SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid")],
         );
@@ -3764,7 +3764,7 @@ impl Harness {
         let roles = Self::load_startup_roles(&harness_settings)?;
         let missing_default_role = roles.missing_default_role.clone();
         let session_retention = harness_settings.session_retention();
-        let diagnostic_jsonl_retention = harness_settings.diagnostic_jsonl_retention();
+        let diagnostic_retention = harness_settings.diagnostic_retention();
         let session_persistence = launch.session_persistence;
         tracing::debug!(target: "tau_harness::startup", selected_model = ?roles.selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");
         let mut harness = Self::assemble_startup_harness(StartupHarnessParts {
@@ -3804,9 +3804,9 @@ impl Harness {
                 ],
             );
         }
-        crate::diagnostic_cleanup::spawn_diagnostic_jsonl_cleanup(
+        crate::diagnostic_cleanup::spawn_diagnostic_cleanup(
             sessions_dir.clone(),
-            diagnostic_jsonl_retention,
+            diagnostic_retention,
             session_persistence,
             vec![SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid")],
         );

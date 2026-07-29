@@ -129,10 +129,11 @@ process-wide writer. This non-authoritative diagnostic mirror does not promise
 crash or power-loss durability: termination can lose queued lines or leave a
 missing or torn final line, and restart neither repairs nor salvages that line.
 At durable Tau startup, a detached best-effort cleanup pass removes expired
-`events.jsonl` regular files according to `diagnostic_jsonl_retention_days`
-(fourteen days by default). It skips the current and locked sessions, does not
-follow symlinks, and never removes canonical CBOR journals, session directories,
-provider captures, or unrelated JSONL files.
+`events.jsonl` regular files and legacy `.json` or compressed `.json.zst`
+request/response files directly below `debug/provider-requests`, according to
+`diagnostic_retention_days` (fourteen days by default). It skips the current
+and locked sessions, does not follow symlinks, and never removes canonical CBOR
+journals, session directories, unrelated JSONL, or other debug files.
 
 `tau_harness::debug_log_timing` separately traces producer
 serialization/admission and worker I/O. Worker records include exact monotonic

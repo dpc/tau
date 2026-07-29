@@ -1,5 +1,20 @@
 # Shared provider outbound security boundary
 
+Provider debug captures are private sensitive artifacts that can contain full
+prompts, tool results, model output, provider-controlled error bodies, and
+reflected credentials. Tau does not intentionally serialize auth headers or
+API-key configuration, but upstream responses and user/provider-configured
+request fields can reflect secrets. Compression is not redaction.
+
+The shared capture API accepts validated `SessionId` and `AgentPromptId` values
+and constructs filenames through the `tau-config` capture contract. Its worker
+requires existing real session roots and refuses symlinked session, debug, and
+capture directories. Bounded `try_send` admission, zstd compression, and every
+filesystem operation remain best-effort; overload, write failure, or nonjoining
+process exit can omit a capture or leave a truncated final stream. Changes to
+capture validation, content, compression, queueing, paths, or writes require
+focused security and independent privacy review.
+
 Provider startup captures one immutable `Arc<OutboundNetworkPolicy>`. The
 policy reads lowercase proxy variables before their uppercase forms, selects
 `HTTP_PROXY`/`http_proxy` for HTTP and WS, selects

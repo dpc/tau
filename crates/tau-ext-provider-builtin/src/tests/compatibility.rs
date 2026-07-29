@@ -160,7 +160,7 @@ fn responses_event_snapshot() -> Vec<Event> {
         );
         assert!(emitted, "compatibility update must cross the output seam");
         finish_stream(
-            prompt.session_id.as_str(),
+            &prompt.session_id,
             &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
                 .expect("test prompt id"),
             &prompt,

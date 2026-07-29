@@ -154,8 +154,9 @@ CBOR journals never use its queue or lock; they use a separate lifecycle-owned
 coalesced sync worker under
 [SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 Startup separately runs one best-effort, time-based cleanup of expired session
-`events.jsonl` files, defaulting to fourteen days while excluding current or
-locked sessions and all canonical journals.
+`events.jsonl` files and exact legacy/compressed provider request/response
+captures, defaulting to fourteen days while excluding current or locked
+sessions, symlinks, unrelated diagnostics, and all canonical journals.
 
 Configured Provider execution uses the same generic commit boundary. Five `_reported`
 observations commit before exact generation and prompt/retry correlation; the harness

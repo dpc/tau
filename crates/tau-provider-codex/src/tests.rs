@@ -2,6 +2,56 @@ use std::sync::Arc;
 
 use super::*;
 
+/// Ensures the enabled real Codex response producer submits typed response
+/// metadata through the shared compressed-capture boundary.
+#[test]
+fn debug_response_producer_submits_typed_compressed_capture_job() {
+    let response = tau_proto::ProviderResponseFinished {
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: tau_proto::AgentPromptId::parse("prompt-test").expect("prompt id"),
+        agent_id: tau_proto::AgentId::parse("agent-test").expect("agent id"),
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_items: Vec::new(),
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: Some(tau_proto::ProviderBackend {
+            kind: tau_proto::ProviderBackendKind::Responses,
+            base_url: "https://example.invalid".to_owned(),
+            transport: tau_proto::ProviderBackendTransport::Websocket,
+            stale_chain_fallback: false,
+        }),
+        provider_response_id: Some("response-test".to_owned()),
+        ws_pool_delta: None,
+    };
+    let mut submitted = None;
+
+    let session_id = tau_proto::SessionId::parse("session-test").expect("session id");
+    submit_response_debug_with(&session_id, true, &response, None, |capture| {
+        submitted = Some(capture);
+    });
+
+    let capture = submitted.expect("capture submitted");
+    assert_eq!(capture.session_id().as_str(), "session-test");
+    assert_eq!(capture.agent_prompt_id(), &response.agent_prompt_id);
+    assert_eq!(
+        capture.class(),
+        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketResponse
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(capture.json()).expect("capture JSON");
+    assert_eq!(metadata["provider_response_id"], "response-test");
+    assert_eq!(
+        metadata["provider_response_finished"]["agent_prompt_id"],
+        "prompt-test"
+    );
+}
+
 /// Published ChatGPT models carry the basic OpenAI API prices used for
 /// equivalent-cost estimation.
 #[test]

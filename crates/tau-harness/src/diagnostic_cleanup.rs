@@ -1,4 +1,4 @@
-//! Best-effort startup cleanup for non-authoritative JSONL diagnostics.
+//! Best-effort startup cleanup for non-authoritative session diagnostics.
 
 #[cfg(test)]
 mod tests;
@@ -7,39 +7,36 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
 
-/// Spawn one opportunistic cleanup pass for session debug JSONL files.
-pub(crate) fn spawn_diagnostic_jsonl_cleanup(
+/// Spawn one opportunistic cleanup pass for session debug files.
+pub(crate) fn spawn_diagnostic_cleanup(
     sessions_dir: PathBuf,
     retention: Option<Duration>,
     persistence: tau_core::SessionPersistenceMode,
     protected_sessions: Vec<tau_proto::SessionId>,
 ) {
-    if let Err(error) = spawn_diagnostic_jsonl_cleanup_inner(
-        sessions_dir,
-        retention,
-        persistence,
-        protected_sessions,
-    ) {
+    if let Err(error) =
+        spawn_diagnostic_cleanup_inner(sessions_dir, retention, persistence, protected_sessions)
+    {
         tracing::warn!(
             target: "tau_harness::diagnostic_cleanup",
             %error,
-            "failed to spawn diagnostic JSONL cleanup thread"
+            "failed to spawn diagnostic cleanup thread"
         );
     }
 }
 
 /// Start cleanup for tests that need to observe thread completion.
 #[cfg(test)]
-fn spawn_diagnostic_jsonl_cleanup_for_test(
+fn spawn_diagnostic_cleanup_for_test(
     sessions_dir: PathBuf,
     retention: Option<Duration>,
     persistence: tau_core::SessionPersistenceMode,
     protected_sessions: Vec<tau_proto::SessionId>,
 ) -> io::Result<Option<std::thread::JoinHandle<()>>> {
-    spawn_diagnostic_jsonl_cleanup_inner(sessions_dir, retention, persistence, protected_sessions)
+    spawn_diagnostic_cleanup_inner(sessions_dir, retention, persistence, protected_sessions)
 }
 
-fn spawn_diagnostic_jsonl_cleanup_inner(
+fn spawn_diagnostic_cleanup_inner(
     sessions_dir: PathBuf,
     retention: Option<Duration>,
     persistence: tau_core::SessionPersistenceMode,
@@ -50,17 +47,17 @@ fn spawn_diagnostic_jsonl_cleanup_inner(
     };
     std::thread::Builder::new()
         .name("tau-diagnostic-cleanup".to_owned())
-        .spawn(move || cleanup_diagnostic_jsonl(&sessions_dir, retention, &protected_sessions))
+        .spawn(move || cleanup_diagnostics(&sessions_dir, retention, &protected_sessions))
         .map(Some)
 }
 
-/// Remove expired `events.jsonl` files directly below session directories.
-fn cleanup_diagnostic_jsonl(
+/// Remove expired JSONL mirrors and provider request/response captures.
+fn cleanup_diagnostics(
     sessions_dir: &Path,
     retention: Duration,
     protected_sessions: &[tau_proto::SessionId],
 ) {
-    cleanup_diagnostic_jsonl_with(
+    cleanup_diagnostics_with(
         sessions_dir,
         retention,
         SystemTime::now(),
@@ -70,7 +67,7 @@ fn cleanup_diagnostic_jsonl(
 }
 
 /// Run cleanup with injectable time and removal for deterministic fault tests.
-fn cleanup_diagnostic_jsonl_with(
+fn cleanup_diagnostics_with(
     sessions_dir: &Path,
     retention: Duration,
     now: SystemTime,
@@ -137,38 +134,111 @@ fn cleanup_diagnostic_jsonl_with(
                     continue;
                 }
             };
-        let path = entry.path().join("events.jsonl");
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() => metadata,
-            Ok(_) => continue,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+        cleanup_candidate(
+            &entry.path().join("events.jsonl"),
+            retention,
+            now,
+            &mut remove_file,
+        );
+        cleanup_provider_captures(&entry.path(), retention, now, &mut remove_file);
+    }
+}
+
+/// Remove recognized captures from one real provider-capture directory.
+fn cleanup_provider_captures(
+    session_dir: &Path,
+    retention: Duration,
+    now: SystemTime,
+    remove_file: &mut impl FnMut(&Path) -> io::Result<()>,
+) {
+    let debug_dir = session_dir.join("debug");
+    let capture_dir = debug_dir.join("provider-requests");
+    if !is_real_directory(&debug_dir) || !is_real_directory(&capture_dir) {
+        return;
+    }
+    let entries = match fs::read_dir(&capture_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                target: "tau_harness::diagnostic_cleanup",
+                path = %capture_dir.display(),
+                %error,
+                "failed to list provider debug captures for cleanup"
+            );
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
             Err(error) => {
                 tracing::warn!(
                     target: "tau_harness::diagnostic_cleanup",
-                    path = %path.display(),
+                    path = %capture_dir.display(),
                     %error,
-                    "failed to inspect diagnostic JSONL file"
+                    "failed to inspect one provider debug capture"
                 );
                 continue;
             }
         };
-        let expired = metadata
-            .modified()
-            .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| retention <= age);
-        if !expired {
+        let filename = entry.file_name();
+        let Some(filename) = filename.to_str() else {
+            continue;
+        };
+        if !is_provider_capture_filename(filename) {
             continue;
         }
-        if let Err(error) = remove_file(&path)
-            && error.kind() != io::ErrorKind::NotFound
-        {
+        cleanup_candidate(&entry.path(), retention, now, remove_file);
+    }
+}
+
+/// Return whether a filename is one legacy or compressed provider capture.
+fn is_provider_capture_filename(filename: &str) -> bool {
+    tau_config::provider_debug_capture::ProviderDebugCaptureFilename::parse(filename).is_some()
+}
+
+/// Return whether `path` is a directory and not a final-component symlink.
+fn is_real_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+/// Remove one expired regular diagnostic file without following symlinks.
+fn cleanup_candidate(
+    path: &Path,
+    retention: Duration,
+    now: SystemTime,
+    remove_file: &mut impl FnMut(&Path) -> io::Result<()>,
+) {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(error) => {
             tracing::warn!(
                 target: "tau_harness::diagnostic_cleanup",
                 path = %path.display(),
                 %error,
-                "failed to remove expired diagnostic JSONL file"
+                "failed to inspect diagnostic file"
             );
+            return;
         }
+    };
+    let expired = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| retention <= age);
+    if !expired {
+        return;
+    }
+    if let Err(error) = remove_file(path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            target: "tau_harness::diagnostic_cleanup",
+            path = %path.display(),
+            %error,
+            "failed to remove expired diagnostic file"
+        );
     }
 }
