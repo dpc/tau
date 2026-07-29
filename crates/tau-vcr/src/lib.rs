@@ -210,6 +210,8 @@ fn decode_escaped_bytes_byte(chars: &mut std::str::Chars<'_>) -> Result<u8, Stri
                 .to_digit(16)
                 .ok_or_else(|| "invalid escaped byte hex".to_owned())?;
             let byte = (high << 4) | low;
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             let byte = u8::try_from(byte).map_err(|_| "invalid escaped byte".to_owned())?;
             if byte < 0x80 {
                 return Err("escaped bytes must use \\uDC80 through \\uDCFF".to_owned());

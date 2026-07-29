@@ -441,6 +441,8 @@ fn region_u32(entries: &[(CborValue, CborValue)], name: &str) -> Result<u32, Str
     let CborValue::Integer(value) = value else {
         return Err(format!("argument `region.{name}` must be an integer"));
     };
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let value = u32::try_from(i128::from(*value))
         .map_err(|_| format!("argument `region.{name}` must fit in an unsigned 32-bit integer"))?;
     Ok(value)

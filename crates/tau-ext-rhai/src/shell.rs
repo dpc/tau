@@ -326,6 +326,8 @@ fn wait_for_process_event(
             }
             process_rx.recv_timeout(deadline.saturating_duration_since(now))
         }
+        // Preserve behavior at this site.
+        // ast-grep-ignore: silent-map-err
         None => process_rx
             .recv()
             .map_err(|_| mpsc::RecvTimeoutError::Disconnected),

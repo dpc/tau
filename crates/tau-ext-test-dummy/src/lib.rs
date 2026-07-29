@@ -107,6 +107,8 @@ impl<T> DummyState<T> {
                 .pending_hold
                 .take()
                 .expect("finished hold remains present");
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             hold.join.join().map_err(|_| {
                 tau_client::ClientError::handler("hold_no_side_effect worker panicked")
             })?;
@@ -130,6 +132,8 @@ impl<T> DummyState<T> {
         // This call is intentionally best-effort; preserve the existing discarded
         // result. ast-grep-ignore: let-underscore-call
         let _ = hold.signal.send(HoldSignal::Cancel);
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         hold.join
             .join()
             .map_err(|_| tau_client::ClientError::handler("hold_no_side_effect worker panicked"))

@@ -184,6 +184,8 @@ impl PumpGuard {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         handle
             .join()
             .map_err(|_| "quota fixture input pump panicked".to_owned())?

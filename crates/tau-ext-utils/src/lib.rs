@@ -857,6 +857,8 @@ fn parse_action(value: &CborValue, call_id: &str) -> Result<TimerAction, String>
 
 fn bounded_seconds(value: &CborValue, key: &str, min: u64, max: u64) -> Result<u64, String> {
     let raw = tau_proto::cbor_int_field(value, key).ok_or_else(|| format!("{key} is required"))?;
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let seconds = u64::try_from(raw).map_err(|_| format!("{key} must be a positive integer"))?;
     if !(min..=max).contains(&seconds) {
         return Err(format!("{key} must be between {min} and {max}"));

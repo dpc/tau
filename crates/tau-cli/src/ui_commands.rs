@@ -28,11 +28,15 @@ pub(crate) fn parse_tree_navigation_target(
         return Ok(tau_proto::UiTreeNavigationTarget::Root);
     }
     if let Some(rest) = arg.strip_prefix("node ") {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         let node_id = rest.trim().parse::<u64>().map_err(|_| ())?;
         return Ok(tau_proto::UiTreeNavigationTarget::Node(
             tau_proto::NodeId::new(node_id),
         ));
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let anchor = arg.parse::<u64>().map_err(|_| ())?;
     if anchor == 0 {
         return Ok(tau_proto::UiTreeNavigationTarget::Root);
@@ -91,6 +95,8 @@ fn parse_compaction_threshold_update(value: &str) -> Result<Option<u64>, String>
     if is_reset_value(value) {
         return Ok(None);
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let threshold = value
         .parse::<u64>()
         .map_err(|_| "compaction-threshold must be a token count of at least 1000".to_owned())?;

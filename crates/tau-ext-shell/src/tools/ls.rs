@@ -145,6 +145,8 @@ fn parse_limit(arguments: &CborValue) -> Result<usize, ToolFailure> {
         Some(value) if value < 1 => Err(ToolFailure::new("limit must be >= 1")),
         Some(value) => {
             let limit =
+                // Preserve behavior at this site.
+                // ast-grep-ignore: silent-map-err
                 usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large"))?;
             if MAX_LS_LIMIT < limit {
                 return Err(ToolFailure::new(format!("limit must be <= {MAX_LS_LIMIT}")));

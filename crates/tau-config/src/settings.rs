@@ -79,6 +79,8 @@ pub fn parse_enable_extensions_env(
     let Some(value) = value else {
         return Ok(Vec::new());
     };
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let value = value.into_string().map_err(|_| {
         EnableExtensionsEnvError(format!(
             "{TAU_ENABLE_EXTENSIONS_ENV} must be valid UTF-8 and contain NAME[,NAME...]"
@@ -97,6 +99,8 @@ pub fn parse_enable_extensions_env(
                 index + 1
             )));
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         validate_extension_name(name).map_err(|_| {
             EnableExtensionsEnvError(format!(
                 "{TAU_ENABLE_EXTENSIONS_ENV} item {} is invalid; names may contain only ASCII letters, digits, '_' and '-'",

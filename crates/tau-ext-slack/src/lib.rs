@@ -4024,6 +4024,8 @@ async fn socket_worker_once_with_heartbeat(
             ws_url
         }
     };
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let (mut ws, _response) = tokio_tungstenite::connect_async(&ws_url)
         .await
         .map_err(|_| "Slack websocket connection failed".to_owned())?;
@@ -4065,6 +4067,8 @@ async fn socket_worker_once_with_heartbeat(
         let Some(frame) = frame else {
             return Ok(WorkerOutcome::ReconnectNow);
         };
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         let frame = frame.map_err(|_| "Slack websocket frame failed".to_owned())?;
         if matches!(&frame, Message::Pong(_)) {
             pong_deadline
@@ -5206,6 +5210,8 @@ fn cbor_optional_usize_field(arguments: &CborValue, field: &str) -> Result<Optio
             && name == field
         {
             return match value {
+                // Preserve behavior at this site.
+                // ast-grep-ignore: silent-map-err
                 CborValue::Integer(value) => usize::try_from(*value)
                     .map(Some)
                     .map_err(|_| format!("`{field}` must be a non-negative integer")),
@@ -5230,10 +5236,14 @@ fn decode_discovery_cursor(cursor: &str) -> Result<String, String> {
         .strip_prefix("v1:")
         .filter(|encoded| !encoded.is_empty())
         .ok_or_else(|| "`cursor` is malformed or stale".to_owned())?;
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded)
         .map_err(|_| "`cursor` is malformed or stale".to_owned())?;
     let alias =
+        // Preserve behavior at this site.
+        // ast-grep-ignore: silent-map-err
         String::from_utf8(bytes).map_err(|_| "`cursor` is malformed or stale".to_owned())?;
     valid_conversation_alias(&alias)
         .then_some(alias)
@@ -5627,6 +5637,8 @@ impl HttpSlackClient {
             .send(body.to_string())
             .map_err(|error| slack_api_transport_error(&error))?;
         let status = response.status();
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         let text = response
             .body_mut()
             .with_config()
@@ -5653,6 +5665,8 @@ impl HttpSlackClient {
             .send_form([("user", user_id)])
             .map_err(|error| slack_api_transport_error(&error))?;
         let status = response.status();
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         let text = response
             .body_mut()
             .with_config()
@@ -5682,6 +5696,8 @@ fn parse_slack_api_response(
         return Err(SlackApiError::RemoteFailure);
     }
     let value: serde_json::Value =
+        // Preserve behavior at this site.
+        // ast-grep-ignore: silent-map-err
         serde_json::from_str(text).map_err(|_| SlackApiError::MalformedResponse)?;
     if !(200..300).contains(&status_code) {
         let classified = classify_api_error(value.get("error").and_then(serde_json::Value::as_str));

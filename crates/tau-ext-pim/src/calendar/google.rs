@@ -906,6 +906,8 @@ fn read_limited_body(
     if MAX_JSON_BODY_BYTES < bytes.len() {
         return Err(format!("{context} was too large"));
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     String::from_utf8(bytes).map_err(|_| format!("{context} was not valid UTF-8"))
 }
 

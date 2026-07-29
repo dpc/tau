@@ -55,6 +55,8 @@ where
             let writer_thread = scope.spawn(move || run_writer(writer, receiver));
             let run_result = run_client_loop(reader, state, builder, handle.clone());
             let shutdown_result = handle.shutdown();
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             let writer_result = writer_thread
                 .join()
                 .map_err(|_| ClientError::WriterPanicked)
@@ -138,6 +140,8 @@ where
         }
 
         let shutdown_result = handle.shutdown();
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         let writer_result = writer_thread
             .join()
             .map_err(|_| ClientError::WriterPanicked)

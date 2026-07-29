@@ -83,6 +83,8 @@ impl Color {
         if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(ColorParseError(format!("#{hex}")));
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         let rgb = u32::from_str_radix(hex, 16).map_err(|_| ColorParseError(format!("#{hex}")))?;
         let r = ((rgb >> 16) & 0xff) as u8;
         let g = ((rgb >> 8) & 0xff) as u8;

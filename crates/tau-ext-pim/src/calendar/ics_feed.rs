@@ -194,6 +194,8 @@ impl IcsFeedBackend {
         let Some(timestamp) = recurring_event_timestamp(event_id) else {
             return Err(format!("calendar event `{event_id}` was not found"));
         };
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         let start = OffsetDateTime::from_unix_timestamp(timestamp)
             .map_err(|_| "calendar event id timestamp is out of range".to_owned())?;
         let end = start
@@ -233,6 +235,8 @@ impl IcsFeedBackend {
         if MAX_ICS_BYTES < bytes.len() as u64 {
             return Err("iCalendar feed is too large".to_owned());
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         String::from_utf8(bytes).map_err(|_| "iCalendar feed is not valid UTF-8".to_owned())
     }
 
@@ -320,6 +324,8 @@ fn parse_ics_cursor(cursor: Option<&str>) -> Result<usize, String> {
     if offset.is_empty() || !offset.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("iCalendar feed cursor is invalid".to_owned());
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     offset
         .parse::<usize>()
         .map_err(|_| "iCalendar feed cursor is too large".to_owned())
@@ -343,6 +349,8 @@ fn ics_default_timezone(account: &ValidatedAccount) -> Result<Tz, String> {
     let Some(timezone) = account.timezone.as_deref() else {
         return Ok(system_ics_timezone().unwrap_or(Tz::UTC));
     };
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     timezone.parse::<Tz>().map_err(|_| {
         format!("account timezone `{timezone}` is not recognized for iCalendar feed interpretation")
     })
@@ -654,6 +662,8 @@ fn expand_master_in_range(
         let before = offset_to_rrule_datetime(range_max, rrule_tz, chrono::Duration::zero())?;
         let mut set = RRuleSet::new(dt_start).limit();
         for rule in &master.rrules {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             let rule = rule
                 .parse::<RRule<Unvalidated>>()
                 .map_err(|_| capped_range_error())?

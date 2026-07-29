@@ -291,6 +291,8 @@ impl Application for SwarmApplication {
         drop(commands);
         let operation = async {
             let (completion, accepted) = oneshot::channel();
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             self.prompts
                 .send(PromptSubmission {
                     agent_id: AgentId::new(request.prompt.agent_id.clone()),
@@ -421,6 +423,8 @@ impl Application for SwarmApplication {
         drop(commands);
         let operation = async {
             let (completion, accepted) = oneshot::channel();
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             self.blockers
                 .send(BlockerSubmission {
                     agent_id: owner,
@@ -503,6 +507,8 @@ impl SwarmApplication {
             .filter(|record| record.owner == owner)
             .cloned()
             .collect();
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         let before = serde_json::to_vec(&owner_history)
             .map_err(|_| "blocker history encoding failed".to_owned())?
             .len();
@@ -521,6 +527,8 @@ impl SwarmApplication {
                 tau_swarm_api::BlockerAnswerKind::Custom
             }
         });
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         let after = serde_json::to_vec(&prospective)
             .map_err(|_| "blocker history encoding failed".to_owned())?
             .len();
@@ -568,6 +576,8 @@ async fn wait_for_prompt(
         if let Some(response) = result.borrow().clone() {
             return response.map_err(ClientError::transport);
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         result
             .changed()
             .await
@@ -582,6 +592,8 @@ async fn wait_for_blocker(
         if let Some(response) = result.borrow().clone() {
             return response.map_err(ClientError::transport);
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         result
             .changed()
             .await

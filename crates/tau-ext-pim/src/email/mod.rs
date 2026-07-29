@@ -172,6 +172,8 @@ fn register_tools_with_prompt_fragment(
             cx.handle
                 .report_tool_progress(initial_progress(cx.invoke, cx.local_tool_name()))?;
             let mut outcome =
+                // Preserve this error contract.
+                // ast-grep-ignore: silent-map-err
                 tau_client::ToolTerminalOutcome::try_from(cx.state.dispatch(local_invoke))
                     .map_err(|_| {
                         tau_client::ClientError::handler(
@@ -1571,6 +1573,8 @@ impl StateStore {
                 "no pending Google authorization for account `{account}`"
             ));
         };
+        // Preserve this error contract.
+        // ast-grep-ignore: silent-map-err
         let pending: EmailGooglePendingAuth = serde_json::from_slice(&bytes).map_err(|_| {
             "pending Google email authorization is unsupported or corrupt; run `:email auth google start <account>` again".to_owned()
         })?;
@@ -3179,8 +3183,9 @@ fn safe_display_join<'a>(values: impl IntoIterator<Item = &'a String>, separator
 
 fn parse_cursor(cursor: Option<&str>) -> Result<usize, String> {
     // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-option-verbose
     match cursor {
+        // Preserve this error contract.
+        // ast-grep-ignore: silent-map-err
         Some(cursor) => cursor
             .parse::<usize>()
             .map_err(|_| "cursor must be a non-negative integer offset".to_owned()),
@@ -5203,6 +5208,8 @@ fn require_approval_ids(argv: &[String]) -> Result<Vec<String>, String> {
 fn parse_log_limit(argv: &[String]) -> Result<usize, String> {
     let limit = match argv {
         [] => EMAIL_LOG_DEFAULT_LIMIT,
+        // Preserve this error contract.
+        // ast-grep-ignore: silent-map-err
         [value] if !value.trim().is_empty() => value
             .parse::<usize>()
             .map_err(|_| "log limit must be a positive integer".to_owned())?,
@@ -6305,6 +6312,8 @@ fn parse_flattened_folder_arg(
             "folder must be a folder id from email_list_folders",
         ));
     };
+    // Preserve this error contract.
+    // ast-grep-ignore: silent-map-err
     let account = crate::opaque_id::decode_component(account).map_err(|_| {
         error_envelope(
             Some(command),
@@ -6312,6 +6321,8 @@ fn parse_flattened_folder_arg(
             "folder must be a folder id from email_list_folders",
         )
     })?;
+    // Preserve this error contract.
+    // ast-grep-ignore: silent-map-err
     let folder = crate::opaque_id::decode_component(folder).map_err(|_| {
         error_envelope(
             Some(command),

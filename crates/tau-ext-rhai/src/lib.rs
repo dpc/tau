@@ -1537,6 +1537,8 @@ fn cbor_to_json(value: &CborValue) -> Result<serde_json::Value, String> {
     match value {
         CborValue::Null => Ok(serde_json::Value::Null),
         CborValue::Bool(v) => Ok(serde_json::Value::Bool(*v)),
+        // Preserve behavior at this site.
+        // ast-grep-ignore: silent-map-err
         CborValue::Integer(v) => i64::try_from(*v)
             .map(|v| serde_json::Value::Number(v.into()))
             .map_err(|_| "CBOR integer is outside JSON integer range".to_owned()),

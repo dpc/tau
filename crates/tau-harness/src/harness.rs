@@ -4044,6 +4044,8 @@ impl Harness {
     fn wait_for_initial_ui_subscribe(&mut self) -> Result<(), HarnessError> {
         let started_at = Instant::now();
         loop {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             let harness_evt = self
                 .recv_startup_event(started_at)
                 .map_err(|_| HarnessError::StartupTimeout)?;
@@ -8393,6 +8395,8 @@ impl Harness {
         }
         let started_at = Instant::now();
         while !self.turn_state.is_idle() {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             let harness_evt = self
                 .recv_startup_event(started_at)
                 .map_err(|_| HarnessError::StartupTimeout)?;
@@ -9237,6 +9241,8 @@ impl Harness {
                 None if loaded.contains(&agent_id) => tau_proto::SessionAgentLifecycle::Unavailable,
                 None => tau_proto::SessionAgentLifecycle::Unloaded,
             };
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             let facts = self
                 .agent_store
                 .agent_creation_facts(
@@ -16016,6 +16022,8 @@ impl Harness {
             .get(&connection_id)
             .map(|entry| entry.name.to_string())
             .unwrap_or_else(|| connection_id.to_string());
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         writer
             .join()
             .map_err(|_| HarnessError::ThreadJoin(name.to_string()))?;

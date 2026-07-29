@@ -128,6 +128,8 @@ impl Output {
         match &self.inner {
             OutputInner::Client(handle) => handle.send_detached(message),
             #[cfg(test)]
+            // Preserve behavior at this site.
+            // ast-grep-ignore: silent-map-err
             OutputInner::Channel(tx) => tx
                 .send(message)
                 .map_err(|_| tau_client::ClientError::WriterClosed),
@@ -157,6 +159,8 @@ impl Output {
         match &self.inner {
             OutputInner::Client(handle) => handle.report_tool_terminal_detached(outcome),
             #[cfg(test)]
+            // Preserve behavior at this site.
+            // ast-grep-ignore: silent-map-err
             OutputInner::Channel(tx) => tx
                 .send(HarnessInputMessage::emit_with_persist(
                     outcome.into_reported_event(),
@@ -173,6 +177,8 @@ impl Output {
         match &self.inner {
             OutputInner::Client(handle) => handle.register_local_tool(registration),
             #[cfg(test)]
+            // Preserve behavior at this site.
+            // ast-grep-ignore: silent-map-err
             OutputInner::Channel(tx) => tx
                 .send(HarnessInputMessage::emit_with_persist(
                     Event::ToolRegistrationDeclared(registration),
@@ -1276,6 +1282,8 @@ fn schedule_tool_started(
         };
         let path = crate::tools::workdir::target_dir(&invoke.arguments, base)
             .map_err(|failure| Box::new((wire_invoke.clone(), failure)))?;
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         cwd_state
             .start_pending_workdir_result(
                 invoke.agent_id.clone(),

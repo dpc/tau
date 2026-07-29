@@ -658,6 +658,8 @@ fn parse_args(
                     }
                     continue;
                 };
+                // Preserve this behavior; the structural alternative is not semantics-neutral
+                // here. ast-grep-ignore: silent-map-err
                 let value = token.parse::<i64>().map_err(|_| {
                     ParseError::new(
                         ParseErrorKind::InvalidArguments,

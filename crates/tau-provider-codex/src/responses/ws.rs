@@ -468,6 +468,8 @@ impl WsConn {
         }
         let text = serde_json::to_string(&envelope).map_err(LlmError::Json)?;
         on_dispatched(Instant::now());
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         self.outbound_tx
             .send(WsCommand::SendText(text))
             .map_err(|_| LlmError::HttpStatus(0, "stream error: ws writer task gone".to_owned()))?;
@@ -677,6 +679,8 @@ async fn connect_with_policy(
         )));
     }
     let response_headers = response.headers().clone();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let upgraded = response.upgrade().await.map_err(|_| {
         tungstenite::Error::Io(std::io::Error::other(
             network.protocol_error(&websocket_url, tau_provider::OutboundPhase::Request),

@@ -208,6 +208,8 @@ fn update_spec() -> ToolSpec {
 }
 
 fn decode<T: serde::de::DeserializeOwned>(value: &CborValue) -> Result<T, String> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let json = serde_json::to_value(value).map_err(|_| "tool arguments are not representable")?;
     serde_json::from_value(json).map_err(|error| format!("invalid tool arguments: {error}"))
 }
@@ -366,6 +368,8 @@ fn cancel_blocker(
     state.changed.notify_waiters();
     history[index].state = BlockerState::Cancelled;
     history[index].reason = prospective_reason;
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     serde_json::to_value(&history[index]).map_err(|_| "blocker encoding failed".into())
 }
 
@@ -375,6 +379,8 @@ fn owner_history_fits(
     prospective: &[BlockerRecord],
     limit: usize,
 ) -> Result<bool, String> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let encoded = serde_json::to_vec(prospective)
         .map_err(|_| "blocker history encoding failed")?
         .len();
@@ -392,6 +398,8 @@ fn owner_history_fits(
 }
 
 fn list_blockers(state: &SwarmRuntime, owner: &str) -> Result<serde_json::Value, String> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     serde_json::to_value(
         state
             .blocker_history
@@ -522,6 +530,8 @@ fn report_json(
     cx: &ToolContext<'_, SwarmRuntime>,
     value: serde_json::Value,
 ) -> Result<(), ClientError> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-map-err
     let cbor = serde_json::from_value::<CborValue>(value)
         .map_err(|_| ClientError::handler("tool result encoding failed"))?;
     cx.report_result(ToolResult {

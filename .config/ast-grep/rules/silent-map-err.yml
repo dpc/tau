@@ -1,0 +1,32 @@
+id: silent-map-err
+language: rust
+severity: hint
+rule:
+  all:
+    - pattern: $EXPR.map_err(|_| $$$BODY)
+    - not:
+        inside:
+          stopBy: end
+          kind: mod_item
+          follows:
+            kind: attribute_item
+            regex: "cfg\\(test\\)"
+ignores:
+  - "crates/**/tests/**"
+  - "crates/**/benches/**"
+  - "benches/**"
+  - "tests/**"
+  - "examples/**"
+  - "tracehealth-api/tests/**"
+  - "tracehealth-api/benches/**"
+  - "**/test_utils.rs"
+  - "vendor/**"
+  - ".claude/worktrees/**"
+  - "target/**"
+  - "tracehealth-ios/**"
+message: |
+  Original error discarded — .map_err(|_| ...) replaces the error without
+  preserving context, making failures harder to diagnose. Prefer:
+    .map_err(|e| MyError::Foo(e))  or  .map_err(MyError::from)
+  For parse errors where the original is unhelpful, add .inspect_err() or
+  include the input value in the replacement error message.

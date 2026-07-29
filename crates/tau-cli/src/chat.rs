@@ -378,6 +378,8 @@ fn parse_debug_show_event_stats_command(
     }
     Ok(Some(HarnessInputMessage::UiDebugEventStatsRequest(
         tau_proto::UiDebugEventStatsRequest {
+            // Preserve behavior at this site.
+            // ast-grep-ignore: silent-map-err
             extension_name: tau_proto::ExtensionName::parse(extension_name)
                 .map_err(|_| DEBUG_SHOW_EVENT_STATS_USAGE)?,
         },

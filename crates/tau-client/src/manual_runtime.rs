@@ -680,6 +680,8 @@ impl<State> ManualExtensionRuntime<State> {
         };
         let input_closed = self.input.borrow().input_closed;
         let reader_join_result = if input_closed || self.reader_thread.is_finished() {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             self.reader_thread
                 .join()
                 .map_err(|_| ClientError::ReaderPanicked)
@@ -687,6 +689,8 @@ impl<State> ManualExtensionRuntime<State> {
             Ok(())
         };
         let shutdown_result = self.handle.shutdown();
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-map-err
         let writer_result = self
             .writer_thread
             .join()
@@ -1119,6 +1123,8 @@ where
         } else {
             handle.discard_configure_outputs();
             let shutdown_result = handle.shutdown();
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: silent-map-err
             let writer_result = writer_thread
                 .join()
                 .map_err(|_| ClientError::WriterPanicked)

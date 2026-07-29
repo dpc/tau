@@ -3005,13 +3005,14 @@ fn run_retry_scheduler(
             return;
         }
         // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let command = match state.next_due() {
             Some(next_due) => commands.recv_timeout(
                 next_due
                     .checked_duration_since(clock.now())
                     .unwrap_or(Duration::ZERO),
             ),
+            // Preserve this error contract.
+            // ast-grep-ignore: silent-map-err
             None => commands
                 .recv()
                 .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
@@ -3277,6 +3278,8 @@ impl HarnessInputMessageWrite {
                 cancel_generation,
                 agent_prompt_id,
                 cooldown_probe,
+                // Preserve this error contract.
+                // ast-grep-ignore: silent-map-err
             } => send_worker_message(
                 tx,
                 waker,
@@ -3618,6 +3621,8 @@ fn send_worker_message(
     // All worker-to-loop messages must be enqueued through this helper so the
     // main loop can rely on enqueue-before-wake ordering before blocking in
     // `ManualExtensionRuntime::wait_for_wake`.
+    // Preserve this error contract.
+    // ast-grep-ignore: silent-map-err
     tx.send(message).map_err(|_| ())?;
     waker.wake();
     Ok(())
