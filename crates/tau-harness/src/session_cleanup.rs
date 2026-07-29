@@ -74,65 +74,64 @@ fn cleanup_old_sessions_with(
     };
 
     for (session_id, meta) in metas {
-        if protected_sessions.contains(&session_id) {
-            continue;
-        }
-        if cutoff < meta.last_touched {
-            continue;
-        }
+        if !(protected_sessions.contains(&session_id)) {
+            if cutoff < meta.last_touched {
+                continue;
+            }
 
-        let path = sessions_dir.join(session_id.as_str());
-        let cleanup_lock = match try_acquire_cleanup_lock(&path.join("lock")) {
-            Ok(Some(lock)) => lock,
-            Ok(None) => continue,
-            Err(error) => {
-                tracing::warn!(
-                    target: "tau_harness::session_cleanup",
-                    session_id = %session_id,
-                    %error,
-                    "failed to acquire session lock for cleanup"
-                );
-                continue;
+            let path = sessions_dir.join(session_id.as_str());
+            let cleanup_lock = match try_acquire_cleanup_lock(&path.join("lock")) {
+                Ok(Some(lock)) => lock,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "tau_harness::session_cleanup",
+                        session_id = %session_id,
+                        %error,
+                        "failed to acquire session lock for cleanup"
+                    );
+                    continue;
+                }
+            };
+            match read_session_meta(&path.join("meta.json")) {
+                Ok(current_meta) if cutoff < current_meta.last_touched => continue,
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "tau_harness::session_cleanup",
+                        session_id = %session_id,
+                        %error,
+                        "failed to revalidate session metadata for cleanup"
+                    );
+                    continue;
+                }
             }
-        };
-        match read_session_meta(&path.join("meta.json")) {
-            Ok(current_meta) if cutoff < current_meta.last_touched => continue,
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                tracing::warn!(
-                    target: "tau_harness::session_cleanup",
-                    session_id = %session_id,
-                    %error,
-                    "failed to revalidate session metadata for cleanup"
-                );
-                continue;
-            }
-        }
 
-        let detached_path = match detach_session_dir(&sessions_dir, &path, &session_id) {
-            Ok(path) => path,
-            Err(error) => {
+            let detached_path = match detach_session_dir(&sessions_dir, &path, &session_id) {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "tau_harness::session_cleanup",
+                        session_id = %session_id,
+                        path = %path.display(),
+                        %error,
+                        "failed to detach old session directory"
+                    );
+                    continue;
+                }
+            };
+            let result = remove_dir(&detached_path);
+            drop(cleanup_lock);
+            if let Err(error) = result {
                 tracing::warn!(
                     target: "tau_harness::session_cleanup",
                     session_id = %session_id,
-                    path = %path.display(),
+                    path = %detached_path.display(),
                     %error,
-                    "failed to detach old session directory"
+                    "failed to remove detached session directory"
                 );
-                continue;
             }
-        };
-        let result = remove_dir(&detached_path);
-        drop(cleanup_lock);
-        if let Err(error) = result {
-            tracing::warn!(
-                target: "tau_harness::session_cleanup",
-                session_id = %session_id,
-                path = %detached_path.display(),
-                %error,
-                "failed to remove detached session directory"
-            );
         }
     }
 }

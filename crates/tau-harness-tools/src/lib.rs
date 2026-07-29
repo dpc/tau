@@ -570,16 +570,14 @@ impl BuiltinTools {
         let watchers = host.watchers_for_agent(sender_id);
         let mut failed_watchers = Vec::new();
         for watcher_id in watchers {
-            if watcher_id == sender_id {
-                continue;
-            }
-            if host
-                .publish_agent_watch_response_from_agent_ids(
-                    sender_id,
-                    watcher_id.clone(),
-                    message.clone(),
-                )
-                .is_err()
+            if watcher_id != sender_id
+                && host
+                    .publish_agent_watch_response_from_agent_ids(
+                        sender_id,
+                        watcher_id.clone(),
+                        message.clone(),
+                    )
+                    .is_err()
             {
                 failed_watchers.push(watcher_id);
             }

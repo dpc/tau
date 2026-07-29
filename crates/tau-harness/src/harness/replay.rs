@@ -188,17 +188,16 @@ impl Harness {
             }
         };
         for entry in session_events {
-            if entry.event.name().category() != &tau_proto::EventCategory::Message
-                || !selector_matches_event(selectors, &entry.event)
+            if !(entry.event.name().category() != &tau_proto::EventCategory::Message
+                || !selector_matches_event(selectors, &entry.event))
             {
-                continue;
+                let frame = HarnessOutputMessage::deliver_replay(entry.recorded_at, entry.event);
+                let source = entry
+                    .source
+                    .as_ref()
+                    .and_then(tau_core::PersistedEventSource::connection_id);
+                let _ = self.bus.send_to(client_id, source, frame);
             }
-            let frame = HarnessOutputMessage::deliver_replay(entry.recorded_at, entry.event);
-            let source = entry
-                .source
-                .as_ref()
-                .and_then(tau_core::PersistedEventSource::connection_id);
-            let _ = self.bus.send_to(client_id, source, frame);
         }
 
         match self

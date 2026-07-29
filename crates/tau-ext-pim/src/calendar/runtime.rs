@@ -279,50 +279,49 @@ fn validate_config_secrets(
         return Ok(());
     }
     for account in config.accounts.values() {
-        if !account.enable {
-            continue;
-        }
-        match &account.backend {
-            Some(ValidatedBackendConfig::IcsFeed {
-                url_secret: Some(secret),
-                allow_plain_http,
-                ..
-            }) => {
-                let value =
-                    required_config_secret(&account.id, "backend.url_secret", secret, secrets)?;
-                normalize_feed_url(&value, *allow_plain_http)?;
-            }
-            Some(ValidatedBackendConfig::Google {
-                client_id_secret,
-                client_secret_secret,
-                refresh_token_secret,
-                ..
-            }) => {
-                required_config_secret(
-                    &account.id,
-                    "backend.client_id_secret",
-                    client_id_secret,
-                    secrets,
-                )?;
-                for (field, secret) in [
-                    (
-                        "backend.client_secret_secret",
-                        client_secret_secret.as_deref(),
-                    ),
-                    (
-                        "backend.refresh_token_secret",
-                        refresh_token_secret.as_deref(),
-                    ),
-                ] {
-                    let Some(secret) = secret else { continue };
-                    required_config_secret(&account.id, field, secret, secrets)?;
+        if !(!account.enable) {
+            match &account.backend {
+                Some(ValidatedBackendConfig::IcsFeed {
+                    url_secret: Some(secret),
+                    allow_plain_http,
+                    ..
+                }) => {
+                    let value =
+                        required_config_secret(&account.id, "backend.url_secret", secret, secrets)?;
+                    normalize_feed_url(&value, *allow_plain_http)?;
                 }
+                Some(ValidatedBackendConfig::Google {
+                    client_id_secret,
+                    client_secret_secret,
+                    refresh_token_secret,
+                    ..
+                }) => {
+                    required_config_secret(
+                        &account.id,
+                        "backend.client_id_secret",
+                        client_id_secret,
+                        secrets,
+                    )?;
+                    for (field, secret) in [
+                        (
+                            "backend.client_secret_secret",
+                            client_secret_secret.as_deref(),
+                        ),
+                        (
+                            "backend.refresh_token_secret",
+                            refresh_token_secret.as_deref(),
+                        ),
+                    ] {
+                        let Some(secret) = secret else { continue };
+                        required_config_secret(&account.id, field, secret, secrets)?;
+                    }
+                }
+                Some(ValidatedBackendConfig::Caldav { .. })
+                | Some(ValidatedBackendConfig::IcsFeed {
+                    url_secret: None, ..
+                })
+                | None => {}
             }
-            Some(ValidatedBackendConfig::Caldav { .. })
-            | Some(ValidatedBackendConfig::IcsFeed {
-                url_secret: None, ..
-            })
-            | None => {}
         }
     }
     Ok(())

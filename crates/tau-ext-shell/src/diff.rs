@@ -16,72 +16,70 @@ pub(crate) fn compute_diff(old: &str, new: &str) -> tau_proto::DiffSummary {
     let mut summary = tau_proto::DiffSummary::default();
 
     for group in diff.grouped_ops(DIFF_CONTEXT_LINES) {
-        if group.is_empty() {
-            continue;
-        }
+        if !(group.is_empty()) {
+            // Hunk header (1-based line numbers like unified-diff).
+            let first = &group[0];
+            let last = &group[group.len() - 1];
+            let old_start = first.old_range().start as u32 + 1;
+            let new_start = first.new_range().start as u32 + 1;
+            let old_count = (last.old_range().end - first.old_range().start) as u32;
+            let new_count = (last.new_range().end - first.new_range().start) as u32;
 
-        // Hunk header (1-based line numbers like unified-diff).
-        let first = &group[0];
-        let last = &group[group.len() - 1];
-        let old_start = first.old_range().start as u32 + 1;
-        let new_start = first.new_range().start as u32 + 1;
-        let old_count = (last.old_range().end - first.old_range().start) as u32;
-        let new_count = (last.new_range().end - first.new_range().start) as u32;
+            let mut lines: Vec<tau_proto::DiffLine> = Vec::new();
+            for op in &group {
+                let mut removed = Vec::new();
+                let mut added = Vec::new();
+                let mut equal = Vec::new();
 
-        let mut lines: Vec<tau_proto::DiffLine> = Vec::new();
-        for op in &group {
-            let mut removed = Vec::new();
-            let mut added = Vec::new();
-            let mut equal = Vec::new();
-
-            for change in diff.iter_changes(op) {
-                let text = strip_eol(change.value()).to_owned();
-                match change.tag() {
-                    ChangeTag::Equal => equal.push(text),
-                    ChangeTag::Delete => {
-                        summary.removed += 1;
-                        removed.push(text);
-                    }
-                    ChangeTag::Insert => {
-                        summary.added += 1;
-                        added.push(text);
+                for change in diff.iter_changes(op) {
+                    let text = strip_eol(change.value()).to_owned();
+                    match change.tag() {
+                        ChangeTag::Equal => equal.push(text),
+                        ChangeTag::Delete => {
+                            summary.removed += 1;
+                            removed.push(text);
+                        }
+                        ChangeTag::Insert => {
+                            summary.added += 1;
+                            added.push(text);
+                        }
                     }
                 }
-            }
 
-            if !equal.is_empty() {
+                if !equal.is_empty() {
+                    lines.extend(
+                        equal
+                            .into_iter()
+                            .map(|text| tau_proto::DiffLine::Equal { text }),
+                    );
+                    continue;
+                }
+
+                if removed.len() == 1 && added.len() == 1 {
+                    lines.push(make_modify(&removed[0], &added[0]));
+                    continue;
+                }
+
                 lines.extend(
-                    equal
+                    removed
                         .into_iter()
-                        .map(|text| tau_proto::DiffLine::Equal { text }),
+                        .map(|text| tau_proto::DiffLine::Remove { text }),
                 );
-                continue;
+                lines.extend(
+                    added
+                        .into_iter()
+                        .map(|text| tau_proto::DiffLine::Add { text }),
+                );
             }
 
-            if removed.len() == 1 && added.len() == 1 {
-                lines.push(make_modify(&removed[0], &added[0]));
-                continue;
-            }
-
-            lines.extend(
-                removed
-                    .into_iter()
-                    .map(|text| tau_proto::DiffLine::Remove { text }),
-            );
-            lines.extend(
-                added
-                    .into_iter()
-                    .map(|text| tau_proto::DiffLine::Add { text }),
-            );
+            summary.hunks.push(tau_proto::DiffHunk {
+                old_start,
+                old_count,
+                new_start,
+                new_count,
+                lines,
+            });
         }
-
-        summary.hunks.push(tau_proto::DiffHunk {
-            old_start,
-            old_count,
-            new_start,
-            new_count,
-            lines,
-        });
     }
 
     summary

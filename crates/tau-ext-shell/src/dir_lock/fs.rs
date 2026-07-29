@@ -666,12 +666,11 @@ impl FsLockBackend {
             .collect();
         let mut dead = Vec::new();
         for instance in instances {
-            if dead.contains(&instance) {
-                continue;
-            }
-            match instance_liveness(&self.state_dir, &instance)? {
-                InstanceLiveness::Dead => dead.push(instance),
-                InstanceLiveness::Alive => {}
+            if !(dead.contains(&instance)) {
+                match instance_liveness(&self.state_dir, &instance)? {
+                    InstanceLiveness::Dead => dead.push(instance),
+                    InstanceLiveness::Alive => {}
+                }
             }
         }
         if dead.is_empty() {

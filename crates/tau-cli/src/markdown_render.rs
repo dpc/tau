@@ -484,78 +484,77 @@ fn push_runs(
     show_link_target: bool,
 ) {
     for run in runs {
-        if run.text.is_empty() {
-            continue;
-        }
-        match run.style {
-            MarkdownStyle::Base => children.push(SpanTree::text(run.text.clone())),
-            MarkdownStyle::Strong => {
-                children.push(SpanTree::span(
-                    styles.strong,
-                    vec![SpanTree::text(run.text.clone())],
-                ));
-            }
-            MarkdownStyle::StrongEmphasis => {
-                children.push(SpanTree::span(
-                    styles.strong,
-                    vec![SpanTree::span(
+        if !(run.text.is_empty()) {
+            match run.style {
+                MarkdownStyle::Base => children.push(SpanTree::text(run.text.clone())),
+                MarkdownStyle::Strong => {
+                    children.push(SpanTree::span(
+                        styles.strong,
+                        vec![SpanTree::text(run.text.clone())],
+                    ));
+                }
+                MarkdownStyle::StrongEmphasis => {
+                    children.push(SpanTree::span(
+                        styles.strong,
+                        vec![SpanTree::span(
+                            styles.emphasis,
+                            vec![SpanTree::text(run.text.clone())],
+                        )],
+                    ));
+                }
+                MarkdownStyle::Emphasis => {
+                    children.push(SpanTree::span(
                         styles.emphasis,
                         vec![SpanTree::text(run.text.clone())],
-                    )],
-                ));
-            }
-            MarkdownStyle::Emphasis => {
-                children.push(SpanTree::span(
-                    styles.emphasis,
-                    vec![SpanTree::text(run.text.clone())],
-                ));
-            }
-            MarkdownStyle::Strikethrough => {
-                children.push(SpanTree::span(
-                    styles.strikethrough,
-                    vec![SpanTree::text(run.text.clone())],
-                ));
-            }
-            MarkdownStyle::Heading => {
-                children.push(SpanTree::span(
-                    styles.heading,
-                    vec![SpanTree::text(run.text.clone())],
-                ));
-            }
-            MarkdownStyle::ListMarker => {
-                children.push(SpanTree::span(
-                    styles.list_marker,
-                    vec![SpanTree::text(run.text.clone())],
-                ));
-            }
-            MarkdownStyle::PromptMarker => {
-                children.push(SpanTree::span(
-                    styles.prompt_marker,
-                    vec![SpanTree::text(run.text.clone())],
-                ));
-            }
-            MarkdownStyle::Code => {
-                children.push(SpanTree::span(
-                    styles.code,
-                    vec![SpanTree::text(run.text.clone())],
-                ));
-            }
-            MarkdownStyle::Escape => {
-                children.push(SpanTree::span(
-                    styles.escape,
-                    vec![SpanTree::text(run.text.clone())],
-                ));
-            }
-            MarkdownStyle::Link => {
-                let target = run.hyperlink.as_deref().unwrap_or_default();
-                let needs_visible_target =
-                    show_link_target || tau_cli_term::sanitize_hyperlink_target(target).is_none();
-                let text = if needs_visible_target && target != run.text {
-                    format!("{} ({target})", run.text)
-                } else {
-                    run.text.clone()
-                };
-                children.push(SpanTree::span(styles.link, vec![SpanTree::text(text)]));
+                    ));
+                }
+                MarkdownStyle::Strikethrough => {
+                    children.push(SpanTree::span(
+                        styles.strikethrough,
+                        vec![SpanTree::text(run.text.clone())],
+                    ));
+                }
+                MarkdownStyle::Heading => {
+                    children.push(SpanTree::span(
+                        styles.heading,
+                        vec![SpanTree::text(run.text.clone())],
+                    ));
+                }
+                MarkdownStyle::ListMarker => {
+                    children.push(SpanTree::span(
+                        styles.list_marker,
+                        vec![SpanTree::text(run.text.clone())],
+                    ));
+                }
+                MarkdownStyle::PromptMarker => {
+                    children.push(SpanTree::span(
+                        styles.prompt_marker,
+                        vec![SpanTree::text(run.text.clone())],
+                    ));
+                }
+                MarkdownStyle::Code => {
+                    children.push(SpanTree::span(
+                        styles.code,
+                        vec![SpanTree::text(run.text.clone())],
+                    ));
+                }
+                MarkdownStyle::Escape => {
+                    children.push(SpanTree::span(
+                        styles.escape,
+                        vec![SpanTree::text(run.text.clone())],
+                    ));
+                }
+                MarkdownStyle::Link => {
+                    let target = run.hyperlink.as_deref().unwrap_or_default();
+                    let needs_visible_target = show_link_target
+                        || tau_cli_term::sanitize_hyperlink_target(target).is_none();
+                    let text = if needs_visible_target && target != run.text {
+                        format!("{} ({target})", run.text)
+                    } else {
+                        run.text.clone()
+                    };
+                    children.push(SpanTree::span(styles.link, vec![SpanTree::text(text)]));
+                }
             }
         }
     }
@@ -739,11 +738,10 @@ fn pad_table_lines(lines: &[(&str, &str)]) -> Option<Vec<String>> {
     }
     let mut widths = vec![3; columns];
     for (row_index, row) in rows.iter().enumerate() {
-        if row_index == 1 {
-            continue;
-        }
-        for (index, cell) in row.cells.iter().enumerate() {
-            widths[index] = widths[index].max(cell.chars().count());
+        if !(row_index == 1) {
+            for (index, cell) in row.cells.iter().enumerate() {
+                widths[index] = widths[index].max(cell.chars().count());
+            }
         }
     }
     if widths.iter().any(|width| TABLE_MAX_CELL_WIDTH < *width) {
@@ -968,12 +966,11 @@ fn find_closing_delimiter(text: &str, start: usize, delimiter: char) -> Option<u
     let after_open = start + delimiter.len_utf8();
     let rest = &text[after_open..];
     for (relative, ch) in rest.char_indices() {
-        if ch != delimiter {
-            continue;
-        }
-        let close = after_open + relative;
-        if delimiter_allowed(text, close, delimiter) && after_open < close {
-            return Some(close + delimiter.len_utf8());
+        if !(ch != delimiter) {
+            let close = after_open + relative;
+            if delimiter_allowed(text, close, delimiter) && after_open < close {
+                return Some(close + delimiter.len_utf8());
+            }
         }
     }
     None

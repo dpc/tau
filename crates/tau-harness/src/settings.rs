@@ -410,10 +410,9 @@ fn apply_extension_cli_overrides(
             }
             ExtensionCliOverride::EnableAll => {
                 for (name, entry) in entries.iter_mut() {
-                    if name == TEST_DUMMY_EXTENSION_NAME {
-                        continue;
+                    if !(name == TEST_DUMMY_EXTENSION_NAME) {
+                        entry.enable = true;
                     }
-                    entry.enable = true;
                 }
             }
             ExtensionCliOverride::DisableAll => {

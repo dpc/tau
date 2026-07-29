@@ -1021,10 +1021,9 @@ fn decode_mcp_text_result(payload: &str, provider: &str) -> Result<String, Strin
         .ok_or_else(|| format!("{provider} MCP response missing `result.content`"))?;
     let mut chunks = Vec::new();
     for part in content {
-        if part.get("type").and_then(|v| v.as_str()) != Some("text") {
-            continue;
-        }
-        if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+        if part.get("type").and_then(|v| v.as_str()) == Some("text")
+            && let Some(text) = part.get("text").and_then(|v| v.as_str())
+        {
             chunks.push(text.to_owned());
         }
     }

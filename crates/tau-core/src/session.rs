@@ -808,13 +808,12 @@ impl AgentTree {
                 continue;
             };
             for call_id in &round.call_order {
-                if round.terminal_results.contains_key(call_id) {
-                    continue;
-                }
-                if let Some(call) = output_items.iter().find_map(|item| match item {
-                    ContextItem::ToolCall(call) if &call.call_id == call_id => Some(call),
-                    _ => None,
-                }) {
+                if !round.terminal_results.contains_key(call_id)
+                    && let Some(call) = output_items.iter().find_map(|item| match item {
+                        ContextItem::ToolCall(call) if &call.call_id == call_id => Some(call),
+                        _ => None,
+                    })
+                {
                     calls.push(call);
                 }
             }

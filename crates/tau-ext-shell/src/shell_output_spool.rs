@@ -227,35 +227,34 @@ fn cleanup_crash_leftovers() {
     };
     let now = SystemTime::now();
     for entry in entries.flatten() {
-        if !entry
+        if !(!entry
             .file_name()
             .to_string_lossy()
-            .starts_with(DIRECTORY_PREFIX)
+            .starts_with(DIRECTORY_PREFIX))
         {
-            continue;
-        }
-        let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
-            continue;
-        };
-        if !metadata.file_type().is_dir() {
-            continue;
-        }
-        let old = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| MAX_AGE <= age);
-        let lock_result = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(entry.path().join(LOCK_FILE_NAME));
-        let owner_dead = match lock_result {
-            Ok(file) => fs2::FileExt::try_lock_exclusive(&file).is_ok(),
-            Err(error) => error.kind() == io::ErrorKind::NotFound,
-        };
-        if old && owner_dead {
-            let _ = remove_saved(&entry.path().join(FILE_NAME));
+            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if !metadata.file_type().is_dir() {
+                continue;
+            }
+            let old = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| MAX_AGE <= age);
+            let lock_result = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(entry.path().join(LOCK_FILE_NAME));
+            let owner_dead = match lock_result {
+                Ok(file) => fs2::FileExt::try_lock_exclusive(&file).is_ok(),
+                Err(error) => error.kind() == io::ErrorKind::NotFound,
+            };
+            if old && owner_dead {
+                let _ = remove_saved(&entry.path().join(FILE_NAME));
+            }
         }
     }
 }
