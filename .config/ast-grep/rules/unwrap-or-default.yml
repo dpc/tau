@@ -1,0 +1,18 @@
+id: unwrap-or-default
+language: rust
+severity: warning
+rule:
+  all:
+    - any:
+        - pattern: $VALUE.parse().unwrap_or_default()
+        - pattern: $VALUE.decode($$$ARGS).unwrap_or_default()
+        - pattern: $VALUE.deserialize($$$ARGS).unwrap_or_default()
+        - pattern: $VALUE.read_to_string($$$ARGS).unwrap_or_default()
+        - pattern: $VALUE.from_str($$$ARGS).unwrap_or_default()
+        - pattern: $VALUE.from_slice($$$ARGS).unwrap_or_default()
+        - pattern: $VALUE.from_reader($$$ARGS).unwrap_or_default()
+    - not:
+        has:
+          pattern: $RESULT.inspect_err($$$ARGS)
+          stopBy: end
+message: A fallible operation defaults away its error; propagate it or observe the error before choosing a default.

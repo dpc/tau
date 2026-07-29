@@ -1,0 +1,11 @@
+id: unwrap-or-default
+valid:
+  - option.unwrap_or_default()
+  - cache.lookup(key).unwrap_or_default()
+  - input.parse().inspect_err(log_error).unwrap_or_default()
+  - decoder.decode(bytes).inspect_err(log_error).unwrap_or_default()
+invalid:
+  - input.parse().unwrap_or_default()
+  - decoder.decode(bytes).unwrap_or_default()
+  - serde.deserialize(value).unwrap_or_default()
+  - reader.read_to_string(&mut output).unwrap_or_default()
