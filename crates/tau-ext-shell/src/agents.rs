@@ -77,8 +77,6 @@ fn agents_file_candidates(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-filter-map-ok
     let mut candidates = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
