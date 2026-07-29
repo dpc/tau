@@ -190,8 +190,6 @@ fn render_entry_name(name: &tau_vcr::EscapedBytes, is_dir: bool) -> LsEntry {
 }
 
 fn render_entry_bytes(bytes: &[u8], is_dir: bool) -> LsEntry {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     match std::str::from_utf8(bytes) {
         Ok(text) => render_entry_text(text, is_dir, false),
         Err(_) => render_entry_text(&String::from_utf8_lossy(bytes), is_dir, true),

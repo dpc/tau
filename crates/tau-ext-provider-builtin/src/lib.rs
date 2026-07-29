@@ -3726,8 +3726,6 @@ fn trace_prompt_like<T: serde::Serialize>(
     if !tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
         return;
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     match serde_json::to_string_pretty(value) {
         Ok(json) => tracing::trace!(
             target: LOG_TARGET,

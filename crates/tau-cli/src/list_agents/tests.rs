@@ -576,8 +576,6 @@ fn roster_request_deadline_bounds_saturated_backlog_connect() {
     for _ in 0..16 {
         let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
             .expect("backlog socket");
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         match socket.connect_timeout(
             &socket2::SockAddr::unix(&socket_path).expect("socket address"),
             Duration::from_millis(10),

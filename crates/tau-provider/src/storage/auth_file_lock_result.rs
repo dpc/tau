@@ -32,8 +32,6 @@ pub(super) fn classify_callback_result<R>(
     unlock_result: io::Result<()>,
 ) -> AuthFileLockResult<R> {
     let unlock_error = unlock_result.err();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     match callback_result {
         Ok(value) => AuthFileLockResult::Completed {
             value,

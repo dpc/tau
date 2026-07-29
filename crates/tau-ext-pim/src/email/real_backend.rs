@@ -107,8 +107,6 @@ impl RealEmailBackend {
         Fut: Future<Output = Result<T, String>>,
     {
         self.runtime.block_on(async move {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: match-result-verbose
             match time::timeout(Duration::from_secs(seconds), fut).await {
                 Ok(result) => result,
                 Err(_) => Err("network_error: email backend operation timed out".to_owned()),

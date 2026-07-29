@@ -3597,8 +3597,6 @@ impl<B: EmailBackend> Engine<B> {
     fn list_folders(&self) -> CborValue {
         let mut visible = Vec::new();
         for account_id in &self.config.account_order {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: match-result-verbose
             let account = match self.account("list_folders", account_id) {
                 Ok(account) => account,
                 Err(_) => continue,
@@ -4031,8 +4029,6 @@ impl<B: EmailBackend> Engine<B> {
             subject_preview: unapproved_subject_preview(&metadata.subject),
             reason: decision.reason.clone(),
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         match self.state.pending_incoming(&approval) {
             Ok(_id) => ok_envelope(
                 "request_access",
@@ -4271,8 +4267,6 @@ impl<B: EmailBackend> Engine<B> {
     }
 
     fn send_allowed_outgoing_message(&mut self, message: &OutgoingMessage) -> CborValue {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         match self.backend.send_message(message) {
             Ok(_id) => ok_envelope("send", "sent", cbor_map(vec![])),
             Err(message) => backend_error_envelope(Some("send"), "smtp_error", &message),
@@ -4302,8 +4296,6 @@ impl<B: EmailBackend> Engine<B> {
             reason: "recipient_not_whitelisted".to_owned(),
             sent_message_id: None,
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         match self.state.pending_outgoing(&approval) {
             Ok(_id) => ok_envelope(
                 "send",
@@ -4598,8 +4590,6 @@ impl<B: EmailBackend> Engine<B> {
                 .send_message(&message)
                 .map_err(|message| backend_error_text(&message))?;
             let display_message_id = safe_display_line(&message_id);
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: match-result-verbose
             return match self.state.complete_outgoing(id, &message_id) {
                 Ok(()) => Ok(format!(
                     "Sent approved outgoing email {id}. message_id={display_message_id} subject={} to={}",
@@ -5367,8 +5357,6 @@ impl RuntimeState {
     pub fn dispatch(&mut self, invoke: ToolStarted) -> Event {
         let invoke = invoke_with_command(invoke);
         match &mut self.config_state {
-            // Preserve behavior at this site.
-            // ast-grep-ignore: match-result-verbose
             ConfigState::Configured(engine) => match parse_command(&invoke.arguments) {
                 Ok(command) => finish_tool_result(invoke, engine.dispatch(command)),
                 Err(error) => tool_error(invoke, error),
@@ -5409,8 +5397,6 @@ impl RuntimeState {
                 "email extension configuration was rejected: {reason}"
             )),
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         match result {
             Ok(text) => Event::ActionResult(ActionResult {
                 invocation_id: invoke.invocation_id,

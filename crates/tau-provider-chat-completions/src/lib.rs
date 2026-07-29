@@ -788,8 +788,6 @@ fn apply_chat_stream_lines(
         if data == "[DONE]" {
             return Ok(true);
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         let event: serde_json::Value = match serde_json::from_str(data) {
             Ok(event) => event,
             Err(_) => continue,

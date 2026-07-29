@@ -3062,8 +3062,6 @@ impl Extension {
             );
             return;
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         match self.resolve_registered_agent(target) {
             Ok(agent_id) => self.route_text(message, identity, agent_id, body.trim(), admission),
             Err(reply) => self.reply(
@@ -3092,8 +3090,6 @@ impl Extension {
             log_ingress_rejection("route_changed");
             return;
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         match self.plain_text_target(&route_key) {
             Ok(agent_id) => self.route_text(message, identity, agent_id, text, admission),
             Err(reply) => self.reply(

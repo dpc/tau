@@ -433,8 +433,6 @@ fn dispatch_intercept<State>(
         Some(handler) => handler.handle(request, state, handle),
         None => Ok(crate::InterceptDecision::Pass),
     };
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     let (decision, handler_error) = match decision_result {
         Ok(decision) => (decision, None),
         Err(error) => (crate::InterceptDecision::Pass, Some(error)),

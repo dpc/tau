@@ -316,8 +316,6 @@ fn render_path(path: &Path) -> String {
 }
 
 pub(crate) fn render_path_bytes(bytes: &[u8]) -> String {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     match std::str::from_utf8(bytes) {
         Ok(text) => escape_path_text(text),
         Err(_) => format!(

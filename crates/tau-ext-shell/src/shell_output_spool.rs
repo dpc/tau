@@ -250,8 +250,6 @@ fn cleanup_crash_leftovers() {
             .read(true)
             .write(true)
             .open(entry.path().join(LOCK_FILE_NAME));
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         let owner_dead = match lock_result {
             Ok(file) => fs2::FileExt::try_lock_exclusive(&file).is_ok(),
             Err(error) => error.kind() == io::ErrorKind::NotFound,
@@ -296,8 +294,6 @@ fn remove_saved(path: &Path) -> bool {
     };
     let output_removed = remove_if_present(path);
     let lock_removed = remove_if_present(&directory.join(LOCK_FILE_NAME));
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     let directory_removed = match fs::remove_dir(directory) {
         Ok(()) => true,
         Err(error) => error.kind() == io::ErrorKind::NotFound,
@@ -306,8 +302,6 @@ fn remove_saved(path: &Path) -> bool {
 }
 
 fn remove_if_present(path: &Path) -> bool {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     match fs::remove_file(path) {
         Ok(()) => true,
         Err(error) => error.kind() == io::ErrorKind::NotFound,

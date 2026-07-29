@@ -156,8 +156,6 @@ impl BuiltinState {
                 tau_proto::PROGRESS_INDICATOR_TEXT,
                 None,
             ),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: match-result-verbose
             MESSAGE_TOOL_NAME => match parse_message_args(&call.arguments) {
                 Ok(parsed) => (
                     parsed.recipient_id,
@@ -173,8 +171,6 @@ impl BuiltinState {
                 tau_proto::PROGRESS_INDICATOR_TEXT,
                 None,
             ),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: match-result-verbose
             CANCEL_TOOL_NAME => match parse_cancel_args(&call.arguments) {
                 Ok(target) => (target.to_string(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
                 Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
@@ -833,8 +829,6 @@ fn handle_skill_tool_call(
 ) -> Result<(), HarnessError> {
     let call_id = call.id.clone();
     host.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     match handle_skill_query(host, conversation_id, &call.arguments) {
         Ok((result, display)) => host.finish_tool_with_cbor_result(
             conversation_id,
@@ -983,8 +977,6 @@ fn search_discovered_skills(
                 push_matched_field(&mut matched_fields, "description");
             }
             if search_content {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: match-result-verbose
                 let body = body.get_or_insert_with(|| match read_skill_source_prefix(&skill.source, MAX_SKILL_CONTENT_BYTES) {
                     Ok(read) => match skill_body_from_prefix(&read) {
                         Ok(body) => { if read.truncated { warnings.push(format!("skill too long: {} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while content-searching {}", skill.source.label(), skill.name)); } body.to_lowercase() }
@@ -1395,8 +1387,6 @@ impl BuiltinTools {
             host.publish_tool_cancel_request_for(conversation_id, call.call_ref, target)?;
             Ok(())
         });
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         match result {
             Ok(()) => host.finish_tool_with_result(
                 conversation_id,

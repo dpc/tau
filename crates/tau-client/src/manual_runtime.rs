@@ -911,15 +911,11 @@ impl ManualInput {
                     if remaining.is_zero() {
                         break Err(ExtensionDataRpcError::Timeout);
                     }
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: match-result-verbose
                     match self.recv_timeout_from_reader(remaining) {
                         Ok(input) => input,
                         Err(error) => break Err(ExtensionDataRpcError::Client(error)),
                     }
                 }
-                // Preserve behavior at this site.
-                // ast-grep-ignore: match-result-verbose
                 None => match self.recv_from_reader() {
                     Ok(input) => input,
                     Err(error) => break Err(ExtensionDataRpcError::Client(error)),

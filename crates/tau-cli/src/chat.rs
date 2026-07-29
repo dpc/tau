@@ -255,8 +255,6 @@ fn send_handshake_frame(
     read_stream: &mut Box<dyn Read + Send>,
     message: &HarnessInputMessage,
 ) -> Result<(), CliError> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     match send_frame(writer, message) {
         Ok(()) => Ok(()),
         Err(error) => Err(startup_disconnect_or_io_error(read_stream, error)),
@@ -1346,8 +1344,6 @@ fn cycle_role(
     roles_available: &Arc<Mutex<Vec<String>>>,
     print_local: &impl Fn(&str),
 ) -> Option<String> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     let roles = match roles_available.lock() {
         Ok(roles) => roles.clone(),
         Err(_) => Vec::new(),
@@ -2717,8 +2713,6 @@ fn new_alias_role(text: &str) -> Result<Option<&str>, &'static str> {
 }
 
 fn new_alias_command_effect(text: &str) -> NewAliasCommandEffect<'_> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     match new_alias_role(text) {
         Ok(role) => NewAliasCommandEffect::StartNewAgent { role },
         Err(usage) => NewAliasCommandEffect::Usage(usage),
@@ -3275,8 +3269,6 @@ impl<'a> TerminalInputSession<'a> {
             return true;
         }
         if let Some(command) = parse_agent_picker_command(text) {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: match-result-verbose
             match command {
                 Ok(filter) => self.pick_agent(filter),
                 Err(message) => self.output.system_info(message),
@@ -3426,8 +3418,6 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_name_alias(&self, text: &str) {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-result-verbose
         match name_alias_request(text, self.selected_agent_id(), |agent_id| {
             self.agent_is_known(agent_id)
         }) {
@@ -4666,8 +4656,6 @@ fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {
         );
     }
     let args = vec!["add".to_owned()];
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     match tau_ext_provider_builtin::run_provider_cli(&args) {
         Ok(()) => print_local("provider profile saved; new prompts will use updated credentials"),
         Err(error) => print_local(&format!("provider registration failed: {error}")),

@@ -186,8 +186,6 @@ fn fetch_openrouter_models_from(
             }
         }
         err => {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: match-result-verbose
             let error = match err {
                 Ok(resp) => {
                     if let Some(error) = network.proxy_response_error(url, resp.status().as_u16()) {

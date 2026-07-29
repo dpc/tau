@@ -146,8 +146,6 @@ fn pick_with_raw_mode<G: RawModeCleanup>(
     let result = pick_with_event_reader(prompt, items, writer, read_event, current_size);
     let restore_result = raw.restore_raw_mode();
 
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-result-verbose
     match restore_result {
         Ok(()) => result,
         Err(err) => Err(PickerError::Io(err)),
