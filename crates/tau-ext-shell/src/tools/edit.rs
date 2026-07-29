@@ -666,14 +666,14 @@ fn edit_display_args(path: &str, ranges: &[String]) -> String {
     }
 
     let mut unique_ranges: Vec<&str> = Vec::new();
-    ranges.iter().for_each(|range| {
+    for range in ranges {
         if unique_ranges
             .iter()
             .all(|existing| *existing != range.as_str())
         {
             unique_ranges.push(range.as_str());
         }
-    });
+    }
     format!("{path} {}", unique_ranges.join(","))
 }
 

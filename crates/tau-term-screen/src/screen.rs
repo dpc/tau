@@ -665,7 +665,6 @@ pub fn layout_lines(
     // Wrap each logical line at width (measured in terminal columns,
     // not cell count — wide chars like emoji occupy 2 columns).
     let mut result: Vec<Vec<Cell>> = Vec::new();
-    // ast-grep-ignore: filter-in-loop
     for line in logical_lines {
         if line.is_empty() {
             result.push(Vec::new());

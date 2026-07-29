@@ -4481,15 +4481,11 @@ impl<B: EmailBackend> Engine<B> {
 
     fn approvable_pending_outgoing(&self) -> Result<Vec<OutgoingApproval>, String> {
         let mut approvals = Vec::new();
-        self.state
-            .list_pending_outgoing()?
-            .into_iter()
-            .try_for_each(|approval| -> Result<(), String> {
-                if !self.state.outgoing_denied_exists(&approval.id)? {
-                    approvals.push(approval);
-                }
-                Ok(())
-            })?;
+        for approval in self.state.list_pending_outgoing()? {
+            if !self.state.outgoing_denied_exists(&approval.id)? {
+                approvals.push(approval);
+            }
+        }
         Ok(approvals)
     }
 

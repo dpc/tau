@@ -807,18 +807,16 @@ impl AgentTree {
             else {
                 continue;
             };
-            calls.extend(
-                round
-                    .call_order
-                    .iter()
-                    .filter(|call_id| !round.terminal_results.contains_key(*call_id))
-                    .filter_map(|call_id| {
-                        output_items.iter().find_map(|item| match item {
-                            ContextItem::ToolCall(call) if &call.call_id == call_id => Some(call),
-                            _ => None,
-                        })
-                    }),
-            );
+            for call_id in &round.call_order {
+                if !round.terminal_results.contains_key(call_id)
+                    && let Some(call) = output_items.iter().find_map(|item| match item {
+                        ContextItem::ToolCall(call) if &call.call_id == call_id => Some(call),
+                        _ => None,
+                    })
+                {
+                    calls.push(call);
+                }
+            }
         }
         calls
     }
@@ -972,16 +970,16 @@ impl AgentTree {
         }
 
         let mut ordered = Vec::new();
-        ordered.extend(
-            completion_order
-                .into_iter()
-                .filter_map(|call_id| states.remove(&call_id)),
-        );
-        ordered.extend(
-            placeholder_order
-                .into_iter()
-                .filter_map(|call_id| states.remove(&call_id)),
-        );
+        for call_id in completion_order {
+            if let Some(state) = states.remove(&call_id) {
+                ordered.push(state);
+            }
+        }
+        for call_id in placeholder_order {
+            if let Some(state) = states.remove(&call_id) {
+                ordered.push(state);
+            }
+        }
         ordered
     }
 

@@ -218,11 +218,11 @@ impl EventBus {
                 connection_id: connection_id.clone(),
             })?;
         let mut selectors = historical_selectors.clone();
-        live_selectors.iter().for_each(|selector| {
+        for selector in &live_selectors {
             if !selectors.contains(selector) {
                 selectors.push(selector.clone());
             }
-        });
+        }
         validate_socket_subscription(&metadata, &selectors).map_err(|reason| {
             RouteError::SubscriptionDenied {
                 connection_id: connection_id.clone(),

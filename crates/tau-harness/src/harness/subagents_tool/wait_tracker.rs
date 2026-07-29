@@ -1291,7 +1291,6 @@ impl WaitTracker {
             });
         }
         let input_waiters = std::mem::take(&mut self.input_waiters);
-        // ast-grep-ignore: filter-in-loop
         for (owner, wait) in input_waiters {
             if call_ids.contains(&wait.request.call_id) {
                 cancelled.cancelled_waits.push(wait.request);

@@ -585,19 +585,20 @@ impl BuiltinTools {
         message: String,
     ) {
         let watchers = host.watchers_for_agent(sender_id);
-        let failed_watchers = watchers
-            .into_iter()
-            .filter(|watcher_id| {
-                watcher_id != sender_id
-                    && host
-                        .publish_agent_watch_response_from_agent_ids(
-                            sender_id,
-                            watcher_id.clone(),
-                            message.clone(),
-                        )
-                        .is_err()
-            })
-            .collect::<Vec<_>>();
+        let mut failed_watchers = Vec::new();
+        for watcher_id in watchers {
+            if watcher_id != sender_id
+                && host
+                    .publish_agent_watch_response_from_agent_ids(
+                        sender_id,
+                        watcher_id.clone(),
+                        message.clone(),
+                    )
+                    .is_err()
+            {
+                failed_watchers.push(watcher_id);
+            }
+        }
         if !failed_watchers.is_empty() {
             for watcher_id in failed_watchers {
                 host.prune_agent_watch(&watcher_id, sender_id);
@@ -1286,7 +1287,6 @@ fn wait_target_call_id(arguments: &CborValue) -> Option<&str> {
 fn normalized_skill_query_terms(raw_query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     let mut current = String::new();
-    // ast-grep-ignore: filter-in-loop
     for ch in raw_query.chars().flat_map(char::to_lowercase) {
         if ch.is_alphanumeric() || ch == '-' {
             current.push(ch);

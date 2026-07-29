@@ -860,7 +860,6 @@ fn attendee_response_patch(event: &Value, response_status: &str) -> Result<Value
 
 fn encode_path_segment(value: &str) -> String {
     let mut out = String::new();
-    // ast-grep-ignore: filter-in-loop
     for byte in value.bytes() {
         if is_path_segment_unreserved(byte) {
             out.push(byte as char);

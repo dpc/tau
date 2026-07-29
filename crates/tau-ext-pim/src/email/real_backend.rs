@@ -1298,10 +1298,11 @@ fn apply_parsed_headers(message: &mut BackendMessage, parsed: &mail_parser::Mess
 
 fn parsed_body_text(parsed: &mail_parser::Message<'_>) -> String {
     let mut parts = Vec::new();
-    parts.extend(
-        (0..parsed.text_body_count())
-            .filter_map(|index| parsed.body_text(index).map(|text| text.into_owned())),
-    );
+    for index in 0..parsed.text_body_count() {
+        if let Some(text) = parsed.body_text(index) {
+            parts.push(text.into_owned());
+        }
+    }
     if parts.is_empty()
         && let Some(html) = parsed.body_html(0)
     {
