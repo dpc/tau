@@ -114,7 +114,7 @@ fn line_byte_failures_roll_back_and_allow_later_append() {
     let mut encoded = serde_json::to_vec(&rejected).expect("serialize expected line");
     encoded.push(b'\n');
 
-    for fail_write_at in 0..encoded.len() {
+    for (fail_write_at, _) in encoded.iter().enumerate() {
         let td = tempfile::tempdir().expect("tempdir");
         let mut log = DebugEventLog::open(td.path()).expect("open");
         log.write_entry(&serde_json::json!({"type": "baseline"}))

@@ -289,7 +289,7 @@ fn visible_window(total: usize, selected: usize, visible: usize) -> (usize, usiz
 }
 
 fn adjacent_enabled_item(items: &[PickerItem], selected: usize, forward: bool) -> usize {
-    for offset in 1..items.len() {
+    for (offset, _) in items.iter().enumerate().skip(1) {
         let idx = if forward {
             (selected + offset) % items.len()
         } else {

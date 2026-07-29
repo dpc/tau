@@ -1793,15 +1793,16 @@ impl Harness {
     pub(crate) fn drain_publish_idle_dispatches(&mut self) {
         let mut attempted = Vec::new();
         while self.publish_chain_is_idle() {
-            for index in 0..self.pending_publish_idle_dispatches.len() {
-                let needs_binding = self.pending_publish_idle_dispatches[index]
-                    .committed_activation
-                    && self.pending_publish_idle_dispatches[index]
-                        .activation_through
-                        .is_none();
-                if !needs_binding {
-                    continue;
-                }
+            let bindings = self
+                .pending_publish_idle_dispatches
+                .iter()
+                .enumerate()
+                .filter_map(|(index, deferred)| {
+                    (deferred.committed_activation && deferred.activation_through.is_none())
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            for index in bindings {
                 let cid = self.pending_publish_idle_dispatches[index].cid.clone();
                 let through = self.selected_head_for_agent(&cid);
                 let cut = self.activation_cut_before_current_head(&cid);

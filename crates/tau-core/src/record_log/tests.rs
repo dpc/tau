@@ -55,7 +55,7 @@ fn rolls_back_every_length_prefix_failure() {
 #[test]
 fn rolls_back_every_payload_failure() {
     let payload = b"payload";
-    for payload_offset in 0..payload.len() {
+    for (payload_offset, _) in payload.iter().enumerate() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("events.cbor");
         let mut file = baseline_file(&path);
