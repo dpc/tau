@@ -34,8 +34,6 @@ pub(crate) fn render_turn_stats_block(
     let mut themed = ThemedText::new();
     let root = themed.add_style(names::TOKEN_STATS);
     let mut children = Vec::new();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: map-collect-loop-with-let
     for part in turn_stats_parts(usage, previous_usage, turn_latency, total_latency) {
         let style = themed.add_style(part.style_name);
         children.push(SpanTree::span(style, vec![SpanTree::text(part.text)]));

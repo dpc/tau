@@ -108,8 +108,6 @@ pub(crate) fn push_grapheme_cells(
         return;
     }
     let grapheme_width = screen_grapheme_width(grapheme);
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: map-collect-loop-with-let
     for (idx, ch) in grapheme.chars().enumerate() {
         let width = if idx == 0 { grapheme_width } else { 0 };
         cells.push(

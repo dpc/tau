@@ -588,8 +588,6 @@ impl<State> ExtensionBuilder<State> {
             handler.apply_name_scope(scope)?;
         }
         let declarations = std::mem::take(&mut self.startup_events);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: map-collect-loop-with-let
         for declaration in declarations {
             let emit = match declaration {
                 StartupDeclaration::Emit(mut emit) => {

@@ -627,8 +627,6 @@ impl Gateway {
             return "No live Tau sessions are registered with this Telegram gateway.".to_owned();
         }
         let mut lines = vec!["Live Tau sessions:".to_owned()];
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: map-collect-loop-with-let
         for session in &snapshot.sessions {
             let selected = if self
                 .selection_for_message(Some(message))

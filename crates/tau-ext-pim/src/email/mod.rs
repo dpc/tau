@@ -4496,8 +4496,6 @@ impl<B: EmailBackend> Engine<B> {
             "{} pending outgoing email approval(s):",
             approvals.len()
         )];
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: map-collect-loop-with-let
         for approval in approvals {
             let visible_blocked = approval
                 .blocked_recipients
