@@ -79,10 +79,12 @@ watch-notification turns never request acknowledgement from the watcher. Done
 and Blocked mutate reported status only, never close a turn or install a wait,
 and a later activation does not silently change them.
 Tool guidance asks agents to report meaningful user-level work rather than
-routine progress or title-only changes, and to batch status with independent tool
-calls when possible.
+routine progress or label-only changes, and to batch status with independent tool
+calls when possible. The model-visible status argument names this label
+`task_name` and describes it as a short, user-visible, few-word label; internal
+events and projections continue to call the canonical metadata `title`.
 Rejected `status` calls emit and persist their human-readable diagnostic with
-no `ToolError.details`; rejected state and title fields must not resemble an
+no `ToolError.details`; rejected state and `task_name` fields must not resemble an
 accepted or current status. This event-payload semantic was explicitly approved
 under
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).

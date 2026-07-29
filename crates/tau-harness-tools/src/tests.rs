@@ -4,11 +4,27 @@ use super::*;
 /// standalone tool round when independent work can share the call.
 #[test]
 fn status_guidance_prefers_meaningful_batched_reports() {
+    let spec = status::tool_spec();
     assert_eq!(
-        status::tool_spec().description.as_deref(),
+        spec.description.as_deref(),
         Some(
-            "Report meaningful user-level work status to watchers. Avoid routine progress or title-only updates; call alongside other independent tools when possible."
+            "Report meaningful user-level work status to watchers. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
         )
+    );
+    assert_eq!(
+        spec.parameters,
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "state": {"type":"string","enum":["working","done","blocked"]},
+                "task_name": {
+                    "type":"string",
+                    "description":"Short user-visible label for the current task (a few words; 160 UTF-8 bytes maximum)."
+                }
+            },
+            "required": ["state", "task_name"],
+            "additionalProperties": false
+        }))
     );
 }
 
@@ -22,12 +38,12 @@ fn status_errors_redact_rejected_arguments() {
             CborValue::Text("working".to_owned()),
         ),
         (
-            CborValue::Text("title".to_owned()),
+            CborValue::Text("task_name".to_owned()),
             CborValue::Text(String::new()),
         ),
     ]);
     let (message, details) = status::parse_tool_args(&arguments).expect_err("invalid title");
-    assert_eq!(message, "status title must not be empty");
+    assert_eq!(message, "status task_name must not be empty");
     assert_eq!(details, None);
     assert!(!message.contains("working"));
 }
@@ -42,7 +58,7 @@ fn status_arguments_are_closed_and_canonical() {
             CborValue::Text("working".to_owned()),
         ),
         (
-            CborValue::Text("title".to_owned()),
+            CborValue::Text("task_name".to_owned()),
             CborValue::Text("  trace lifecycle  ".to_owned()),
         ),
     ]);
@@ -58,6 +74,21 @@ fn status_arguments_are_closed_and_canonical() {
         entries[0].1 = CborValue::Text(state.to_owned());
         assert!(parse_status_args(&invalid).is_err());
     }
+
+    let legacy_title = CborValue::Map(vec![
+        (
+            CborValue::Text("state".to_owned()),
+            CborValue::Text("working".to_owned()),
+        ),
+        (
+            CborValue::Text("title".to_owned()),
+            CborValue::Text("trace lifecycle".to_owned()),
+        ),
+    ]);
+    assert_eq!(
+        parse_status_args(&legacy_title).expect_err("legacy title must be rejected"),
+        "unknown status argument `title`"
+    );
 }
 
 /// The status parser enforces the exact UTF-8 byte and single-line title
@@ -70,7 +101,10 @@ fn status_title_validation_uses_utf8_bytes() {
                 CborValue::Text("state".to_owned()),
                 CborValue::Text("done".to_owned()),
             ),
-            (CborValue::Text("title".to_owned()), CborValue::Text(title)),
+            (
+                CborValue::Text("task_name".to_owned()),
+                CborValue::Text(title),
+            ),
         ])
     };
     assert!(parse_status_args(&make("é".repeat(80))).is_ok());
@@ -102,7 +136,7 @@ fn status_initial_display_exposes_state_and_title() {
                 CborValue::Text("blocked".to_owned()),
             ),
             (
-                CborValue::Text("title".to_owned()),
+                CborValue::Text("task_name".to_owned()),
                 CborValue::Text("  waiting for maintainer input  ".to_owned()),
             ),
         ]),

@@ -12,7 +12,7 @@ pub(crate) fn tool_spec() -> ToolSpec {
         name: ToolName::new("status"),
         model_visible_name: None,
         description: Some(
-            "Report meaningful user-level work status to watchers. Avoid routine progress or title-only updates; call alongside other independent tools when possible."
+            "Report meaningful user-level work status to watchers. Avoid routine progress or label-only updates; call alongside other independent tools when possible."
                 .to_owned(),
         ),
         tool_type: ToolType::Function,
@@ -20,9 +20,9 @@ pub(crate) fn tool_spec() -> ToolSpec {
             "type": "object",
             "properties": {
                 "state": {"type":"string","enum":["working","done","blocked"]},
-                "title": {"type":"string","description":"Canonical one-line UTF-8 title (160 bytes maximum)."}
+                "task_name": {"type":"string","description":"Short user-visible label for the current task (a few words; 160 UTF-8 bytes maximum)."}
             },
-            "required": ["state", "title"],
+            "required": ["state", "task_name"],
             "additionalProperties": false
         })),
         format: None,
@@ -85,14 +85,14 @@ pub(crate) fn parse_args(arguments: &CborValue) -> Result<WorkStatusReport, Stri
         return Err("status arguments must be an object".to_owned());
     };
     let mut state = None;
-    let mut title = None;
+    let mut task_name = None;
     for (key, value) in entries {
         let CborValue::Text(key) = key else {
             return Err("status argument keys must be strings".to_owned());
         };
         match key.as_str() {
             "state" => state = value.as_text().map(ToOwned::to_owned),
-            "title" => title = value.as_text().map(ToOwned::to_owned),
+            "task_name" => task_name = value.as_text().map(ToOwned::to_owned),
             _ => return Err(format!("unknown status argument `{key}`")),
         }
     }
@@ -105,7 +105,7 @@ pub(crate) fn parse_args(arguments: &CborValue) -> Result<WorkStatusReport, Stri
     };
     WorkStatusReport::new(
         phase,
-        title.ok_or_else(|| "status requires title".to_owned())?,
+        task_name.ok_or_else(|| "status requires task_name".to_owned())?,
     )
 }
 

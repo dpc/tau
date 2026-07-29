@@ -61,16 +61,16 @@ impl WorkStatusReport {
         }
         let canonical = title.trim();
         if canonical.is_empty() {
-            return Err("status title must not be empty".to_owned());
+            return Err("status task_name must not be empty".to_owned());
         }
         if 160 < canonical.len() {
-            return Err("status title must be at most 160 UTF-8 bytes".to_owned());
+            return Err("status task_name must be at most 160 UTF-8 bytes".to_owned());
         }
         if canonical
             .chars()
             .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
         {
-            return Err("status title must be one line without control characters".to_owned());
+            return Err("status task_name must be one line without control characters".to_owned());
         }
         Ok(Self {
             phase,
