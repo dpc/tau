@@ -588,7 +588,7 @@ fn render_grep_output(
 }
 
 fn limit_reached_notice(limit: usize) -> String {
-    if limit >= MAX_GREP_LIMIT {
+    if MAX_GREP_LIMIT <= limit {
         format!("{limit} matches limit reached. Maximum limit reached; refine pattern.")
     } else {
         format!(

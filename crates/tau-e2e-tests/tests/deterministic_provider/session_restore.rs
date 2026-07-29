@@ -699,7 +699,7 @@ fn assert_watch_prompt_response(
         sole_watch_message(messages, AgentMessageKind::WatchResponse)?;
     if prompt_message.message != "fresh watched worker work"
         || response_message.message != "fresh watched worker complete"
-        || prompt_index >= response_index
+        || response_index <= prompt_index
     {
         return Err("watched prompt/response content or causal order changed".into());
     }
@@ -886,7 +886,7 @@ fn assert_resume_boundaries(
             )
             .into());
         };
-        if boundary >= session_boundary {
+        if session_boundary <= boundary {
             return Err(
                 format!("{agent_id} replay boundary did not precede session boundary").into(),
             );

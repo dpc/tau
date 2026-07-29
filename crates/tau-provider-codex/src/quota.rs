@@ -342,13 +342,13 @@ fn normalize_window(
         return None;
     }
     let window_seconds = match raw.limit_window_seconds {
-        Some(seconds) if seconds > 0 => Some(u64::try_from(seconds).ok()?),
+        Some(seconds) if 0 < seconds => Some(u64::try_from(seconds).ok()?),
         Some(_) => return None,
         None if require_duration => return None,
         None => None,
     };
     let reset_at_unix_seconds = match raw.reset_at {
-        Some(value) if value > 0 => Some(u64::try_from(value).ok()?),
+        Some(value) if 0 < value => Some(u64::try_from(value).ok()?),
         Some(_) => return None,
         None => None,
     };

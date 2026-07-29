@@ -953,7 +953,7 @@ fn shell_spawn(
     if timeout_secs < 0 {
         return Err("shell_spawn timeout must be non-negative".to_owned());
     }
-    if timeout_secs > MAX_SHELL_TIMEOUT_SECS {
+    if MAX_SHELL_TIMEOUT_SECS < timeout_secs {
         return Err(format!(
             "shell_spawn timeout must be at most {MAX_SHELL_TIMEOUT_SECS} seconds"
         ));

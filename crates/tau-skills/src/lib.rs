@@ -787,7 +787,7 @@ fn discover_skill_paths_inner(
         return;
     }
 
-    if depth > MAX_SKILL_DISCOVERY_DEPTH {
+    if MAX_SKILL_DISCOVERY_DEPTH < depth {
         state.push_warning(
             dir,
             format!(

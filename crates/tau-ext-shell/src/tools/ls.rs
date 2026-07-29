@@ -89,7 +89,7 @@ pub(crate) fn run_ls(
     let displayed_line_count = limited_lines.len();
     let displayed_bytes = line_oriented_len(limited_lines.iter().copied());
     let full_output_text = limited_lines.join("\n");
-    let limit_reached = observed_entries > displayed_line_count;
+    let limit_reached = displayed_line_count < observed_entries;
     let truncated =
         truncate_line_oriented_lines(limited_lines, displayed_line_count, displayed_bytes);
     let output_text = truncated.content;

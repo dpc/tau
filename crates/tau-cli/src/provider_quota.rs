@@ -109,7 +109,7 @@ impl QuotaPacingState {
             Some(age) => age,
             None => return Some(QuotaPacing::Unknown),
         };
-        if binding_age > HARD_STALE_MS {
+        if HARD_STALE_MS < binding_age {
             return Some(QuotaPacing::Unknown);
         }
 
@@ -138,7 +138,7 @@ impl QuotaPacingState {
         {
             return Some(QuotaPacing::Unknown);
         }
-        if missing_pool || binding_age > SOFT_STALE_MS {
+        if missing_pool || SOFT_STALE_MS < binding_age {
             return Some(QuotaPacing::Unknown);
         }
 
@@ -177,18 +177,18 @@ impl QuotaPacingState {
 }
 
 fn window_hard_expired(window: &ProviderQuotaWindow, now_unix_ms: u64) -> bool {
-    if age_ms(window.usage_observed_at_unix_ms, now_unix_ms).is_some_and(|age| age > HARD_STALE_MS)
+    if age_ms(window.usage_observed_at_unix_ms, now_unix_ms).is_some_and(|age| HARD_STALE_MS < age)
     {
         return true;
     }
     let relative_expired = window
         .timing_anchor_observed_at_unix_ms
         .and_then(|observed| age_ms(observed, now_unix_ms))
-        .is_some_and(|age| age > HARD_STALE_MS);
+        .is_some_and(|age| HARD_STALE_MS < age);
     let offset_expired = window
         .server_offset_observed_at_unix_ms
         .and_then(|observed| age_ms(observed, now_unix_ms))
-        .is_some_and(|age| age > HARD_STALE_MS);
+        .is_some_and(|age| HARD_STALE_MS < age);
     match (
         window.timing_anchor_observed_at_unix_ms,
         window.server_offset_observed_at_unix_ms,
@@ -202,7 +202,7 @@ fn window_hard_expired(window: &ProviderQuotaWindow, now_unix_ms: u64) -> bool {
 
 fn valid_fractions(window: &ProviderQuotaWindow, now_unix_ms: u64) -> Option<(f64, f64)> {
     let usage_age = age_ms(window.usage_observed_at_unix_ms, now_unix_ms)?;
-    if usage_age > SOFT_STALE_MS {
+    if SOFT_STALE_MS < usage_age {
         return None;
     }
     let duration_ms = i128::from(window.window_seconds).checked_mul(1_000)?;
@@ -285,18 +285,18 @@ fn classify_window(used: f64, elapsed: f64, previous: Option<QuotaPacing>) -> Qu
     let elapsed = (elapsed * 10_000.0).round() as i32;
     let deviation = used - elapsed;
     match previous {
-        Some(QuotaPacing::Danger) if deviation > 2_200 || used >= 8_700 => QuotaPacing::Danger,
-        Some(QuotaPacing::Over) if deviation > 700 => {
-            if used >= 9_000 || deviation >= 2_500 {
+        Some(QuotaPacing::Danger) if 2_200 < deviation || 8_700 <= used => QuotaPacing::Danger,
+        Some(QuotaPacing::Over) if 700 < deviation => {
+            if 9_000 <= used || 2_500 <= deviation {
                 QuotaPacing::Danger
             } else {
                 QuotaPacing::Over
             }
         }
         Some(QuotaPacing::FarUnder) if deviation < -1_200 => QuotaPacing::FarUnder,
-        _ if used >= 9_000 || deviation >= 2_500 => QuotaPacing::Danger,
-        _ if deviation >= 1_000 => QuotaPacing::Over,
-        _ if elapsed >= 1_000 && deviation <= -1_500 => QuotaPacing::FarUnder,
+        _ if 9_000 <= used || 2_500 <= deviation => QuotaPacing::Danger,
+        _ if 1_000 <= deviation => QuotaPacing::Over,
+        _ if 1_000 <= elapsed && deviation <= -1_500 => QuotaPacing::FarUnder,
         _ => QuotaPacing::Aligned,
     }
 }

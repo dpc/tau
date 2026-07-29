@@ -701,7 +701,7 @@ impl AgentStore {
             };
             let projected_bytes = record_bytes
                 .saturating_add(display_name.map_or(0, |display_name| display_name.len() as u64));
-            if projected_bytes > remaining_bytes {
+            if remaining_bytes < projected_bytes {
                 return Err(AgentCreationFactsBudgetExceeded);
             }
             return Ok(agent_creation_facts_from_record(
@@ -731,10 +731,10 @@ impl AgentStore {
                 return Ok(AgentCreationFacts::Unreadable { bytes_read: 0 });
             }
         };
-        if record_length > max_record_bytes {
+        if max_record_bytes < record_length {
             return Ok(AgentCreationFacts::Unreadable { bytes_read: 0 });
         }
-        if record_length > remaining_bytes {
+        if remaining_bytes < record_length {
             return Err(AgentCreationFactsBudgetExceeded);
         }
         let mut bytes = vec![0; record_length as usize];
@@ -1691,7 +1691,7 @@ where
         else {
             return Ok(());
         };
-        if record_length > MAX_RECORD_BYTES {
+        if MAX_RECORD_BYTES < record_length {
             return Err(AgentStoreError::Read {
                 path: path.to_path_buf(),
                 source: io::Error::new(

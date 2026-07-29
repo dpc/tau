@@ -340,7 +340,7 @@ impl QuotaCoordinator {
                     let age_seconds = now_ms().saturating_sub(anchor).div_ceil(1_000);
                     u64::try_from(remaining)
                         .ok()
-                        .is_none_or(|remaining| age_seconds >= remaining)
+                        .is_none_or(|remaining| remaining <= age_seconds)
                 })
         });
         if current.fetch_in_flight

@@ -222,7 +222,7 @@ impl SizeDistribution {
         let mut seen = 0_u64;
         for (index, count) in self.buckets.iter().enumerate() {
             seen += count;
-            if seen >= rank {
+            if rank <= seen {
                 return size_bucket_upper_bound(index);
             }
         }

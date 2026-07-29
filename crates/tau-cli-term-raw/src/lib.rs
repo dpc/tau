@@ -598,7 +598,7 @@ impl SharedState {
                 return false;
             }
             let new_selected = match menu.selected {
-                None => Some(if delta > 0 { 0 } else { len - 1 }),
+                None => Some(if 0 < delta { 0 } else { len - 1 }),
                 // Up at the first match drops back to "no preview" so
                 // the user sees their original buffer; pressing Up
                 // again wraps to the last match.
@@ -3443,7 +3443,7 @@ fn prompt_scroll_indicator_rows(
     total_rows: usize,
     cap_rows: usize,
 ) -> usize {
-    usize::from(show_indicator && buffer_non_empty && cap_rows >= 2 && cap_rows < total_rows)
+    usize::from(show_indicator && buffer_non_empty && 2 <= cap_rows && cap_rows < total_rows)
 }
 
 fn prompt_editable_rows(total_rows: usize, cap_rows: usize, indicator_rows: usize) -> usize {
@@ -4442,7 +4442,7 @@ fn full_render(
         // into scrollback naturally. Short content stays at the top, so the prompt
         // sits directly under content instead of being bottom-pinned by rubber.
         for (i, line) in replay_lines.iter().enumerate() {
-            if i > 0 {
+            if 0 < i {
                 stdout.queue(Print("\r\n"))?;
             }
             emit_styled_cells(stdout, line)?;

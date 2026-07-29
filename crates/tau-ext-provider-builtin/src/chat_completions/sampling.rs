@@ -113,7 +113,7 @@ impl ResponseSampler {
 
     fn is_due(&self, now: std::time::Instant, bytes: u64, terminal: bool) -> bool {
         terminal
-            || !self.emitted_non_empty && bytes > 0
+            || !self.emitted_non_empty && 0 < bytes
             || self.last_emitted_at.map_or(
                 now.saturating_duration_since(self.started_at) >= RESPONSE_UPDATE_INTERVAL,
                 |last| now.saturating_duration_since(last) >= RESPONSE_UPDATE_INTERVAL,

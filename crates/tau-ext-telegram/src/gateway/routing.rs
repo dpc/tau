@@ -210,5 +210,5 @@ pub(super) fn telegram_source_label(message: &TgMessage) -> String {
 fn parse_numbered_alias(selector: &str, prefix: char) -> Option<usize> {
     let suffix = selector.strip_prefix(prefix)?;
     let number = suffix.parse::<usize>().ok()?;
-    (number > 0).then_some(number)
+    (0 < number).then_some(number)
 }

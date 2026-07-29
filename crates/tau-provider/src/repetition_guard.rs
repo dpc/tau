@@ -169,7 +169,7 @@ impl ExactTailDetector {
     fn push(&mut self, delta: &str, max_tail_chars: usize) {
         self.tail.push_str(delta);
         let chars = self.tail.chars().count();
-        if chars > max_tail_chars {
+        if max_tail_chars < chars {
             let drop = chars - max_tail_chars;
             let byte = self
                 .tail
@@ -199,7 +199,7 @@ impl ExactTailDetector {
                 continue;
             }
             let repeated = reps * period;
-            if repeated >= MIN_FRAGMENT_REPEATED_CHARS {
+            if MIN_FRAGMENT_REPEATED_CHARS <= repeated {
                 return Some((
                     RepetitionMode::Fragment,
                     bounded_chars(&chars[chars.len() - period..].iter().collect::<String>()),
@@ -213,7 +213,7 @@ impl ExactTailDetector {
         let tokens: Vec<&str> = self.tail.split_whitespace().collect();
         for period in 1..=MAX_TOKEN_PERIOD.min(tokens.len() / MIN_TOKEN_REPETITIONS) {
             let reps = suffix_repetitions(&tokens, period);
-            if reps >= MIN_TOKEN_REPETITIONS && reps * period >= MIN_REPEATED_TOKENS {
+            if MIN_TOKEN_REPETITIONS <= reps && reps * period >= MIN_REPEATED_TOKENS {
                 return Some((
                     RepetitionMode::Tokens,
                     bounded_chars(&tokens[tokens.len() - period..].join(" ")),
@@ -234,7 +234,7 @@ impl ExactTailDetector {
                 .join("\n")
                 .chars()
                 .count();
-            if repeated >= MIN_LINE_REPEATED_CHARS {
+            if MIN_LINE_REPEATED_CHARS <= repeated {
                 return Some((
                     RepetitionMode::Lines,
                     bounded_chars(&lines[lines.len() - period..].join("\n")),

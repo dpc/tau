@@ -525,7 +525,7 @@ fn assert_durable_agent_start(
         )
         .into());
     };
-    if call >= result {
+    if result <= call {
         return Err("S8 durable agent_start result preceded its call".into());
     }
     Ok(())
@@ -820,7 +820,7 @@ fn assert_lifecycle_pairs(
                     )
                 })
                 .ok_or_else(|| format!("S8 lifecycle prompt missing for {prompt_id}"))?;
-            if dispatch_index >= prompt_index
+            if prompt_index <= dispatch_index
                 || prompt_index <= *start_index
                 || prompt_index >= *finish_index
             {

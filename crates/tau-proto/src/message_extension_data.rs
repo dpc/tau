@@ -298,7 +298,7 @@ fn validate_value_structure(
     depth: usize,
     nodes: &mut usize,
 ) -> Result<(), MessageExtensionDataError> {
-    if depth > MESSAGE_EXTENSION_DATA_MAX_DEPTH {
+    if MESSAGE_EXTENSION_DATA_MAX_DEPTH < depth {
         return Err(MessageExtensionDataError::Depth);
     }
     *nodes = nodes.saturating_add(1);

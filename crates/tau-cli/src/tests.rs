@@ -8766,7 +8766,7 @@ fn three_queued_prompts_render_sequentially() {
     // Process all three sequentially, flushing between each.
     for i in 0..3 {
         let spid: tau_proto::AgentPromptId = test_agent_prompt_id(format!("sp-{i}"));
-        if i > 0 {
+        if 0 < i {
             renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
                 agent_prompt_id: spid.clone(),
                 ..agent_prompt_created("sp-ignore", "s1")

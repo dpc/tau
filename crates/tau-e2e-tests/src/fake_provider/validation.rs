@@ -12,7 +12,7 @@ pub(super) fn validate_v1(scenario: &ScenarioV1) -> ClientResult<()> {
     let total_text = serde_json::to_vec(scenario)
         .map_err(|error| ClientError::handler(error.to_string()))?
         .len();
-    if total_text > MAX_SCENARIO_BYTES {
+    if MAX_SCENARIO_BYTES < total_text {
         return Err(ClientError::handler("scenario exceeds 16384 bytes"));
     }
     match scenario.turns.as_slice() {

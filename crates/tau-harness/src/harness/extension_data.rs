@@ -177,7 +177,7 @@ pub(super) fn list_extension_data_entries(
     })?;
     let mut out = Vec::new();
     for (seen_entries, entry) in entries.enumerate() {
-        if seen_entries >= MAX_EXTENSION_DATA_LIST_ENTRIES {
+        if MAX_EXTENSION_DATA_LIST_ENTRIES <= seen_entries {
             return Err(quota_exceeded(format!(
                 "directory `{}` has more than {MAX_EXTENSION_DATA_LIST_ENTRIES} entries",
                 dir.display()
@@ -236,7 +236,7 @@ fn ensure_request_contents_within_limit(contents: &[u8]) -> Result<(), Extension
 }
 
 fn ensure_file_len_within_limit(rel: &Path, len: u64) -> Result<(), ExtensionDataError> {
-    if len > MAX_EXTENSION_DATA_FILE_BYTES {
+    if MAX_EXTENSION_DATA_FILE_BYTES < len {
         return Err(quota_exceeded(format!(
             "`{}` is {len} bytes; limit is {MAX_EXTENSION_DATA_FILE_BYTES} bytes",
             rel.display()

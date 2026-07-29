@@ -1226,7 +1226,7 @@ pub(crate) fn find_harness_for_session_until(
                 continue;
             }
             matching_candidates += 1;
-            if matching_candidates > SESSION_DISCOVERY_MAX_CANDIDATES {
+            if SESSION_DISCOVERY_MAX_CANDIDATES < matching_candidates {
                 scan_exhausted = true;
                 continue;
             }

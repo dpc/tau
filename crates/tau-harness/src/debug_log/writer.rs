@@ -202,7 +202,7 @@ impl DebugWriter {
         if self.queue.poisoned.load(Ordering::Acquire) {
             return false;
         }
-        if retained_bytes > MAX_RETAINED_BYTES {
+        if MAX_RETAINED_BYTES < retained_bytes {
             self.queue.note_drop();
             return false;
         }
@@ -266,7 +266,7 @@ impl DebugWriter {
     ) -> bool {
         let retained_bytes = line.len().saturating_add(path.as_os_str().len());
         if self.queue.poisoned.load(Ordering::Acquire)
-            || retained_bytes > MAX_RETAINED_BYTES
+            || MAX_RETAINED_BYTES < retained_bytes
             || !reserve_bounded(&self.queue.retained_lines, 1, MAX_RETAINED_LINES)
         {
             return false;

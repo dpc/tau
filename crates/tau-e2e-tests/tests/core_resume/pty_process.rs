@@ -609,7 +609,7 @@ fn armed_capture_stops_mid_chunk_without_losing_prior_violation() {
     capture.raw.extend_from_slice(&bytes);
     let stop_at = b"restart_test_dummy pending\r".len() + 128;
     let started = Instant::now();
-    let complete = process_capture_bytes(&mut capture, &bytes, |index| index >= stop_at);
+    let complete = process_capture_bytes(&mut capture, &bytes, |index| stop_at <= index);
     assert!(!complete);
     assert!(capture.tool_violation.is_some());
     assert_eq!(capture.raw.len(), MAX_RAW_BYTES);

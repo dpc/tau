@@ -968,7 +968,7 @@ fn overflow_lines_go_to_scrollback() {
     // Output 10 lines (more than 5 rows).
     let mut buf = Vec::new();
     for i in 0..10 {
-        if i > 0 {
+        if 0 < i {
             buf.extend_from_slice(b"\r\n");
         }
         buf.extend_from_slice(format!("line {i}").as_bytes());
@@ -1004,7 +1004,7 @@ fn clear_and_rerender_scrollback() {
     // First render: 8 lines.
     let mut buf = Vec::new();
     for i in 0..8 {
-        if i > 0 {
+        if 0 < i {
             buf.extend_from_slice(b"\r\n");
         }
         buf.extend_from_slice(format!("old line {i}").as_bytes());
@@ -1019,7 +1019,7 @@ fn clear_and_rerender_scrollback() {
     let mut buf2 = Vec::new();
     buf2.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J"); // clear screen + scrollback
     for i in 0..8 {
-        if i > 0 {
+        if 0 < i {
             buf2.extend_from_slice(b"\r\n");
         }
         buf2.extend_from_slice(format!("new line {i}").as_bytes());
@@ -1052,7 +1052,7 @@ fn cursor_positioning_after_overflow() {
     // is (which should be row 0 of the visible screen).
     let mut buf = Vec::new();
     for i in 0..8 {
-        if i > 0 {
+        if 0 < i {
             buf.extend_from_slice(b"\r\n");
         }
         buf.extend_from_slice(format!("line {i}").as_bytes());
@@ -1140,7 +1140,7 @@ fn full_render_via_vt100() {
     buf.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J");
     // Output all lines.
     for (i, line) in lines_text.iter().enumerate() {
-        if i > 0 {
+        if 0 < i {
             buf.extend_from_slice(b"\r\n");
         }
         buf.extend_from_slice(line.as_bytes());
@@ -1156,7 +1156,7 @@ fn full_render_via_vt100() {
     // Move cursor from current position to cursor position.
     let up = current_vp_row.saturating_sub(cursor_vp_row); // 4 - 3 = 1
     let mut buf2: Vec<u8> = Vec::new();
-    if up > 0 {
+    if 0 < up {
         (&mut buf2 as &mut dyn std::io::Write)
             .queue(MoveUp(up as u16))
             .expect("ok");
@@ -1204,7 +1204,7 @@ fn full_render_no_overflow() {
     let mut buf: Vec<u8> = Vec::new();
     buf.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J");
     for (i, line) in lines_text.iter().enumerate() {
-        if i > 0 {
+        if 0 < i {
             buf.extend_from_slice(b"\r\n");
         }
         buf.extend_from_slice(line.as_bytes());
@@ -1216,7 +1216,7 @@ fn full_render_no_overflow() {
     let cursor_vp_row = cursor_row.saturating_sub(viewport_top); // 1
 
     let up = current_vp_row.saturating_sub(cursor_vp_row); // 1
-    if up > 0 {
+    if 0 < up {
         use std::io::Write;
         (&mut buf as &mut dyn Write)
             .queue(crossterm::cursor::MoveUp(up as u16))
@@ -1265,7 +1265,7 @@ fn scrollback_rebuilt_after_resize() {
 
     let mut buf: Vec<u8> = Vec::new();
     for (i, line) in phase1.iter().enumerate() {
-        if i > 0 {
+        if 0 < i {
             buf.extend_from_slice(b"\r\n");
         }
         buf.extend_from_slice(line.as_bytes());
@@ -1300,7 +1300,7 @@ fn scrollback_rebuilt_after_resize() {
     let mut buf2: Vec<u8> = Vec::new();
     buf2.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J"); // clear + clear scrollback
     for (i, line) in phase2.iter().enumerate() {
-        if i > 0 {
+        if 0 < i {
             buf2.extend_from_slice(b"\r\n");
         }
         buf2.extend_from_slice(line.as_bytes());
@@ -1488,7 +1488,7 @@ fn scrolling_after_already_scrolled_does_not_rewrite_rows_that_will_drop() {
         let lines = plain_cell_lines(frame);
         let visible_start = lines.len().saturating_sub(height);
         let mut buf = Vec::new();
-        if visible_start > prev_visible_start {
+        if prev_visible_start < visible_start {
             screen
                 .render_scrolling(&mut buf, &lines, prev_visible_start, height, (2, width))
                 .expect("scroll render should succeed");
@@ -1685,7 +1685,7 @@ fn scrolling_empty_line_then_text_line_keeps_order() {
         let lines = plain_cell_lines(frame);
         let visible_start = lines.len().saturating_sub(height);
         let mut buf = Vec::new();
-        if visible_start > prev_visible_start {
+        if prev_visible_start < visible_start {
             screen
                 .render_scrolling(
                     &mut buf,
@@ -1729,7 +1729,7 @@ fn scrolling_changed_view_top_into_scrollback_preserves_new_text() {
         let lines = plain_cell_lines(frame);
         let visible_start = lines.len().saturating_sub(height);
         let mut buf = Vec::new();
-        if visible_start > prev_visible_start {
+        if prev_visible_start < visible_start {
             screen
                 .render_scrolling(&mut buf, &lines, prev_visible_start, height, (2, width))
                 .expect("scroll render should succeed");
@@ -1780,7 +1780,7 @@ fn scrolling_matches_full_render_for_cursor_rows_and_exact_width_lines() {
             let visible_start = lines.len().saturating_sub(height);
             let desired_cursor = (cursor_row.min(lines.len() - 1), width);
             let mut buf = Vec::new();
-            if visible_start > prev_visible_start {
+            if prev_visible_start < visible_start {
                 screen
                     .render_scrolling(&mut buf, &lines, prev_visible_start, height, desired_cursor)
                     .expect("scroll render should succeed");

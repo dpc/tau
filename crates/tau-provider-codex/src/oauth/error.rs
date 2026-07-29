@@ -260,7 +260,7 @@ fn bounded_oauth_text(value: &str, max_chars: usize) -> Option<String> {
             continue;
         }
         if pending_space {
-            if output_chars >= max_chars {
+            if max_chars <= output_chars {
                 truncated = true;
                 break;
             }
@@ -268,7 +268,7 @@ fn bounded_oauth_text(value: &str, max_chars: usize) -> Option<String> {
             output_chars += 1;
             pending_space = false;
         }
-        if output_chars >= max_chars {
+        if max_chars <= output_chars {
             truncated = true;
             break;
         }
@@ -278,7 +278,7 @@ fn bounded_oauth_text(value: &str, max_chars: usize) -> Option<String> {
     if output.is_empty() {
         return None;
     }
-    if truncated && max_chars > 0 {
+    if truncated && 0 < max_chars {
         output.pop();
         output.push('…');
     }

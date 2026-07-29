@@ -96,7 +96,7 @@ impl<'line> TableRow<'line> {
         let mut rendered = self.indent.to_owned();
         rendered.push('|');
         for (index, width) in widths.iter().copied().enumerate() {
-            if index > 0 {
+            if 0 < index {
                 rendered.push('|');
             }
             rendered.push(' ');

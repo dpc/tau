@@ -8607,7 +8607,7 @@ impl Harness {
         ever_attached: bool,
         no_clients_attached: bool,
     ) -> bool {
-        if max_clients.is_some_and(|max| served_clients >= max) {
+        if max_clients.is_some_and(|max| max <= served_clients) {
             return true;
         }
         // `exit_on_disconnect`: once at least one UI has been attached, exiting
@@ -10754,7 +10754,7 @@ impl Harness {
         };
         let encoded = ciborium::into_writer(message, &mut counter);
         let next_count = current_count.saturating_add(1);
-        if counter.exceeded || next_count > MAX_EXTENSION_ACTIVATION_MESSAGES {
+        if counter.exceeded || MAX_EXTENSION_ACTIVATION_MESSAGES < next_count {
             let message = format!(
                 "extension activation staging exceeds {} messages or {} encoded bytes",
                 MAX_EXTENSION_ACTIVATION_MESSAGES, MAX_EXTENSION_ACTIVATION_BYTES
@@ -18396,7 +18396,7 @@ impl Harness {
                 .values()
                 .filter(|entry| entry.caller_agent_id.as_str() == caller_public_id)
                 .count();
-        if caller_active_requests >= 4 {
+        if 4 <= caller_active_requests {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
                 call.id.clone(),

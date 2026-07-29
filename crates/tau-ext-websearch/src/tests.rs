@@ -225,7 +225,7 @@ impl RedirectServer {
                 },
             ] {
                 listener
-                    .set_nonblocking(request_count > 0)
+                    .set_nonblocking(0 < request_count)
                     .expect("set nonblocking");
                 let (stream, _) = loop {
                     if stop_rx.try_recv().is_ok() {

@@ -259,7 +259,7 @@ fn render_find_output(request: FindRequest, matches: Vec<String>) -> ToolOutput 
 }
 
 fn limit_reached_notice(limit: usize) -> String {
-    if limit >= MAX_FIND_LIMIT {
+    if MAX_FIND_LIMIT <= limit {
         format!("{limit} results limit reached. Maximum limit reached; refine pattern/path.")
     } else {
         format!(

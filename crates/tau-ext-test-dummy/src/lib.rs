@@ -265,7 +265,7 @@ fn correct_tao_to_tau(text: &str) -> Option<String> {
 }
 
 fn preceded_by_letter(bytes: &[u8], i: usize) -> bool {
-    i > 0 && bytes[i - 1].is_ascii_alphabetic()
+    0 < i && bytes[i - 1].is_ascii_alphabetic()
 }
 
 fn followed_by_letter(bytes: &[u8], i: usize) -> bool {

@@ -1012,7 +1012,7 @@ impl GatewayDurableState {
             .recent_update_ids
             .len()
             .saturating_sub(RECENT_UPDATE_LIMIT);
-        if excess > 0 {
+        if 0 < excess {
             self.recent_update_ids.drain(0..excess);
         }
     }

@@ -637,7 +637,7 @@ impl ExtConfig {
             .to_owned();
         validate_api_base(&api_base)?;
         let max_message_bytes = self.max_message_bytes.unwrap_or(DEFAULT_MAX_MESSAGE_BYTES);
-        if max_message_bytes == 0 || max_message_bytes > MAX_MESSAGE_BYTES {
+        if max_message_bytes == 0 || MAX_MESSAGE_BYTES < max_message_bytes {
             return Err(format!(
                 "slack `max_message_bytes` must be between 1 and {MAX_MESSAGE_BYTES}"
             ));
@@ -5678,7 +5678,7 @@ fn parse_slack_api_response(
     if status_code == 429 {
         return Err(SlackApiError::RateLimited);
     }
-    if status_code >= 500 {
+    if 500 <= status_code {
         return Err(SlackApiError::RemoteFailure);
     }
     let value: serde_json::Value =
@@ -5761,7 +5761,7 @@ impl SlackClient for HttpSlackClient {
         if status == 408 {
             return PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::Timeout);
         }
-        if status >= 500 {
+        if 500 <= status {
             return PostAttemptOutcome::OutcomeUnknown(SendFailureCategory::ServiceUnavailable);
         }
         if !(200..300).contains(&status) {

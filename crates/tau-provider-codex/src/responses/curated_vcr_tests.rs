@@ -256,7 +256,7 @@ fn looks_high_entropy(token: &str) -> bool {
     let has_upper = token.bytes().any(|byte| byte.is_ascii_uppercase());
     let has_digit = token.bytes().any(|byte| byte.is_ascii_digit());
     let unique = token.bytes().collect::<HashSet<_>>().len();
-    unique >= 12 && usize::from(has_lower) + usize::from(has_upper) + usize::from(has_digit) >= 2
+    12 <= unique && usize::from(has_lower) + usize::from(has_upper) + usize::from(has_digit) >= 2
 }
 
 /// Secondary public-text scanning rejects representative credential, identity,

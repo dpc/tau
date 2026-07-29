@@ -1230,7 +1230,7 @@ fn append_cbor_record<T: Serialize>(
 }
 
 fn validate_record_length(path: &Path, record_length: u64) -> Result<(), SessionStoreError> {
-    if record_length > MAX_RECORD_BYTES {
+    if MAX_RECORD_BYTES < record_length {
         Err(SessionStoreError::RecordTooLarge {
             path: path.to_path_buf(),
             record_length,
@@ -1280,7 +1280,7 @@ where
         else {
             return Ok(());
         };
-        if record_length > MAX_RECORD_BYTES {
+        if MAX_RECORD_BYTES < record_length {
             return Err(SessionStoreError::Read {
                 path: path.to_path_buf(),
                 source: io::Error::new(

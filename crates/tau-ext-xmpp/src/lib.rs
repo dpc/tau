@@ -522,7 +522,7 @@ fn validate_max_message_bytes(max_message_bytes: Option<usize>) -> Result<usize,
     if max_message_bytes == 0 {
         return Err("xmpp `max_message_bytes` must be greater than zero".to_owned());
     }
-    if max_message_bytes > MAX_MESSAGE_LIMIT {
+    if MAX_MESSAGE_LIMIT < max_message_bytes {
         return Err(format!(
             "xmpp `max_message_bytes` must be at most {MAX_MESSAGE_LIMIT}"
         ));
@@ -2921,13 +2921,13 @@ fn base32_token(bytes: &[u8]) -> String {
     for byte in bytes {
         buffer = (buffer << 8) | u16::from(*byte);
         bits += 8;
-        while bits >= 5 {
+        while 5 <= bits {
             bits -= 5;
             let index = usize::from((buffer >> bits) & 0b1_1111);
             out.push(char::from(ALPHABET[index]));
         }
     }
-    if bits > 0 {
+    if 0 < bits {
         let index = usize::from((buffer << (5 - bits)) & 0b1_1111);
         out.push(char::from(ALPHABET[index]));
     }

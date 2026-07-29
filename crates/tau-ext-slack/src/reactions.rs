@@ -883,7 +883,7 @@ impl HttpSlackClient {
         if status == 429 {
             return Err(ReactionApiError::RateLimited(retry_after.unwrap_or(1)));
         }
-        if status >= 500 {
+        if 500 <= status {
             return Err(ReactionApiError::OutcomeUnknown);
         }
         let text = response

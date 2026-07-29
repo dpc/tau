@@ -1107,7 +1107,7 @@ fn is_known_phase_capable_model_id(model_id: &str) -> bool {
         return false;
     };
 
-    n >= 4 || (n == 3 && suffix.starts_with("codex"))
+    4 <= n || (n == 3 && suffix.starts_with("codex"))
 }
 
 #[cfg(test)]

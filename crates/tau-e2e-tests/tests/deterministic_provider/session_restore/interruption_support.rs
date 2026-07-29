@@ -91,7 +91,7 @@ pub(super) fn wait_for_hold_readiness(
         if ready == 1 {
             return Ok(());
         }
-        if ready > 1 {
+        if 1 < ready {
             return Err(format!(
                 "held provider prompt reached an invalid readiness state: {trace}"
             )

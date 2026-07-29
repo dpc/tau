@@ -467,7 +467,7 @@ fn try_bounded_suffix_repair(
         verify_boundary(&mut journal, &checkpoint.journal)?;
         journal.seek(SeekFrom::Start(checkpoint.journal.covered_bytes))?;
         let suffix_bytes = metadata.len() - checkpoint.journal.covered_bytes;
-        if suffix_bytes > MAX_REPAIR_BYTES_PER_AGENT
+        if MAX_REPAIR_BYTES_PER_AGENT < suffix_bytes
             || suffix_bytes > *remaining_repair_bytes
             || repair_deadline <= Instant::now()
         {
@@ -675,7 +675,7 @@ fn records_begin_with_creation(id: &AgentId, records: &[PersistedAgentEvent]) ->
 
 fn verify_boundary(file: &mut File, journal: &AgentJournalCheckpoint) -> io::Result<()> {
     let length = u64::from(journal.boundary_window_len);
-    if length > BOUNDARY_BYTES || length > journal.covered_bytes {
+    if BOUNDARY_BYTES < length || length > journal.covered_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid boundary length",
@@ -705,7 +705,7 @@ fn read_one_record_or_eof(
     let Some(length) = crate::record_log::read_record_length(file)? else {
         return Ok(None);
     };
-    if length > MAX_RECORD_BYTES || length > allocation_budget {
+    if MAX_RECORD_BYTES < length || allocation_budget < length {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "record exceeds repair budget",

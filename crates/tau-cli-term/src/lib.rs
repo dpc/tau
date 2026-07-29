@@ -773,7 +773,7 @@ fn format_agent_picker_rows(rows: &str, terminal_width: usize) -> Result<String,
 
 fn agent_picker_column_widths(rows: &[Vec<&str>], content_width: usize) -> Vec<usize> {
     let mut column_count = AGENT_PICKER_COLUMNS.len();
-    while column_count > 1
+    while 1 < column_count
         && content_width
             < AGENT_PICKER_COLUMNS[..column_count]
                 .iter()
@@ -812,11 +812,11 @@ fn agent_picker_column_widths(rows: &[Vec<&str>], content_width: usize) -> Vec<u
             .collect::<Vec<_>>(),
         natural.as_slice(),
     ] {
-        while remaining > 0 {
+        while 0 < remaining {
             let mut grew = false;
             for (column, width) in widths.iter_mut().enumerate() {
                 let target = targets[column].min(natural[column]);
-                if *width < target && remaining > 0 {
+                if *width < target && 0 < remaining {
                     *width += 1;
                     remaining -= 1;
                     grew = true;

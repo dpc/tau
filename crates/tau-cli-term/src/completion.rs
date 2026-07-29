@@ -756,7 +756,7 @@ fn build_filesystem_candidates_with_home(
 
 fn clamp_to_char_boundary(text: &str, cursor: usize) -> usize {
     let mut cursor = cursor.min(text.len());
-    while cursor > 0 && !text.is_char_boundary(cursor) {
+    while 0 < cursor && !text.is_char_boundary(cursor) {
         cursor -= 1;
     }
     cursor
@@ -906,7 +906,7 @@ fn render_menu_block_with_max_rows(
     let mut spans: Vec<Span> = Vec::new();
     for (row, i) in visible.enumerate() {
         let candidate = &view.candidates[i];
-        if row > 0 {
+        if 0 < row {
             spans.push(Span::plain("\n"));
         }
 

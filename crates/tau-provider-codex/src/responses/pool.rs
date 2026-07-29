@@ -130,7 +130,7 @@ impl WsPool {
         let max = std::env::var(POOL_MAX_ENV)
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
+            .filter(|&n| 0 < n)
             .unwrap_or(DEFAULT_POOL_MAX);
         Self {
             conns: LruCache::new(NonZeroUsize::new(max).unwrap_or(NonZeroUsize::MIN)),

@@ -368,7 +368,7 @@ impl Screen {
         // Mutates both the tracked viewport and cursor row via natural terminal
         // scrolling before addressing `render_start` within the new viewport.
         let viewport_bottom = *viewport_top + height - 1;
-        if render_start > viewport_bottom {
+        if viewport_bottom < render_start {
             let to_bottom = (height - 1).saturating_sub(self.cursor_row);
             self.move_down_rows(w, to_bottom)?;
             let scroll = render_start - viewport_bottom;
@@ -435,7 +435,7 @@ impl Screen {
     ) -> io::Result<()> {
         self.move_down_one(w)?;
         let screen_row = self.cursor_row + 1;
-        if screen_row >= height {
+        if height <= screen_row {
             // Moving down scrolled the terminal.
             *viewport_top += 1;
             self.cursor_row = height - 1;

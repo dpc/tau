@@ -5022,7 +5022,7 @@ impl EventRenderer {
         for grapheme in value.graphemes(true) {
             let escaped = escape(grapheme);
             let next_columns = columns.saturating_add(escaped.width());
-            if next_columns > max_columns || output.len().saturating_add(escaped.len()) > max_bytes
+            if max_columns < next_columns || output.len().saturating_add(escaped.len()) > max_bytes
             {
                 if columns < max_columns && output.len().saturating_add('…'.len_utf8()) <= max_bytes
                 {

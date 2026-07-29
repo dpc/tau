@@ -313,7 +313,7 @@ impl TimerRuntime {
             let mut prompt = format!("Timer `{}` fired: {}", timer.timer_id, timer.message);
             if let Some(interval) = timer.interval_seconds {
                 let missed = missed_intervals(timer.next_fire_at, now, interval);
-                if missed > 1 {
+                if 1 < missed {
                     prompt.push_str(&format!(
                         "\n\nCoalesced {missed} missed scheduled firings while Tau was unavailable."
                     ));
@@ -471,7 +471,7 @@ impl TimerRuntime {
                 .values()
                 .filter(|timer| &timer.agent_id == agent_id)
                 .count();
-            if count >= MAX_TIMERS_PER_AGENT {
+            if MAX_TIMERS_PER_AGENT <= count {
                 return Err(format!(
                     "timer limit exceeded: at most {MAX_TIMERS_PER_AGENT} active timers per agent"
                 ));

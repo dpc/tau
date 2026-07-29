@@ -75,7 +75,7 @@ impl ShellCancel {
         #[cfg(unix)]
         {
             let pgid = self.pgid.load(Ordering::SeqCst);
-            if pgid > 0 {
+            if 0 < pgid {
                 kill_process_group_id(pgid);
             }
         }

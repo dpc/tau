@@ -638,7 +638,7 @@ fn format_stats(matches: Option<u64>, lines: Option<u64>, bytes: Option<u64>) ->
 }
 
 fn format_tool_use_state_bytes(bytes: u64) -> String {
-    if bytes >= 1024 {
+    if 1024 <= bytes {
         let k = bytes as f64 / 1024.0;
         if k >= 100.0 {
             format!("{k:.0}kB")

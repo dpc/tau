@@ -1928,10 +1928,10 @@ pub(super) fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, Strin
     if tool_call_id_value.is_some() && timeout_minutes_value.is_some() {
         return Err("`tool_call_id` and `timeout_minutes` are mutually exclusive".to_owned());
     }
-    if tool_call_id_count > 1 {
+    if 1 < tool_call_id_count {
         return Err("`tool_call_id` must not be repeated".to_owned());
     }
-    if timeout_minutes_count > 1 {
+    if 1 < timeout_minutes_count {
         return Err("`timeout_minutes` must not be repeated".to_owned());
     }
     if let Some(value) = tool_call_id_value {

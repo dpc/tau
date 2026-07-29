@@ -218,7 +218,7 @@ impl PeerIoPermit {
             .copied()
             .unwrap_or(0);
         if admission.inbound >= MAX_INBOUND_PEER_AUTH_JOBS
-            || per_connection >= MAX_INBOUND_PEER_AUTH_JOBS_PER_CONNECTION
+            || MAX_INBOUND_PEER_AUTH_JOBS_PER_CONNECTION <= per_connection
         {
             return None;
         }
@@ -2006,7 +2006,7 @@ impl Harness {
             .fold((0usize, 0usize), |(count, bytes), message_bytes| {
                 (count.saturating_add(1), bytes.saturating_add(message_bytes))
             });
-        if queued_count >= MAX_QUEUED_PEER_INPUTS_PER_AGENT
+        if MAX_QUEUED_PEER_INPUTS_PER_AGENT <= queued_count
             || queued_bytes.saturating_add(message_bytes) > MAX_QUEUED_PEER_BYTES_PER_AGENT
         {
             return Err("peer input queue is full; retry later".to_owned());
