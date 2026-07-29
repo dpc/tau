@@ -1,0 +1,10 @@
+id: hashmap-entry-grouping-loop
+valid:
+  - map.entry(key).or_default().push(value)
+  - map.entry(key).or_insert_with(Vec::new).push(value)
+  - map.entry(key).or_insert_with(|| String::new()).push_str(value)
+  - map.entry(key).or_insert(existing).push(value)
+invalid:
+  - map.entry(key).or_insert(Vec::new()).push(value)
+  - map.entry(key).or_insert(HashSet::new()).insert(value)
+  - map.entry(key).or_insert(String::new()).push_str(value)
