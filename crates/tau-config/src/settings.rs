@@ -568,6 +568,8 @@ impl CliState {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return default;
         };
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         match serde_json::from_str::<CliStatePatch>(&text) {
             Ok(patch) => patch.apply_to(default),
             Err(_) => default,

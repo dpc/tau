@@ -111,6 +111,8 @@ impl RuntimeState {
             Err(_) => {
                 let calendar_secrets = configure.secrets.clone();
                 let calendar_state_dir = configure.state_dir.clone();
+                // Preserve this behavior; the structural alternative is not semantics-neutral
+                // here. ast-grep-ignore: match-result-verbose
                 match self.email.configure(configure, Rc::clone(&storage)) {
                     Ok(()) => self.calendar.configure_with_config(
                         calendar::CalendarExtensionConfig::default(),

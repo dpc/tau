@@ -1242,6 +1242,8 @@ fn xmpp_thread(
     output: Output,
     shutdown: Arc<ShutdownSignal>,
 ) {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

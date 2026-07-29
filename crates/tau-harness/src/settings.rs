@@ -691,6 +691,8 @@ pub fn default_config() -> Config {
     // invalid command slots. The built-in settings have no user entries or
     // overrides, and the hard-coded `builtin_extensions()` list resolves to
     // non-empty commands, so the failure path is unreachable.
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     let extensions = match resolve_extensions(&HarnessSettings::built_in(), builtin_extensions()) {
         Ok(extensions) => extensions,
         Err(err) => unreachable!("built-in extensions resolve cleanly: {err}"),

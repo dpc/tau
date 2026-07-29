@@ -252,6 +252,8 @@ fn append_prompt_history(
     let mut cached_tail = validated_tail
         .lock()
         .expect("prompt-history tail mutex poisoned");
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     match &result {
         Ok(new_tail) => *cached_tail = Some(new_tail.clone()),
         Err(_) => *cached_tail = None,

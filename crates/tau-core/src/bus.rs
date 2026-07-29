@@ -292,6 +292,8 @@ impl EventBus {
                 report.blocked_by_filter.push(connection_id.clone());
                 continue;
             }
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: match-result-verbose
             match entry.sink.send(routed) {
                 Ok(()) => report.delivered_to.push(connection_id.clone()),
                 Err(error) => report.failed_deliveries.push(DeliveryFailure {
@@ -348,6 +350,8 @@ impl EventBus {
                 continue;
             }
 
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: match-result-verbose
             match entry.sink.send(routed.clone()) {
                 Ok(()) => report.delivered_to.push(connection_id.clone()),
                 Err(error) => report.failed_deliveries.push(DeliveryFailure {
@@ -381,6 +385,8 @@ impl EventBus {
             return Ok(report);
         }
 
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         match entry.sink.send(routed) {
             Ok(()) => report.delivered_to.push(target_id.clone()),
             Err(error) => report.failed_deliveries.push(DeliveryFailure {

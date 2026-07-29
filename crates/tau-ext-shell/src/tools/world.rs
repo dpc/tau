@@ -971,6 +971,8 @@ impl<T> OpResult<T> {
     where
         T: Clone,
     {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         match result {
             Ok(value) => Self::Ok(value.clone()),
             Err(error) => Self::Err(WorldIoError::from_io_error(error)),

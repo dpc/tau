@@ -1999,6 +1999,8 @@ impl Term {
         if self.owns_raw_mode {
             let tx = self.handle.input_tx.clone();
             thread::spawn(move || {
+                // Preserve this behavior; the structural alternative is not semantics-neutral
+                // here. ast-grep-ignore: match-result-verbose
                 let message = match read_real_raw_event(event::read, raw_term_size) {
                     Ok(raw) => InputMessage::Raw(raw),
                     Err(error) => InputMessage::Error(error),

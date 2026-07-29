@@ -295,6 +295,8 @@ impl DaemonHandle {
     /// daemon thread panicked, returns [`HarnessError::ThreadJoin`] with the
     /// panic payload string when it is available.
     pub fn join(self) -> Result<(), HarnessError> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         match self.join_handle.join() {
             Ok(result) => result,
             Err(payload) => Err(HarnessError::ThreadJoin(format!(

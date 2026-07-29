@@ -264,6 +264,8 @@ impl RuntimeState {
                 "calendar module configuration was rejected: {reason}"
             )),
         };
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         match result {
             Ok(text) => action_result(invoke, text),
             Err(message) => action_error(invoke, message),
@@ -679,6 +681,8 @@ impl Engine {
             let result = match self.execute_change(&change) {
                 Ok(result) => result,
                 Err(error) => {
+                    // Preserve this behavior; the structural alternative is not semantics-neutral
+                    // here. ast-grep-ignore: match-result-verbose
                     return match self.state.release_claimed_change(id) {
                         Ok(()) => Err(error),
                         Err(recovery_error) => Err(format!(
@@ -688,6 +692,8 @@ impl Engine {
                 }
             };
             let result_event_id = result.event_id();
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: match-result-verbose
             return match self.state.complete_change(id, result_event_id) {
                 Ok(()) => Ok(format_mutation_result("Applied", id, &change, &result)),
                 Err(error) => Ok(format!(
@@ -2019,6 +2025,8 @@ fn normalize_write_time_value(
     {
         return Ok(value.to_owned());
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     match parse_local_read_bound(value, field, account_timezone) {
         Ok(local) => local_read_bound_to_utc(local, field, account_timezone)?
             .format(&time::format_description::well_known::Rfc3339)

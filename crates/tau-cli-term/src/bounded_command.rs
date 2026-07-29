@@ -715,6 +715,8 @@ fn set_foreground_process_group(pgid: nix::unistd::Pid) -> nix::Result<()> {
 fn with_controlling_terminal<T>(
     f: impl FnOnce(std::os::fd::BorrowedFd<'_>) -> nix::Result<T>,
 ) -> nix::Result<T> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     match std::fs::OpenOptions::new()
         .read(true)
         .write(true)

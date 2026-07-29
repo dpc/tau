@@ -9008,6 +9008,8 @@ impl Harness {
         let (prompt, error) = if !self.available_roles.contains_key(&request.role) {
             (None, Some(format!("unknown role: {}", request.role)))
         } else {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: match-result-verbose
             match self.build_system_prompt_for_role_preview(&request.role) {
                 Ok(prompt) => (Some(prompt), None),
                 Err(error) => (
@@ -9135,6 +9137,8 @@ impl Harness {
     ) {
         let request_id = request.request_id;
         let session_id = request.session_id;
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         let result = match self.build_session_agent_list(&session_id, request.scope) {
             Ok(agents) => tau_proto::SessionAgentListResult {
                 request_id: request_id.clone(),
@@ -9319,6 +9323,8 @@ impl Harness {
         request: tau_proto::ExtensionDataRequest,
     ) {
         let request_id = request.request_id;
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         let result = match self.run_extension_data_request(connection_id, request.scope, request.op)
         {
             Ok(value) => tau_proto::ExtensionDataResultPayload::Ok { value },

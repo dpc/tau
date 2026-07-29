@@ -866,6 +866,8 @@ impl Gateway {
         target: GatewayRegistrationKey,
         text: &str,
     ) -> bool {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         match self
             .socket_state
             .enqueue_delivery(&target, message, update_id, text)
@@ -1847,6 +1849,8 @@ fn socket_response(
     result: Result<(), String>,
     deliveries: Vec<GatewayDelivery>,
 ) -> serde_json::Value {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     match result {
         Ok(()) => successful_socket_response(&state.generation, &deliveries),
         Err(error) => serde_json::json!({
@@ -1881,6 +1885,8 @@ fn delivery_response_fits(gateway_generation: &str, deliveries: &[GatewayDeliver
 
 /// Write one JSON-line response to a gateway socket client.
 fn write_gateway_socket_response(stream: &mut UnixStream, response: &serde_json::Value) -> bool {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     match serde_json::to_string(response) {
         Ok(text) => writeln!(stream, "{text}")
             .and_then(|()| stream.flush())

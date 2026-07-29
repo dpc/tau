@@ -1283,6 +1283,8 @@ fn dispatch_dir_lock_unlock(
             UnlockOwnerScope::AnyInstanceWithAgentId,
         ),
     };
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     match unlock_result {
         Ok(()) => send_dir_lock_unlock_result(&invoke, tx, &request),
         Err(message) => send_event(

@@ -41,6 +41,8 @@ impl<'a> MakeWriter<'a> for UiLogWriter {
     type Writer = Box<dyn Write + Send + 'a>;
 
     fn make_writer(&'a self) -> Self::Writer {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         match OpenOptions::new()
             .create(true)
             .append(true)

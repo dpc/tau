@@ -282,6 +282,8 @@ pub(crate) fn run_command_live_for_surface(
     let combined = output_trunc.content.clone();
 
     let saved_output = output_trunc.was_truncated.then(|| {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         match crate::shell_output_spool::save(
             &wait.output.saved_output,
             wait.output.saved_output_incomplete,

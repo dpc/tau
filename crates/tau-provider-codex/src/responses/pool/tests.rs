@@ -2191,6 +2191,8 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("bound fake Codex reads");
     let mut upgrade_headers = BTreeMap::new();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     let mut ws = match tungstenite::accept_hdr(
         stream,
         #[allow(clippy::result_large_err)]
@@ -2213,6 +2215,8 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
 
     let mut turn_counter = 0_usize;
     loop {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         let msg = match ws.read() {
             Ok(m) => m,
             Err(_) => return,

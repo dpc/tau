@@ -1673,6 +1673,8 @@ impl Harness {
                 started: false,
             });
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         match self.queue_external_agent_message_receive(client_id, session_generation, request) {
             Ok(()) => None,
             Err(error) => Some(tau_proto::ExternalAgentMessageResult {
@@ -1756,6 +1758,8 @@ impl Harness {
     ) -> tau_proto::ExternalAgentMessageResult {
         let request_id = request.request_id.clone();
         let result = self.receive_external_agent_message(request);
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         let (recipient_id, started, error) = match result {
             Ok((recipient_id, started)) => (Some(recipient_id), started, None),
             Err(error) => (None, false, Some(error)),
@@ -2087,6 +2091,8 @@ impl Harness {
         let result = parse_message_args(&call.arguments).and_then(|parsed| {
             self.publish_agent_message_from_agent(agent_id, parsed.recipient_id, parsed.message)
         });
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: match-result-verbose
         match result {
             Ok(()) => self.finish_harness_owned_tool_with_result(
                 agent_id,

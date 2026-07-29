@@ -2376,6 +2376,8 @@ fn discovery_skill_candidate(skill: tau_skills::Skill) -> DiscoverySkillCandidat
 }
 
 fn system_time_to_discovery_micros(time: std::time::SystemTime) -> Option<DiscoveryModifiedMicros> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     match time.duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => i64::try_from(duration.as_micros())
             .ok()

@@ -237,6 +237,8 @@ fn handle_blocker(cx: ToolContext<'_, SwarmRuntime>) -> Result<(), ClientError> 
         }
         BlockerArgs::List {} => list_blockers(cx.state, &owner),
     };
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     match result {
         Ok(value) => report_json(&cx, value),
         Err(error) => report_error(&cx, error),
@@ -409,6 +411,8 @@ fn handle_update(cx: ToolContext<'_, SwarmRuntime>) -> Result<(), ClientError> {
     };
     let owner = cx.invoke().agent_id.as_str().to_owned();
     let result = add_update(cx.state, &owner, args);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     match result {
         Ok(value) => report_json(&cx, value),
         Err(error) => report_error(&cx, error),

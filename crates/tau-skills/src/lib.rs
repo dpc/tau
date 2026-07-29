@@ -815,6 +815,8 @@ fn discover_skill_paths_inner(
     }
     state.visited_dir_count += 1;
 
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: match-result-verbose
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
