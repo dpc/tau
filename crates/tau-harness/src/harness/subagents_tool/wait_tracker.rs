@@ -261,6 +261,18 @@ pub(super) struct WaitTracker {
 }
 
 impl WaitTracker {
+    /// Return owners that currently have at least one installed, unclaimed
+    /// wait.
+    pub(super) fn installed_wait_owners(&self) -> HashSet<AgentId> {
+        self.waiters
+            .values()
+            .map(|wait| wait.owner.clone())
+            .chain(self.any_waiters.keys().cloned())
+            .chain(self.input_waiters.keys().cloned())
+            .chain(self.claimed_waits.keys().cloned())
+            .collect()
+    }
+
     /// Atomically claim the installed wait matching this owner and call.
     ///
     /// The harness caller must separately establish that this call is the sole
@@ -457,6 +469,7 @@ impl WaitTracker {
 
     /// Parse and resolve a wait immediately or install exactly one owner-scoped
     /// waiter.
+    #[cfg(test)]
     pub(super) fn handle_wait_invoke(
         &mut self,
         owner: &AgentId,
@@ -475,7 +488,10 @@ impl WaitTracker {
         )
     }
 
-    fn handle_wait_invoke_at(
+    /// Resolve a wait invocation at the supplied monotonic `now`, returning an
+    /// immediate outcome or installing a waiter whose input timeout derives
+    /// from that exact clock value.
+    pub(super) fn handle_wait_invoke_at(
         &mut self,
         owner: &AgentId,
         call_id: ToolCallId,
@@ -1521,6 +1537,9 @@ impl WaitTracker {
         }
         if let Some(wait) = self.input_waiters.remove(owner) {
             call_ids.push(wait.request.call_id);
+        }
+        if let Some(wait) = self.claimed_waits.remove(owner) {
+            call_ids.push(wait.request().call_id.clone());
         }
         self.waiters.retain(|_, wait| &wait.owner != owner);
         call_ids.sort();

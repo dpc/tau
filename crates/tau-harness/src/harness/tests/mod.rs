@@ -1699,6 +1699,7 @@ fn draft_event(text: &str) -> Event {
 
 mod action;
 mod agent_list;
+mod agent_watch_wait;
 mod dedup;
 mod dispatch;
 mod format;

@@ -84,8 +84,8 @@ prompt text:
 - `WatchResponse` and `WatchPrompt` retain separate sender-labelled typed
   wrappers and replace only their own exact closing sentinel in each body;
 - current provider and work-status kinds render wording reconstructed from their
-  structured state; legacy turn and long-wait kinds do so only on compatibility
-  replay.
+  structured state; current long-wait kinds render their harness-derived
+  threshold, while legacy turn kinds do so only on compatibility replay.
 
 Display names remain UI-only. Peer bodies remain agent-authored model input, not
 harness instructions. Model-authored work titles receive trusted-frame visible

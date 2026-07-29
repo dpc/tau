@@ -207,7 +207,14 @@ serialization changes. See
 Work-status titles are model-authored cross-agent content, not trusted routing
 or instruction data. The harness keeps their typed phase and epoch separate and
 applies visible trusted-frame escaping before prompt interpolation. Long-wait
-notifications contain only harness-derived numeric thresholds.
+notifications contain only harness-derived numeric thresholds. Their scheduler
+uses actual monotonic installed-wait intervals, advances even without watchers,
+and never reconstructs runtime clocks or re-fans committed thresholds on replay.
+Late watchers receive no historical threshold activation. Overdue catch-up
+captures crossed thresholds and their current subscriptions compactly, advances
+the timer cursor before later watch changes, and materializes at most 64 recipient
+occurrences per runtime scheduler cycle. A queued event runs between batches;
+without one, the remaining compact backlog schedules another immediate cycle.
 Only the model-owned, policy-authorized `status` call may mutate its calling
 agent. Configured extensions cannot invoke it directly or select a target agent.
 The harness validates the closed phase and canonical 160-byte, single-line title

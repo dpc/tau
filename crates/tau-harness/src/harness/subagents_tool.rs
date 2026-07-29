@@ -33,6 +33,49 @@ use crate::harness::{
     AgentMessageRecipientStatus, AgentToolCall, Harness, PendingExternalAgentMessageAuth,
 };
 
+/// Maximum overdue long-wait occurrences published in one scheduler cycle.
+pub(super) const MAX_WORK_WAIT_THRESHOLDS_PER_RUNTIME_CYCLE: usize = 64;
+
+/// Compact delayed materialization for crossings captured before later events.
+pub(crate) struct PendingLongWaitNotifications {
+    /// Watched sender whose wait crossed the thresholds.
+    sender_id: String,
+    /// Working epoch at the crossing cut.
+    status_epoch: u64,
+    /// Watch subscriptions present at the crossing cut.
+    recipients: Vec<(String, String)>,
+    /// Crossed thresholds awaiting per-recipient publication.
+    thresholds: crate::agent::CrossedWaitThresholds,
+    /// Threshold currently being materialized across recipients.
+    current_threshold: Option<u32>,
+    /// Next recipient for the current threshold.
+    recipient_index: usize,
+}
+
+impl PendingLongWaitNotifications {
+    /// Retain matching recipients without rewinding the in-progress threshold.
+    ///
+    /// Returns whether any materialization remains.
+    fn retain_recipients(&mut self, retain: impl Fn(&(String, String)) -> bool + Copy) -> bool {
+        let removed_before_cursor = self
+            .recipients
+            .iter()
+            .take(self.recipient_index)
+            .filter(|recipient| !retain(recipient))
+            .count();
+        self.recipients.retain(|recipient| retain(recipient));
+        if self.recipients.is_empty() {
+            return false;
+        }
+        self.recipient_index = self.recipient_index.saturating_sub(removed_before_cursor);
+        if self.current_threshold.is_some() && self.recipients.len() <= self.recipient_index {
+            self.recipient_index = 0;
+            self.current_threshold = None;
+        }
+        self.current_threshold.is_some() || !self.thresholds.is_empty()
+    }
+}
+
 fn provider_status_attempt(state: &tau_proto::AgentWatchProviderState) -> Option<u32> {
     match state {
         tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
@@ -335,6 +378,7 @@ impl Harness {
             .subagents
             .wait_tracker
             .record_tool_result(result, owner, terminal);
+        self.synchronize_work_waits();
         self.publish_wait_replies(replies);
     }
 
@@ -351,6 +395,7 @@ impl Harness {
             .subagents
             .wait_tracker
             .record_tool_error(error, owner, terminal);
+        self.synchronize_work_waits();
         self.publish_wait_replies(replies);
     }
 
@@ -367,6 +412,7 @@ impl Harness {
             .subagents
             .wait_tracker
             .record_background_result(result, owner, terminal);
+        self.synchronize_work_waits();
         self.publish_wait_replies(replies);
     }
 
@@ -383,6 +429,7 @@ impl Harness {
             .subagents
             .wait_tracker
             .record_background_error(error, owner, terminal);
+        self.synchronize_work_waits();
         self.publish_wait_replies(replies);
     }
 
@@ -393,7 +440,20 @@ impl Harness {
         &mut self,
         owner: &AgentId,
     ) -> Vec<ToolCallId> {
-        self.subagents.wait_tracker.discard_owner(owner)
+        self.discard_wait_owner_before_teardown_at(owner, Instant::now())
+    }
+
+    /// Retire all waits and their derived semantic clock at one teardown cut.
+    pub(crate) fn discard_wait_owner_before_teardown_at(
+        &mut self,
+        owner: &AgentId,
+        now: Instant,
+    ) -> Vec<ToolCallId> {
+        let discarded = self.subagents.wait_tracker.discard_owner(owner);
+        if let Some(agent) = self.agents.get_mut(owner) {
+            agent.work_status.retire_wait_at(now);
+        }
+        discarded
     }
 
     fn wait_owner_for_call(&self, call_id: &ToolCallId) -> Option<AgentId> {
@@ -444,6 +504,7 @@ impl Harness {
             .subagents
             .wait_tracker
             .activate_waits_for(owner, activation);
+        self.synchronize_work_waits();
         self.publish_wait_replies(replies);
     }
 
@@ -451,6 +512,9 @@ impl Harness {
     /// is unloaded.
     pub(crate) fn discard_input_wait_for(&mut self, owner: &AgentId) {
         self.subagents.wait_tracker.discard_input_wait_for(owner);
+        if let Some(agent) = self.agents.get_mut(owner) {
+            agent.work_status.retire_wait_at(Instant::now());
+        }
     }
 
     /// Return the earliest monotonic deadline among registered input waiters.
@@ -458,9 +522,169 @@ impl Harness {
         self.subagents.wait_tracker.next_input_wait_deadline()
     }
 
+    /// Synchronize semantic wait accounting against current tracker ownership.
+    pub(crate) fn synchronize_work_waits(&mut self) {
+        self.synchronize_work_waits_at(Instant::now());
+    }
+
+    /// Synchronize semantic wait accounting at a deterministic monotonic time.
+    pub(crate) fn synchronize_work_waits_at(&mut self, now: Instant) {
+        self.synchronize_work_wait_clocks_at(now);
+        self.capture_crossed_work_wait_thresholds_at(now);
+        self.drain_pending_long_wait_notifications_with_budget(
+            MAX_WORK_WAIT_THRESHOLDS_PER_RUNTIME_CYCLE,
+        );
+    }
+
+    /// Synchronize semantic wait clocks without publishing threshold crossings.
+    fn synchronize_work_wait_clocks_at(&mut self, now: Instant) {
+        let installed = self.subagents.wait_tracker.installed_wait_owners();
+        for (cid, agent) in &mut self.agents {
+            agent
+                .work_status
+                .synchronize_wait_at(installed.contains(cid), now);
+        }
+    }
+
+    /// Return the earliest semantic wait threshold deadline.
+    pub(crate) fn next_work_wait_threshold_deadline(&self) -> Option<Instant> {
+        self.agents
+            .values()
+            .filter_map(|agent| agent.work_status.next_wait_deadline())
+            .min()
+    }
+
+    /// Process a bounded number of semantic wait thresholds due by `now`.
+    pub(crate) fn process_work_wait_threshold_deadlines(
+        &mut self,
+        now: Instant,
+        budget: usize,
+    ) -> usize {
+        self.synchronize_work_wait_clocks_at(now);
+        self.capture_crossed_work_wait_thresholds_at(now);
+        self.drain_pending_long_wait_notifications_with_budget(budget)
+    }
+
+    /// Capture all overdue cursors with the subscriptions present at `now`.
+    fn capture_crossed_work_wait_thresholds_at(&mut self, now: Instant) {
+        let mut captured = Vec::new();
+        for agent in self.agents.values_mut() {
+            let Some(thresholds) = agent.work_status.take_all_crossed_wait_thresholds_at(now)
+            else {
+                continue;
+            };
+            let Some(sender_id) = agent.agent_id.clone() else {
+                continue;
+            };
+            captured.push((sender_id, agent.work_status.epoch(), thresholds));
+        }
+        captured.sort_by(|left, right| left.0.cmp(&right.0));
+        for (sender_id, status_epoch, thresholds) in captured {
+            let recipients = self
+                .watchers_for_agent(&sender_id)
+                .into_iter()
+                .filter_map(|watcher_id| {
+                    let subscription_id = self
+                        .agent_watch_subscriptions
+                        .get(&(watcher_id.clone(), sender_id.clone()))?
+                        .clone();
+                    Some((watcher_id, subscription_id))
+                })
+                .collect::<Vec<_>>();
+            if recipients.is_empty() {
+                continue;
+            }
+            self.pending_long_wait_notifications
+                .push_back(PendingLongWaitNotifications {
+                    sender_id,
+                    status_epoch,
+                    recipients,
+                    thresholds,
+                    current_threshold: None,
+                    recipient_index: 0,
+                });
+        }
+    }
+
+    /// Materialize up to `budget` captured recipient occurrences.
+    fn drain_pending_long_wait_notifications(&mut self, budget: usize) -> usize {
+        let mut processed = 0;
+        while processed < budget {
+            let Some(batch) = self.pending_long_wait_notifications.front_mut() else {
+                break;
+            };
+            if batch.current_threshold.is_none() {
+                batch.current_threshold = batch.thresholds.pop_next();
+            }
+            let Some(threshold_minutes) = batch.current_threshold else {
+                self.pending_long_wait_notifications.pop_front();
+                continue;
+            };
+            let sender_id = batch.sender_id.clone();
+            let status_epoch = batch.status_epoch;
+            let (watcher_id, subscription_id) = batch.recipients[batch.recipient_index].clone();
+            batch.recipient_index += 1;
+            if batch.recipients.len() <= batch.recipient_index {
+                batch.recipient_index = 0;
+                batch.current_threshold = None;
+            }
+            let batch_complete = batch.current_threshold.is_none() && batch.thresholds.is_empty();
+            self.notify_agent_watcher_about_long_wait(
+                &sender_id,
+                &watcher_id,
+                subscription_id,
+                status_epoch,
+                threshold_minutes,
+            );
+            processed += 1;
+            if batch_complete {
+                self.pending_long_wait_notifications.pop_front();
+            }
+        }
+        processed
+    }
+
+    /// Drain against both the caller's limit and the active scheduler budget.
+    fn drain_pending_long_wait_notifications_with_budget(&mut self, budget: usize) -> usize {
+        let previous_budget = self.long_wait_materialization_budget;
+        let effective = previous_budget.map_or(budget, |remaining| remaining.min(budget));
+        // Publication re-enters wait synchronization through post-commit tool
+        // settlement. Reserve this entire batch before publishing so nested
+        // paths cannot recursively acquire a fresh budget.
+        self.long_wait_materialization_budget = Some(0);
+        let processed = self.drain_pending_long_wait_notifications(effective);
+        self.long_wait_materialization_budget =
+            previous_budget.map(|remaining| remaining.saturating_sub(processed));
+        processed
+    }
+
+    /// Return whether captured long-wait occurrences still await
+    /// materialization.
+    pub(crate) fn has_pending_long_wait_notifications(&self) -> bool {
+        !self.pending_long_wait_notifications.is_empty()
+    }
+
+    /// Return the front backlog cursor and recipients for deterministic tests.
+    #[cfg(test)]
+    pub(crate) fn pending_long_wait_front_for_test(
+        &self,
+    ) -> Option<(usize, Vec<(String, String)>)> {
+        self.pending_long_wait_notifications
+            .front()
+            .map(|batch| (batch.recipient_index, batch.recipients.clone()))
+    }
+
+    /// Drain captured notifications against the active runtime-cycle budget.
+    pub(crate) fn drain_pending_long_wait_notifications_for_scheduler(&mut self) -> usize {
+        self.drain_pending_long_wait_notifications_with_budget(
+            MAX_WORK_WAIT_THRESHOLDS_PER_RUNTIME_CYCLE,
+        )
+    }
+
     /// Complete every input waiter due at or before `now`.
     pub(crate) fn process_input_wait_deadlines(&mut self, now: Instant) {
         let replies = self.subagents.wait_tracker.expire_input_waits(now);
+        self.synchronize_work_waits_at(now);
         self.publish_wait_replies(replies);
     }
 
@@ -470,9 +694,12 @@ impl Harness {
         owner: &AgentId,
         call_id: &ToolCallId,
     ) -> bool {
-        self.subagents
+        let claimed = self
+            .subagents
             .wait_tracker
-            .claim_wait_for_manual_compaction(owner, call_id)
+            .claim_wait_for_manual_compaction(owner, call_id);
+        self.synchronize_work_waits();
+        claimed
     }
 
     /// Restore a claimed wait after its canonical cancellation failed to
@@ -486,6 +713,7 @@ impl Harness {
             .subagents
             .wait_tracker
             .rollback_manual_compaction_claim(owner, call_id);
+        self.synchronize_work_waits();
         self.publish_wait_replies(replies);
     }
 
@@ -523,6 +751,7 @@ impl Harness {
             .subagents
             .wait_tracker
             .record_tool_cancelled(call_ids, terminal);
+        self.synchronize_work_waits();
         for call_id in cancelled.unsuppress_call_ids {
             self.unsuppress_background_completion_prompt(call_id);
         }
@@ -851,6 +1080,12 @@ impl Harness {
     ///
     /// See `SPEC-agent-watch`.
     pub(crate) fn retire_agent_watch_endpoint(&mut self, agent_id: &str) {
+        self.pending_long_wait_notifications.retain_mut(|batch| {
+            if batch.sender_id == agent_id {
+                return false;
+            }
+            batch.retain_recipients(|(watcher_id, _)| watcher_id != agent_id)
+        });
         let outgoing = self.agent_watches.remove(agent_id).unwrap_or_default();
         let incoming = self.agent_watchers.remove(agent_id).unwrap_or_default();
 
@@ -891,6 +1126,9 @@ impl Harness {
             .agent_watch_subscriptions
             .remove(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
         {
+            self.pending_long_wait_notifications.retain_mut(|batch| {
+                batch.retain_recipients(|(_, candidate)| candidate != &subscription_id)
+            });
             self.agent_watch_provider_deliveries
                 .remove(&subscription_id);
         }
@@ -930,12 +1168,19 @@ impl Harness {
         conversation_id: &AgentId,
         report: crate::WorkStatusReport,
     ) -> Result<bool, String> {
+        let now = Instant::now();
+        self.synchronize_work_waits_at(now);
+        let wait_installed = self
+            .subagents
+            .wait_tracker
+            .installed_wait_owners()
+            .contains(conversation_id);
         let (changed, watched_agent_id) = {
             let Some(agent) = self.agents.get_mut(conversation_id) else {
                 return Err("status caller is no longer loaded".to_owned());
             };
             let current = &mut agent.work_status;
-            if !current.report(report) {
+            if !current.report_at(report, now, wait_installed) {
                 return Ok(false);
             }
             (true, agent.agent_id.clone())
@@ -991,6 +1236,41 @@ impl Harness {
                     initial,
                 }),
                 watch_long_wait: None,
+                message: String::new(),
+            }),
+        );
+    }
+
+    /// Materialize one captured long-wait occurrence for one subscription.
+    fn notify_agent_watcher_about_long_wait(
+        &mut self,
+        watched_agent_id: &str,
+        watcher_id: &str,
+        subscription_id: String,
+        status_epoch: u64,
+        threshold_minutes: u32,
+    ) {
+        if self.agent_message_recipient_status(watcher_id) != AgentMessageRecipientStatus::Live {
+            return;
+        }
+        let sender_id = crate::parse_agent_id(watched_agent_id);
+        self.publish_event(
+            Some(crate::harness::harness_connection_id()),
+            Event::AgentMessageReceived(AgentMessageReceived {
+                message_id: next_agent_message_id(&sender_id),
+                sender_id,
+                sender_session_id: None,
+                recipient_id: crate::parse_agent_id(watcher_id),
+                kind: tau_proto::AgentMessageKind::WatchLongWait,
+                watch_turn_state: None,
+                watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {
+                    session_id: self.current_session_id.clone(),
+                    subscription_id,
+                    status_epoch,
+                    threshold_minutes,
+                }),
                 message: String::new(),
             }),
         );
@@ -1829,6 +2109,21 @@ impl Harness {
         call: &AgentToolCall,
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
+        self.handle_wait_tool_call_at(agent_id, call, visible_tool_name, Instant::now())
+    }
+
+    /// Handle the harness-owned `wait` tool call at one supplied monotonic
+    /// time.
+    ///
+    /// Production supplies [`Instant::now`]; deterministic scheduler tests
+    /// supply a fixed clock value.
+    pub(crate) fn handle_wait_tool_call_at(
+        &mut self,
+        agent_id: &AgentId,
+        call: &AgentToolCall,
+        visible_tool_name: ToolName,
+        now: Instant,
+    ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
         if let Some(call_ref) = call.call_ref {
             self.subagents
@@ -1947,13 +2242,15 @@ impl Harness {
             self.publish_wait_replies(vec![reply]);
             return Ok(());
         }
-        let start = self.subagents.wait_tracker.handle_wait_invoke(
+        let start = self.subagents.wait_tracker.handle_wait_invoke_at(
             agent_id,
             call_id,
             visible_tool_name,
             &call.arguments,
+            now,
             wait_observation,
         );
+        self.synchronize_work_waits_at(now);
         if let Some((observation_id, registration)) = start.registration.clone() {
             self.append_best_effort_observation(
                 agent_id,

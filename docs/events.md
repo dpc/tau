@@ -823,9 +823,13 @@ terminal silently no-op. See
 `agent.message_received` also supports `watch_work_status` and
 `watch_long_wait`. Work status carries a closed phase, runtime-local status
 epoch, optional canonical title of at most 160 UTF-8 bytes, and initial-snapshot
-marker. Long-wait delivery
-carries the work epoch and newly crossed whole-minute threshold; it is never a
-late-watch historical snapshot.
+marker. Long-wait delivery carries the work epoch and newly crossed whole-minute
+threshold; it is never a late-watch historical snapshot. The harness accumulates
+the union of actual monotonic installed-wait intervals within one Working epoch
+and emits thresholds at 15, 30, 60, 120, 240, 360, then every 120 minutes.
+Current runtime accounting, monotonic timestamps, and crossed-threshold cursors
+are not restored; already committed recipient projections remain durable replay
+context without restarting timers or live fanout.
 
 ### Reactive context recovery fields
 

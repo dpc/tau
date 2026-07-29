@@ -1,11 +1,5 @@
 # SPEC-agent-watch: Agent watch
 
-## Status
-
-Typed long-wait notifications remain protocol/replay compatibility only. The
-Phase C monotonic wait accounting, threshold deadlines, and live producers are
-not implemented.
-
 ## Record justification
 
 Agent watch behavior spans harness-owned topology and dedupe state, typed
@@ -88,6 +82,23 @@ Unsuccessful terminals bypass challenges and change Working to Unknown once.
 Current status is runtime-only; durable typed message facts provide projection
 and replay authority. A newly enabled watcher receives only the current snapshot,
 never historical transitions or thresholds.
+
+Installed waits accumulate the union of monotonic elapsed time within the current
+Working epoch. A wait resolved or rejected before installation contributes no
+duration. Every terminal path after installation, including ordinary settlement,
+interruption, and timeout, contributes its actual installed duration. A settled
+wait pauses accounting, and a later installed wait resumes from the accumulated
+duration. Starting a new Working epoch resets both accumulated duration and
+crossed thresholds.
+
+The harness schedules event-loop deadlines at 15, 30, 60, 120, 240, 360, and
+subsequent 120-minute thresholds. Each crossing emits one durable typed,
+isolated notification to every current watcher without waking the waiting agent.
+Accounting and threshold cursors advance even when there are no watchers. A
+watch enabled later receives the current work-status snapshot but no historical
+long-wait notification. Unload and session rollover discard runtime accounting
+and deadlines; replay retains committed recipient projections as context without
+reconstructing timers or re-fanning notifications.
 
 The watch path must not forward internal steering prompts, background or foreground
 tool-completion prompts, explicit `message` tool deliveries to the watched agent, or

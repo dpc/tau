@@ -2053,6 +2053,11 @@ pub struct Harness {
     /// Receiver side of the central event channel. The main loop
     /// blocks on this and dispatches one `HarnessEvent` at a time.
     pub(crate) rx: Receiver<HarnessEvent>,
+    /// Received event held while bounded overdue-deadline catch-up completes.
+    pending_runtime_event: Option<HarnessEvent>,
+    /// Deterministic post-receive clock cut for runtime scheduler tests.
+    #[cfg(test)]
+    runtime_event_receive_cut: Option<Instant>,
     /// Routes protocol events between connections (agent ↔ extensions
     /// ↔ socket clients). Owns connection state and per-connection
     /// outgoing queues.
@@ -2313,6 +2318,12 @@ pub struct Harness {
         HashMap<String, tau_proto::AgentWatchProviderStatusNotification>,
     /// Bounded already-delivered provider-status state by watch subscription.
     pub(crate) agent_watch_provider_deliveries: HashMap<String, AgentWatchProviderDeliveries>,
+    /// Compact long-wait crossings captured for pre-existing subscriptions and
+    /// awaiting bounded durable materialization.
+    pending_long_wait_notifications: VecDeque<subagents_tool::PendingLongWaitNotifications>,
+    /// Remaining long-wait materialization budget inside the active scheduler
+    /// call, or `None` outside deadline processing.
+    long_wait_materialization_budget: Option<usize>,
     /// Agent ids that were once known but can no longer receive messages.
     pub(crate) stopped_agent_ids: HashSet<String>,
     /// Global harness state. Currently only tracks per-session init
@@ -3070,6 +3081,9 @@ impl Harness {
         Self {
             tx: parts.tx,
             rx: parts.rx,
+            pending_runtime_event: None,
+            #[cfg(test)]
+            runtime_event_receive_cut: None,
             bus: parts.bus,
             registry: ToolRegistry::new(),
             action_registry: ActionRegistry::new(),
@@ -3149,6 +3163,8 @@ impl Harness {
             agent_watch_subscriptions: HashMap::new(),
             agent_watch_provider_status: HashMap::new(),
             agent_watch_provider_deliveries: HashMap::new(),
+            pending_long_wait_notifications: VecDeque::new(),
+            long_wait_materialization_budget: None,
             stopped_agent_ids: HashSet::new(),
             turn_state: TurnState::Idle,
             debug_log: None,
@@ -8413,10 +8429,48 @@ impl Harness {
 
     fn next_runtime_event(&mut self) -> RuntimeEventWait {
         self.process_runtime_deadlines();
+        if self
+            .next_runtime_deadline()
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            return RuntimeEventWait::DeadlineElapsed;
+        }
+        if let Some(event) = self.pending_runtime_event.take() {
+            return RuntimeEventWait::Event(event);
+        }
+        if self.has_pending_long_wait_notifications() {
+            return match self.rx.try_recv() {
+                Ok(event) => RuntimeEventWait::Event(event),
+                Err(mpsc::TryRecvError::Empty) => RuntimeEventWait::DeadlineElapsed,
+                Err(mpsc::TryRecvError::Disconnected) => RuntimeEventWait::Disconnected,
+            };
+        }
         if let Some(deadline) = self.next_runtime_deadline() {
             let timeout = deadline.saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(timeout) {
-                Ok(event) => RuntimeEventWait::Event(event),
+                Ok(event) => {
+                    self.pending_runtime_event = Some(event);
+                    #[cfg(test)]
+                    let now = self
+                        .runtime_event_receive_cut
+                        .take()
+                        .unwrap_or_else(Instant::now);
+                    #[cfg(not(test))]
+                    let now = Instant::now();
+                    self.process_runtime_deadlines_at(now);
+                    if self
+                        .next_runtime_deadline()
+                        .is_some_and(|deadline| deadline <= now)
+                    {
+                        RuntimeEventWait::DeadlineElapsed
+                    } else {
+                        RuntimeEventWait::Event(
+                            self.pending_runtime_event
+                                .take()
+                                .expect("received event remains held"),
+                        )
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     self.process_runtime_deadlines();
                     RuntimeEventWait::DeadlineElapsed
@@ -8436,18 +8490,34 @@ impl Harness {
     }
 
     fn process_runtime_deadlines_at(&mut self, now: Instant) {
+        debug_assert!(self.long_wait_materialization_budget.is_none());
+        self.long_wait_materialization_budget =
+            Some(subagents_tool::MAX_WORK_WAIT_THRESHOLDS_PER_RUNTIME_CYCLE);
+        self.drain_pending_long_wait_notifications_for_scheduler();
         loop {
             // Drain one earliest deadline cohort at a time. Supplying that
             // cohort's deadline, rather than `now`, preserves deterministic
             // ordering when the event loop wakes after several classes are due.
             let background = self.tool_turn.next_background_deadline();
             let input = self.next_input_wait_deadline();
+            let work_wait = self.next_work_wait_threshold_deadline();
             let extension = self.next_extension_deadline();
-            let next = [input, background, extension].into_iter().flatten().min();
+            let next = [work_wait, input, background, extension]
+                .into_iter()
+                .flatten()
+                .min();
             let Some(deadline) = next.filter(|deadline| *deadline <= now) else {
                 break;
             };
-            if input == Some(deadline) {
+            if work_wait == Some(deadline) {
+                let budget = self.long_wait_materialization_budget.unwrap_or_default();
+                let next_non_work = [input, background, extension]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                    .unwrap_or(now);
+                self.process_work_wait_threshold_deadlines(now.min(next_non_work), budget);
+            } else if input == Some(deadline) {
                 self.process_input_wait_deadlines(deadline);
             } else if background == Some(deadline) {
                 self.process_background_deadlines_at(deadline);
@@ -8455,12 +8525,14 @@ impl Harness {
                 self.process_extension_deadlines_at(deadline, now);
             }
         }
+        self.long_wait_materialization_budget = None;
     }
 
     fn next_runtime_deadline(&self) -> Option<Instant> {
         [
             self.tool_turn.next_background_deadline(),
             self.next_input_wait_deadline(),
+            self.next_work_wait_threshold_deadline(),
             self.next_extension_deadline(),
         ]
         .into_iter()
@@ -19813,6 +19885,7 @@ impl Harness {
         self.agent_watch_subscriptions.clear();
         self.agent_watch_provider_status.clear();
         self.agent_watch_provider_deliveries.clear();
+        self.pending_long_wait_notifications.clear();
         self.stopped_agent_ids.clear();
 
         self.current_session_id = new_session_id.clone();

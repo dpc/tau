@@ -200,6 +200,30 @@ fn compaction_claim_cancellation_unsuppresses_completed_exact_source() {
     assert!(cancelled.replies.is_empty());
 }
 
+/// Owner teardown retires a claimed wait as installed state and returns its
+/// call identity for the harness's outer tracking cleanup.
+#[test]
+fn owner_teardown_retires_claimed_wait() {
+    let owner = conv("main");
+    let target: ToolCallId = "claimed-teardown-target".into();
+    let wait_call: ToolCallId = "claimed-teardown-wait".into();
+    let mut tracker = WaitTracker::default();
+    tracker.record_tool_invoke(target.clone(), slow_tool_name(), owner.clone());
+    assert!(
+        start_wait_exact(&mut tracker, &owner, wait_call.as_str(), target.as_str())
+            .reply
+            .is_none()
+    );
+    assert!(tracker.claim_wait_for_manual_compaction(&owner, &wait_call));
+    assert!(tracker.installed_wait_owners().contains(&owner));
+
+    let retired = tracker.discard_owner(&owner);
+
+    assert!(retired.contains(&wait_call));
+    assert!(!tracker.installed_wait_owners().contains(&owner));
+    assert!(!tracker.wait_claimed_for_manual_compaction(&owner, &wait_call));
+}
+
 /// A background error racing a claimed exact wait has the same notification
 /// restoration contract as a successful source completion.
 #[test]
