@@ -3679,8 +3679,6 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
             *attempt
         };
         if attempt == 1 {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: stringly-typed-match
             let class = match id.as_str() {
                 "chatgpt-retry" => RetryClass::Transport,
                 "generic-retry" => RetryClass::Overload,
@@ -3826,8 +3824,6 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     let executor: PromptExecutor = Arc::new(move |execution| {
         let id = execution.job.agent_prompt_id.to_string();
         executor_calls.lock().expect("mixed calls").push(id.clone());
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: stringly-typed-match
         match id.as_str() {
             "mixed-delayed" => {
                 initial_workers_started.wait();

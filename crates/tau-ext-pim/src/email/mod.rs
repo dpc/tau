@@ -1601,8 +1601,6 @@ impl StateStore {
     fn load_allow_file(&self, name: &str) -> Result<Vec<AddressPattern>, String> {
         self.load_allow_records(name)?
             .iter()
-            // Preserve behavior at this site.
-            // ast-grep-ignore: stringly-typed-match
             .map(|record| match record.kind.as_str() {
                 "exact" | "glob" => AddressPattern::compile(&record.pattern),
                 "regex" => AddressPattern::compile(&format!("re:{}", record.pattern)),
@@ -3472,8 +3470,6 @@ impl<B: EmailBackend> Engine<B> {
                 entry.folder = log_field(data, "folder", Some(folder.as_str()));
                 entry.uid = log_field(data, "uid", Some(uid.as_str()));
                 if entry.access.is_none() {
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: stringly-typed-match
                     entry.access = match email_log_status(result).as_str() {
                         "ok" => Some(ACCESS_FULL.to_owned()),
                         ACCESS_PREVIEW => Some(ACCESS_PREVIEW.to_owned()),

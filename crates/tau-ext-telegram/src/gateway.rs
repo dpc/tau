@@ -1757,8 +1757,6 @@ fn handle_gateway_socket_request(
     connection_id: u64,
     request: GatewaySocketRequest,
 ) -> serde_json::Value {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: stringly-typed-match
     match request.kind.as_str() {
         "status" => state.status_response(false),
         "hello" => {

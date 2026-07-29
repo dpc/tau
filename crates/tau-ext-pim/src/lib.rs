@@ -163,8 +163,6 @@ impl RuntimeState {
         invoke: &tau_proto::ToolStarted,
         local_tool_name: &tau_proto::ToolName,
     ) -> Option<tau_proto::ToolProgress> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: stringly-typed-match
         match local_tool_name.as_str() {
             name if email::is_tool_name(name) => Some(tau_proto::ToolProgress {
                 call_id: invoke.call_id.clone(),
@@ -195,8 +193,6 @@ impl RuntimeState {
         let wire_tool_name = invoke.tool_name.clone();
         let mut local_invoke = invoke;
         local_invoke.tool_name = local_tool_name.clone();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: stringly-typed-match
         let event = match local_tool_name.as_str() {
             name if email::is_tool_name(name) => Some(self.email.dispatch(local_invoke)),
             name if calendar::is_tool_name(name) => Some(self.calendar.dispatch(local_invoke)),

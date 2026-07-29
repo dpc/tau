@@ -698,8 +698,6 @@ fn fallback_timer_display_args(arguments: &CborValue) -> String {
     let Some(action) = tau_proto::cbor_text_field(arguments, "action") else {
         return String::new();
     };
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: stringly-typed-match
     match action.as_str() {
         "schedule" => schedule_display_args(
             sanitized_display_timer_id(arguments).as_deref(),

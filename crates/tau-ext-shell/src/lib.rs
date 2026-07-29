@@ -1129,8 +1129,6 @@ fn rewrite_invoke_for_cwd(
     if invoke.tool_name == WORKDIR_TOOL_NAME {
         return invoke;
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: stringly-typed-match
     let field = match invoke.tool_name.as_str() {
         SHELL_TOOL_NAME => crate::tools::ShellSurface::Generic.directory_argument(),
         GPT_SHELL_TOOL_NAME => crate::tools::ShellSurface::ChatGpt.directory_argument(),

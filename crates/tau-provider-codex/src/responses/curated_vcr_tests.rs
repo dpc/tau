@@ -287,8 +287,6 @@ fn audit_structural_stream(stream: &ProviderRawEventStream) {
             .unwrap_or(&event.raw);
         let value: serde_json::Value = serde_json::from_str(json).expect("fixture JSON frame");
         let object = value.as_object().expect("fixture event object");
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: stringly-typed-match
         match value["type"].as_str() {
             Some("response.output_text.delta") => {
                 assert_eq!(object.len(), 2);

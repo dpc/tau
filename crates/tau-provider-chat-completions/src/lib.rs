@@ -1721,8 +1721,6 @@ fn non_empty_str(value: &serde_json::Value) -> Option<&str> {
 }
 
 fn apply_finish_reason(state: &mut StreamState, choice: &serde_json::Value) {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: stringly-typed-match
     match choice["finish_reason"].as_str() {
         Some("tool_calls") => state.stop_reason = ProviderStopReason::ToolCalls,
         Some("stop") => state.stop_reason = ProviderStopReason::EndTurn,

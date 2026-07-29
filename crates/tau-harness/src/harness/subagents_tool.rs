@@ -2823,8 +2823,6 @@ impl crate::InternalToolHandler for TestBuiltinTools {
         else {
             return Ok(());
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: stringly-typed-match
         match call.name.as_str() {
             "skill" => Ok(()),
             WAIT_TOOL_NAME => {

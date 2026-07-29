@@ -119,8 +119,6 @@ impl ShellOutcome {
                     let CborValue::Text(value) = value else {
                         return None;
                     };
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: stringly-typed-match
                     reason = Some(match value.as_str() {
                         "exit" => ShellTerminationReason::Exit,
                         "timeout" => ShellTerminationReason::Timeout,

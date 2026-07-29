@@ -1181,8 +1181,6 @@ pub(crate) fn dispatch_dir_lock_tool(
         }
     };
 
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: stringly-typed-match
     match request.command.as_str() {
         "update" => dispatch_dir_lock_update(invoke, manager, tx, request),
         "unlock" => dispatch_dir_lock_unlock(invoke, manager, tx, request),

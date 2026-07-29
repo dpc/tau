@@ -814,8 +814,6 @@ fn register_host_functions(
 
     engine.register_fn(
         "tau_log",
-        // Preserve behavior at this site.
-        // ast-grep-ignore: stringly-typed-match
         move |level: ImmutableString, message: ImmutableString| match level.as_str() {
             "trace" => tracing::trace!(target: LOG_TARGET, message = %message, "rhai script log"),
             "debug" => tracing::debug!(target: LOG_TARGET, message = %message, "rhai script log"),

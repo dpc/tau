@@ -166,8 +166,6 @@ fn picker_rows_append_canonical_cost_and_status() {
     });
     let unavailable = entry("unavailable", None, Some(3));
     let output = format_picker_rows(&[zero, nonzero, unavailable], |agent_id| {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: stringly-typed-match
         match agent_id.as_str() {
             "zero" => Some(tau_proto::EstimatedApiCost::default()),
             "nonzero" => Some(tau_proto::EstimatedApiCost::from_picodollars(

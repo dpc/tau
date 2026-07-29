@@ -1363,8 +1363,6 @@ impl Engine {
         let account = self.account_by_id(&change.account)?;
         self.ensure_calendar_allowed(account, &change.calendar)?;
         let stored_refresh_token = self.google_refresh_token(account)?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: stringly-typed-match
         let result = match change.command.as_str() {
             "create_event" => {
                 let event = self
@@ -2160,8 +2158,6 @@ fn ensure_response_only_for_invites(args: &ChangeArgs) -> Result<(), String> {
 }
 
 fn validate_change_shape(change: &CalendarChangeApproval) -> Result<(), String> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: stringly-typed-match
     match change.command.as_str() {
         "create_event" => {
             required_change_field(change.title.as_deref(), "title")?;

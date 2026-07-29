@@ -864,8 +864,6 @@ impl Extension {
                 ..Default::default()
             }),
         });
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: stringly-typed-match
         let event = match invoke.tool_name.as_str() {
             name if name == self.tool_names.register.as_str() => self.handle_register(invoke),
             name if name == self.tool_names.send.as_str() => self.handle_send(invoke),
