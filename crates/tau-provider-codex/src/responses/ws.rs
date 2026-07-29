@@ -628,10 +628,10 @@ async fn connect_with_policy(
     let client = network
         .client_for(&websocket_url)
         .map_err(|error| tungstenite::Error::Io(std::io::Error::other(error)))?;
-    let mut outbound = client.get(&http_url).version(reqwest::Version::HTTP_11);
-    for (name, value) in request.headers() {
-        outbound = outbound.header(name, value);
-    }
+    let outbound = request.headers().iter().fold(
+        client.get(&http_url).version(reqwest::Version::HTTP_11),
+        |outbound, (name, value)| outbound.header(name, value),
+    );
     let response = outbound.send().await.map_err(|error| {
         tungstenite::Error::Io(std::io::Error::other(network.reqwest_error(
             &websocket_url,
