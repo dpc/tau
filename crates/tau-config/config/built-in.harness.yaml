@@ -1,6 +1,7 @@
 # Built-in HarnessSettings defaults. Harness-owned roles and prompt fragments
 # are provided as ordinary config so user partial overrides keep built-in fields.
 session_retention_days: 60
+diagnostic_jsonl_retention_days: 14
 extensions: {}
 tool_policy:
   rules:

@@ -1,4 +1,5 @@
 use super::*;
+use crate::harness::TerminalSettlement;
 use crate::harness::tests::dispatch::{final_tool_result, setup_routed_test_tool_call, tool_error};
 
 /// Collect terminal reports and projections for one call in commit order.
@@ -31,6 +32,97 @@ fn committed_terminal_events(
     events
 }
 
+/// Ensures exact and prefix UI subscriptions receive only payload-free result
+/// projections while non-UI peers may observe the raw generic facts.
+#[test]
+fn ui_result_subscriptions_exclude_raw_foreground_and_background_facts() {
+    let (_tmp, mut harness) = setup_routed_test_tool_call("routing-result", "owned_tool");
+    let exact = connect_test_client(&mut harness, "result-ui-exact", tau_proto::ClientKind::Ui);
+    let prefix = connect_test_client(&mut harness, "result-ui-prefix", tau_proto::ClientKind::Ui);
+    let core = connect_test_client(&mut harness, "result-core", tau_proto::ClientKind::Core);
+    harness
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("result-ui-exact"),
+            Vec::new(),
+            vec![
+                EventSelector::Exact(tau_proto::EventName::TOOL_RESULT),
+                EventSelector::Exact(tau_proto::EventName::TOOL_RESULT_DISPLAY),
+                EventSelector::Exact(tau_proto::EventName::TOOL_BACKGROUND_RESULT),
+                EventSelector::Exact(tau_proto::EventName::TOOL_BACKGROUND_RESULT_DISPLAY),
+            ],
+        )
+        .expect("exact UI subscription");
+    harness
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("result-ui-prefix"),
+            Vec::new(),
+            vec![EventSelector::Prefix("tool.".to_owned())],
+        )
+        .expect("prefix UI subscription");
+    harness
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("result-core"),
+            Vec::new(),
+            vec![
+                EventSelector::Exact(tau_proto::EventName::TOOL_RESULT),
+                EventSelector::Exact(tau_proto::EventName::TOOL_BACKGROUND_RESULT),
+            ],
+        )
+        .expect("core subscription");
+
+    let result = final_tool_result("routing-result", "owned_tool", "raw-marker");
+    let background = tau_proto::ToolBackgroundResult {
+        call_id: "routing-background".into(),
+        tool_name: ToolName::new("owned_tool"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("background-marker".to_owned()),
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+    harness.publish_event(None, Event::ToolResult(result.clone()));
+    harness.publish_event(
+        None,
+        Event::ToolResultDisplay(tau_proto::ToolResultDisplay::from(&result)),
+    );
+    harness.publish_event(None, Event::ToolBackgroundResult(background.clone()));
+    harness.publish_event(
+        None,
+        Event::ToolBackgroundResultDisplay(tau_proto::ToolBackgroundResultDisplay::from(
+            &background,
+        )),
+    );
+
+    for frames in [&exact, &prefix] {
+        let frames = frames.lock().expect("UI frames");
+        assert!(frames.iter().any(|frame| matches!(
+            peel_inner_event(&frame.frame),
+            Some(Event::ToolResultDisplay(_))
+        )));
+        assert!(frames.iter().any(|frame| matches!(
+            peel_inner_event(&frame.frame),
+            Some(Event::ToolBackgroundResultDisplay(_))
+        )));
+        assert!(frames.iter().all(|frame| !matches!(
+            peel_inner_event(&frame.frame),
+            Some(Event::ToolResult(_) | Event::ToolBackgroundResult(_))
+        )));
+    }
+    let core = core.lock().expect("core frames");
+    assert!(core.iter().any(|frame| matches!(
+        peel_inner_event(&frame.frame),
+        Some(Event::ToolResult(result))
+            if result.result == CborValue::Text("raw-marker".to_owned())
+    )));
+    assert!(core.iter().any(|frame| matches!(
+        peel_inner_event(&frame.frame),
+        Some(Event::ToolBackgroundResult(result))
+            if result.result == CborValue::Text("background-marker".to_owned())
+    )));
+}
+
 /// Register one exact interceptor for the supplied terminal event names.
 fn intercept_terminal_names(harness: &mut Harness, names: Vec<tau_proto::EventName>) {
     connect_test_tool(harness, "terminal-interceptor");
@@ -53,6 +145,117 @@ fn reply(harness: &mut Harness, action: InterceptAction) {
             TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply { action })),
         )
         .expect("resolve terminal interception");
+}
+
+/// Ownerless peer-internal results retain their dedicated correlation and
+/// accounting until the canonical provider fact clears interception.
+#[test]
+fn parked_ownerless_result_settles_once_after_canonical_commit() {
+    let (_tmp, mut harness) = setup_routed_test_tool_call("seed-owner", "owned_tool");
+    let cid = harness
+        .tool_agents
+        .remove("seed-owner")
+        .expect("seed owner");
+    let call_id = ToolCallId::from("parked-ownerless");
+    harness
+        .peer_internal_tool_agents
+        .insert(call_id.clone(), cid.clone());
+    harness.agents.get_mut(&cid).expect("agent").tools_in_flight = 1;
+    let agent_id = harness.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent id");
+    let stats_count = |harness: &Harness| {
+        event_log_events(harness)
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::AgentStatsUpdated(stats) if stats.agent_id.as_str() == agent_id
+                )
+            })
+            .count()
+    };
+    let stats_before = stats_count(&harness);
+    intercept_terminal_names(
+        &mut harness,
+        vec![tau_proto::EventName::PROVIDER_TOOL_RESULT],
+    );
+
+    harness.finish_prebuilt_internal_tool_result(final_tool_result(
+        call_id.as_str(),
+        "skill",
+        "loaded",
+    ));
+    assert!(harness.pending_intercept.is_some());
+    assert_eq!(harness.peer_internal_tool_agents.get(&call_id), Some(&cid));
+    assert!(!harness.tool_agents.contains_key(&call_id));
+    assert_eq!(harness.agents[&cid].tools_in_flight, 1);
+    assert_eq!(stats_count(&harness), stats_before);
+    assert!(committed_terminal_events(&harness, call_id.as_str()).is_empty());
+
+    reply(&mut harness, InterceptAction::Pass(None));
+
+    assert!(harness.pending_intercept.is_none());
+    assert!(!harness.peer_internal_tool_agents.contains_key(&call_id));
+    assert!(!harness.tool_agents.contains_key(&call_id));
+    assert_eq!(harness.agents[&cid].tools_in_flight, 0);
+    assert_eq!(stats_count(&harness), stats_before + 1);
+    let events = committed_terminal_events(&harness, call_id.as_str());
+    assert!(matches!(
+        events.as_slice(),
+        [(_, Event::ProviderToolResult(_)), (_, Event::ToolResult(_)),]
+    ));
+    assert_eq!(
+        event_log_events(&harness)
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Event::ToolResultDisplay(display) if display.call_id == call_id
+            ))
+            .count(),
+        1
+    );
+}
+
+/// A truly uncorrelated peer request remains live while its canonical result is
+/// parked, then clears only after commit.
+#[test]
+fn parked_uncorrelated_peer_result_clears_tracking_after_commit() {
+    let (_tmp, mut harness) = setup_routed_test_tool_call("seed-peer", "owned_tool");
+    let call_id = ToolCallId::from("parked-peer");
+    harness.peer_tool_requests.insert(call_id.clone());
+    harness.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("peer_tool"),
+            internal_name: ToolName::new("peer_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
+    intercept_terminal_names(
+        &mut harness,
+        vec![tau_proto::EventName::PROVIDER_TOOL_RESULT],
+    );
+
+    harness.handle_extension_tool_result(
+        crate::harness::harness_connection_id(),
+        final_tool_result(call_id.as_str(), "peer_tool", "done"),
+    );
+    assert!(harness.pending_intercept.is_some());
+    assert!(harness.peer_tool_requests.contains(&call_id));
+    assert!(harness.pending_tools.contains_key(&call_id));
+    assert!(committed_terminal_events(&harness, call_id.as_str()).is_empty());
+
+    reply(&mut harness, InterceptAction::Pass(None));
+
+    assert!(!harness.peer_tool_requests.contains(&call_id));
+    assert!(!harness.pending_tools.contains_key(&call_id));
+    assert!(matches!(
+        committed_terminal_events(&harness, call_id.as_str()).as_slice(),
+        [(_, Event::ProviderToolResult(_)), (_, Event::ToolResult(_)),]
+    ));
 }
 
 /// A provider-terminal append error rejects that attempt without faulting the
@@ -188,11 +391,14 @@ fn direct_append_fault_discards_deferred_terminal() {
     harness.emit_info("park nonsemantic publication");
     assert!(harness.pending_intercept.is_some());
 
-    assert!(harness.publish_terminal_tool_result(
-        Some(&cid),
-        None,
-        final_tool_result("deferred-fault", "owned_tool", "deferred"),
-    ));
+    assert_eq!(
+        harness.publish_terminal_tool_result(
+            Some(&cid),
+            None,
+            final_tool_result("deferred-fault", "owned_tool", "deferred"),
+        ),
+        TerminalSettlement::PostCommit
+    );
     assert_eq!(harness.deferred_publishes.len(), 1);
 
     let journal = harness
@@ -220,6 +426,26 @@ fn direct_append_fault_discards_deferred_terminal() {
         None,
         final_tool_result("ownerless-after-fault", "ownerless", "live"),
     );
+    let ordered = event_log_events(&harness)
+        .into_iter()
+        .filter(|event| match event {
+            Event::ProviderToolResult(result) | Event::ToolResult(result) => {
+                result.call_id.as_str() == "ownerless-after-fault"
+            }
+            Event::ToolResultDisplay(result) => result.call_id.as_str() == "ownerless-after-fault",
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        ordered.as_slice(),
+        [
+            Event::ProviderToolResult(provider),
+            Event::ToolResult(generic),
+            Event::ToolResultDisplay(display),
+        ] if provider.result == CborValue::Text("live".to_owned())
+            && generic.result == provider.result
+            && display.call_id == provider.call_id
+    ));
     harness.publish_event(
         None,
         Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
@@ -237,6 +463,23 @@ fn direct_append_fault_discards_deferred_terminal() {
         Event::ProviderToolResult(result)
             if result.call_id.as_str() == "ownerless-after-fault"
     )));
+    let display = event_log_events(&harness)
+        .into_iter()
+        .find(|event| {
+            matches!(
+                event,
+                Event::ToolResultDisplay(result)
+                    if result.call_id.as_str() == "ownerless-after-fault"
+            )
+        })
+        .expect("ownerless result publishes a UI display projection");
+    let encoded = tau_proto::encode_message_to_vec(&display).expect("encode display event");
+    assert!(
+        !encoded
+            .windows(b"live".len())
+            .any(|window| window == b"live"),
+        "UI display projection must not contain the raw result marker"
+    );
     assert!(event_log_events(&harness).iter().any(|event| matches!(
         event,
         Event::ToolBackgroundError(error)

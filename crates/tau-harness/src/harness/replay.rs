@@ -884,11 +884,14 @@ pub(super) fn project_agent_replay_event(event: Event, is_ui: bool) -> Event {
         Event::ProviderToolResult(mut result) => {
             result.provider_content.clear();
             if is_ui {
-                Event::ToolResult(result)
+                Event::ToolResultDisplay(tau_proto::ToolResultDisplay::from(&result))
             } else {
                 Event::ProviderToolResult(result)
             }
         }
+        Event::ToolBackgroundResult(result) if is_ui => Event::ToolBackgroundResultDisplay(
+            tau_proto::ToolBackgroundResultDisplay::from(&result),
+        ),
         Event::AgentCompacted(mut compacted) => {
             tau_proto::clear_context_items_provider_image_bytes(&mut compacted.replacement_window);
             Event::AgentCompacted(compacted)

@@ -10,7 +10,12 @@ fn chat_subscription_uses_prompt_started_not_prompt_created() {
     assert!(selectors.contains(&EventSelector::Exact(EventName::AGENT_PROMPT_STARTED)));
     assert!(!selectors.contains(&EventSelector::Exact(EventName::AGENT_PROMPT_CREATED)));
     assert!(!selectors.contains(&EventSelector::Exact(EventName::PROVIDER_TOOL_RESULT)));
-    assert!(selectors.contains(&EventSelector::Exact(EventName::TOOL_RESULT)));
+    assert!(selectors.contains(&EventSelector::Exact(EventName::TOOL_RESULT_DISPLAY)));
+    assert!(!selectors.contains(&EventSelector::Exact(EventName::TOOL_RESULT)));
+    assert!(selectors.contains(&EventSelector::Exact(
+        EventName::TOOL_BACKGROUND_RESULT_DISPLAY
+    )));
+    assert!(!selectors.contains(&EventSelector::Exact(EventName::TOOL_BACKGROUND_RESULT)));
     assert!(!selectors.contains(&EventSelector::Exact(EventName::AGENT_STATE)));
     assert!(!selectors.contains(&EventSelector::Prefix("agent.".to_owned())));
 }
@@ -58,7 +63,8 @@ fn chat_subscription_keeps_runtime_side_effects_live_only() {
 
     for event in [
         EventName::PROVIDER_RESPONSE_FINISHED,
-        EventName::TOOL_RESULT,
+        EventName::TOOL_RESULT_DISPLAY,
+        EventName::TOOL_BACKGROUND_RESULT_DISPLAY,
         EventName::TOOL_ERROR,
     ] {
         let selector = EventSelector::Exact(event);

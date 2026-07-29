@@ -287,12 +287,10 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         ephemeral: true,
     };
 
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id("ui-test"),
-        message: Box::new(tau_proto::HarnessInputMessage::emit(Event::UiCreateAgent(
-            request,
-        ))),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("ui-test"),
+        tau_proto::HarnessInputMessage::emit(Event::UiCreateAgent(request)),
+    ));
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         literal: false,
         session_id: "s1"
@@ -368,13 +366,10 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         progress: None,
         display: None,
     });
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id(progress_owner),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_with_persist(
-            progress_report.clone(),
-            false,
-        )),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id(progress_owner),
+        tau_proto::HarnessInputMessage::emit_with_persist(progress_report.clone(), false),
+    ));
     h.handle_extension_event_inner(&crate::test_connection_id(progress_owner), progress_report)
         .expect("commit ephemeral tool progress report");
     let terminal_report = Event::ToolResultReported(ToolResult {
@@ -387,13 +382,10 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         display: None,
         originator: tau_proto::PromptOriginator::User,
     });
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id(progress_owner),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_with_persist(
-            terminal_report.clone(),
-            false,
-        )),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id(progress_owner),
+        tau_proto::HarnessInputMessage::emit_with_persist(terminal_report.clone(), false),
+    ));
     h.handle_extension_event_inner(&crate::test_connection_id(progress_owner), terminal_report)
         .expect("commit ephemeral terminal tool report");
     let message_fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
@@ -409,10 +401,10 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         None,
         "message-debug-secret",
     ));
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id("bridge-connection"),
-        message: Box::new(tau_proto::HarnessInputMessage::emit(message_fact.clone())),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("bridge-connection"),
+        tau_proto::HarnessInputMessage::emit(message_fact.clone()),
+    ));
     h.commit_message_fact(
         Some(&crate::test_connection_id("bridge-connection")),
         message_fact,
@@ -463,12 +455,10 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         agent_prompt_id: provider_prompt_id.clone(),
         originator: tau_proto::PromptOriginator::User,
     });
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id(provider),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
-            submitted.clone(),
-        )),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id(provider),
+        tau_proto::HarnessInputMessage::emit_transient(submitted.clone()),
+    ));
     h.handle_extension_event_inner(&crate::test_connection_id(provider), submitted)
         .expect("commit ephemeral submitted report");
     let update = Event::ProviderResponseUpdatedReported(tau_proto::ProviderResponseUpdated {
@@ -484,12 +474,10 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     });
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id(provider),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
-            update.clone(),
-        )),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id(provider),
+        tau_proto::HarnessInputMessage::emit_transient(update.clone()),
+    ));
     h.handle_extension_event_inner(&crate::test_connection_id(provider), update)
         .expect("commit ephemeral update report");
     let cache =
@@ -505,12 +493,10 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
             cacheable_input_tokens: 1,
             corrected_cache_efficiency: 0.0,
         });
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id(provider),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
-            cache.clone(),
-        )),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id(provider),
+        tau_proto::HarnessInputMessage::emit_transient(cache.clone()),
+    ));
     h.handle_extension_event_inner(&crate::test_connection_id(provider), cache)
         .expect("commit ephemeral cache report");
     let retry_result =
@@ -519,12 +505,10 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
             agent_prompt_id: provider_prompt_id.clone(),
             status: tau_proto::RetryPromptStatus::Accepted,
         });
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id(provider),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
-            retry_result.clone(),
-        )),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id(provider),
+        tau_proto::HarnessInputMessage::emit_transient(retry_result.clone()),
+    ));
     h.handle_extension_event_inner(&crate::test_connection_id(provider), retry_result.clone())
         .expect("commit ephemeral retry report");
     let finished =
@@ -535,28 +519,22 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         ));
     h.remove_agent(&cid);
     assert!(!h.agents.contains_key(&cid));
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id(provider),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
-            finished.clone(),
-        )),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id(provider),
+        tau_proto::HarnessInputMessage::emit_transient(finished.clone()),
+    ));
     h.handle_extension_event_inner(&crate::test_connection_id(provider), finished.clone())
         .expect("commit ephemeral finished report");
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id(provider),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
-            finished.clone(),
-        )),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id(provider),
+        tau_proto::HarnessInputMessage::emit_transient(finished.clone()),
+    ));
     h.handle_extension_event_inner(&crate::test_connection_id(provider), finished)
         .expect("commit late ephemeral finished report");
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id(provider),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_transient(
-            retry_result.clone(),
-        )),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id(provider),
+        tau_proto::HarnessInputMessage::emit_transient(retry_result.clone()),
+    ));
     h.handle_extension_event_inner(&crate::test_connection_id(provider), retry_result)
         .expect("commit duplicate ephemeral retry report");
     let duplicate_terminal_report = Event::ToolResultReported(ToolResult {
@@ -569,13 +547,10 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         display: None,
         originator: tau_proto::PromptOriginator::User,
     });
-    h.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id(progress_owner),
-        message: Box::new(tau_proto::HarnessInputMessage::emit_with_persist(
-            duplicate_terminal_report.clone(),
-            false,
-        )),
-    });
+    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id(progress_owner),
+        tau_proto::HarnessInputMessage::emit_with_persist(duplicate_terminal_report.clone(), false),
+    ));
     h.handle_extension_event_inner(
         &crate::test_connection_id(progress_owner),
         duplicate_terminal_report,

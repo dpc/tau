@@ -1250,6 +1250,39 @@ pub type DecodeError = ciborium::de::Error<std::io::Error>;
 /// activation quotas can apply.
 pub const MAX_PROTOCOL_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Encoded byte count for one complete protocol message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProtocolMessageBytes {
+    /// Nonzero size of the complete encoded message.
+    bytes: std::num::NonZeroU64,
+}
+
+impl ProtocolMessageBytes {
+    /// Construct a nonzero count observed by the protocol codec.
+    #[must_use]
+    pub const fn new(bytes: u64) -> Option<Self> {
+        match std::num::NonZeroU64::new(bytes) {
+            Some(bytes) => Some(Self { bytes }),
+            None => None,
+        }
+    }
+
+    /// Return the observed encoded byte count.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.bytes.get()
+    }
+}
+
+/// One decoded protocol message with its observed encoded size.
+#[derive(Debug, Eq, PartialEq)]
+pub struct DecodedMessage<M> {
+    /// Decoded directionally typed message.
+    pub message: M,
+    /// Bytes consumed while decoding this exact message.
+    pub encoded_bytes: ProtocolMessageBytes,
+}
+
 // ---------------------------------------------------------------------------
 // Codec
 // ---------------------------------------------------------------------------
@@ -1462,11 +1495,48 @@ where
 {
     /// Writes one protocol message to the stream.
     pub fn write_message(&mut self, message: &M) -> Result<(), EncodeError> {
-        encode_message(&mut self.inner, message)
+        self.write_message_with_size(message).map(|_| ())
+    }
+
+    /// Writes one protocol message and returns the encoded bytes written.
+    ///
+    /// The count is collected by the real serialization write rather than a
+    /// separate accounting-only encoding.
+    pub fn write_message_with_size(
+        &mut self,
+        message: &M,
+    ) -> Result<ProtocolMessageBytes, EncodeError> {
+        let mut writer = CountingWriter {
+            inner: &mut self.inner,
+            bytes: 0,
+        };
+        encode_message(&mut writer, message)?;
+        Ok(ProtocolMessageBytes::new(writer.bytes)
+            .expect("a complete encoded CBOR message is nonempty"))
     }
 
     /// Flushes the wrapped writer.
     pub fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Writer adapter that counts bytes accepted by the underlying transport.
+struct CountingWriter<W> {
+    /// Real protocol destination.
+    inner: W,
+    /// Bytes successfully written through the adapter.
+    bytes: u64,
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        self.bytes = self.bytes.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
 }
@@ -1509,6 +1579,16 @@ where
     /// Returns `Err` only for actual corruption, wrong-direction payloads, or
     /// truncated data.
     pub fn read_message(&mut self) -> Result<Option<M>, DecodeError> {
+        self.read_message_with_size()
+            .map(|decoded| decoded.map(|decoded| decoded.message))
+    }
+
+    /// Reads one protocol message and returns its consumed encoded byte size.
+    ///
+    /// The size comes from the same bounded reader that decodes the message, so
+    /// callers can account for transport bytes without encoding the decoded
+    /// value again.
+    pub fn read_message_with_size(&mut self) -> Result<Option<DecodedMessage<M>>, DecodeError> {
         // Peek one byte to distinguish clean EOF from a real read; if none is
         // available, the stream is at a message boundary.
         match std::io::BufRead::fill_buf(&mut self.inner) {
@@ -1529,7 +1609,13 @@ where
                 ),
             )));
         }
-        decoded.map(Some)
+        decoded.map(|message| {
+            Some(DecodedMessage {
+                message,
+                encoded_bytes: ProtocolMessageBytes::new(consumed)
+                    .expect("a decoded CBOR message consumes at least one byte"),
+            })
+        })
     }
 }
 

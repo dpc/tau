@@ -387,12 +387,10 @@ fn intercepted_route_replacement_cannot_leak_ephemeral_report_to_debug_jsonl() {
             replacement_secret,
         )))),
     };
-    harness.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id("interceptor"),
-        message: Box::new(tau_proto::HarnessInputMessage::InterceptReply(
-            reply.clone(),
-        )),
-    });
+    harness.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("interceptor"),
+        tau_proto::HarnessInputMessage::InterceptReply(reply.clone()),
+    ));
     harness
         .handle_extension_event(
             "interceptor",
@@ -475,12 +473,10 @@ fn multi_interceptor_replacements_keep_raw_reply_ephemeral_suppression() {
             first_secret,
         )))),
     };
-    harness.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id("interceptor-a"),
-        message: Box::new(tau_proto::HarnessInputMessage::InterceptReply(
-            first_reply.clone(),
-        )),
-    });
+    harness.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("interceptor-a"),
+        tau_proto::HarnessInputMessage::InterceptReply(first_reply.clone()),
+    ));
     harness
         .handle_extension_event(
             "interceptor-a",
@@ -496,12 +492,10 @@ fn multi_interceptor_replacements_keep_raw_reply_ephemeral_suppression() {
             second_secret,
         )))),
     };
-    harness.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id("interceptor-b"),
-        message: Box::new(tau_proto::HarnessInputMessage::InterceptReply(
-            second_reply.clone(),
-        )),
-    });
+    harness.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("interceptor-b"),
+        tau_proto::HarnessInputMessage::InterceptReply(second_reply.clone()),
+    ));
     harness
         .handle_extension_event(
             "interceptor-b",
@@ -561,12 +555,10 @@ fn canonical_shell_replacement_target_cannot_suppress_raw_reply_audit() {
             },
         )))),
     };
-    harness.log_event(&crate::event::HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id("interceptor"),
-        message: Box::new(tau_proto::HarnessInputMessage::InterceptReply(
-            reply.clone(),
-        )),
-    });
+    harness.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("interceptor"),
+        tau_proto::HarnessInputMessage::InterceptReply(reply.clone()),
+    ));
     harness
         .handle_extension_event(
             "interceptor",

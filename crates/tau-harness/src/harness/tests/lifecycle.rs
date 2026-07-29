@@ -190,6 +190,7 @@ fn drive_crashed_extension_cleanup(
             HarnessEvent::FromConnection {
                 connection_id,
                 message,
+                frame_bytes: _,
             } => h
                 .handle_extension_message(&connection_id, *message)
                 .expect("extension message"),
@@ -545,10 +546,10 @@ fn tree_request_returns_one_directed_multiline_notice() {
         .enable_debug_log(&td.path().join("debug"))
         .expect("enable debug log");
     let baseline_seq = h.event_log.next_seq();
-    let event = HarnessEvent::FromConnection {
-        connection_id: requesting_ui_id,
-        message: Box::new(tree_request("s1", Some(agent_id.as_str()))),
-    };
+    let event = HarnessEvent::from_connection_for_test(
+        requesting_ui_id,
+        tree_request("s1", Some(agent_id.as_str())),
+    );
     h.log_event(&event);
 
     let mut served_clients = 0;
@@ -650,10 +651,7 @@ fn tree_request_is_silently_denied_for_other_client_origins() {
         let mut exit_on_disconnect = false;
         let mut ever_attached = false;
         h.handle_runtime_event(
-            HarnessEvent::FromConnection {
-                connection_id,
-                message: Box::new(tree_request("s1", None)),
-            },
+            HarnessEvent::from_connection_for_test(connection_id, tree_request("s1", None)),
             &mut served_clients,
             &mut exit_on_disconnect,
             &mut ever_attached,
@@ -771,10 +769,7 @@ fn detach_request_controls_runtime_without_publication() {
     let (ui_id, mut ui) = connect_socket_ui(&mut h);
     let (_observer_id, mut observer) = connect_socket_ui(&mut h);
     let baseline_seq = h.event_log.next_seq();
-    let event = HarnessEvent::FromConnection {
-        connection_id: ui_id,
-        message: Box::new(detach_request()),
-    };
+    let event = HarnessEvent::from_connection_for_test(ui_id, detach_request());
     h.log_event(&event);
 
     let mut served_clients = 0;
@@ -877,10 +872,7 @@ fn detach_request_is_silently_denied_for_other_client_origins() {
         let mut exit_on_disconnect = true;
         let mut ever_attached = false;
         h.handle_runtime_event(
-            HarnessEvent::FromConnection {
-                connection_id,
-                message: Box::new(detach_request()),
-            },
+            HarnessEvent::from_connection_for_test(connection_id, detach_request()),
             &mut served_clients,
             &mut exit_on_disconnect,
             &mut ever_attached,
@@ -1024,10 +1016,10 @@ fn debug_event_stats_request_is_directed_to_requesting_ui() {
     let mut exit_on_disconnect = false;
     let mut ever_attached = false;
     h.handle_runtime_event(
-        HarnessEvent::FromConnection {
-            connection_id: requesting_ui_id,
-            message: Box::new(debug_event_stats_request("std-shell")),
-        },
+        HarnessEvent::from_connection_for_test(
+            requesting_ui_id,
+            debug_event_stats_request("std-shell"),
+        ),
         &mut served_clients,
         &mut exit_on_disconnect,
         &mut ever_attached,
@@ -1112,10 +1104,10 @@ fn debug_event_stats_request_rejects_unauthorized_ui_origin() {
     let mut exit_on_disconnect = false;
     let mut ever_attached = false;
     h.handle_runtime_event(
-        HarnessEvent::FromConnection {
-            connection_id: crate::test_connection_id("ui"),
-            message: Box::new(debug_event_stats_request("secret-ext")),
-        },
+        HarnessEvent::from_connection_for_test(
+            crate::test_connection_id("ui"),
+            debug_event_stats_request("secret-ext"),
+        ),
         &mut served_clients,
         &mut exit_on_disconnect,
         &mut ever_attached,
@@ -1219,10 +1211,10 @@ fn debug_event_stats_request_is_ignored_from_configured_extensions() {
     );
 
     let notice_count = h.replayable_harness_notices.len();
-    let event = HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id("requester"),
-        message: Box::new(debug_event_stats_request("secret-ext")),
-    };
+    let event = HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("requester"),
+        debug_event_stats_request("secret-ext"),
+    );
     h.log_event(&event);
     let mut served_clients = 0;
     let mut exit_on_disconnect = false;
@@ -1270,10 +1262,10 @@ fn debug_event_stats_request_is_not_staged_for_handshaking_extensions() {
         .expect("enable debug log");
     let requester = connect_handshaking_tool(&mut h, "requester");
     let notice_count = h.replayable_harness_notices.len();
-    let event = HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id("requester"),
-        message: Box::new(debug_event_stats_request("secret-ext")),
-    };
+    let event = HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("requester"),
+        debug_event_stats_request("secret-ext"),
+    );
     h.log_event(&event);
     let mut served_clients = 0;
     let mut exit_on_disconnect = false;
@@ -7328,12 +7320,12 @@ fn explicit_socket_disconnect_cleans_client_writer_and_bus_state() {
     assert!(h.bus.connection(&socket_conn).is_some());
     assert!(h.client_writers.contains_key(&socket_conn));
 
-    h.tx.send(HarnessEvent::FromConnection {
-        connection_id: socket_conn.clone(),
-        message: Box::new(HarnessInputMessage::Disconnect(Disconnect {
+    h.tx.send(HarnessEvent::from_connection_for_test(
+        socket_conn.clone(),
+        HarnessInputMessage::Disconnect(Disconnect {
             reason: Some("test explicit disconnect".to_owned()),
-        })),
-    })
+        }),
+    ))
     .expect("queue explicit disconnect");
 
     h.run_event_loop(Some(1), false).expect("event loop exits");

@@ -628,13 +628,10 @@ fn debug_jsonl_keeps_request_and_published_output_separate() {
     let debug_path = harness
         .enable_debug_log(&temp.path().join("debug"))
         .expect("enable debug log");
-    let event = HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id("publisher"),
-        message: Box::new(notice_request(
-            "debug separation",
-            tau_proto::NoticeLevel::Debug,
-        )),
-    };
+    let event = HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("publisher"),
+        notice_request("debug separation", tau_proto::NoticeLevel::Debug),
+    );
     harness.log_event(&event);
     let mut served_clients = 0;
     let mut exit_on_disconnect = false;

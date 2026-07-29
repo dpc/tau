@@ -217,9 +217,9 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         // it does not consume `tool.request`.
         EventSelector::Exact(E::TOOL_STARTED),
         EventSelector::Exact(E::TOOL_REJECTED),
-        EventSelector::Exact(E::TOOL_RESULT),
+        EventSelector::Exact(E::TOOL_RESULT_DISPLAY),
         EventSelector::Exact(E::TOOL_ERROR),
-        EventSelector::Exact(E::TOOL_BACKGROUND_RESULT),
+        EventSelector::Exact(E::TOOL_BACKGROUND_RESULT_DISPLAY),
         EventSelector::Exact(E::TOOL_BACKGROUND_ERROR),
         EventSelector::Exact(E::TOOL_PROGRESS),
         EventSelector::Exact(E::TOOL_CANCELLED),

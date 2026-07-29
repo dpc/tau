@@ -214,6 +214,24 @@ fn zero_session_retention_disables_cleanup() {
     assert_eq!(settings.session_retention(), None);
 }
 
+/// Ensures non-authoritative JSONL cleanup defaults to fourteen days and can be
+/// disabled independently from whole-session retention.
+#[test]
+fn diagnostic_jsonl_retention_has_independent_default_and_disable() {
+    let built_in = HarnessSettings::built_in();
+    assert_eq!(built_in.diagnostic_jsonl_retention_days, 14);
+    assert_eq!(
+        built_in.diagnostic_jsonl_retention(),
+        Some(std::time::Duration::from_secs(14 * 24 * 60 * 60))
+    );
+
+    let disabled = HarnessSettings {
+        diagnostic_jsonl_retention_days: 0,
+        ..built_in
+    };
+    assert_eq!(disabled.diagnostic_jsonl_retention(), None);
+}
+
 /// Ensures tag policy patterns support exact and terminal-prefix matching while
 /// rejecting middle globs that would make policy behavior ambiguous.
 #[test]
@@ -1219,6 +1237,7 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
         dir.join("harness.yaml"),
         r#"{
             session_retention_days: 7,
+            diagnostic_jsonl_retention_days: 9,
             extensions: {
                 "core-shell": { config: { working_directory: "/from-file" } },
                 "std-websearch": { enable: true },
@@ -1227,8 +1246,14 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     )
     .expect("write");
 
+    let file_settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load file layer");
+    assert_eq!(file_settings.session_retention_days, 7);
+    assert_eq!(file_settings.diagnostic_jsonl_retention_days, 9);
+
     let overrides = [
         HarnessConfigCliOverride::from_str("session_retention_days=3").expect("override"),
+        HarnessConfigCliOverride::from_str("diagnostic_jsonl_retention_days=0")
+            .expect("diagnostic override"),
         HarnessConfigCliOverride::from_str(
             "extensions.core-shell.config.working_directory=/from-cli",
         )
@@ -1245,6 +1270,8 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
         .expect("load");
 
     assert_eq!(s.session_retention_days, 3);
+    assert_eq!(s.diagnostic_jsonl_retention_days, 0);
+    assert_eq!(s.diagnostic_jsonl_retention(), None);
     let core_shell = &s.extensions["core-shell"];
     assert_eq!(
         core_shell.config.as_ref().and_then(|config| {

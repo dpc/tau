@@ -111,8 +111,9 @@ normal subscribers. The harness overrides `drop` for must-pass events and
 publishes the original event instead. Current default must-pass events include
 user input and prompt lifecycle facts; agent response facts
 (`provider.response_finished`); terminal tool completion facts (`tool.result`,
-`tool.error`, `provider.tool_result`, `provider.tool_error`, `tool.cancelled`,
-`tool.background_result`, and `tool.background_error`); validated user-shell
+`tool.result_display`, `tool.error`, `provider.tool_result`,
+`provider.tool_error`, `tool.cancelled`, `tool.background_result`,
+`tool.background_result_display`, and `tool.background_error`); validated user-shell
 terminal facts (`shell.command_finished`); session lifecycle facts; durable
 session membership facts; `agent.started`; and harness-owned agent message
 projections. Canonical external `message.*` facts are also protected; their
@@ -137,7 +138,8 @@ replacement must have the same event type as the original; if it does not, the
 harness logs a warning and falls back to the original event. Some same-type
 replacements are also rejected to preserve immutable facts. For mandatory
 warning/critical `harness.notice` diagnostics, immutable prompt lifecycle facts,
-`provider.response_finished`, terminal tool completion facts, session
+`provider.response_finished`, terminal tool completion facts including the
+payload-free result display projections, session
 lifecycle/membership facts, `agent.started`, and harness-owned agent message
 projections, canonical external `message.*` facts, and
 `shell.command_finished`, the harness publishes the original event instead. For mutable

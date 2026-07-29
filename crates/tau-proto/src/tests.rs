@@ -950,6 +950,14 @@ fn representative_events() -> Vec<Event> {
             display: None,
             originator: PromptOriginator::User,
         }),
+        Event::ToolResultDisplay(ToolResultDisplay {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("echo"),
+            tool_type: ToolType::Function,
+            kind: ToolResultKind::Final,
+            display: None,
+            originator: PromptOriginator::User,
+        }),
         Event::ToolErrorReported(ToolError {
             call_id: "call-1".into(),
             tool_name: ToolName::new("missing_tool"),
@@ -973,6 +981,13 @@ fn representative_events() -> Vec<Event> {
             tool_name: ToolName::new("slow_echo"),
             tool_type: ToolType::Function,
             result: CborValue::Text("done".to_owned()),
+            display: None,
+            originator: PromptOriginator::User,
+        }),
+        Event::ToolBackgroundResultDisplay(ToolBackgroundResultDisplay {
+            call_id: "call-bg".into(),
+            tool_name: ToolName::new("slow_echo"),
+            tool_type: ToolType::Function,
             display: None,
             originator: PromptOriginator::User,
         }),
@@ -2469,6 +2484,8 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::ToolErrorReported(_)
                 | Event::ToolCancelledReported(_)
                 | Event::ToolCancelled(_)
+                | Event::ToolResultDisplay(_)
+                | Event::ToolBackgroundResultDisplay(_)
                 | Event::ProviderModelsDeclared(_)
                 | Event::ProviderModelsUpdated(_)
                 | Event::ProviderPromptSubmittedReported(_)
@@ -2632,6 +2649,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "term.osc1337_set_user_var",
         "tool.background_error",
         "tool.background_result",
+        "tool.background_result_display",
         "tool.cancel_request",
         "tool.cancelled",
         "tool.cancelled_reported",
@@ -2645,6 +2663,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "tool.rejected",
         "tool.request",
         "tool.result",
+        "tool.result_display",
         "tool.result_reported",
         "tool.started",
         "tool.unregistration_declared",
@@ -3048,6 +3067,59 @@ fn multiple_directional_messages_can_share_one_stream() {
     }
 
     assert_eq!(decoded, messages);
+}
+
+/// Ensures streaming codec byte accounting reuses the real encode/decode work
+/// and attributes each back-to-back item independently.
+#[test]
+fn directional_message_codec_reports_actual_item_sizes() {
+    let messages = representative_output_messages();
+    let mut writer = HarnessOutputWriter::new(Vec::new());
+    let encoded_sizes = messages
+        .iter()
+        .map(|message| {
+            writer
+                .write_message_with_size(message)
+                .expect("output message should encode")
+        })
+        .collect::<Vec<_>>();
+    let bytes = writer.into_inner();
+    assert_eq!(
+        encoded_sizes.iter().map(|bytes| bytes.get()).sum::<u64>(),
+        bytes.len() as u64
+    );
+
+    let mut reader = HarnessOutputReader::new(std::io::Cursor::new(bytes));
+    let decoded = messages
+        .iter()
+        .map(|_| {
+            reader
+                .read_message_with_size()
+                .expect("read should succeed")
+                .expect("message should arrive")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        decoded
+            .iter()
+            .map(|decoded| &decoded.message)
+            .collect::<Vec<_>>(),
+        messages.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        decoded
+            .iter()
+            .map(|decoded| decoded.encoded_bytes)
+            .collect::<Vec<_>>(),
+        encoded_sizes
+    );
+    assert!(
+        reader
+            .read_message_with_size()
+            .expect("clean EOF should succeed")
+            .is_none()
+    );
 }
 
 /// Ensures extension-defined events cannot spoof first-party event categories
@@ -3692,12 +3764,17 @@ fn terminal_tool_reports_and_canonical_facts_have_distinct_wire_names() {
         tool_name: ToolName::new("owned_tool"),
         tool_type: ToolType::Function,
     };
+    let result_display = ToolResultDisplay::from(&result);
     for (event, expected) in [
         (
             Event::ToolResultReported(result.clone()),
             "tool.result_reported",
         ),
         (Event::ToolResult(result), "tool.result"),
+        (
+            Event::ToolResultDisplay(result_display),
+            "tool.result_display",
+        ),
         (
             Event::ToolErrorReported(error.clone()),
             "tool.error_reported",

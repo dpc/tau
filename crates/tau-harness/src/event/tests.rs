@@ -38,6 +38,7 @@ fn extension_reader_waits_for_initialized_ack() {
         HarnessEvent::FromConnection {
             connection_id,
             message,
+            frame_bytes: _,
         } => {
             assert_eq!(connection_id.as_str(), "conn-test");
             assert!(matches!(

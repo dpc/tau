@@ -120,8 +120,9 @@ harness-sourced `tool.progress`; see
 They submit terminal result, error, and cancellation reports through the same
 generic commit boundary. The post-commit consumer revalidates the captured live
 generation and exact routed-call owner before applying existing terminal
-processing and publishing protected harness-sourced terminal, provider, or
-background projections; see
+processing and publishing protected harness-sourced terminal or provider facts.
+Successful provider and background facts then produce distinct payload-free UI
+display events in both live and replay paths; see
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 Configured Tool/Core shell providers likewise submit
 `shell.command_progress_reported` and `shell.command_finished_reported` through
@@ -152,6 +153,9 @@ No harness lifecycle owns, drains, joins, or fsyncs this worker. Authoritative
 CBOR journals never use its queue or lock; they use a separate lifecycle-owned
 coalesced sync worker under
 [SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
+Startup separately runs one best-effort, time-based cleanup of expired session
+`events.jsonl` files, defaulting to fourteen days while excluding current or
+locked sessions and all canonical journals.
 
 Configured Provider execution uses the same generic commit boundary. Five `_reported`
 observations commit before exact generation and prompt/retry correlation; the harness

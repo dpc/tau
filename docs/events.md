@@ -430,13 +430,16 @@ agent requests, and harness dispatch. The registration lifecycle contract is
   explicitly image-capable tool on an image-capable selected provider route may
   submit typed image content. A committed report is not itself accepted
   completion.
-- **`tool.result`** *(harness)* — Protected canonical renderer-facing successful
-  logical runtime tool completion, by call id, with tool-owned `result`, optional
-  UI `display` metadata, and echoed originator. Canonical `tool.result` always
-  omits `provider_content`; the protected `provider.tool_result` transcript fact
-  retains validated typed provider content. Debug projections clear provider
-  image bytes. The canonical event uses the harness source and cannot be
-  rewritten or dropped.
+- **`tool.result_display`** *(harness)* — Protected lightweight
+  renderer-facing successful completion. It carries call/tool identity, result
+  kind, optional generic `display` metadata, and originator, but no raw result or
+  provider content. The protected `provider.tool_result` transcript fact retains
+  the full validated result. Live publication follows the canonical provider
+  commit, and UI replay derives the same display shape from that durable fact.
+- **`tool.result`** *(harness)* — Protected transient full-result projection for
+  non-UI generic consumers. It retains the tool-owned raw result while clearing
+  provider content. Interactive UIs subscribe to `tool.result_display` instead;
+  the durable transcript authority remains `provider.tool_result`.
 - **`tool.error_reported`** *(Tool/Core extension)* — Transient peer
   observation of logical failure. It has the same generic commit and downstream
   route/generation validation boundary as `tool.result_reported`.
@@ -445,15 +448,21 @@ agent requests, and harness dispatch. The registration lifecycle contract is
   use `provider.tool_error`. The raw renderer fact remains outside semantic
   history.
 - **`tool.background_result`** / **`tool.background_error`** *(harness)* —
-  Logical notification that a backgrounded tool later completed for real.
-  The earlier synthetic placeholder is provider-facing only and is not
-  emitted as `tool.result`. Once a call has emitted a background placeholder,
+  Protected full-result notification for non-UI consumers when a backgrounded
+  tool later completes for real. UI clients receive the separate display
+  projection below. The earlier synthetic provider placeholder also produces
+  `tool.result` and `tool.result_display` projections after its canonical
+  `provider.tool_result` commit. Once a call has emitted a background placeholder,
   harness-forced cancellation or teardown also completes it through
   `tool.background_error` (and wait background-completion state), not through a
   second transcript-terminal `tool.cancelled`. Only one real background
   completion is valid for a `call_id`: once either `tool.background_result` or
   `tool.background_error` has been recorded, later background completion events
   for that id are rejected during both live append and durable replay.
+- **`tool.background_result_display`** *(harness)* — Lightweight UI projection
+  emitted after a canonical `tool.background_result` commit and derived the same
+  way during UI replay. It omits the raw successful background output; UI clients
+  do not receive `tool.background_result`.
 - **`tool.progress_reported`** *(Tool/Core extension)* — Transient peer
   observation of in-flight progress with an optional message, current/total
   counters, and/or complete display state. Tool providers should usually submit

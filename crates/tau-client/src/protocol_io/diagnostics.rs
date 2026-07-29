@@ -11,7 +11,7 @@ use tau_proto::{
 };
 
 use super::{
-    ProtocolIoFrameStats, message_len, record_frame_bounded, sorted_protocol_io_frame_stats,
+    ProtocolIoFrameStats, record_frame_bounded, sorted_protocol_io_frame_stats,
     total_protocol_io_frame_stats,
 };
 
@@ -66,69 +66,49 @@ struct DeliveryScope {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum MeasurementKind {
     /// Complete encoded harness-to-peer frame.
-    EncodedFrame,
-    /// Bare event without its delivery envelope.
-    FullEvent,
-    /// Raw successful tool result field.
-    RawResult,
-    /// Non-empty provider-visible tool content.
-    ProviderContent,
+    Encoded,
     /// Complete frame for a result with no provider content.
-    ProviderContentMissingFrame,
+    ProviderContentMissing,
     /// Complete frame for a result carrying provider content.
-    ProviderContentPresentFrame,
-    /// Present tool display state.
-    Display,
+    ProviderContentPresent,
+    /// Complete frame for a result carrying display state.
+    DisplayPresent,
     /// Complete frame for a result with no display state.
-    DisplayMissingFrame,
-    /// Authoritative typed final-response output projection.
-    SemanticOutputProjection,
-    /// Sum of independently encoded provider replay sidecars.
-    ProviderReplaySidecarsSummed,
-    /// Final-response event with output items removed.
-    MetadataOnlyEvent,
+    DisplayMissing,
     /// Complete observed stats or quota frame.
-    ObservedFrame,
+    Observed,
     /// Exact stats repeat within one loaded-agent epoch and traffic scope.
-    ExactDuplicateWithinLoadedEpochFrame,
+    ExactDuplicateWithinLoadedEpoch,
     /// Changed stats snapshot within one loaded-agent epoch and traffic scope.
-    ChangedWithinLoadedEpochFrame,
+    ChangedWithinLoadedEpoch,
     /// First stats snapshot in one loaded-agent epoch and traffic scope.
-    InitialLoadedEpochFrame,
+    InitialLoadedEpoch,
     /// Exact quota snapshot repeat within one traffic scope.
-    ExactDuplicateFrame,
+    ExactDuplicate,
     /// Quota snapshot differing only by sequence.
-    SequenceOnlyChangeFrame,
+    SequenceOnlyChange,
     /// Quota snapshot with a substantive state change.
-    SubstantiveChangeFrame,
+    SubstantiveChange,
     /// First quota snapshot for one provider and traffic scope.
-    InitialSnapshotFrame,
+    InitialSnapshot,
 }
 
 impl MeasurementKind {
     fn label(self) -> &'static str {
         match self {
-            Self::EncodedFrame => "encoded-frame",
-            Self::FullEvent => "full-event",
-            Self::RawResult => "raw-result",
-            Self::ProviderContent => "provider-content",
-            Self::ProviderContentMissingFrame => "provider-content-missing-frame",
-            Self::ProviderContentPresentFrame => "provider-content-present-frame",
-            Self::Display => "display",
-            Self::DisplayMissingFrame => "display-missing-frame",
-            Self::SemanticOutputProjection => "semantic-output-projection",
-            Self::ProviderReplaySidecarsSummed => "provider-replay-sidecars-summed",
-            Self::MetadataOnlyEvent => "metadata-only-event",
-            Self::ObservedFrame => "observed-frame",
-            Self::ExactDuplicateWithinLoadedEpochFrame => {
-                "exact-duplicate-within-loaded-epoch-frame"
-            }
-            Self::ChangedWithinLoadedEpochFrame => "changed-within-loaded-epoch-frame",
-            Self::InitialLoadedEpochFrame => "initial-loaded-epoch-frame",
-            Self::ExactDuplicateFrame => "exact-duplicate-frame",
-            Self::SequenceOnlyChangeFrame => "sequence-only-change-frame",
-            Self::SubstantiveChangeFrame => "substantive-change-frame",
-            Self::InitialSnapshotFrame => "initial-snapshot-frame",
+            Self::Encoded => "encoded-frame",
+            Self::ProviderContentMissing => "provider-content-missing-frame",
+            Self::ProviderContentPresent => "provider-content-present-frame",
+            Self::DisplayPresent => "display-present-frame",
+            Self::DisplayMissing => "display-missing-frame",
+            Self::Observed => "observed-frame",
+            Self::ExactDuplicateWithinLoadedEpoch => "exact-duplicate-within-loaded-epoch-frame",
+            Self::ChangedWithinLoadedEpoch => "changed-within-loaded-epoch-frame",
+            Self::InitialLoadedEpoch => "initial-loaded-epoch-frame",
+            Self::ExactDuplicate => "exact-duplicate-frame",
+            Self::SequenceOnlyChange => "sequence-only-change-frame",
+            Self::SubstantiveChange => "substantive-change-frame",
+            Self::InitialSnapshot => "initial-snapshot-frame",
         }
     }
 }
@@ -359,10 +339,10 @@ impl State {
                 };
                 let kind = match self.last_agent_stats.get(&key) {
                     Some(previous) if previous == stats => {
-                        MeasurementKind::ExactDuplicateWithinLoadedEpochFrame
+                        MeasurementKind::ExactDuplicateWithinLoadedEpoch
                     }
-                    Some(_) => MeasurementKind::ChangedWithinLoadedEpochFrame,
-                    None => MeasurementKind::InitialLoadedEpochFrame,
+                    Some(_) => MeasurementKind::ChangedWithinLoadedEpoch,
+                    None => MeasurementKind::InitialLoadedEpoch,
                 };
                 self.record_measurement(scope, event.name(), kind, frame_bytes);
                 self.last_agent_stats.insert(key, stats.clone());
@@ -373,12 +353,12 @@ impl State {
                     provider: quota.provider.clone(),
                 };
                 let kind = match self.last_provider_quota.get(&key) {
-                    Some(previous) if previous == quota => MeasurementKind::ExactDuplicateFrame,
+                    Some(previous) if previous == quota => MeasurementKind::ExactDuplicate,
                     Some(previous) if same_quota_except_sequence(previous, quota) => {
-                        MeasurementKind::SequenceOnlyChangeFrame
+                        MeasurementKind::SequenceOnlyChange
                     }
-                    Some(_) => MeasurementKind::SubstantiveChangeFrame,
-                    None => MeasurementKind::InitialSnapshotFrame,
+                    Some(_) => MeasurementKind::SubstantiveChange,
+                    None => MeasurementKind::InitialSnapshot,
                 };
                 self.record_measurement(scope, event.name(), kind, frame_bytes);
                 self.last_provider_quota.insert(key, quota.clone());
@@ -422,7 +402,7 @@ impl State {
     }
 }
 
-/// Encode selected event components outside the meter mutex.
+/// Classify selected events using only the already-observed frame size.
 pub(super) fn collect_measurements(
     message: &HarnessOutputMessage,
     frame_bytes: u64,
@@ -433,71 +413,57 @@ pub(super) fn collect_measurements(
     let event = delivery.event();
     let mut measurements = Vec::new();
     match event {
+        Event::ToolResultDisplay(result) => {
+            measurements.push(sample(MeasurementKind::Encoded, frame_bytes));
+            if result.display.is_some() {
+                measurements.push(sample(MeasurementKind::DisplayPresent, frame_bytes));
+            } else {
+                measurements.push(sample(MeasurementKind::DisplayMissing, frame_bytes));
+            }
+        }
         Event::ToolResult(result) | Event::ProviderToolResult(result) => {
-            measurements.push(sample(MeasurementKind::EncodedFrame, frame_bytes));
-            push_value(&mut measurements, MeasurementKind::FullEvent, event);
-            push_value(
-                &mut measurements,
-                MeasurementKind::RawResult,
-                &result.result,
-            );
-            if result.provider_content.is_empty() {
-                measurements.push(sample(
-                    MeasurementKind::ProviderContentMissingFrame,
-                    frame_bytes,
-                ));
-            } else {
-                push_value(
-                    &mut measurements,
-                    MeasurementKind::ProviderContent,
-                    &result.provider_content,
-                );
-                measurements.push(sample(
-                    MeasurementKind::ProviderContentPresentFrame,
-                    frame_bytes,
-                ));
-            }
-            if let Some(display) = &result.display {
-                push_value(&mut measurements, MeasurementKind::Display, display);
-            } else {
-                measurements.push(sample(MeasurementKind::DisplayMissingFrame, frame_bytes));
-            }
+            measurements.push(sample(MeasurementKind::Encoded, frame_bytes));
+            measurements.push(sample(
+                if result.provider_content.is_empty() {
+                    MeasurementKind::ProviderContentMissing
+                } else {
+                    MeasurementKind::ProviderContentPresent
+                },
+                frame_bytes,
+            ));
+            measurements.push(sample(
+                if result.display.is_some() {
+                    MeasurementKind::DisplayPresent
+                } else {
+                    MeasurementKind::DisplayMissing
+                },
+                frame_bytes,
+            ));
+        }
+        Event::ToolBackgroundResultDisplay(result) => {
+            measurements.push(sample(MeasurementKind::Encoded, frame_bytes));
+            measurements.push(sample(
+                if result.display.is_some() {
+                    MeasurementKind::DisplayPresent
+                } else {
+                    MeasurementKind::DisplayMissing
+                },
+                frame_bytes,
+            ));
         }
         Event::ToolBackgroundResult(result) => {
-            measurements.push(sample(MeasurementKind::EncodedFrame, frame_bytes));
-            push_value(&mut measurements, MeasurementKind::FullEvent, event);
-            push_value(
-                &mut measurements,
-                MeasurementKind::RawResult,
-                &result.result,
-            );
-            if let Some(display) = &result.display {
-                push_value(&mut measurements, MeasurementKind::Display, display);
-            } else {
-                measurements.push(sample(MeasurementKind::DisplayMissingFrame, frame_bytes));
-            }
-        }
-        Event::ProviderResponseFinished(response) => {
-            push_value(&mut measurements, MeasurementKind::FullEvent, event);
-            push_value(
-                &mut measurements,
-                MeasurementKind::SemanticOutputProjection,
-                &semantic_output_projection(&response.output_items),
-            );
+            measurements.push(sample(MeasurementKind::Encoded, frame_bytes));
             measurements.push(sample(
-                MeasurementKind::ProviderReplaySidecarsSummed,
-                provider_replay_sidecar_bytes(&response.output_items),
+                if result.display.is_some() {
+                    MeasurementKind::DisplayPresent
+                } else {
+                    MeasurementKind::DisplayMissing
+                },
+                frame_bytes,
             ));
-            let mut metadata_only = response.clone();
-            metadata_only.output_items.clear();
-            push_value(
-                &mut measurements,
-                MeasurementKind::MetadataOnlyEvent,
-                &Event::ProviderResponseFinished(metadata_only),
-            );
         }
         Event::AgentStatsUpdated(_) | Event::HarnessProviderQuotaChanged(_) => {
-            measurements.push(sample(MeasurementKind::ObservedFrame, frame_bytes));
+            measurements.push(sample(MeasurementKind::Observed, frame_bytes));
         }
         _ => {}
     }
@@ -506,78 +472,6 @@ pub(super) fn collect_measurements(
 
 fn sample(kind: MeasurementKind, bytes: u64) -> MeasurementSample {
     MeasurementSample { kind, bytes }
-}
-
-fn push_value(
-    measurements: &mut Vec<MeasurementSample>,
-    kind: MeasurementKind,
-    value: &impl serde::Serialize,
-) {
-    if let Some(bytes) = message_len(value) {
-        measurements.push(sample(kind, bytes));
-    }
-}
-
-fn semantic_output_projection(items: &[tau_proto::ContextItem]) -> Vec<tau_proto::ContextItem> {
-    items
-        .iter()
-        .filter_map(|item| match item {
-            tau_proto::ContextItem::Message(message) => {
-                let mut message = message.clone();
-                message.responses_raw_json = None;
-                Some(tau_proto::ContextItem::Message(message))
-            }
-            tau_proto::ContextItem::ToolCall(call) => {
-                let mut call = call.clone();
-                call.raw_arguments_json = None;
-                call.responses_envelope = None;
-                Some(tau_proto::ContextItem::ToolCall(call))
-            }
-            tau_proto::ContextItem::ToolResult(result) => {
-                Some(tau_proto::ContextItem::ToolResult(result.clone()))
-            }
-            tau_proto::ContextItem::ReasoningText(reasoning) => {
-                Some(tau_proto::ContextItem::ReasoningText(reasoning.clone()))
-            }
-            tau_proto::ContextItem::CompactionTrigger | tau_proto::ContextItem::Compaction(_) => {
-                Some(tau_proto::ContextItem::CompactionTrigger)
-            }
-            tau_proto::ContextItem::Reasoning(_)
-            | tau_proto::ContextItem::UnknownProviderItem(_) => None,
-        })
-        .collect()
-}
-
-fn provider_replay_sidecar_bytes(items: &[tau_proto::ContextItem]) -> u64 {
-    items
-        .iter()
-        .map(|item| match item {
-            tau_proto::ContextItem::Message(message) => message
-                .responses_raw_json
-                .as_ref()
-                .and_then(message_len)
-                .unwrap_or_default(),
-            tau_proto::ContextItem::ToolCall(call) => {
-                call.raw_arguments_json
-                    .as_ref()
-                    .and_then(message_len)
-                    .unwrap_or_default()
-                    + call
-                        .responses_envelope
-                        .as_ref()
-                        .and_then(message_len)
-                        .unwrap_or_default()
-            }
-            tau_proto::ContextItem::Reasoning(opaque)
-            | tau_proto::ContextItem::Compaction(opaque)
-            | tau_proto::ContextItem::UnknownProviderItem(opaque) => {
-                message_len(opaque).unwrap_or_default()
-            }
-            tau_proto::ContextItem::ToolResult(_)
-            | tau_proto::ContextItem::ReasoningText(_)
-            | tau_proto::ContextItem::CompactionTrigger => 0,
-        })
-        .sum()
 }
 
 fn same_quota_except_sequence(

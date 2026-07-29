@@ -225,11 +225,16 @@ impl EventName {
     pub const TOOL_RESULT_REPORTED: Self =
         Self::from_static(EventCategory::Tool, "result_reported");
     pub const TOOL_RESULT: Self = Self::from_static(EventCategory::Tool, "result");
+    /// Payload-free harness projection for UI completion rendering.
+    pub const TOOL_RESULT_DISPLAY: Self = Self::from_static(EventCategory::Tool, "result_display");
     /// Tool-provider error observation submitted for downstream validation.
     pub const TOOL_ERROR_REPORTED: Self = Self::from_static(EventCategory::Tool, "error_reported");
     pub const TOOL_ERROR: Self = Self::from_static(EventCategory::Tool, "error");
     pub const TOOL_BACKGROUND_RESULT: Self =
         Self::from_static(EventCategory::Tool, "background_result");
+    /// Payload-free harness projection for background completion rendering.
+    pub const TOOL_BACKGROUND_RESULT_DISPLAY: Self =
+        Self::from_static(EventCategory::Tool, "background_result_display");
     pub const TOOL_BACKGROUND_ERROR: Self =
         Self::from_static(EventCategory::Tool, "background_error");
     /// Tool-provider observation submitted for downstream validation.

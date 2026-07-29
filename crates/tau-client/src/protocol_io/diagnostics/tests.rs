@@ -190,37 +190,15 @@ fn protocol_io_meter_attributes_tool_result_fields_without_contents() {
     meter.record_downlink_frame(&second_message);
 
     let diagnostics = meter.diagnostic_stats();
-    for component in ["encoded-frame", "full-event", "raw-result"] {
-        let key = format!("steady.non-replay.tool.result.{component}");
-        assert_eq!(diagnostics.measurements[&key].count, 2, "{key}");
-    }
+    let key = "steady.non-replay.tool.result.encoded-frame";
+    assert_eq!(diagnostics.measurements[key].count, 2, "{key}");
     assert_eq!(
         diagnostics.measurements["steady.non-replay.tool.result.encoded-frame"].bytes,
         protocol_test_encoded_len(&first_message) + protocol_test_encoded_len(&second_message)
     );
     assert_eq!(
-        diagnostics.measurements["steady.non-replay.tool.result.full-event"].bytes,
-        protocol_test_encoded_len(&first_event) + protocol_test_encoded_len(&second_event)
-    );
-    assert_eq!(
-        diagnostics.measurements["steady.non-replay.tool.result.raw-result"].bytes,
-        2 * protocol_test_encoded_len(&result.result)
-    );
-    assert_eq!(
-        diagnostics.measurements["steady.non-replay.tool.result.provider-content"].count,
+        diagnostics.measurements["steady.non-replay.tool.result.display-present-frame"].count,
         1
-    );
-    assert_eq!(
-        diagnostics.measurements["steady.non-replay.tool.result.provider-content"].bytes,
-        protocol_test_encoded_len(&result.provider_content)
-    );
-    assert_eq!(
-        diagnostics.measurements["steady.non-replay.tool.result.display"].count,
-        1
-    );
-    assert_eq!(
-        diagnostics.measurements["steady.non-replay.tool.result.display"].bytes,
-        protocol_test_encoded_len(result.display.as_ref().expect("display fixture"))
     );
     assert_eq!(
         diagnostics.measurements["steady.non-replay.tool.result.display-missing-frame"].count,
@@ -239,8 +217,8 @@ fn protocol_io_meter_attributes_tool_result_fields_without_contents() {
     assert!(!meter.format_diagnostics().contains("raw result contents"));
 }
 
-/// Background tool completions use the same encoded/raw/display attribution
-/// contract as foreground results.
+/// Background tool completions retain content-free frame/display attribution
+/// without re-encoding their raw output.
 #[test]
 fn protocol_io_meter_attributes_background_tool_results() {
     let mut meter = TestMeter::default();
@@ -266,14 +244,9 @@ fn protocol_io_meter_attributes_background_tool_results() {
         protocol_test_encoded_len(&message)
     );
     assert_eq!(
-        measurements[&format!("{prefix}.full-event")].bytes,
-        protocol_test_encoded_len(&event)
+        measurements[&format!("{prefix}.display-present-frame")].count,
+        1
     );
-    assert_eq!(
-        measurements[&format!("{prefix}.raw-result")].bytes,
-        protocol_test_encoded_len(&result.result)
-    );
-    assert_eq!(measurements[&format!("{prefix}.display")].count, 1);
 }
 
 /// Provider-directed tool results retain their own event-name accounting when
@@ -305,10 +278,6 @@ fn protocol_io_meter_attributes_provider_tool_results() {
         protocol_test_encoded_len(&message)
     );
     assert_eq!(
-        measurements[&format!("{prefix}.raw-result")].bytes,
-        protocol_test_encoded_len(&result.result)
-    );
-    assert_eq!(
         measurements[&format!("{prefix}.display-missing-frame")].count,
         1
     );
@@ -318,8 +287,8 @@ fn protocol_io_meter_attributes_provider_tool_results() {
     );
 }
 
-/// Final-response attribution separates typed semantic output from provider
-/// replay sidecars and non-output metadata across every context-item variant.
+/// Final-response diagnostics retain frame totals without re-encoding semantic
+/// output, provider sidecars, or metadata-only projections.
 #[test]
 fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
     let mut meter = TestMeter::default();
@@ -404,46 +373,13 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
         event.clone(),
     ));
 
-    let expected_semantic = vec![
-        tau_proto::ContextItem::Message(tau_proto::MessageItem {
-            responses_raw_json: None,
-            ..message
-        }),
-        tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
-            raw_arguments_json: None,
-            responses_envelope: None,
-            ..tool_call
-        }),
-        tau_proto::ContextItem::ToolResult(tool_result),
-        tau_proto::ContextItem::ReasoningText(reasoning_text),
-        tau_proto::ContextItem::CompactionTrigger,
-        tau_proto::ContextItem::CompactionTrigger,
-    ];
-    let expected_sidecars = protocol_test_encoded_len(&message_raw)
-        + protocol_test_encoded_len(&raw_arguments)
-        + protocol_test_encoded_len(&envelope)
-        + protocol_test_encoded_len(&reasoning)
-        + protocol_test_encoded_len(&compaction)
-        + protocol_test_encoded_len(&unknown);
-    let mut metadata_only = response;
-    metadata_only.output_items.clear();
     let measurements = meter.diagnostic_stats().measurements;
     let prefix = "cold-attach.replay.provider.response_finished";
-    assert_eq!(
-        measurements[&format!("{prefix}.full-event")].bytes,
-        protocol_test_encoded_len(&event)
-    );
-    assert_eq!(
-        measurements[&format!("{prefix}.semantic-output-projection")].bytes,
-        protocol_test_encoded_len(&expected_semantic)
-    );
-    assert_eq!(
-        measurements[&format!("{prefix}.provider-replay-sidecars-summed")].bytes,
-        expected_sidecars
-    );
-    assert_eq!(
-        measurements[&format!("{prefix}.metadata-only-event")].bytes,
-        protocol_test_encoded_len(&Event::ProviderResponseFinished(metadata_only))
+    assert!(
+        measurements
+            .iter()
+            .all(|(key, _)| !key.label().starts_with(prefix)),
+        "provider response components must not be re-encoded"
     );
 }
 

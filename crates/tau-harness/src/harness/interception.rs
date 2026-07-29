@@ -385,11 +385,13 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // cancellation, provider result, or background result for a tool
     // that was actually invoked leaves the agent waiting forever.
     EventName::TOOL_RESULT,
+    EventName::TOOL_RESULT_DISPLAY,
     EventName::TOOL_ERROR,
     EventName::PROVIDER_TOOL_RESULT,
     EventName::PROVIDER_TOOL_ERROR,
     EventName::TOOL_CANCELLED,
     EventName::TOOL_BACKGROUND_RESULT,
+    EventName::TOOL_BACKGROUND_RESULT_DISPLAY,
     EventName::TOOL_BACKGROUND_ERROR,
     // A validated user-shell terminal consumes the harness's pending route.
     // Dropping it would leave every attached UI waiting forever.
@@ -527,11 +529,13 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::ProviderResponseFinished(_)
             | Event::HarnessProviderQuotaChanged(_)
             | Event::ToolResult(_)
+            | Event::ToolResultDisplay(_)
             | Event::ToolError(_)
             | Event::ProviderToolResult(_)
             | Event::ProviderToolError(_)
             | Event::ToolCancelled(_)
             | Event::ToolBackgroundResult(_)
+            | Event::ToolBackgroundResultDisplay(_)
             | Event::ToolBackgroundError(_)
             | Event::ShellCommandFinished(_)
     ) && original != replacement

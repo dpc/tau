@@ -454,6 +454,13 @@ no-drain/no-join behavior is a structural review invariant: the singleton drops
 the production join handle immediately, exposes no shutdown/drain API, and no
 lifecycle code may wait for it.
 
+Startup JSONL-retention tests live beside `diagnostic_cleanup`. Use the injected
+clock/removal seam for exact age, scope, symlink, and per-file failure behavior.
+Use the returned test join handle only to verify startup gating: durable configured
+cleanup launches and protects the current session, while disabled retention and
+ephemeral sessions do not launch. Production drops that handle and never blocks
+startup on cleanup.
+
 
 ## Skill discovery and loading
 

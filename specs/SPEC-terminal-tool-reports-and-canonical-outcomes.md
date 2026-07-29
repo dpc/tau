@@ -15,7 +15,7 @@ Authenticated configured Tool and Core extensions submit transient
 reports use ordinary generic `HarnessInputMessage::Emit` admission,
 interception, commit, and broadcast. Provider, Action, UI, socket,
 unconfigured, and stale configured generations have no report authority. No
-peer may author canonical `tool.result`, `tool.error`, `tool.cancelled`,
+peer may author canonical `tool.result`, `tool.result_display`, `tool.error`, `tool.cancelled`,
 `provider.tool_result`, `provider.tool_error`, or background completion facts.
 
 This specification covers terminal result, error, and cancellation reports
@@ -43,9 +43,13 @@ their complete encoded envelope and global activation ordering.
 ## Canonical projections and completion
 
 A valid foreground result report publishes protected harness-sourced
-`provider.tool_result` and then derives `tool.result` after the provider terminal
-commits. The generic result clears typed provider content; the provider
-projection retains it and remains the durable transcript fact. A valid
+`provider.tool_result` and then derives transient `tool.result` plus
+`tool.result_display` after the provider terminal commits. The generic
+non-UI projection retains the raw result while clearing provider content. The UI
+projection carries only call identity, tool
+identity/type, result kind, generic display state, and originator; the provider
+projection retains the full raw result and typed provider content and remains the
+durable transcript fact. A valid
 foreground error likewise commits protected harness-sourced
 `provider.tool_error` before deriving `tool.error`. A valid foreground
 cancellation publishes protected harness-sourced `tool.cancelled`, which is its
@@ -61,7 +65,9 @@ If a call already runs in the background, a valid result report publishes
 `tool.background_result`; an error or cancellation report publishes
 `tool.background_error`. These protected harness-sourced facts preserve the
 existing background wait and notification flow and never emit a second
-provider-transcript terminal.
+provider-transcript terminal. UI subscribers receive the separate payload-free
+`tool.background_result_display` projection after the canonical background fact
+commits.
 
 The report commits before terminal processing begins. For a journal-backed,
 transcript-owned foreground call, the durable provider terminal is the sole
@@ -86,13 +92,15 @@ The writeback and recovery boundary is governed by
 ## Persistence, debug logging, and replay
 
 Reports are explicitly transient and never enter agent or session semantic
-history. Canonical `tool.result` and `tool.error` are renderer-facing raw facts
-and also remain outside semantic history; their protected
-`provider.tool_result` / `provider.tool_error` counterparts retain the existing
-durable agent-transcript and replay contract. Canonical `tool.cancelled` and
-background completion facts retain their existing terminal semantic
-persistence. No report has cold-restart replay behavior, so a report committed
-immediately before a crash may have no canonical successor.
+history. `tool.result`, `tool.result_display`, and `tool.error` remain transient
+facts; only the display projection is owned by UI consumers. The protected
+`provider.tool_result` / `provider.tool_error` counterparts
+retain the durable agent-transcript and replay contract. Canonical
+`tool.cancelled` and background completion facts retain their existing terminal
+semantic persistence. UI replay derives the same result-display DTOs from those
+full canonical facts without exposing raw successful output. No report has
+cold-restart replay behavior, so a report committed immediately before a crash
+may have no canonical successor.
 
 The runtime event log retains committed reports and canonical projections.
 Ordinary non-ephemeral debug JSONL observes attempted projections before

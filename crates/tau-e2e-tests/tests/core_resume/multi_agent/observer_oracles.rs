@@ -500,7 +500,7 @@ fn replay_event_owner(
         ),
         Event::ProviderToolResult(value) => Some(tool_owner(call_owners, &value.call_id)?),
         Event::ProviderToolError(value) => Some(tool_owner(call_owners, &value.call_id)?),
-        Event::ToolResult(value) => Some(tool_owner(call_owners, &value.call_id)?),
+        Event::ToolResultDisplay(value) => Some(tool_owner(call_owners, &value.call_id)?),
         Event::ToolError(value) => Some(tool_owner(call_owners, &value.call_id)?),
         _ => None,
     };
@@ -545,15 +545,15 @@ fn assert_replayed_agent_start(
     let results = replay_positions(events, |event| {
         matches!(
             event,
-            Event::ToolResult(value)
+            Event::ToolResultDisplay(value)
                 if value.call_id == call_id
                     && value.tool_name.as_str() == "agent_start"
                     && value.kind == tau_proto::ToolResultKind::Final
-                    && agent_start_projection::result_ids_match(
-                        &value.result,
-                        &identities.main,
-                        &identities.worker,
-                    )
+                    && value.display.as_ref().is_some_and(|display| {
+                        display.info_chips.iter().any(
+                            |chip| chip == &format!("@{}", identities.worker),
+                        )
+                    })
         )
     });
     let calls = replay_positions(events, |event| {
@@ -598,7 +598,7 @@ fn assert_replayed_agent_start(
                 observed.replay,
                 observed.recorded_at.is_some(),
             )),
-            Event::ToolResult(value) => Some((
+            Event::ToolResultDisplay(value) => Some((
                 "result",
                 value.call_id.as_str(),
                 observed.replay,
@@ -716,7 +716,7 @@ fn event_owned_by(
         Event::ProviderToolError(value) => call_owners.get(&value.call_id) == Some(agent_id),
         Event::ToolRequest(value) => &value.agent_id == agent_id,
         Event::ToolStarted(value) => &value.agent_id == agent_id,
-        Event::ToolResult(value) => call_owners.get(&value.call_id) == Some(agent_id),
+        Event::ToolResultDisplay(value) => call_owners.get(&value.call_id) == Some(agent_id),
         Event::ToolError(value) => call_owners.get(&value.call_id) == Some(agent_id),
         Event::AgentMessageReceived(value) => &value.recipient_id == agent_id,
         _ => false,

@@ -59,6 +59,11 @@ When adding or renaming a harness config field, update all alias handling paths
 needed for direct patch parsing) and add regression coverage for both file and
 CLI override forms.
 
+`session_retention_days` controls whole inactive session-directory cleanup.
+`diagnostic_jsonl_retention_days` independently controls best-effort startup
+cleanup of non-authoritative session JSONL and defaults to fourteen days; zero
+disables only that diagnostic cleanup.
+
 `tool_policy.rules` is a keyed layered map. Rule names may contain dots (for
 example `builtin.chatgpt-shell`), so dotted CLI overrides cannot naturally refer
 to such rule keys; use whole-map override values for those rules unless an

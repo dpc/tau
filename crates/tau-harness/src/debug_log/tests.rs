@@ -554,14 +554,12 @@ fn full_prompt_debug_projection_is_fixed_shape_and_content_free() {
 
     let td = tempfile::tempdir().expect("tempdir");
     let mut log = DebugEventLog::open(td.path()).expect("open");
-    log.log_harness_event(&HarnessEvent::FromConnection {
-        connection_id: crate::test_connection_id("interceptor"),
-        message: Box::new(HarnessInputMessage::InterceptReply(
-            tau_proto::InterceptReply {
-                action: tau_proto::InterceptAction::Pass(Some(Box::new(event))),
-            },
-        )),
-    })
+    log.log_harness_event(&HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("interceptor"),
+        HarnessInputMessage::InterceptReply(tau_proto::InterceptReply {
+            action: tau_proto::InterceptAction::Pass(Some(Box::new(event))),
+        }),
+    ))
     .expect("log intercepted full prompt summary");
     let raw = std::fs::read_to_string(log.path()).expect("read debug log");
     for sentinel in [
@@ -677,11 +675,11 @@ fn transient_from_connection_events_are_not_logged_twice() {
         originator: PromptOriginator::User,
     });
 
-    log.log_harness_event(&HarnessEvent::FromConnection {
-        connection_id: tau_proto::ConnectionId::parse("conn-1")
+    log.log_harness_event(&HarnessEvent::from_connection_for_test(
+        tau_proto::ConnectionId::parse("conn-1")
             .expect("test connection id must satisfy the identifier grammar"),
-        message: Box::new(HarnessInputMessage::emit(event)),
-    })
+        HarnessInputMessage::emit(event),
+    ))
     .expect("skip transient harness event");
 
     let lines = read_lines(log.path());
@@ -698,15 +696,13 @@ fn ui_debug_event_stats_requests_are_not_logged() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut log = DebugEventLog::open(td.path()).expect("open");
 
-    log.log_harness_event(&HarnessEvent::FromConnection {
-        connection_id: tau_proto::ConnectionId::parse("ui")
+    log.log_harness_event(&HarnessEvent::from_connection_for_test(
+        tau_proto::ConnectionId::parse("ui")
             .expect("test connection id must satisfy the identifier grammar"),
-        message: Box::new(HarnessInputMessage::UiDebugEventStatsRequest(
-            tau_proto::UiDebugEventStatsRequest {
-                extension_name: crate::test_extension_name("secret-extension"),
-            },
-        )),
-    })
+        HarnessInputMessage::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+            extension_name: crate::test_extension_name("secret-extension"),
+        }),
+    ))
     .expect("skip UI debug stats request");
 
     assert!(read_lines(log.path()).is_empty());

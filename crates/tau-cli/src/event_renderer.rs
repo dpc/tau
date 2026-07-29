@@ -29,12 +29,12 @@ use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolStatus, ToolSuffixSegment, ToolSummaryDisplay,
     agent_context_initialized_block, build_delegate_completion_display, build_tool_summary_display,
-    diff_payload_counts, extension_status_block, extract_diff, format_token_count,
-    pending_tool_call_display, render_compaction_block, render_diff_tool_block,
-    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_use_state, render_tool_use_state_without_status, render_turn_stats_block,
-    session_status_block, streaming_block, streaming_block_with_indicator_suffix,
-    synthesize_fallback_display, tool_duration_suffix, ui_dir_block,
+    diff_payload_counts, extension_status_block, format_token_count, pending_tool_call_display,
+    render_compaction_block, render_diff_tool_block, render_harness_notice,
+    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
+    render_tool_use_state_without_status, render_turn_stats_block, session_status_block,
+    streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
+    tool_duration_suffix, ui_dir_block,
 };
 use crate::watch_activity::WatchActivityProjection;
 use crate::{MUTEX_POISONED, build_banner};
@@ -3480,6 +3480,13 @@ impl EventRenderer {
             Event::ToolRejected(rejected) => {
                 self.agent_activity.finish_tool(&rejected.call_id);
             }
+            Event::ToolResultDisplay(result) => {
+                if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
+                    self.agent_activity.background_tool(&result.call_id);
+                } else {
+                    self.agent_activity.finish_tool(&result.call_id);
+                }
+            }
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
                     self.agent_activity.background_tool(&result.call_id);
@@ -3489,6 +3496,9 @@ impl EventRenderer {
             }
             Event::ToolError(error) => {
                 self.agent_activity.finish_tool(&error.call_id);
+            }
+            Event::ToolBackgroundResultDisplay(result) => {
+                self.agent_activity.finish_background_tool(&result.call_id);
             }
             Event::ToolBackgroundResult(result) => {
                 self.agent_activity.finish_background_tool(&result.call_id);
@@ -4159,6 +4169,7 @@ impl EventRenderer {
             Event::ProviderResponseUpdated(update) => !update.originator.is_user(),
             Event::ProviderResponseFinished(finished) => !finished.originator.is_user(),
             Event::ToolStarted(started) => !started.originator.is_user(),
+            Event::ToolResultDisplay(result) => !result.originator.is_user(),
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 !result.originator.is_user()
             }
@@ -4499,6 +4510,12 @@ impl EventRenderer {
             Event::ToolProgress(progress) => EventAgentIdResolution::from_agent_id(
                 self.tool_agents.get(progress.call_id.as_str()).cloned(),
             ),
+            Event::ToolResultDisplay(result) => EventAgentIdResolution::from_agent_id(
+                self.tool_agents
+                    .get(result.call_id.as_str())
+                    .cloned()
+                    .or_else(|| self.agent_id_for_originator(&result.originator)),
+            ),
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 EventAgentIdResolution::from_agent_id(
                     self.tool_agents
@@ -4512,6 +4529,9 @@ impl EventRenderer {
                     .get(error.call_id.as_str())
                     .cloned()
                     .or_else(|| self.agent_id_for_originator(&error.originator)),
+            ),
+            Event::ToolBackgroundResultDisplay(result) => EventAgentIdResolution::from_agent_id(
+                self.tool_agents.get(result.call_id.as_str()).cloned(),
             ),
             Event::ToolBackgroundResult(result) => EventAgentIdResolution::from_agent_id(
                 self.tool_agents.get(result.call_id.as_str()).cloned(),
@@ -6167,29 +6187,32 @@ impl EventRenderer {
                 self.handle_tool_progress(progress);
                 true
             }
-            Event::ProviderToolResult(result)
-                if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder =>
-            {
-                self.handle_tool_background_placeholder(result.call_id.as_str());
-                true
-            }
-            Event::ProviderToolResult(result)
-                if self.tool_calls.contains_key(result.call_id.as_str()) =>
-            {
-                self.handle_tool_result(result, recorded_at);
+            Event::ProviderToolResult(result) => {
+                self.handle_tool_result(&tau_proto::ToolResultDisplay::from(result), recorded_at);
                 true
             }
             Event::ProviderToolError(_) => true,
-            Event::ToolResult(result) => {
+            Event::ToolResultDisplay(result) => {
                 self.handle_tool_result(result, recorded_at);
+                true
+            }
+            Event::ToolResult(result) => {
+                self.handle_tool_result(&tau_proto::ToolResultDisplay::from(result), recorded_at);
                 true
             }
             Event::ToolError(error) => {
                 self.handle_tool_error(error, recorded_at);
                 true
             }
-            Event::ToolBackgroundResult(result) => {
+            Event::ToolBackgroundResultDisplay(result) => {
                 self.handle_tool_background_result(result, recorded_at);
+                true
+            }
+            Event::ToolBackgroundResult(result) => {
+                self.handle_tool_background_result(
+                    &tau_proto::ToolBackgroundResultDisplay::from(result),
+                    recorded_at,
+                );
                 true
             }
             Event::ToolBackgroundError(error) => {
@@ -6432,7 +6455,11 @@ impl EventRenderer {
         Some((prior, known_main_tool))
     }
 
-    fn handle_tool_result(&mut self, result: &tau_proto::ToolResult, recorded_at: UnixMicros) {
+    fn handle_tool_result(
+        &mut self,
+        result: &tau_proto::ToolResultDisplay,
+        recorded_at: UnixMicros,
+    ) {
         let call_id = result.call_id.as_str();
         if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
             self.handle_tool_background_placeholder(call_id);
@@ -6474,15 +6501,13 @@ impl EventRenderer {
 
     fn handle_tool_background_result(
         &mut self,
-        result: &tau_proto::ToolBackgroundResult,
+        result: &tau_proto::ToolBackgroundResultDisplay,
         recorded_at: UnixMicros,
     ) {
-        let result = tau_proto::ToolResult {
+        let result = tau_proto::ToolResultDisplay {
             call_id: result.call_id.clone(),
             tool_name: result.tool_name.clone(),
             tool_type: result.tool_type,
-            result: result.result.clone(),
-            provider_content: Vec::new(),
             kind: tau_proto::ToolResultKind::Final,
             display: result.display.clone(),
             originator: result.originator.clone(),
@@ -6507,14 +6532,8 @@ impl EventRenderer {
         self.render_model_status_after_tool_completion(known_main_tool);
     }
 
-    fn tool_result_display(result: &tau_proto::ToolResult) -> ToolCallDisplay {
-        if result.tool_name.as_str() == AGENT_START_TOOL_NAME {
-            if let Some(descriptor) = &result.display {
-                return render_tool_use_state(&result.tool_name, descriptor);
-            }
-            let descriptor = build_delegate_completion_display(None, &result.result, None);
-            render_tool_use_state(&result.tool_name, &descriptor)
-        } else if let Some(descriptor) = &result.display {
+    fn tool_result_display(result: &tau_proto::ToolResultDisplay) -> ToolCallDisplay {
+        if let Some(descriptor) = &result.display {
             render_tool_use_state(&result.tool_name, descriptor)
         } else {
             render_tool_use_state(
@@ -6535,17 +6554,13 @@ impl EventRenderer {
         0 < added || 0 < removed
     }
 
-    fn tool_result_diff(result: &tau_proto::ToolResult) -> Option<tau_proto::ToolUsePayload> {
-        let display_diff = result.display.as_ref().and_then(|d| match &d.payload {
+    fn tool_result_diff(
+        result: &tau_proto::ToolResultDisplay,
+    ) -> Option<tau_proto::ToolUsePayload> {
+        result.display.as_ref().and_then(|d| match &d.payload {
             Some(payload) if Self::diff_payload_has_changes(payload) => Some(payload.clone()),
             _ => None,
-        });
-        if result.display.is_some() {
-            display_diff
-        } else {
-            display_diff
-                .or_else(|| extract_diff(&result.result).map(tau_proto::ToolUsePayload::Diff))
-        }
+        })
     }
 
     fn record_tool_result_block(

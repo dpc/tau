@@ -114,9 +114,11 @@ most matching events before commit. The harness protects selected facts as
 must-pass and immutable because live state, durable resume state, and transcript
 routing must agree. Fully immutable facts include session lifecycle facts,
 session membership facts, `agent.started`, harness-owned agent message
-projections, terminal tool completion facts (`tool.result`, `tool.error`,
+projections, terminal tool completion facts (`tool.result`,
+`tool.result_display`, `tool.error`,
 `provider.tool_result`, `provider.tool_error`, `tool.cancelled`,
-`tool.background_result`, and `tool.background_error`), and selected response
+`tool.background_result`, `tool.background_result_display`, and
+`tool.background_error`), and selected response
 closure facts such as `provider.response_finished`. Prompt text facts are
 must-pass, but only their routing keys are generally immutable: interceptors
 may rewrite text on the sanctioned prompt-text events without changing agent

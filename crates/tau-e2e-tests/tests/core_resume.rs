@@ -299,9 +299,8 @@ fn wait_for_terminal_turn(
     observer.recv_until(deadline, |observed| {
         matches!(
             &observed.event,
-            Event::ToolResult(result)
+            Event::ToolResultDisplay(result)
                 if &result.call_id == call_id
-                    && result.result == CborValue::Text("restart succeeded".to_owned())
         )
     })?;
     observer.recv_until(deadline, |observed| {
@@ -398,12 +397,11 @@ fn wait_for_resume_boundary(
             && observed.recorded_at.is_some()
             && matches!(
                 &observed.event,
-                Event::ToolResult(value)
+                Event::ToolResultDisplay(value)
                     if &value.call_id == call_id
                         && value.tool_name.as_str() == "restart_test_dummy"
                         && value.tool_type == tau_proto::ToolType::Function
                         && value.kind == tau_proto::ToolResultKind::Final
-                        && value.result == CborValue::Text("restart succeeded".to_owned())
             )
     });
     let marker = observer.events.iter().position(|observed| {
@@ -505,7 +503,7 @@ fn wait_for_resume_boundary(
             observed.replay
                 && matches!(
                     &observed.event,
-                    Event::ToolResult(value) if &value.call_id == call_id
+                    Event::ToolResultDisplay(value) if &value.call_id == call_id
                 )
         })
         .count();
@@ -621,7 +619,7 @@ fn assert_no_live_old_execution(
             && match &observed.event {
                 Event::ToolRequest(value) => &value.call_id == call_id,
                 Event::ToolStarted(value) => &value.call_id == call_id,
-                Event::ToolResult(value) => &value.call_id == call_id,
+                Event::ToolResultDisplay(value) => &value.call_id == call_id,
                 Event::ToolError(value) => &value.call_id == call_id,
                 Event::ProviderToolError(value) => &value.call_id == call_id,
                 Event::AgentPromptSubmitted(value) => value.text == old_prompt,

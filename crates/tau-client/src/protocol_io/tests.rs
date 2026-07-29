@@ -121,8 +121,8 @@ fn protocol_io_meter_keeps_cumulative_stats_after_sampling() {
     );
 }
 
-/// Detailed payload encoding is explicit opt-in so extension meters preserve
-/// their cumulative-only hot path.
+/// Detailed content-free classification is explicit opt-in so extension meters
+/// preserve their cumulative-only hot path.
 #[test]
 fn protocol_io_default_meter_skips_detailed_diagnostics() {
     let meter = ProtocolIoMeter::default();
@@ -133,6 +133,31 @@ fn protocol_io_default_meter_skips_detailed_diagnostics() {
 
     assert!(meter.format_diagnostics().is_empty());
     assert_eq!(meter.cumulative_stats().downlink["term.bell"].count, 1);
+}
+
+/// Ensures decoded-frame accounting trusts the transport size supplied by the
+/// codec instead of re-encoding the message to derive another value.
+#[test]
+fn protocol_io_meter_attributes_supplied_decoded_frame_size() {
+    let meter = ProtocolIoMeter::with_diagnostics();
+    let message = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        Event::TermBell(tau_proto::TermBell {}),
+    );
+
+    meter.record_downlink_frame_bytes(
+        &message,
+        tau_proto::ProtocolMessageBytes::new(12_345).expect("nonzero fixture size"),
+    );
+
+    assert_eq!(
+        meter.cumulative_stats().downlink["term.bell"],
+        ProtocolIoFrameStats {
+            count: 1,
+            bytes: 12_345,
+        }
+    );
+    assert!(meter.format_diagnostics().contains("bytes=12345 count=1"));
 }
 
 /// The opt-in meter wires exact frame sizes, attach/replay axes, selected

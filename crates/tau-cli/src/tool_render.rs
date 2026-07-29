@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus, cbor_field};
+use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus};
 
 #[cfg(test)]
 pub(crate) fn format_turn_stats_line(
@@ -234,23 +234,6 @@ pub(crate) fn format_token_count(tokens: u64) -> String {
         return format!("{whole}m");
     }
     format!("{whole}.{tenth}m")
-}
-
-/// Format the `+N/-M` chip from a `DiffSummary` sub-tree on a tool
-/// result as themed suffix segments. `+N` is painted with the
-/// diff-added style and `-M` with the diff-removed style, matching
-/// `git diff --shortstat`. The parens and slash stay in the muted info
-/// Decode a `DiffSummary` sub-tree from a tool result, if present and
-/// non-empty. Round-trips the CBOR sub-value through ciborium.
-pub(crate) fn extract_diff(details: &CborValue) -> Option<tau_proto::DiffSummary> {
-    let diff = cbor_field(details, "diff")?;
-    let mut buf = Vec::new();
-    ciborium::ser::into_writer(diff, &mut buf).ok()?;
-    let summary: tau_proto::DiffSummary = ciborium::de::from_reader(buf.as_slice()).ok()?;
-    if summary.added == 0 && summary.removed == 0 {
-        return None;
-    }
-    Some(summary)
 }
 
 /// Which status-suffix style the completion block should use.

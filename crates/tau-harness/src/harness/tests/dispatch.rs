@@ -23762,12 +23762,47 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
             if result.call_id.as_str() == "slow-call"
                 && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
     )));
-    assert!(!event_log_contains_any_source(&h, |event| matches!(
+    assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == "slow-call"
                 && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
     )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResultDisplay(result)
+            if result.call_id.as_str() == "slow-call"
+                && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+    )));
+    let placeholder_positions = [
+        event_log_position(&h, |event| {
+            matches!(
+                event,
+                Event::ProviderToolResult(result)
+                    if result.call_id.as_str() == "slow-call"
+                        && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+            )
+        }),
+        event_log_position(&h, |event| {
+            matches!(
+                event,
+                Event::ToolResult(result)
+                    if result.call_id.as_str() == "slow-call"
+                        && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+            )
+        }),
+        event_log_position(&h, |event| {
+            matches!(
+                event,
+                Event::ToolResultDisplay(result)
+                    if result.call_id.as_str() == "slow-call"
+                        && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+            )
+        }),
+    ]
+    .map(|position| position.expect("placeholder event"));
+    assert!(placeholder_positions[0] < placeholder_positions[1]);
+    assert!(placeholder_positions[1] < placeholder_positions[2]);
 
     let followup_spid = h
         .prompt_agents
@@ -23837,6 +23872,22 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
                     && matches!(&result.result, CborValue::Text(text) if text == "real output")
         )
     ));
+    let canonical_position = event_log_position(&h, |event| {
+        matches!(
+            event,
+            Event::ToolBackgroundResult(result) if result.call_id.as_str() == "slow-call"
+        )
+    })
+    .expect("canonical background result");
+    let display_position = event_log_position(&h, |event| {
+        matches!(
+            event,
+            Event::ToolBackgroundResultDisplay(result)
+                if result.call_id.as_str() == "slow-call"
+        )
+    })
+    .expect("background display projection");
+    assert!(canonical_position < display_position);
     let parent = h
         .agents
         .get(&parent_cid)

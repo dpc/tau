@@ -102,6 +102,8 @@ pub(crate) enum HarnessEvent {
     FromConnection {
         connection_id: tau_proto::ConnectionId,
         message: Box<HarnessInputMessage>,
+        /// Encoded bytes consumed by the real protocol decode.
+        frame_bytes: tau_proto::ProtocolMessageBytes,
     },
     /// A connection's reader hit clean EOF.
     Disconnected {
@@ -120,6 +122,26 @@ pub(crate) enum HarnessEvent {
     },
     /// Internal state transition requested by harness helpers.
     Command(HarnessCommand),
+}
+
+impl HarnessEvent {
+    /// Build a synthetic connection event while accounting for its actual
+    /// encoded fixture size.
+    #[cfg(test)]
+    pub(crate) fn from_connection_for_test(
+        connection_id: tau_proto::ConnectionId,
+        message: HarnessInputMessage,
+    ) -> Self {
+        let frame_bytes = tau_proto::encode_message_to_vec(&message)
+            .ok()
+            .and_then(|encoded| tau_proto::ProtocolMessageBytes::new(encoded.len() as u64))
+            .expect("a synthetic harness input message encodes to a nonempty frame");
+        Self::FromConnection {
+            connection_id,
+            message: Box::new(message),
+            frame_bytes,
+        }
+    }
 }
 
 /// Commands accepted by per-connection writer threads.
@@ -178,12 +200,13 @@ fn spawn_reader_thread_inner(
 
         let mut reader = HarnessInputReader::new(BufReader::new(stream));
         loop {
-            match reader.read_message() {
-                Ok(Some(message)) => {
+            match reader.read_message_with_size() {
+                Ok(Some(decoded)) => {
                     if tx
                         .send(HarnessEvent::FromConnection {
                             connection_id: connection_id.clone(),
-                            message: Box::new(message),
+                            message: Box::new(decoded.message),
+                            frame_bytes: decoded.encoded_bytes,
                         })
                         .is_err()
                     {
@@ -436,12 +459,16 @@ fn spawn_writer_thread_inner(
         while let Ok(command) = rx.recv() {
             match command {
                 WriterCommand::Message(message) => {
-                    if w.write_message(&message).is_err() || w.flush().is_err() {
+                    let Ok(frame_bytes) = w.write_message_with_size(&message) else {
+                        can_write_disconnect = false;
+                        break;
+                    };
+                    if w.flush().is_err() {
                         can_write_disconnect = false;
                         break;
                     }
                     if let Some(protocol_io) = &protocol_io {
-                        protocol_io.record_downlink_frame(&message);
+                        protocol_io.record_downlink_frame_bytes(&message, frame_bytes);
                     }
                 }
                 WriterCommand::Flush(ack) => {
@@ -462,11 +489,11 @@ fn spawn_writer_thread_inner(
                     let disconnect = HarnessOutputMessage::Disconnect(Disconnect {
                         reason: Some("shutdown".to_owned()),
                     });
-                    if w.write_message(&disconnect).is_ok()
+                    if let Ok(frame_bytes) = w.write_message_with_size(&disconnect)
                         && w.flush().is_ok()
                         && let Some(protocol_io) = &protocol_io
                     {
-                        protocol_io.record_downlink_frame(&disconnect);
+                        protocol_io.record_downlink_frame_bytes(&disconnect, frame_bytes);
                     }
                 }
                 // Drop the writer → closes stdin → extension sees EOF.

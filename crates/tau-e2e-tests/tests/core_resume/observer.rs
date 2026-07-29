@@ -420,7 +420,7 @@ fn selectors() -> Vec<EventSelector> {
         E::PROVIDER_TOOL_ERROR,
         E::TOOL_REQUEST,
         E::TOOL_STARTED,
-        E::TOOL_RESULT,
+        E::TOOL_RESULT_DISPLAY,
         E::TOOL_ERROR,
         E::EXTENSION_READY,
         E::EXTENSION_EXITED,

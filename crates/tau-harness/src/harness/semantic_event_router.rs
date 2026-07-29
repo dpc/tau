@@ -84,5 +84,11 @@ fn is_persistence_exception(event: &Event) -> bool {
 }
 
 fn is_raw_tool_terminal_event(event: &Event) -> bool {
-    matches!(event, Event::ToolResult(_) | Event::ToolError(_))
+    matches!(
+        event,
+        Event::ToolResult(_)
+            | Event::ToolResultDisplay(_)
+            | Event::ToolError(_)
+            | Event::ToolBackgroundResultDisplay(_)
+    )
 }

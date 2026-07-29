@@ -614,6 +614,10 @@ pub struct HarnessSettings {
     /// Set to `0` to disable session cleanup.
     pub session_retention_days: u64,
 
+    /// Number of days to keep non-authoritative JSONL diagnostic files.
+    /// Set to `0` to disable diagnostic cleanup.
+    pub diagnostic_jsonl_retention_days: u64,
+
     /// Extension table, keyed by name. Built-in entries (`provider-builtin`,
     /// `core-shell`) come pre-baked at the harness level; anything the
     /// user writes here overrides those per-field, or adds a new
@@ -680,12 +684,19 @@ pub struct HarnessSettings {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HarnessSettingsWire {
+    /// Whole-session directory retention in days.
     session_retention_days: u64,
+    /// Non-authoritative session JSONL retention in days.
+    diagnostic_jsonl_retention_days: u64,
+    /// Configured extension entries.
     extensions: HashMap<String, ExtensionEntry>,
     #[serde(default, alias = "customPrompts")]
+    /// User-defined prompt text keyed by prompt identifier.
     custom_prompts: BTreeMap<String, String>,
     #[serde(default)]
+    /// Harness-wide declarative tool policy.
     tool_policy: ToolPolicy,
+    /// Agent defaults and role groups.
     agents: AgentsSettings,
 }
 #[derive(Deserialize)]
@@ -719,6 +730,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         }
         let mut settings = Self {
             session_retention_days: wire.session_retention_days,
+            diagnostic_jsonl_retention_days: wire.diagnostic_jsonl_retention_days,
             extensions: wire.extensions,
             default_role: wire.agents.default_role,
             roles: HashMap::new(),
@@ -1384,6 +1396,21 @@ impl HarnessSettings {
         }
         Some(Duration::from_secs(
             self.session_retention_days.saturating_mul(24 * 60 * 60),
+        ))
+    }
+
+    /// Returns the configured non-authoritative JSONL retention duration.
+    ///
+    /// A value of `0` disables time-based cleanup and returns `None`; otherwise
+    /// the configured day count is converted to a saturating [`Duration`].
+    #[must_use]
+    pub fn diagnostic_jsonl_retention(&self) -> Option<Duration> {
+        if self.diagnostic_jsonl_retention_days == 0 {
+            return None;
+        }
+        Some(Duration::from_secs(
+            self.diagnostic_jsonl_retention_days
+                .saturating_mul(24 * 60 * 60),
         ))
     }
 }

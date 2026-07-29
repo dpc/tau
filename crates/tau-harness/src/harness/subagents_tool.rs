@@ -31,6 +31,7 @@ use crate::error::HarnessError;
 use crate::event::{ExternalMessageToolCompletedCommand, HarnessCommand, HarnessEvent};
 use crate::harness::{
     AgentMessageRecipientStatus, AgentToolCall, Harness, PendingExternalAgentMessageAuth,
+    TerminalSettlement,
 };
 
 /// Maximum overdue long-wait occurrences published in one scheduler cycle.
@@ -2376,10 +2377,7 @@ impl Harness {
             originator: tau_proto::PromptOriginator::User,
         };
         let transcript_owner = self.harness_owned_terminal_transcript_owner(cid, &call_id);
-        self.publish_terminal_tool_result(transcript_owner, None, result);
-        if transcript_owner.is_none() {
-            self.finish_harness_owned_tool_tracking(&call_id);
-        }
+        let _settlement = self.publish_terminal_tool_result(transcript_owner, None, result);
     }
 
     pub(crate) fn finish_harness_owned_tool_with_error(
@@ -2438,10 +2436,7 @@ impl Harness {
         } else {
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);
-            self.publish_terminal_tool_result(transcript_owner, None, result);
-            if transcript_owner.is_none() {
-                self.finish_harness_owned_tool_tracking(&call_id);
-            }
+            let _settlement = self.publish_terminal_tool_result(transcript_owner, None, result);
         }
     }
 
@@ -2499,44 +2494,40 @@ impl Harness {
                 self.pending_wait_settlements
                     .insert(wait_call_id.clone(), settlement);
             }
-            match reply.kind {
-                WaitReplyKind::Result { result, display } => {
-                    self.publish_terminal_tool_result(
-                        transcript_owner,
-                        None,
-                        ToolResult {
-                            call_id: reply.wait_call_id,
-                            tool_name: reply.wait_tool_name,
-                            tool_type: ToolType::Function,
-                            result,
-                            provider_content: Vec::new(),
-                            kind: ToolResultKind::Final,
-                            display,
-                            originator: tau_proto::PromptOriginator::User,
-                        },
-                    );
-                }
+            let settlement = match reply.kind {
+                WaitReplyKind::Result { result, display } => self.publish_terminal_tool_result(
+                    transcript_owner,
+                    None,
+                    ToolResult {
+                        call_id: reply.wait_call_id,
+                        tool_name: reply.wait_tool_name,
+                        tool_type: ToolType::Function,
+                        result,
+                        provider_content: Vec::new(),
+                        kind: ToolResultKind::Final,
+                        display,
+                        originator: tau_proto::PromptOriginator::User,
+                    },
+                ),
                 WaitReplyKind::Error {
                     message,
                     details,
                     display,
-                } => {
-                    self.publish_terminal_tool_error(
-                        transcript_owner,
-                        None,
-                        ToolError {
-                            call_id: reply.wait_call_id,
-                            tool_name: reply.wait_tool_name,
-                            tool_type: ToolType::Function,
-                            message,
-                            details,
-                            display,
-                            originator: tau_proto::PromptOriginator::User,
-                        },
-                    );
-                }
-            }
-            if ownerless {
+                } => self.publish_terminal_tool_error(
+                    transcript_owner,
+                    None,
+                    ToolError {
+                        call_id: reply.wait_call_id,
+                        tool_name: reply.wait_tool_name,
+                        tool_type: ToolType::Function,
+                        message,
+                        details,
+                        display,
+                        originator: tau_proto::PromptOriginator::User,
+                    },
+                ),
+            };
+            if ownerless && matches!(settlement, TerminalSettlement::Caller) {
                 self.finish_harness_owned_tool_tracking(&wait_call_id);
             }
         }

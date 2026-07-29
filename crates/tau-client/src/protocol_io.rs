@@ -81,14 +81,15 @@ struct ProtocolIoState {
 /// The meter records frames that already cross an existing transport. It does
 /// not subscribe to events or affect dispatch; callers choose where in their
 /// read/write path a successful frame is counted. [`Self::with_diagnostics`]
-/// opts a UI connection into attach-phase, replay-kind, field-size, and
-/// equality diagnostics; [`Self::default`] retains only the inexpensive
-/// cumulative and rolling counters used by extension transports.
+/// opts a UI connection into attach-phase, replay-kind, content-presence, and
+/// equality diagnostics over real frame sizes; [`Self::default`] retains only
+/// the inexpensive cumulative and rolling counters used by extension
+/// transports.
 #[derive(Clone, Default)]
 pub struct ProtocolIoMeter {
     state: Arc<Mutex<ProtocolIoState>>,
-    /// Fast-path mirror of `state.diagnostics.is_some()` that avoids locking or
-    /// component serialization on cumulative-only extension meters.
+    /// Fast-path mirror of `state.diagnostics.is_some()` that avoids locking
+    /// for detailed classification on cumulative-only extension meters.
     detailed: bool,
 }
 
@@ -105,30 +106,50 @@ impl ProtocolIoMeter {
         }
     }
 
-    /// Record a peer-to-harness input frame, grouped by event name for `Emit`
-    /// messages and by protocol message variant for all other frames.
-    pub fn record_uplink_frame(&self, message: &HarnessInputMessage) {
-        let Some(bytes) = message_len(message) else {
-            return;
-        };
+    /// Record a peer-to-harness frame using its already-observed encoded size.
+    pub fn record_uplink_frame_bytes(
+        &self,
+        message: &HarnessInputMessage,
+        bytes: tau_proto::ProtocolMessageBytes,
+    ) {
         let mut state = self.state.lock().expect("protocol io meter mutex");
         state.record_bytes(
             ProtocolIoDirection::Uplink,
             &input_message_key(message),
-            bytes,
+            bytes.get(),
         );
     }
 
     /// Record a harness-to-peer output frame, grouped by event name for
     /// delivered events and by protocol message variant for all other frames.
-    pub fn record_downlink_frame(&self, message: &HarnessOutputMessage) {
+    #[cfg(test)]
+    fn record_downlink_frame(&self, message: &HarnessOutputMessage) {
         let Some(bytes) = message_len(message) else {
             return;
         };
+        self.record_downlink_frame_bytes(
+            message,
+            tau_proto::ProtocolMessageBytes::new(bytes)
+                .expect("an encoded protocol fixture is nonempty"),
+        );
+    }
+
+    /// Record a decoded harness-to-peer frame using its already-observed
+    /// encoded byte size.
+    ///
+    /// Callers on a decode path should prefer this method so accounting never
+    /// re-encodes the message solely to recover its transport size.
+    pub fn record_downlink_frame_bytes(
+        &self,
+        message: &HarnessOutputMessage,
+        bytes: tau_proto::ProtocolMessageBytes,
+    ) {
         let key = output_message_key(message);
-        let measurements = self.detailed.then(|| collect_measurements(message, bytes));
+        let measurements = self
+            .detailed
+            .then(|| collect_measurements(message, bytes.get()));
         let mut state = self.state.lock().expect("protocol io meter mutex");
-        state.record_bytes(ProtocolIoDirection::Downlink, &key, bytes);
+        state.record_bytes(ProtocolIoDirection::Downlink, &key, bytes.get());
         if let (Some(diagnostics), HarnessOutputMessage::Deliver(delivery)) =
             (&mut state.diagnostics, message)
         {
@@ -141,7 +162,7 @@ impl ProtocolIoMeter {
                 delivery_kind,
                 delivery.event(),
                 &key,
-                bytes,
+                bytes.get(),
                 measurements.unwrap_or_default(),
             );
         }
@@ -405,6 +426,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
     }
 }
 
+#[cfg(test)]
 fn message_len<M: serde::Serialize>(message: &M) -> Option<u64> {
     tau_proto::encode_message_to_vec(message)
         .ok()

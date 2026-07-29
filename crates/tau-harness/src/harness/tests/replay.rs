@@ -1421,7 +1421,7 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
 }
 
 /// Ensures every late subscriber receives a byte-free durable-result
-/// projection, with UI clients additionally receiving the generic `tool.result`
+/// projection, with UI clients additionally receiving the payload-free display
 /// event shape.
 #[test]
 fn ui_replay_projects_provider_image_result_without_bytes() {
@@ -1444,17 +1444,21 @@ fn ui_replay_projects_provider_image_result_without_bytes() {
         originator: tau_proto::PromptOriginator::User,
     };
 
-    let ui = crate::harness::replay::project_agent_replay_event(
-        Event::ProviderToolResult(result.clone()),
-        true,
-    );
-    assert!(matches!(
-        ui,
-        Event::ToolResult(ToolResult {
-            provider_content,
-            ..
-        }) if provider_content.is_empty()
-    ));
+    for kind in [
+        tau_proto::ToolResultKind::Final,
+        tau_proto::ToolResultKind::BackgroundPlaceholder,
+    ] {
+        let mut projected_result = result.clone();
+        projected_result.kind = kind;
+        let expected = tau_proto::ToolResultDisplay::from(&projected_result);
+        assert_eq!(
+            crate::harness::replay::project_agent_replay_event(
+                Event::ProviderToolResult(projected_result),
+                true,
+            ),
+            Event::ToolResultDisplay(expected),
+        );
+    }
     assert!(matches!(
         crate::harness::replay::project_agent_replay_event(
             Event::ProviderToolResult(result),
@@ -3057,7 +3061,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
             continue;
         };
         match event {
-            Event::ToolBackgroundResult(result)
+            Event::ToolBackgroundResultDisplay(result)
                 if result.call_id.as_str() == "background-result-call" =>
             {
                 got_background_result = true;

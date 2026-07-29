@@ -45,8 +45,10 @@ Terminal tool outcomes likewise use transient peer
 `tool.result_reported`, `tool.error_reported`, and
 `tool.cancelled_reported` inputs, distinct from protected harness-authored
 canonical terminal and provider projections. Reports and canonical facts reuse
-the existing terminal payload DTOs; the event names establish authorship and
-commit stage. See
+the existing full terminal payload DTOs. Successful UI display events instead
+use dedicated payload-free DTOs, so `tool.result_display` and
+`tool.background_result_display` cannot expose raw result data. Event names
+establish authorship and commit stage. See
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 User-shell progress/completion likewise separates transient Tool/Core
 `shell.command_progress_reported` / `shell.command_finished_reported` inputs

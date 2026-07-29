@@ -49,7 +49,8 @@ broadcasts and subscriber replay receive byte-free projections regardless of
 client kind. Image buffers use shared immutable
 ownership within a process so diagnostic and prompt projections do not deep-copy
 the payload. Live provider-result broadcasts exclude UI clients, and historical
-UI replay converts the durable provider event to a byte-free generic tool result.
+UI replay converts the durable provider event to a payload-free
+`tool.result_display` projection.
 Recursive debug and TRACE projections clear image buffers before JSON
 serialization, including prompt contexts and compaction replacement windows.
 

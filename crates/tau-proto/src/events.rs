@@ -1475,6 +1475,42 @@ pub struct ToolResult {
     pub originator: PromptOriginator,
 }
 
+/// Lightweight harness-owned presentation of a successful tool completion.
+///
+/// This projection intentionally excludes the raw result and provider content.
+/// UI consumers render [`Self::display`] or a generic tool-name fallback
+/// without decoding tool-specific result data.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolResultDisplay {
+    /// Stable id of the completed tool call.
+    pub call_id: ToolCallId,
+    /// Tool name that produced this result.
+    pub tool_name: ToolName,
+    /// Protocol-level tool kind echoed from the request.
+    pub tool_type: ToolType,
+    /// Whether this is a real result or a foreground background placeholder.
+    pub kind: ToolResultKind,
+    /// Generic UI state supplied by the tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolUseState>,
+    /// Conversation originator used by UIs to classify the completion.
+    #[serde(default)]
+    pub originator: PromptOriginator,
+}
+
+impl From<&ToolResult> for ToolResultDisplay {
+    fn from(result: &ToolResult) -> Self {
+        Self {
+            call_id: result.call_id.clone(),
+            tool_name: result.tool_name.clone(),
+            tool_type: result.tool_type,
+            kind: result.kind,
+            display: result.display.clone(),
+            originator: result.originator.clone(),
+        }
+    }
+}
+
 /// Failed logical tool completion.
 ///
 /// This is terminal for a foreground call. Backgrounded calls that have already
@@ -1528,6 +1564,35 @@ pub struct ToolBackgroundResult {
     /// [`ToolResult::originator`].
     #[serde(default)]
     pub originator: PromptOriginator,
+}
+
+/// Lightweight UI projection of a committed background tool result.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolBackgroundResultDisplay {
+    /// Stable id of the backgrounded tool call.
+    pub call_id: ToolCallId,
+    /// Tool name that produced this result.
+    pub tool_name: ToolName,
+    /// Protocol-level tool kind echoed from the request.
+    pub tool_type: ToolType,
+    /// Generic UI state supplied by the tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolUseState>,
+    /// Conversation originator used by UIs to classify the completion.
+    #[serde(default)]
+    pub originator: PromptOriginator,
+}
+
+impl From<&ToolBackgroundResult> for ToolBackgroundResultDisplay {
+    fn from(result: &ToolBackgroundResult) -> Self {
+        Self {
+            call_id: result.call_id.clone(),
+            tool_name: result.tool_name.clone(),
+            tool_type: result.tool_type,
+            display: result.display.clone(),
+            originator: result.originator.clone(),
+        }
+    }
 }
 
 /// Real error result for a tool call whose foreground was already completed
@@ -5141,6 +5206,9 @@ pub enum Event {
     /// Harness-authored canonical successful completion.
     #[serde(rename = "tool.result")]
     ToolResult(ToolResult),
+    /// Harness-authored payload-free presentation for UI consumers.
+    #[serde(rename = "tool.result_display")]
+    ToolResultDisplay(ToolResultDisplay),
     /// Peer-authored failed completion awaiting routed-call validation.
     #[serde(rename = "tool.error_reported")]
     ToolErrorReported(ToolError),
@@ -5149,6 +5217,9 @@ pub enum Event {
     ToolError(ToolError),
     #[serde(rename = "tool.background_result")]
     ToolBackgroundResult(ToolBackgroundResult),
+    /// Payload-free presentation of a committed background result.
+    #[serde(rename = "tool.background_result_display")]
+    ToolBackgroundResultDisplay(ToolBackgroundResultDisplay),
     #[serde(rename = "tool.background_error")]
     ToolBackgroundError(ToolBackgroundError),
     /// Peer-authored observation awaiting routed-call validation.
@@ -5628,9 +5699,11 @@ impl Event {
             Self::ToolRejected(_) => EventName::TOOL_REJECTED,
             Self::ToolResultReported(_) => EventName::TOOL_RESULT_REPORTED,
             Self::ToolResult(_) => EventName::TOOL_RESULT,
+            Self::ToolResultDisplay(_) => EventName::TOOL_RESULT_DISPLAY,
             Self::ToolErrorReported(_) => EventName::TOOL_ERROR_REPORTED,
             Self::ToolError(_) => EventName::TOOL_ERROR,
             Self::ToolBackgroundResult(_) => EventName::TOOL_BACKGROUND_RESULT,
+            Self::ToolBackgroundResultDisplay(_) => EventName::TOOL_BACKGROUND_RESULT_DISPLAY,
             Self::ToolBackgroundError(_) => EventName::TOOL_BACKGROUND_ERROR,
             Self::ToolProgressReported(_) => EventName::TOOL_PROGRESS_REPORTED,
             Self::ToolProgress(_) => EventName::TOOL_PROGRESS,
@@ -5892,6 +5965,8 @@ impl Event {
                 | Self::ToolErrorReported(_)
                 | Self::ToolCancelledReported(_)
                 | Self::ToolCancelled(_)
+                | Self::ToolResultDisplay(_)
+                | Self::ToolBackgroundResultDisplay(_)
                 | Self::MessageDeliveredReported(_)
                 | Self::MessageEditedReported(_)
                 | Self::MessageDeletedReported(_)

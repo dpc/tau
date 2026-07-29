@@ -105,19 +105,17 @@ Those diagnostics classify two orthogonal axes: the initial connection remains i
 `cold-attach` through the non-replay `session.replay_complete` boundary, while
 each delivery independently retains its replay/non-replay marker. Later
 per-agent replay therefore appears as `steady.replay`, not cold attach. For
-selected high-volume events the diagnostics retain only byte-size
-distributions and equality classifications: tool-result encoded frame, full bare
-event, raw result, display, provider components, and missing-display occurrences;
-final-response authoritative semantic output, provider replay sidecars, and a
-metadata-only event projection; exact agent-stats duplicates within the observed
-loaded epoch; and
+selected high-volume events the diagnostics retain only already-observed frame
+size distributions and content-free classifications: tool-result display/provider
+content presence and missing-display occurrences; exact agent-stats duplicates
+within the observed loaded epoch; and
 exact/sequence-only/substantive quota changes. Agent comparison state resets on
 load, unload, and session start; quota comparison state resets on session start.
 Equality caches are also separated by attach and replay dimensions, so a replay
 snapshot is not counted as a duplicate predecessor for the first live snapshot.
-These diagnostics do not log payload content, suppress events, or change event
-semantics. Component encodings are independent CBOR size measurements and are not
-expected to add up to the enclosing frame.
+The codec returns the byte count from the real read or write, and the meter never
+re-encodes a payload solely for accounting. These diagnostics do not log payload
+content, suppress events, or change event semantics.
 
 The meter does not subscribe to events, affect replay/live filtering, own
 lifecycle policy, or call back into the harness. The harness may depend on this

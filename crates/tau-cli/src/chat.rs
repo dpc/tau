@@ -117,8 +117,9 @@ impl UiWriter {
 
     fn send_frame(&mut self, message: &HarnessInputMessage) -> io::Result<()> {
         let write_started = Instant::now();
-        self.writer
-            .write_message(message)
+        let frame_bytes = self
+            .writer
+            .write_message_with_size(message)
             .map_err(io::Error::other)?;
         let flush_started = Instant::now();
         self.writer.flush()?;
@@ -128,7 +129,7 @@ impl UiWriter {
             flush_us = flush_started.elapsed().as_micros(),
             "terminal UI uplink written and flushed"
         );
-        self.meter.record_uplink_frame(message);
+        self.meter.record_uplink_frame_bytes(message, frame_bytes);
         Ok(())
     }
 }
@@ -973,23 +974,33 @@ mod ui_io_tests {
     #[test]
     fn ui_io_stats_report_separates_catch_up_and_steady_live() {
         let meter = UiIoMeter::with_diagnostics();
-        meter.record_downlink_frame(&HarnessOutputMessage::deliver_replay(
+        let record = |message: HarnessOutputMessage| {
+            let bytes = tau_proto::encode_message_to_vec(&message)
+                .expect("encode test frame")
+                .len() as u64;
+            meter.record_downlink_frame_bytes(
+                &message,
+                tau_proto::ProtocolMessageBytes::new(bytes)
+                    .expect("an encoded protocol fixture is nonempty"),
+            );
+        };
+        record(HarnessOutputMessage::deliver_replay(
             UnixMicros::new(1),
             Event::TermBell(tau_proto::TermBell {}),
         ));
-        meter.record_downlink_frame(&HarnessOutputMessage::deliver(
-            Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        record(HarnessOutputMessage::deliver(Event::SessionReplayComplete(
+            tau_proto::SessionReplayComplete {
                 session_id: "session-1"
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
                 error: None,
-            }),
-        ));
-        meter.record_downlink_frame(&HarnessOutputMessage::deliver_live(
+            },
+        )));
+        record(HarnessOutputMessage::deliver_live(
             UnixMicros::new(2),
             Event::TermBell(tau_proto::TermBell {}),
         ));
-        meter.record_downlink_frame(&HarnessOutputMessage::deliver_replay(
+        record(HarnessOutputMessage::deliver_replay(
             UnixMicros::new(3),
             Event::TermBell(tau_proto::TermBell {}),
         ));
@@ -1737,12 +1748,12 @@ pub(crate) fn run_chat(
                 delivery_id,
                 "socket read and decode started"
             );
-            match reader.read_message() {
-                Ok(Some(message)) => {
+            match reader.read_message_with_size() {
+                Ok(Some(decoded)) => {
+                    let message = decoded.message;
+                    let frame_bytes = decoded.encoded_bytes;
                     let read_elapsed = read_started.elapsed();
-                    let queue_bytes = tau_proto::encode_message_to_vec(&message)
-                        .map(|encoded| encoded.len())
-                        .unwrap_or(0);
+                    let queue_bytes = usize::try_from(frame_bytes.get()).unwrap_or(usize::MAX);
                     tracing::trace!(
                         target: "tau_cli::frontend_progress",
                         delivery_id,
@@ -1750,7 +1761,7 @@ pub(crate) fn run_chat(
                         frame_bytes = queue_bytes,
                         "socket frame read and decoded"
                     );
-                    socket_ui_io_meter.record_downlink_frame(&message);
+                    socket_ui_io_meter.record_downlink_frame_bytes(&message, frame_bytes);
                     let cmd = match message {
                         HarnessOutputMessage::Deliver(delivery) => {
                             let Some((event, recorded_at)) = renderer_event_from_delivery(delivery)

@@ -2041,6 +2041,15 @@ impl Borrow<tau_proto::ShellCommandId> for UiShellRouteId {
     }
 }
 
+/// Component responsible for settling runtime state after terminal publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalSettlement {
+    /// The canonical terminal fact's post-commit reaction settles the call.
+    PostCommit,
+    /// The publication caller settles the call after transient projections.
+    Caller,
+}
+
 /// Central harness event loop and runtime state.
 ///
 /// Owns the event bus, live connections, durable stores, and provider/tool
@@ -3409,6 +3418,12 @@ impl Harness {
                 ],
             );
         }
+        crate::diagnostic_cleanup::spawn_diagnostic_jsonl_cleanup(
+            sessions_dir.clone(),
+            harness_settings.diagnostic_jsonl_retention(),
+            session_persistence,
+            vec![SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid")],
+        );
         let mut harness = Self::from_base_parts(HarnessBaseParts {
             tx,
             rx,
@@ -3749,6 +3764,8 @@ impl Harness {
         let roles = Self::load_startup_roles(&harness_settings)?;
         let missing_default_role = roles.missing_default_role.clone();
         let session_retention = harness_settings.session_retention();
+        let diagnostic_jsonl_retention = harness_settings.diagnostic_jsonl_retention();
+        let session_persistence = launch.session_persistence;
         tracing::debug!(target: "tau_harness::startup", selected_model = ?roles.selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");
         let mut harness = Self::assemble_startup_harness(StartupHarnessParts {
             state_dir,
@@ -3787,6 +3804,12 @@ impl Harness {
                 ],
             );
         }
+        crate::diagnostic_cleanup::spawn_diagnostic_jsonl_cleanup(
+            sessions_dir.clone(),
+            diagnostic_jsonl_retention,
+            session_persistence,
+            vec![SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid")],
+        );
         Ok((
             harness,
             missing_default_role,
@@ -4025,9 +4048,13 @@ impl Harness {
                 HarnessEvent::FromConnection {
                     connection_id,
                     message,
-                    ..
+                    frame_bytes,
                 } => {
-                    if self.handle_startup_from_connection(&connection_id, *message)? {
+                    if self.handle_startup_from_connection_with_frame_bytes(
+                        &connection_id,
+                        *message,
+                        frame_bytes,
+                    )? {
                         if STARTUP_TIMEOUT <= started_at.elapsed() {
                             return Err(HarnessError::StartupTimeout);
                         }
@@ -4088,10 +4115,26 @@ impl Harness {
         }
     }
 
+    #[cfg(test)]
     fn handle_startup_from_connection(
         &mut self,
         connection_id: &tau_proto::ConnectionId,
         message: HarnessInputMessage,
+    ) -> Result<bool, HarnessError> {
+        let frame_bytes = tau_proto::ProtocolMessageBytes::new(
+            tau_proto::encode_message_to_vec(&message)
+                .expect("synthetic startup message must encode")
+                .len() as u64,
+        )
+        .expect("an encoded startup message is nonempty");
+        self.handle_startup_from_connection_with_frame_bytes(connection_id, message, frame_bytes)
+    }
+
+    fn handle_startup_from_connection_with_frame_bytes(
+        &mut self,
+        connection_id: &tau_proto::ConnectionId,
+        message: HarnessInputMessage,
+        frame_bytes: tau_proto::ProtocolMessageBytes,
     ) -> Result<bool, HarnessError> {
         if matches!(&message, HarnessInputMessage::UiDebugEventStatsRequest(_))
             && !self.extensions.entries.contains_key(connection_id)
@@ -4124,7 +4167,11 @@ impl Harness {
                 }
             }
             Some(_) => {
-                self.handle_extension_message(connection_id, message)?;
+                self.handle_extension_message_with_frame_bytes(
+                    connection_id,
+                    message,
+                    frame_bytes,
+                )?;
                 false
             }
             None => false,
@@ -4230,6 +4277,7 @@ impl Harness {
         let HarnessEvent::FromConnection {
             connection_id,
             message,
+            frame_bytes: _,
         } = harness_event
         else {
             return false;
@@ -4746,14 +4794,13 @@ impl Harness {
         })
     }
 
-    /// Publish one terminal result and return whether postcommit reaction owns
-    /// runtime settlement for a durable transcript call.
+    /// Publish one terminal result and identify its runtime settlement owner.
     fn publish_terminal_tool_result(
         &mut self,
         cid: Option<&AgentId>,
         source: Option<&tau_proto::ConnectionId>,
         result: ToolResult,
-    ) -> bool {
+    ) -> TerminalSettlement {
         if result.kind == ToolResultKind::Final
             && let Some(cid) = cid
             && self.tool_terminal_has_open_durable_owner(cid, &result.call_id)
@@ -4767,36 +4814,43 @@ impl Harness {
         match cid {
             Some(cid) if self.tool_terminal_has_open_durable_owner(cid, &result.call_id) => {
                 self.publish_for_agent_from(cid, source, Event::ProviderToolResult(result));
-                true
+                TerminalSettlement::PostCommit
             }
             Some(cid) => {
-                let mut ui_result = result.clone();
-                ui_result.provider_content.clear();
-                self.publish_event(source, Event::ToolResult(ui_result.clone()));
-                self.publish_event(source, Event::ProviderToolResult(result));
-                self.reset_loop_guard_for_progress(cid);
-                self.record_wait_tool_result(ui_result, None);
-                false
+                self.tool_agents
+                    .entry(result.call_id.clone())
+                    .or_insert_with(|| cid.clone());
+                let source = self.resolved_publish_source(source);
+                self.enqueue_publish(
+                    source.as_ref(),
+                    Event::ProviderToolResult(result.clone()),
+                    false,
+                    false,
+                    None,
+                );
+                TerminalSettlement::PostCommit
             }
             None => {
-                let mut ui_result = result.clone();
-                ui_result.provider_content.clear();
-                self.publish_event(source, Event::ToolResult(ui_result.clone()));
-                self.publish_event(source, Event::ProviderToolResult(result));
-                self.record_wait_tool_result(ui_result, None);
-                false
+                let source = self.resolved_publish_source(source);
+                self.enqueue_publish(
+                    source.as_ref(),
+                    Event::ProviderToolResult(result.clone()),
+                    false,
+                    false,
+                    None,
+                );
+                TerminalSettlement::PostCommit
             }
         }
     }
 
-    /// Publish one terminal error and return whether postcommit reaction owns
-    /// runtime settlement for a durable transcript call.
+    /// Publish one terminal error and identify its runtime settlement owner.
     fn publish_terminal_tool_error(
         &mut self,
         cid: Option<&AgentId>,
         source: Option<&tau_proto::ConnectionId>,
         error: ToolError,
-    ) -> bool {
+    ) -> TerminalSettlement {
         self.publish_terminal_tool_error_with_cause(
             cid,
             source,
@@ -4812,7 +4866,7 @@ impl Harness {
         source: Option<&tau_proto::ConnectionId>,
         error: ToolError,
         cause: tau_proto::ToolTerminalCause,
-    ) -> bool {
+    ) -> TerminalSettlement {
         if let Some(cid) = cid
             && self.tool_terminal_has_open_durable_owner(cid, &error.call_id)
         {
@@ -4821,20 +4875,20 @@ impl Harness {
         match cid {
             Some(cid) if self.tool_terminal_has_open_durable_owner(cid, &error.call_id) => {
                 self.publish_for_agent_from(cid, source, Event::ProviderToolError(error));
-                true
+                TerminalSettlement::PostCommit
             }
             Some(cid) => {
                 self.publish_event(source, Event::ToolError(error.clone()));
                 self.publish_event(source, Event::ProviderToolError(error.clone()));
                 self.record_tool_failure_loop_signature(cid, &error);
                 self.record_wait_tool_error(error, None);
-                false
+                TerminalSettlement::Caller
             }
             None => {
                 self.publish_event(source, Event::ToolError(error.clone()));
                 self.publish_event(source, Event::ProviderToolError(error.clone()));
                 self.record_wait_tool_error(error, None);
-                false
+                TerminalSettlement::Caller
             }
         }
     }
@@ -5860,10 +5914,12 @@ impl Harness {
                 &unavailable_route,
                 "captured provider-qualified model has no route",
             );
-        } else if matches!(event, Event::ProviderToolResult(_)) {
-            // Typed provider content is transcript/provider data, not a generic
-            // UI payload. UIs receive the separately published, byte-free
-            // `tool.result` projection instead.
+        } else if matches!(
+            event,
+            Event::ProviderToolResult(_) | Event::ToolResult(_) | Event::ToolBackgroundResult(_)
+        ) {
+            // Raw provider and generic result data is not a UI payload. UIs
+            // receive the separately published payload-free display projection.
             let _ =
                 self.bus
                     .publish_from_excluding_kinds(source, observer_frame, &[ClientKind::Ui]);
@@ -6683,6 +6739,14 @@ impl Harness {
             Event::ToolBackgroundError(error) => &error.call_id,
             _ => return,
         };
+        if let Event::ProviderToolResult(result) = event {
+            let projection_cid = self
+                .tool_agents
+                .get(call_id)
+                .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                .cloned();
+            self.publish_tool_result_projections(projection_cid.as_ref(), source, result);
+        }
         match event {
             Event::ProviderToolResult(result)
                 if result.kind == ToolResultKind::BackgroundPlaceholder =>
@@ -6705,9 +6769,26 @@ impl Harness {
             _ => {}
         }
         let Some(append_outcome) = append_outcome else {
+            if let Event::ProviderToolResult(result) = event {
+                self.record_wait_tool_result(result.clone(), None);
+                if let Some(cid) = self
+                    .tool_agents
+                    .get(call_id)
+                    .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                    .cloned()
+                {
+                    self.reset_loop_guard_for_progress(&cid);
+                }
+                self.finish_harness_owned_tool_tracking(call_id);
+            }
             return;
         };
-        let Some(cid) = self.tool_agents.get(call_id).cloned() else {
+        let Some(cid) = self
+            .tool_agents
+            .get(call_id)
+            .or_else(|| self.peer_internal_tool_agents.get(call_id))
+            .cloned()
+        else {
             return;
         };
         if let Event::ToolBackgroundResult(result) = event {
@@ -6715,6 +6796,13 @@ impl Harness {
                 return;
             };
             self.finish_tool_call_runtime_state(call_id.as_str());
+            self.publish_for_agent_from(
+                &cid,
+                source,
+                Event::ToolBackgroundResultDisplay(tau_proto::ToolBackgroundResultDisplay::from(
+                    result,
+                )),
+            );
             self.record_wait_background_result(result.clone(), Some(append_outcome.observation_id));
             self.finish_committed_background_completion(&cid, call_id, mode);
             return;
@@ -6744,15 +6832,8 @@ impl Harness {
         }
         match event {
             Event::ProviderToolResult(result) => {
-                let mut renderer_result = result.clone();
-                renderer_result.provider_content.clear();
-                self.publish_for_agent_from(
-                    &cid,
-                    source,
-                    Event::ToolResult(renderer_result.clone()),
-                );
                 self.reset_loop_guard_for_progress(&cid);
-                self.record_wait_tool_result(renderer_result, Some(append_outcome.observation_id));
+                self.record_wait_tool_result(result.clone(), Some(append_outcome.observation_id));
             }
             Event::ProviderToolError(error) => {
                 self.publish_for_agent_from(&cid, source, Event::ToolError(error.clone()));
@@ -6804,8 +6885,36 @@ impl Harness {
                 }
             }
         } else {
-            self.on_tool_call_complete(call_id.as_str());
-            self.clear_tool_call_tracking(call_id.as_str());
+            if self.peer_internal_tool_agents.contains_key(call_id) {
+                self.finish_harness_owned_tool_tracking(call_id);
+            } else {
+                self.on_tool_call_complete(call_id.as_str());
+                self.clear_tool_call_tracking(call_id.as_str());
+            }
+        }
+    }
+
+    /// Publish raw non-UI and payload-free UI views of one committed provider
+    /// result.
+    fn publish_tool_result_projections(
+        &mut self,
+        cid: Option<&AgentId>,
+        source: Option<&tau_proto::ConnectionId>,
+        result: &ToolResult,
+    ) {
+        let mut generic_result = result.clone();
+        generic_result.provider_content.clear();
+        let generic = Event::ToolResult(generic_result);
+        let display = Event::ToolResultDisplay(tau_proto::ToolResultDisplay::from(result));
+        match cid {
+            Some(cid) => {
+                self.publish_for_agent_from(cid, source, generic);
+                self.publish_for_agent_from(cid, source, display);
+            }
+            None => {
+                self.publish_event(source, generic);
+                self.publish_event(source, display);
+            }
         }
     }
 
@@ -7693,6 +7802,20 @@ impl Harness {
             }
             return Ok(None);
         }
+        if let Event::ProviderToolResult(result) = event
+            && !persist
+            && self
+                .tool_agents
+                .get(&result.call_id)
+                .or_else(|| self.peer_internal_tool_agents.get(&result.call_id))
+                .is_none_or(|cid| !self.tool_terminal_has_open_durable_owner(cid, &result.call_id))
+        {
+            // Harness-owned wait and peer completions can have a live agent route
+            // without a declared transcript call. They still publish the
+            // authoritative provider-shaped fact before projections, but have no
+            // semantic journal owner to accept it.
+            return Ok(None);
+        }
         if !semantic_event_router::should_persist_event(event, persist) {
             return Ok(None);
         }
@@ -7829,9 +7952,11 @@ impl Harness {
             Event::ProviderToolResult(_)
                 | Event::ProviderToolError(_)
                 | Event::ToolResult(_)
+                | Event::ToolResultDisplay(_)
                 | Event::ToolError(_)
                 | Event::ToolCancelled(_)
                 | Event::ToolBackgroundResult(_)
+                | Event::ToolBackgroundResultDisplay(_)
                 | Event::ToolBackgroundError(_)
         ) {
             return None;
@@ -8216,9 +8341,13 @@ impl Harness {
                 HarnessEvent::FromConnection {
                     connection_id,
                     message,
-                    ..
+                    frame_bytes,
                 } => {
-                    let _ = self.handle_startup_from_connection(&connection_id, *message)?;
+                    let _ = self.handle_startup_from_connection_with_frame_bytes(
+                        &connection_id,
+                        *message,
+                        frame_bytes,
+                    )?;
                 }
                 HarnessEvent::Disconnected { connection_id } => {
                     self.handle_startup_disconnect(&connection_id)?;
@@ -8288,9 +8417,13 @@ impl Harness {
                 HarnessEvent::FromConnection {
                     connection_id,
                     message,
-                    ..
+                    frame_bytes,
                 } => {
-                    let _ = self.handle_startup_from_connection(&connection_id, *message)?;
+                    let _ = self.handle_startup_from_connection_with_frame_bytes(
+                        &connection_id,
+                        *message,
+                        frame_bytes,
+                    )?;
                 }
                 HarnessEvent::Disconnected { connection_id } => {
                     self.handle_startup_disconnect(&connection_id)?;
@@ -8600,10 +8733,11 @@ impl Harness {
             HarnessEvent::FromConnection {
                 connection_id,
                 message,
-                ..
+                frame_bytes,
             } => self.handle_runtime_connection_message(
                 connection_id,
                 message,
+                frame_bytes,
                 served_clients,
                 exit_on_disconnect,
             )?,
@@ -8639,6 +8773,7 @@ impl Harness {
         &mut self,
         connection_id: ConnectionId,
         message: Box<HarnessInputMessage>,
+        frame_bytes: tau_proto::ProtocolMessageBytes,
         served_clients: &mut usize,
         exit_on_disconnect: &mut bool,
     ) -> Result<(), HarnessError> {
@@ -8667,7 +8802,13 @@ impl Harness {
                     *served_clients += 1;
                 }
             }
-            Some(_) => self.handle_extension_message(&connection_id, *message)?,
+            Some(_) => {
+                self.handle_extension_message_with_frame_bytes(
+                    &connection_id,
+                    *message,
+                    frame_bytes,
+                )?;
+            }
             None => {}
         }
         Ok(())
@@ -10558,14 +10699,33 @@ impl Harness {
             });
     }
 
+    #[cfg(test)]
     fn handle_extension_message(
         &mut self,
         source_id: &tau_proto::ConnectionId,
         message: impl Into<HarnessInputMessage>,
     ) -> Result<(), HarnessError> {
         let message = message.into();
+        let frame_bytes = tau_proto::ProtocolMessageBytes::new(
+            tau_proto::encode_message_to_vec(&message)
+                .expect("synthetic extension message must encode")
+                .len() as u64,
+        )
+        .expect("an encoded extension message is nonempty");
+        self.handle_extension_message_with_frame_bytes(source_id, message, frame_bytes)
+    }
+
+    fn handle_extension_message_with_frame_bytes(
+        &mut self,
+        source_id: &tau_proto::ConnectionId,
+        message: impl Into<HarnessInputMessage>,
+        frame_bytes: tau_proto::ProtocolMessageBytes,
+    ) -> Result<(), HarnessError> {
+        let message = message.into();
         if let Some(entry) = self.extensions.entries.get(source_id) {
-            entry.protocol_io.record_uplink_frame(&message);
+            entry
+                .protocol_io
+                .record_uplink_frame_bytes(&message, frame_bytes);
         }
         let admission = self.current_extension_frame_admission();
         self.handle_extension_message_with_admission(source_id, message, admission)
@@ -10931,7 +11091,10 @@ impl Harness {
         if source_id != harness_connection_id()
             && matches!(
                 event,
-                Event::ToolResult(_) | Event::ToolError(_) | Event::ToolCancelled(_)
+                Event::ToolResult(_)
+                    | Event::ToolResultDisplay(_)
+                    | Event::ToolError(_)
+                    | Event::ToolCancelled(_)
             )
         {
             // Peer terminal outcomes use reports. Harness-owned internal tools
@@ -12917,6 +13080,7 @@ impl Harness {
             // `is_peer_forbidden_harness_fact` and the immutable/must-pass
             // classifications in `harness/interception.rs`.
             Event::ToolResult(_)
+            | Event::ToolResultDisplay(_)
             | Event::ToolError(_)
             | Event::ToolCancelled(_)
             | Event::ProviderToolResult(_)
@@ -12928,7 +13092,9 @@ impl Harness {
             | Event::AgentStarted(_)
             | Event::AgentMessageSent(_)
             | Event::AgentMessageReceived(_) => None,
-            Event::ToolBackgroundResult(_) | Event::ToolBackgroundError(_)
+            Event::ToolBackgroundResult(_)
+            | Event::ToolBackgroundResultDisplay(_)
+            | Event::ToolBackgroundError(_)
                 if source_id != harness_connection_id() =>
             {
                 None
@@ -12991,7 +13157,7 @@ impl Harness {
                     %error,
                     "rejecting tool result before dedup and generic publication"
                 );
-                let journal_backed = self.publish_terminal_tool_error(
+                let settlement = self.publish_terminal_tool_error(
                     Some(&cid),
                     Some(crate::harness::harness_connection_id()),
                     ToolError {
@@ -13008,7 +13174,7 @@ impl Harness {
                         originator: result.originator,
                     },
                 );
-                if !journal_backed {
+                if matches!(settlement, TerminalSettlement::Caller) {
                     self.on_tool_call_complete(call_id.as_str());
                     self.clear_tool_call_tracking(call_id.as_str());
                 }
@@ -13023,22 +13189,18 @@ impl Harness {
             // (during its teardown) leaves `tree.head` on the *parent* branch —
             // folding the result there misplaces it and produces orphan ToolUse
             // blocks when the parent conv is later re-prompted.
-            let journal_backed = self.publish_terminal_tool_result(
+            let _settlement = self.publish_terminal_tool_result(
                 Some(&cid),
                 Some(crate::harness::harness_connection_id()),
                 result,
             );
-            if !journal_backed {
-                self.on_tool_call_complete(call_id.as_str());
-                self.clear_tool_call_tracking(call_id.as_str());
-            }
         } else if self.peer_tool_requests.contains(&result.call_id)
             && let Some(tool) = self.pending_tools.get(&result.call_id).cloned()
         {
-            let call_id = result.call_id.to_string();
             result.tool_name = tool.name;
             result.tool_type = tool.tool_type;
             if !result.provider_content.is_empty() {
+                let call_id = result.call_id.clone();
                 self.publish_terminal_tool_error(
                     None,
                     Some(crate::harness::harness_connection_id()),
@@ -13052,6 +13214,7 @@ impl Harness {
                         originator: result.originator,
                     },
                 );
+                self.clear_tool_call_tracking(call_id.as_str());
             } else {
                 self.publish_terminal_tool_result(
                     None,
@@ -13059,7 +13222,6 @@ impl Harness {
                     result,
                 );
             }
-            self.clear_tool_call_tracking(&call_id);
         } else {
             self.emit_info(&format!(
                 "discarding duplicate tool result for call_id={}",
@@ -13085,12 +13247,12 @@ impl Harness {
                 error.tool_type = tool.tool_type;
             }
             self.dedup_tool_error(&cid, &mut error);
-            let journal_backed = self.publish_terminal_tool_error(
+            let settlement = self.publish_terminal_tool_error(
                 Some(&cid),
                 Some(crate::harness::harness_connection_id()),
                 error,
             );
-            if !journal_backed {
+            if matches!(settlement, TerminalSettlement::Caller) {
                 self.on_tool_call_complete(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
             }
@@ -15999,13 +16161,13 @@ impl Harness {
             // have been terminalized.
             let owner = self.tool_agents.get(call_id.as_str()).cloned();
             if let Some(cid) = owner.as_ref() {
-                let journal_backed = self.publish_terminal_tool_error_with_cause(
+                let settlement = self.publish_terminal_tool_error_with_cause(
                     Some(cid),
                     Some(crate::harness::harness_connection_id()),
                     error,
                     tau_proto::ToolTerminalCause::ProviderDisconnected,
                 );
-                if !journal_backed {
+                if matches!(settlement, TerminalSettlement::Caller) {
                     self.disconnect_terminal_batch_pending.remove(&call_id);
                     self.on_tool_call_complete_inner(call_id.as_str(), false);
                     self.clear_tool_call_tracking(call_id.as_str());
@@ -16456,6 +16618,7 @@ impl Harness {
         matches!(
             event,
             Event::ToolResult(_)
+                | Event::ToolResultDisplay(_)
                 | Event::ToolError(_)
                 | Event::ToolResultReported(_)
                 | Event::ToolErrorReported(_)
@@ -16464,6 +16627,7 @@ impl Harness {
                 | Event::ToolCancelled(_)
                 | Event::ToolCancelledReported(_)
                 | Event::ToolBackgroundResult(_)
+                | Event::ToolBackgroundResultDisplay(_)
                 | Event::ToolBackgroundError(_)
         )
     }
@@ -16495,6 +16659,7 @@ impl Harness {
                 | Event::ToolUnregister(_)
                 | Event::ToolProgress(_)
                 | Event::ToolResult(_)
+                | Event::ToolResultDisplay(_)
                 | Event::ToolError(_)
                 | Event::ToolCancelled(_)
                 | Event::HarnessProviderQuotaChanged(_)
@@ -26801,7 +26966,7 @@ impl Harness {
         let call_id: ToolCallId = call.id.clone();
         self.tool_agents.insert(call_id.clone(), cid.clone());
         self.bump_tools_started_for(cid);
-        let journal_backed = self.publish_terminal_tool_error(
+        let settlement = self.publish_terminal_tool_error(
             Some(cid),
             source,
             ToolError {
@@ -26815,7 +26980,7 @@ impl Harness {
                 display: None,
             },
         );
-        if !journal_backed {
+        if matches!(settlement, TerminalSettlement::Caller) {
             if complete_turn {
                 self.on_tool_call_complete(call_id.as_str());
             } else {
@@ -27070,7 +27235,7 @@ impl Harness {
                 originator: owner_originator.clone(),
             };
             self.publish_for_agent_from(cid, source, Event::ToolRequest(request));
-            let journal_backed = self.publish_terminal_tool_error(
+            let settlement = self.publish_terminal_tool_error(
                 Some(cid),
                 source,
                 ToolError {
@@ -27084,7 +27249,7 @@ impl Harness {
                     display: None,
                 },
             );
-            if !journal_backed {
+            if matches!(settlement, TerminalSettlement::Caller) {
                 self.on_tool_call_complete(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
             }
@@ -27218,8 +27383,8 @@ impl Harness {
 
                     display: None,
                 };
-                let journal_backed = self.publish_terminal_tool_error(Some(cid), source, error);
-                if !journal_backed {
+                let settlement = self.publish_terminal_tool_error(Some(cid), source, error);
+                if matches!(settlement, TerminalSettlement::Caller) {
                     self.on_tool_call_complete(call_id.as_str());
                     self.clear_tool_call_tracking(call_id.as_str());
                 }
@@ -27274,7 +27439,7 @@ impl Harness {
                 id: Some(committed_observer_id.clone()),
                 name: tau_proto::ExtensionName::parse("embedded_committed_event_observer")
                     .expect("embedded observer name must satisfy the extension identifier grammar"),
-                kind: ClientKind::Ui,
+                kind: ClientKind::Core,
                 origin: ConnectionOrigin::InMemory,
             },
             Box::new(ChannelSink { tx: observer_tx }),
@@ -27284,7 +27449,7 @@ impl Harness {
             Vec::new(),
             vec![
                 EventSelector::Exact(tau_proto::EventName::TOOL_PROGRESS),
-                EventSelector::Exact(tau_proto::EventName::TOOL_RESULT),
+                EventSelector::Exact(tau_proto::EventName::PROVIDER_TOOL_RESULT),
                 EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
             ],
         ) {
@@ -27308,7 +27473,7 @@ impl Harness {
                         Event::ToolProgress(progress) => {
                             progress_messages.push(format_tool_progress(progress));
                         }
-                        Event::ToolResult(result) => {
+                        Event::ProviderToolResult(result) => {
                             tool_results.push(byte_free_embedded_tool_result(result));
                         }
                         Event::ProviderResponseFinished(response) => {
@@ -27358,8 +27523,13 @@ impl Harness {
                 HarnessEvent::FromConnection {
                     connection_id,
                     message,
+                    frame_bytes,
                 } => {
-                    if let Err(error) = self.handle_extension_message(&connection_id, *message) {
+                    if let Err(error) = self.handle_extension_message_with_frame_bytes(
+                        &connection_id,
+                        *message,
+                        frame_bytes,
+                    ) {
                         break 'interaction Err(error);
                     }
                 }

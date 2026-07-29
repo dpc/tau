@@ -194,7 +194,10 @@ fn remove_stale_detached_sessions(sessions_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn try_acquire_cleanup_lock(path: &std::path::Path) -> io::Result<Option<File>> {
+/// Acquire one session's cleanup lock without waiting.
+///
+/// `None` means another process currently holds the lock.
+pub(crate) fn try_acquire_cleanup_lock(path: &std::path::Path) -> io::Result<Option<File>> {
     let file = OpenOptions::new()
         .create(true)
         .read(true)

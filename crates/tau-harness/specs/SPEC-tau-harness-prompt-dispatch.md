@@ -171,8 +171,8 @@ This authority chain is governed by
 
 Typed image bytes in provider tool results are never generic UI traffic. Live
 `provider.tool_result` delivery excludes UI clients; they receive the separate
-byte-free `tool.result` event. Historical UI replay projects the durable
-provider event back to that byte-free generic event. Debug and TRACE prompt
+payload-free `tool.result_display` event. Historical UI replay projects the durable
+provider event back to that same typed display event. Debug and TRACE prompt
 projections recursively remove image buffers before JSON serialization. Debug
 JSONL represents full prompt work as a bounded content-free count summary rather
 than serializing prompt structure or content.
