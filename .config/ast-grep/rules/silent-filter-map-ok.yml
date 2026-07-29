@@ -1,0 +1,8 @@
+id: silent-filter-map-ok
+language: rust
+severity: warning
+rule:
+  any:
+    - pattern: $ITER.filter_map(|$X| $X.parse().ok())
+    - pattern: $ITER.filter_map(|$X| { $X.parse().ok() })
+message: "A parse-to-Option filter silently drops malformed input; propagate or observe parse errors unless loss is explicit policy."

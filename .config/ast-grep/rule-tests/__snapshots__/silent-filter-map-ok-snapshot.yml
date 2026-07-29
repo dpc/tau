@@ -1,0 +1,14 @@
+id: silent-filter-map-ok
+snapshots:
+  values.filter_map(|value| value.parse().ok()):
+    labels:
+    - source: values.filter_map(|value| value.parse().ok())
+      style: primary
+      start: 0
+      end: 45
+  values.filter_map(|value| { value.parse().ok() }):
+    labels:
+    - source: values.filter_map(|value| { value.parse().ok() })
+      style: primary
+      start: 0
+      end: 49
