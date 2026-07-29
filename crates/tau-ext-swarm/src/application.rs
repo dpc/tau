@@ -310,6 +310,8 @@ impl Application for SwarmApplication {
             .await
             .unwrap_or(Err("prompt acceptance timed out"))
             .map_err(str::to_owned);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = result_tx.send(Some(result.clone()));
         result.map_err(ClientError::transport)
     }
@@ -469,6 +471,8 @@ impl Application for SwarmApplication {
         if result.is_err() || matches!(result, Ok(AnswerBlockerResponse::Rejected(_))) {
             self.release_blocker_answer(&request);
         }
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = result_tx.send(Some(result.clone()));
         result.map_err(ClientError::transport)
     }

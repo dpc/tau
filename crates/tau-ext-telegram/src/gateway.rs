@@ -1680,6 +1680,8 @@ impl GatewaySocketGuard {
 
 impl Drop for GatewaySocketGuard {
     fn drop(&mut self) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = fs::remove_file(&self.path);
     }
 }
@@ -1690,6 +1692,8 @@ fn accept_gateway_socket_loop(listener: UnixListener, state: Arc<GatewaySocketSt
         match stream {
             Ok(stream) => {
                 let state = Arc::clone(&state);
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = thread::Builder::new()
                     .name("telegram-gateway-client".to_owned())
                     .spawn(move || handle_gateway_socket_client(stream, state));
@@ -1704,6 +1708,8 @@ fn accept_gateway_socket_loop(listener: UnixListener, state: Arc<GatewaySocketSt
 /// Handle one local socket client using JSON-line requests and responses.
 fn handle_gateway_socket_client(mut stream: UnixStream, state: Arc<GatewaySocketState>) {
     let connection_id = state.allocate_connection_id();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = stream.set_read_timeout(Some(REGISTRATION_LEASE_DURATION));
     loop {
         state.prune_registry();

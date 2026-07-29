@@ -1471,6 +1471,8 @@ where
         let config = config.clone();
         thread::spawn(move || {
             let result = runtime.fetch_usage(&config);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = send_worker_message(
                 &tx,
                 &waker,
@@ -1527,6 +1529,8 @@ where
         let tx = self.worker_tx.clone();
         thread::spawn(move || {
             thread::sleep(delay);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = send_worker_message(
                 &tx,
                 &waker,
@@ -1646,6 +1650,8 @@ where
                 debug_provider_requests,
                 abort,
             });
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ =
                 send_worker_message(&tx, &waker, WorkerMessage::PrewarmDone { key, generation });
         });
@@ -2935,11 +2941,15 @@ impl RetryScheduler {
     }
 
     fn cancel(&self, prompt_id: tau_proto::AgentPromptId) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.commands.send(SchedulerCommand::Cancel(prompt_id));
     }
 
     /// Requests cancellation of every delayed retry job owned by the scheduler.
     fn cancel_all(&self) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.commands.send(SchedulerCommand::CancelAll);
     }
 
@@ -2948,6 +2958,8 @@ impl RetryScheduler {
         request_id: tau_proto::RetryPromptRequestId,
         agent_prompt_id: tau_proto::AgentPromptId,
     ) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.commands.send(SchedulerCommand::RetryNow {
             request_id,
             agent_prompt_id,
@@ -2955,6 +2967,8 @@ impl RetryScheduler {
     }
 
     fn extend_cooldown(&self, provider: ProviderName, due: Instant, generation: u64) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.commands.send(SchedulerCommand::ExtendCooldown {
             provider,
             due,
@@ -2963,6 +2977,8 @@ impl RetryScheduler {
     }
 
     fn release_cooldown(&self, provider: ProviderName, generation: u64, now: Instant) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.commands.send(SchedulerCommand::ReleaseCooldown {
             provider,
             generation,
@@ -3015,6 +3031,8 @@ fn run_retry_scheduler(
                     ) {
                         return;
                     }
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = acknowledged.send(());
                 }
             }
@@ -3030,6 +3048,8 @@ impl Drop for RetryScheduler {
         let (replacement, _) = mpsc::sync_channel(0);
         self.commands = Arc::new(replacement);
         if let Some(actor) = self.actor.take() {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = actor.join();
         }
     }
@@ -3493,6 +3513,8 @@ fn production_prompt_executor() -> PromptExecutor {
             let Some(profile_identity) = profile_identity else {
                 return;
             };
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = send_worker_message(
                 &quota_tx,
                 &quota_waker,
@@ -3527,6 +3549,8 @@ fn production_prompt_executor() -> PromptExecutor {
         };
         match result {
             Ok(Some(decision)) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = send_worker_message(
                     &execution.output_tx,
                     &execution.output_waker,
@@ -3576,6 +3600,8 @@ fn start_prompt_job(mut job: PromptJob, active_prompts: &mut usize, context: &Pr
     let done_waker = context.worker_waker.clone();
     thread::spawn(move || {
         executor(execution);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = send_worker_message(&done_tx, &done_waker, WorkerMessage::PromptDone);
     });
 }
@@ -4200,6 +4226,8 @@ fn emit_retry_banner<W: Write>(
         attempt,
         error,
     );
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = writer.write_message(&HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
@@ -4215,6 +4243,8 @@ fn emit_retry_banner<W: Write>(
             originator: originator.clone(),
         }),
     ));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = writer.flush();
 }
 
@@ -4686,9 +4716,13 @@ fn emit_chatgpt_connecting_update<W: Write>(
         response_stats: None,
         originator: originator.clone(),
     };
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = writer.write_message(&HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(update),
     ));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = writer.flush();
 }
 
@@ -5045,6 +5079,8 @@ fn emit_repetition_detected_update<W: Write>(
     let text = bounded_provider_error(&format!(
         "provider stream repetition detected; aborting response ({repetition})"
     ));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = writer.write_message(&HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
@@ -5060,6 +5096,8 @@ fn emit_repetition_detected_update<W: Write>(
             originator: originator.clone(),
         }),
     ));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = writer.flush();
 }
 

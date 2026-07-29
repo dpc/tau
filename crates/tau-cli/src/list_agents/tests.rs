@@ -498,6 +498,8 @@ fn roster_request_deadline_survives_unrelated_frames() {
             {
                 break;
             }
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = writer.flush();
             std::thread::sleep(Duration::from_millis(2));
         }

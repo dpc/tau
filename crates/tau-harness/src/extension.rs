@@ -329,6 +329,8 @@ fn spawn_extension_stderr_logger(
             std::process::id(),
             chrono_free_date()
         );
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = file.flush();
 
         let mut reader = BufReader::new(stderr);
@@ -337,7 +339,11 @@ fn spawn_extension_stderr_logger(
             match std::io::Read::read(&mut reader, &mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = file.write_all(&buf[..n]);
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = file.flush();
                 }
                 Err(_) => break,
@@ -349,6 +355,8 @@ fn spawn_extension_stderr_logger(
             name,
             chrono_free_date()
         );
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = file.flush();
     });
 }

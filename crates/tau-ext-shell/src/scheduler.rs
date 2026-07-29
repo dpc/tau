@@ -215,6 +215,8 @@ impl WorkScheduler {
         };
         drop(state);
         if let (Some(call_id), Some(tool_name)) = (item.meta.call_id, item.meta.tool_name) {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self
                 .inner
                 .tx

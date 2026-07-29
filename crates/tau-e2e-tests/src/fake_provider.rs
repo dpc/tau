@@ -225,6 +225,8 @@ impl Drop for FakeState {
     fn drop(&mut self) {
         for (_, hold) in self.holds.drain() {
             drop(hold.cancel);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = hold.join.join();
         }
     }
@@ -1421,16 +1423,24 @@ impl FakeState {
                         finished(&held_prompt, Vec::new(), ProviderStopReason::Error);
                     terminal.error = Some("deterministic hold timed out".to_owned());
                     terminal.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = write_shared_trace(
                         &trace,
                         &format!("prompt_id={worker_prompt_id} hold_timeout"),
                     );
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = completion.send(());
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = worker_handle
                         .emit_transient(Event::ProviderResponseFinishedReported(terminal));
                     HoldOutcome::TimedOut
                 }
                 Ok(canceled_by) => {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = write_shared_trace(
                         &trace,
                         &format!(
@@ -1442,7 +1452,11 @@ impl FakeState {
                         finished(&held_prompt, Vec::new(), ProviderStopReason::Error);
                     terminal.error = Some("(cancelled by harness)".to_owned());
                     terminal.failure_kind = Some(tau_proto::ProviderFailureKind::Unknown);
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = completion.send(());
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = worker_handle
                         .emit_transient(Event::ProviderResponseFinishedReported(terminal));
                     HoldOutcome::Canceled(canceled_by)
@@ -1452,6 +1466,8 @@ impl FakeState {
         });
         if let Err(error) = readiness.recv_timeout(Duration::from_secs(1)) {
             drop(cancel);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = join.join();
             return Err(ClientError::handler(format!(
                 "hold readiness failed: {error}"
@@ -1543,6 +1559,8 @@ impl FakeState {
         };
         // A timeout may win the deadline race and drop its receiver first. That
         // is already a terminal outcome, not a provider protocol failure.
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = hold.cancel.send(prompt_id.clone());
         let outcome = hold
             .join
@@ -2027,6 +2045,8 @@ fn finished(
 impl FakeState {
     fn mismatch(&mut self, index: usize, detail: &str) -> ClientError {
         let detail = format!("scenario first mismatch at turn {index}: {detail}");
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.trace(&detail);
         ClientError::handler(detail)
     }

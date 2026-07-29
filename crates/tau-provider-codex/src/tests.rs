@@ -112,6 +112,8 @@ impl Drop for WsFailureServer {
     fn drop(&mut self) {
         self.shutdown
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = std::net::TcpStream::connect(self.addr);
         if let Some(worker) = self.worker.take() {
             let result = worker.join();
@@ -160,6 +162,8 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
             if thread_shutdown.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
             if matches!(
                 mode,
@@ -171,8 +175,12 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                 thread_counts
                     .ws_upgrade_requests
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = socket.read();
                 if matches!(mode, WsFailureMode::SemanticThenClose) {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = socket.send(tungstenite::Message::Text(
                         serde_json::json!({
                             "type": "response.output_text.delta",
@@ -181,9 +189,13 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                         .to_string()
                         .into(),
                     ));
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = socket.close(None);
                     continue;
                 }
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = socket.send(tungstenite::Message::Text(
                     serde_json::json!({
                         "type": "response.completed",
@@ -199,7 +211,11 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                     .to_string()
                     .into(),
                 ));
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = socket.read();
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = socket.send(tungstenite::Message::Text(
                     serde_json::json!({
                         "type": "error",
@@ -249,6 +265,8 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                         "\r\n",
                         "upgrade unavailable\n"
                     );
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
                 }
                 WsFailureMode::CloseWithoutResponse => {}

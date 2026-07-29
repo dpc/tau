@@ -254,6 +254,8 @@ pub(crate) fn write_checkpoint_atomic(path: &Path, checkpoint: &AgentCheckpoint)
         fs::rename(&temp_path, path)
     })();
     if result.is_err() {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = fs::remove_file(&temp_path);
     }
     result
@@ -515,6 +517,8 @@ fn try_bounded_suffix_repair(
         write_checkpoint_atomic(&dir.join("meta.json"), &checkpoint)?;
         Ok(checkpoint)
     })();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = FileExt::unlock(&lock);
     match result {
         Ok(checkpoint) => journal_entry(id, Some(checkpoint.summary), AgentListStatus::Fresh),
@@ -564,6 +568,8 @@ fn try_bounded_full_rebuild(
         *remaining_repair_bytes -= metadata.len();
         rebuild_checkpoint(&id, dir, repair_deadline)
     })();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = FileExt::unlock(&lock);
     match result {
         Ok(checkpoint) => journal_entry(id, Some(checkpoint.summary), AgentListStatus::Fresh),

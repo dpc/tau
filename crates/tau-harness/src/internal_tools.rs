@@ -142,12 +142,16 @@ impl<'a> InternalToolHost<'a> {
     pub fn register_internal_tool(&mut self, spec: ToolSpec, group: Option<tau_proto::ToolGroup>) {
         // ast-grep-ignore: if-let-some-else
         if let Some(group) = group {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.harness.registry.register_internal_with_group(
                 crate::harness::harness_connection_id(),
                 spec,
                 group,
             );
         } else {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self
                 .harness
                 .registry
@@ -317,6 +321,8 @@ impl<'a> InternalToolHost<'a> {
                     CborValue::Bool(snapshot.scan_truncated),
                 ),
             ]);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = tx.send(crate::event::HarnessEvent::Command(
                 crate::event::HarnessCommand::SessionDiscoveryCompleted(Box::new(command)),
             ));

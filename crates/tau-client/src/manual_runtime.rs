@@ -545,6 +545,8 @@ impl<State> ManualExtensionRuntime<State> {
     /// dropped, the method returns; a subsequent drain will observe any
     /// terminal input state that remains.
     pub fn wait_for_wake(&self) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.wake_receiver.recv();
     }
 
@@ -1039,7 +1041,11 @@ where
         let writer_thread = std::thread::spawn(move || run_writer(writer, receiver));
 
         if let Err(error) = write_hello(&builder, &handle) {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = handle.shutdown();
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = writer_thread.join();
             return Err(error);
         }
@@ -1069,7 +1075,11 @@ where
         let configure = match startup_result {
             Ok(configure) => configure,
             Err(error) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = handle.shutdown();
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = writer_thread.join();
                 return Err(error);
             }
@@ -1091,7 +1101,11 @@ where
             dispatch_initial_configure(&configure, &mut state, &mut builder, &handle)?;
         let startup = if configure_accepted {
             if let Err(error) = write_startup_after_configure(&builder, &handle) {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = handle.shutdown();
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = writer_thread.join();
                 return Err(error);
             }
@@ -1198,7 +1212,11 @@ where
         let writer_thread = std::thread::spawn(move || run_writer(writer, receiver));
 
         if let Err(error) = write_hello(&builder, &handle) {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = handle.shutdown();
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = writer_thread.join();
             return Err(error);
         }

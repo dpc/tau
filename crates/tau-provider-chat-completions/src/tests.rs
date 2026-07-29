@@ -1330,9 +1330,13 @@ fn semantic_progress_checks_do_not_materialize_growing_output() {
             .expect("tool argument delta");
         let progress = AttemptProgress { state: &state };
         assert_eq!(progress.semantic_progress(), SemanticProgress::Parsed);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = progress.response_bytes_received();
     }
     assert_eq!(OUTPUT_MATERIALIZATIONS.with(std::cell::Cell::get), 0);
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = AttemptProgress { state: &state }.materialize_output();
     assert_eq!(OUTPUT_MATERIALIZATIONS.with(std::cell::Cell::get), 1);
 }

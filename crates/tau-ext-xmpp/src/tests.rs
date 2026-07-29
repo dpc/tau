@@ -918,10 +918,18 @@ fn xmpp_register_requires_active_session_before_starting_bridge() {
 fn xmpp_register_allows_two_muc_agents_in_same_session() {
     let (ext, rx, bridge) = extension();
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = rx.recv();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = rx.recv();
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = rx.recv();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = rx.recv();
 
     let registered = bridge.registered.lock().expect("lock");
@@ -969,7 +977,11 @@ fn xmpp_register_rejects_unknown_arguments() {
 fn xmpp_send_uses_registered_conversation_without_destination_arg() {
     let (ext, rx, bridge) = extension();
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = rx.recv();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = rx.recv();
     let conversation = ext
         .state
@@ -1194,7 +1206,11 @@ fn xmpp_send_transport_failure_does_not_submit_sent_report() {
 fn xmpp_send_waits_for_online_readiness_after_registration() {
     let (ext, rx, bridge) = extension();
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = rx.recv();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = rx.recv();
 
     bridge.set_ready(false);
@@ -1272,7 +1288,11 @@ fn disconnected_state_requires_fresh_online_readiness() {
 fn xmpp_send_rejects_unknown_destination_argument() {
     let (ext, rx, _bridge) = extension();
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = rx.recv();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = rx.recv();
     ext.dispatch_tool(tool(
         SEND_TOOL_NAME,

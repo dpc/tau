@@ -2244,6 +2244,8 @@ fn quota_refresh_deadlines_coalesce_and_back_off() {
         .expect("generation");
     assert!(!quota.refresh_is_current(&provider, &epoch, first));
     assert!(quota.refresh_is_current(&provider, &epoch, second));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = quota.begin_fetch(&provider).expect("fetch");
     quota.fail_fetch(&provider, &epoch);
     assert!(quota.failure_delay(&provider) > QUOTA_FETCH_MIN_INTERVAL);

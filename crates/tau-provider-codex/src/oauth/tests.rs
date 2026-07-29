@@ -233,7 +233,11 @@ fn post_form_bytes_from_test_server(
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = std::io::Write::write_all(&mut stream, headers.as_bytes());
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = std::io::Write::write_all(&mut stream, &body);
     });
     let result = super::post_form(

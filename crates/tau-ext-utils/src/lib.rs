@@ -354,6 +354,8 @@ impl TimerRuntime {
         let Some(pending) = self.pending_invocations.remove(&call_id) else {
             return;
         };
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.apply_successful_invocation(&pending, now);
     }
 

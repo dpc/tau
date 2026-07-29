@@ -309,6 +309,8 @@ fn handle_ui_detach_command_text(text: &str, writer: &WriterHandle) -> Option<In
     }
     // If the write fails we still exit — the daemon will notice the disconnect
     // and fall back to its default behavior.
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = send_ui_detach_request(writer);
     Some(InputLoopExit::Detach)
 }
@@ -387,6 +389,8 @@ fn handle_debug_show_event_stats_command_text(
 ) -> bool {
     match parse_debug_show_event_stats_command(text) {
         Ok(Some(message)) => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = send_frame(writer, &message);
             true
         }
@@ -1249,6 +1253,8 @@ fn send_current_role_update(
     let Some(role) = current_role_name(current_role_state, print_local) else {
         return;
     };
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = send_event(
         writer,
         &Event::UiRoleUpdate(tau_proto::UiRoleUpdate { role, action }),
@@ -1282,6 +1288,8 @@ fn cycle_role_in_groups(
         *shared_memory = memory;
     }
     let selected = next.clone();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = send_event(
         writer,
         &Event::UiRoleSelect(tau_proto::UiRoleSelect { role: next }),
@@ -1357,6 +1365,8 @@ fn cycle_role(
         None => roles[0].clone(),
     };
     let selected = next.clone();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = send_event(
         writer,
         &Event::UiRoleSelect(tau_proto::UiRoleSelect { role: next }),
@@ -1513,6 +1523,8 @@ fn debounce_loop(handle: DraftHandle, writer: WriterHandle) {
         {
             // Best-effort: a write failure means the socket is gone,
             // and the input loop will notice on its next write.
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = send_event(&writer, &Event::UiPromptDraft(draft));
         }
         // Coalesce subsequent typing into one event per window. Wake
@@ -2130,6 +2142,8 @@ pub(crate) fn run_chat(
     )?;
 
     tool_timer.stop();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = timer_thread.join();
 
     // Tell the debounce thread to exit and wait for it so we don't
@@ -2141,6 +2155,8 @@ pub(crate) fn run_chat(
         g.done = true;
         cv.notify_all();
     }
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = debounce_thread.join();
 
     let reason = shutdown_ui_connection(
@@ -2189,6 +2205,8 @@ fn shutdown_ui_connection(
 ) -> &'static str {
     let reason = exit.reason();
     local_disconnect_started.store(true, Ordering::Release);
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = send_frame(
         &writer,
         &HarnessInputMessage::Disconnect(Disconnect {
@@ -2201,6 +2219,8 @@ fn shutdown_ui_connection(
     // not close promptly after the best-effort disconnect.
     drop(writer);
     if let Some(stream) = socket_shutdown_stream {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = stream.shutdown(Shutdown::Both);
     }
 
@@ -2753,6 +2773,8 @@ fn handle_tree_command_text(
 ) -> bool {
     match tree_command_message(session_id, target_agent_id, text) {
         Ok(Some(message)) => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = send_frame(writer, &message);
             true
         }
@@ -2951,6 +2973,8 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn send_focus_changed(&self, focused: bool) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = send_event(
             self.writer,
             &Event::UiFocusChanged(UiFocusChanged {
@@ -2961,6 +2985,8 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn recall_queued_prompt(&self) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = send_event(
             self.writer,
             &Event::UiRecallQueuedPrompt(tau_proto::UiRecallQueuedPrompt {
@@ -3115,6 +3141,8 @@ impl<'a> TerminalInputSession<'a> {
             return Ok(CommandOutcome::Continue);
         }
         if text == ":retry" {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = send_event(
                 self.writer,
                 &crate::ui_events::retry_prompt(self.session_id, self.selected_side_agent_id()),
@@ -3173,6 +3201,8 @@ impl<'a> TerminalInputSession<'a> {
                 self.ctx.home_dir.as_deref(),
                 self.session_id,
             ));
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = send_event(
             self.writer,
             &Event::UiSwitchSession(tau_proto::UiSwitchSession {
@@ -3192,6 +3222,8 @@ impl<'a> TerminalInputSession<'a> {
             target_agent_id = target_agent_id.as_ref().map(ToString::to_string),
             "cancel input received and target resolved"
         );
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = send_cancel_prompt_frame(self.writer, self.session_id, target_agent_id);
         tracing::trace!(
             target: "tau_cli::frontend_progress",
@@ -3219,6 +3251,8 @@ impl<'a> TerminalInputSession<'a> {
 
     fn handle_compact_command(&self, text: &str) -> bool {
         if text == ":compact" {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = send_event(
                 self.writer,
                 &crate::ui_events::compact_request(self.session_id, self.selected_side_agent_id()),
@@ -3368,6 +3402,8 @@ impl<'a> TerminalInputSession<'a> {
                 &self.ctx.prompt_symbol,
                 current_role.as_deref(),
             ));
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.ctx.renderer_tx.send(RendererCmd::SetTheme {
             theme: theme.clone(),
         });
@@ -3453,6 +3489,8 @@ impl<'a> TerminalInputSession<'a> {
         // ast-grep-ignore: if-let-some-else
         if let Some(role) = role {
             self.pending_new_agent_options.stage_role(role);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = send_event(
                 self.writer,
                 &Event::UiRoleSelect(tau_proto::UiRoleSelect {
@@ -3469,6 +3507,8 @@ impl<'a> TerminalInputSession<'a> {
         self.ctx.routing.set_selected_agent(None);
         self.dismiss_completion_menu();
         self.retarget_current_draft();
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.ctx.renderer_tx.send(RendererCmd::ClearSelectedAgent);
     }
 
@@ -3476,12 +3516,16 @@ impl<'a> TerminalInputSession<'a> {
         match target {
             None => {
                 self.ctx.routing.set_selected_agent(None);
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = self.ctx.renderer_tx.send(RendererCmd::ClearSelectedAgent);
                 self.dismiss_completion_menu();
                 self.retarget_current_draft();
             }
             Some(agent_id) => {
                 self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = self
                     .ctx
                     .renderer_tx
@@ -3523,6 +3567,8 @@ impl<'a> TerminalInputSession<'a> {
         action: tau_proto::UiAgentNavigationModeAction,
     ) {
         let event = crate::ui_events::set_agent_navigation_mode(self.session_id, agent_id, action);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = send_event(self.writer, &event);
     }
 
@@ -3546,6 +3592,8 @@ impl<'a> TerminalInputSession<'a> {
                             self.ctx.routing.selected_side_agent_id(),
                             model.clone(),
                         ) {
+                            // Intentionally discard this best-effort result.
+                            // ast-grep-ignore: let-underscore-call
                             let _ = send_event(self.writer, &event);
                         } else {
                             self.output
@@ -3575,6 +3623,8 @@ impl<'a> TerminalInputSession<'a> {
                     has_selected_agent,
                     &event,
                 );
+                // This call is intentionally best-effort; preserve the existing discarded result.
+// ast-grep-ignore: let-underscore-call
                 let _ = send_event(self.writer, &event);
             }
             Ok(None) => self.output.system_info(
@@ -3602,6 +3652,8 @@ impl<'a> TerminalInputSession<'a> {
         // Record the renderer owner before sending `action.invoke`: fast
         // completions carry only `invocation_id`, so result/error routing must
         // already know which transcript was viewed at invocation time.
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.ctx.renderer_tx.send(invocation.renderer_cmd);
         if send_event(self.writer, &invocation.event).is_err() {
             CommandOutcome::Exit(InputLoopExit::Quit)
@@ -3847,6 +3899,8 @@ impl<'a> TerminalInputSession<'a> {
         self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
         self.dismiss_completion_menu();
         self.retarget_current_draft();
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self
             .ctx
             .renderer_tx
@@ -4143,12 +4197,16 @@ fn dispatch_agent_cycle(
         AgentCycleAction::KeepSelection => {}
         AgentCycleAction::Select(agent_id) => {
             routing.set_selected_agent(Some(agent_id.clone()));
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = renderer_tx.send(RendererCmd::SwitchAgent {
                 agent_id: agent_id.clone(),
             });
         }
         AgentCycleAction::ClearSelection => {
             routing.set_selected_agent(None);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = renderer_tx.send(RendererCmd::ClearSelectedAgent);
         }
     }
@@ -4622,6 +4680,8 @@ fn handle_set_command(text: &str, renderer_tx: &LocalRendererSender, print_local
         print_local(&format!(":set {name}: invalid value `{value}` ({hint})"));
         return;
     }
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = renderer_tx.send(RendererCmd::Set {
         name: name.to_owned(),
         value: value.to_owned(),

@@ -329,6 +329,8 @@ fn drop_namespace_capabilities() -> std::io::Result<()> {
 #[allow(unsafe_code)]
 fn write_warning(fd: libc::c_int, message: &[u8]) {
     unsafe {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = libc::write(fd, message.as_ptr().cast::<libc::c_void>(), message.len());
     }
 }

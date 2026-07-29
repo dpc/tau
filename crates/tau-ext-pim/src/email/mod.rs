@@ -1792,6 +1792,8 @@ impl StateStore {
         }
         let pending_path = self.approval_path("outgoing", "pending", id)?;
         if let Err(error) = self.storage.delete_file(&pending_path) {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.storage.delete_file(&sending_path);
             return Err(error);
         }

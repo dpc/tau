@@ -494,6 +494,8 @@ fn send_user_shell_finished(
     cancelled: bool,
     tx: &Output,
 ) {
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = tx.send(HarnessInputMessage::emit(
         Event::ShellCommandFinishedReported(tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
@@ -859,6 +861,8 @@ fn set_user_shell_nonblocking(fd: std::os::fd::RawFd) {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
         if 0 <= flags {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
     }
@@ -891,6 +895,8 @@ fn read_available_user_shell<R: std::io::Read>(
                 capture.push_chunk(&chunk);
                 capture_state.saved.push(stream, &chunk);
                 if let Some(chunk) = capture_state.progress.chunk(&chunk) {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = tx.send(HarnessInputMessage::emit(
                         Event::ShellCommandProgressReported(tau_proto::ShellCommandProgress {
                             command_id: command_id.clone(),
@@ -976,6 +982,8 @@ fn wait_for_user_shell_event_until(
     let timeout = deadline.saturating_duration_since(std::time::Instant::now());
     match event_rx.recv_timeout(timeout) {
         Ok(event) => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = apply_user_shell_event(event, status, wait_failed, cancelled);
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -1125,11 +1133,15 @@ fn dispatch_user_shell_command_unix(
     let _cancel_waiter = std::thread::spawn(move || {
         if cancel_rx.recv().is_ok() {
             cancel_flag.store(true, Ordering::SeqCst);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = cancel_event_tx.send(UserShellEvent::Cancelled);
             if let Some(wake_write) = cancel_wake_write {
                 let byte = [1u8];
                 #[allow(unsafe_code)]
                 unsafe {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = libc::write(
                         wake_write.as_raw_fd(),
                         byte.as_ptr().cast::<libc::c_void>(),
@@ -1146,9 +1158,13 @@ fn dispatch_user_shell_command_unix(
         debug!(pid, status = ?status, "user shell child waiter finished");
         match status {
             Ok(status) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = event_tx.send(UserShellEvent::Exited(status));
             }
             Err(_) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = event_tx.send(UserShellEvent::WaitFailed);
             }
         }
@@ -1156,6 +1172,8 @@ fn dispatch_user_shell_command_unix(
             let byte = [1u8];
             #[allow(unsafe_code)]
             unsafe {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = libc::write(
                     wake_write.as_raw_fd(),
                     byte.as_ptr().cast::<libc::c_void>(),
@@ -1227,6 +1245,8 @@ fn dispatch_user_shell_command_unix(
 
         #[allow(unsafe_code)]
         unsafe {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = libc::poll(
                 poll_fds.as_mut_ptr(),
                 poll_fds.len() as libc::nfds_t,
@@ -1265,6 +1285,8 @@ fn dispatch_user_shell_command_unix(
             &mut capture_state,
             tx,
         );
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = collect_user_shell_status(&event_rx, &mut status, &mut wait_failed, &mut cancelled);
         if (stdout_pipe.is_none() && stderr_pipe.is_none())
             || drain_deadline <= std::time::Instant::now()
@@ -1278,6 +1300,8 @@ fn dispatch_user_shell_command_unix(
         }
         #[allow(unsafe_code)]
         unsafe {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = libc::poll(
                 poll_fds.as_mut_ptr(),
                 poll_fds.len() as libc::nfds_t,
@@ -1353,6 +1377,8 @@ fn dispatch_user_shell_command_blocking(
                             if stop.load(std::sync::atomic::Ordering::SeqCst) {
                                 break;
                             }
+                            // Intentionally discard this best-effort result.
+                            // ast-grep-ignore: let-underscore-call
                             let _ = tx.send(HarnessInputMessage::emit(
                                 Event::ShellCommandProgressReported(
                                     tau_proto::ShellCommandProgress {
@@ -1367,6 +1393,8 @@ fn dispatch_user_shell_command_blocking(
                     }
                 }
             }
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = done_tx.send(());
         });
     }
@@ -1396,6 +1424,8 @@ fn dispatch_user_shell_command_blocking(
             pipe_done_tx.clone(),
         );
     } else {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = pipe_done_tx.send(());
     }
     // ast-grep-ignore: if-let-some-else
@@ -1414,6 +1444,8 @@ fn dispatch_user_shell_command_blocking(
             pipe_done_tx,
         );
     } else {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = pipe_done_tx.send(());
     }
 
@@ -1431,6 +1463,8 @@ fn dispatch_user_shell_command_blocking(
         NonUnixChildEvent::Cancelled => match process.child.try_wait() {
             Ok(Some(status)) => (Some(status), None, false),
             _ => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = process.child.kill();
                 (
                     process.child.wait().ok(),
@@ -1442,6 +1476,8 @@ fn dispatch_user_shell_command_blocking(
         NonUnixChildEvent::TimedOut => match process.child.try_wait() {
             Ok(Some(status)) => (Some(status), None, false),
             _ => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = process.child.kill();
                 (
                     process.child.wait().ok(),
@@ -1451,6 +1487,8 @@ fn dispatch_user_shell_command_blocking(
             }
         },
         NonUnixChildEvent::WaitFailed => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = process.child.kill();
             (
                 process.child.wait().ok(),
@@ -1515,6 +1553,8 @@ fn shell_wait_set_nonblocking(fd: std::os::fd::RawFd) {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
         if 0 <= flags {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
     }
@@ -1634,6 +1674,8 @@ fn shell_wait_write_wake_byte(fd: &std::os::fd::OwnedFd) {
     let byte = [1u8];
     #[allow(unsafe_code)]
     unsafe {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = libc::write(
             fd.as_raw_fd(),
             byte.as_ptr().cast::<libc::c_void>(),
@@ -1667,6 +1709,8 @@ fn shell_wait_drain_wake_fd(wake_read: &std::os::fd::OwnedFd) {
 fn shell_wait_poll_fds_until(fds: &mut [libc::pollfd], deadline: std::time::Instant) {
     #[allow(unsafe_code)]
     unsafe {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = libc::poll(
             fds.as_mut_ptr(),
             fds.len() as libc::nfds_t,
@@ -1890,6 +1934,8 @@ impl ShellWaitState {
         let drain_deadline = std::time::Instant::now() + SHELL_WAIT_DRAIN_AFTER_DONE;
         loop {
             self.read_available_output(output);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = shell_wait_collect_status(&self.event_rx, status);
             if self.stdout_pipe.is_none() && self.stderr_pipe.is_none() {
                 trace!(pid = self.pid, "shell output drain completed");
@@ -1981,6 +2027,8 @@ fn spawn_shell_cancel_waiter(
         if cancel_rx.recv().is_ok() {
             debug!(pid, "shell cancellation signal received");
             cancelled_by_request.store(true, Ordering::SeqCst);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = event_tx.send(ShellWaitEvent::Cancelled);
             if let Some(cancel_wake_write) = cancel_wake_write {
                 trace!(pid, "waking shell wait loop after cancellation");
@@ -2008,9 +2056,13 @@ fn spawn_shell_child_waiter(
         debug!(pid, status = ?status, "shell child waiter finished");
         match status {
             Ok(status) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = event_tx.send(ShellWaitEvent::Exited(status));
             }
             Err(_) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = event_tx.send(ShellWaitEvent::WaitFailed);
             }
         }
@@ -2063,6 +2115,8 @@ fn wait_with_timeout(
             Ok(Some(status)) => Some(status),
             _ => {
                 cancelled = true;
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = process.child.kill();
                 process.child.wait().ok()
             }
@@ -2071,11 +2125,15 @@ fn wait_with_timeout(
             Ok(Some(status)) => Some(status),
             _ => {
                 timed_out = true;
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = process.child.kill();
                 process.child.wait().ok()
             }
         },
         NonUnixChildEvent::WaitFailed => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = process.child.kill();
             process.child.wait().ok()
         }
@@ -2123,6 +2181,8 @@ fn spawn_nonunix_shell_pipe_capture(
     done_tx: mpsc::Sender<()>,
 ) {
     let Some(mut pipe) = pipe else {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = done_tx.send(());
         return;
     };
@@ -2142,6 +2202,8 @@ fn spawn_nonunix_shell_pipe_capture(
                 }
             }
         }
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = done_tx.send(());
     });
 }
@@ -2200,6 +2262,8 @@ impl NonUnixChildWait {
             let event_tx = event_tx.clone();
             move || match timeout_stop_rx.recv_timeout(timeout) {
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = event_tx.send(NonUnixChildEvent::TimedOut);
                 }
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
@@ -2208,6 +2272,8 @@ impl NonUnixChildWait {
         if let Some(cancel_rx) = cancel_rx {
             let _cancel_handle = std::thread::spawn(move || {
                 if cancel_rx.recv().is_ok() {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = event_tx.send(NonUnixChildEvent::Cancelled);
                 }
             });
@@ -2228,8 +2294,14 @@ impl NonUnixChildWait {
     }
 
     fn join_exit_and_timeout_watchers(self) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.timeout_stop_tx.send(());
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.timeout_handle.join();
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.exit_handle.join();
     }
 
@@ -2263,6 +2335,8 @@ impl NonUnixChildWait {
                 } else {
                     NonUnixChildEvent::Exited
                 };
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = event_tx.send(event);
             }
         })
@@ -2274,6 +2348,8 @@ impl NonUnixChildWait {
         event_tx: mpsc::Sender<NonUnixChildEvent>,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = event_tx.send(NonUnixChildEvent::WaitFailed);
         })
     }

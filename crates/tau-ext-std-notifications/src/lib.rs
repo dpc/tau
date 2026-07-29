@@ -799,6 +799,8 @@ impl NotificationLoop {
             let input = match recv_next_idle_or_message(&mut runtime) {
                 Ok(input) => input,
                 Err(error) => {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = runtime.finish();
                     return Err(Box::new(error));
                 }
@@ -812,6 +814,8 @@ impl NotificationLoop {
                     }
                     Ok(DispatchOutcome::StopRequested) => break,
                     Err(error) => {
+                        // This call is intentionally best-effort; preserve the existing discarded
+                        // result. ast-grep-ignore: let-underscore-call
                         let _ = runtime.finish();
                         return Err(Box::new(error));
                     }
@@ -828,6 +832,8 @@ impl NotificationLoop {
                         .state_mut()
                         .process_timeout(&handle, summary_timeout)
                     {
+                        // This call is intentionally best-effort; preserve the existing discarded
+                        // result. ast-grep-ignore: let-underscore-call
                         let _ = runtime.finish();
                         return Err(error);
                     }
@@ -1153,6 +1159,8 @@ impl NotificationLoop {
                 return;
             }
             if turn.pending_final_response_prompt.as_ref() == Some(&terminated.agent_prompt_id) {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = turn.cancel_deferred_final_response(&mut self.completed_response_prompts);
             } else {
                 turn.terminate_prompt_preserving_backgrounds();

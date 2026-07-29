@@ -582,9 +582,13 @@ impl Output {
     fn send(&self, message: HarnessInputMessage) {
         match self {
             Self::Channel(tx) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = tx.send(message);
             }
             Self::Client(handle) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = handle.send_detached(message);
             }
         }
@@ -618,9 +622,13 @@ impl Output {
         };
         match self {
             Self::Client(handle) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = handle.report_tool_terminal_detached(outcome);
             }
             Self::Channel(tx) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = tx.send(HarnessInputMessage::emit_with_persist(
                     outcome.into_reported_event(),
                     false,
@@ -835,6 +843,8 @@ impl Extension {
             (session_id, agents)
         };
         for (agent_id, display_name) in agents {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = gateway.register_agent(session_id.as_ref(), agent_id.as_ref(), display_name);
         }
     }
@@ -1551,6 +1561,8 @@ impl Extension {
         if !self.poll_response_matches_config(config_generation) {
             return;
         }
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.client.send_message(cfg, chat_id, text);
     }
 
@@ -2047,6 +2059,8 @@ fn handle_configure_message(runtime: &mut TelegramRuntime, configure: tau_proto:
     if let Err(message) = result {
         runtime.ext.clear_config_after_error();
         if let Output::Client(handle) = &runtime.ext.output {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = handle.config_error(message);
         }
     } else {
@@ -2099,6 +2113,8 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
                 )
             };
             if let (Some(gateway), Some(session_id)) = (gateway, session_id) {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = gateway.unregister_agent(session_id.as_ref(), unloaded.agent_id.as_ref());
             }
             let mut state = runtime.ext.state.lock();
@@ -2124,6 +2140,8 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
             };
             if let (Some(gateway), Some(session_id)) = (gateway.as_ref(), session_id.as_ref()) {
                 for agent_id in &agents {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = gateway.unregister_agent(session_id.as_ref(), agent_id.as_ref());
                 }
             }

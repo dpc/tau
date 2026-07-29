@@ -260,6 +260,8 @@ impl RedirectServer {
     }
 
     fn stop_and_join(self) -> usize {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.stop_tx.send(());
         self.handle.join().expect("join redirect server")
     }
@@ -289,6 +291,8 @@ fn spawn_extension_with_prefix(
         // Behavior tests often close the harness side once the expected event is
         // observed. Treat resulting extension I/O errors as teardown, not as a
         // test-thread panic that can abort a later test run.
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = run_with_clients(reader_stream, ext_stream, searcher, parallel_client);
     });
     let reader = EventReader::new(BufReader::new(

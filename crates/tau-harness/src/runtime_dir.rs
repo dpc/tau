@@ -322,7 +322,11 @@ impl HarnessPaths {
 
     /// Removes the daemon socket and metadata.
     pub fn cleanup(&self) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = std::fs::remove_file(socket_path(&self.path));
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = std::fs::remove_file(metadata_path(&self.path));
     }
 }
@@ -420,6 +424,8 @@ pub(crate) fn discover_peer_sessions(
         }
         if scan_cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
             drop(_permit);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = scan_tx.send((Vec::new(), true));
             return;
         }
@@ -429,6 +435,8 @@ pub(crate) fn discover_peer_sessions(
             Ok(Ok(entries)) => entries,
             Ok(Err(())) => {
                 drop(_permit);
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = scan_tx.send((Vec::new(), true));
                 return;
             }
@@ -453,6 +461,8 @@ pub(crate) fn discover_peer_sessions(
             })
             .collect::<Vec<_>>();
         drop(_permit);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = scan_tx.send((candidates, scan_truncated));
     });
     let scan_result = deadline
@@ -495,6 +505,8 @@ pub(crate) fn discover_peer_sessions(
                         break;
                     };
                     if probe_peer_entrypoint(&path, &metadata.session_id, deadline, &cancelled) {
+                        // This call is intentionally best-effort; preserve the existing discarded
+                        // result. ast-grep-ignore: let-underscore-call
                         let _ = tx.send(metadata);
                     }
                 }
@@ -944,6 +956,8 @@ pub fn list_running_sessions() -> Result<Vec<RunningSession>, std::io::Error> {
         .spawn(move || {
             let _permit = scan_permit;
             let result = scan_running_session_candidates(&runtime_dir, deadline, &scan_cancelled);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = scan_tx.send(result);
         })
         .map_err(|error| {

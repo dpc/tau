@@ -2123,6 +2123,8 @@ impl FakeCodexServer {
 impl Drop for FakeCodexServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = TcpStream::connect(self.addr);
         if let Some(supervisor) = self.supervisor.take() {
             let result = supervisor.join();
@@ -2246,6 +2248,8 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
                     // streaming the response body. Client side
                     // sees `Message::Close` → `LlmError(0, "stream
                     // error: ws closed mid-stream ...")`.
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = ws.send(Message::Close(Some(tungstenite::protocol::CloseFrame {
                         code: tungstenite::protocol::frame::coding::CloseCode::Error,
                         reason: "keepalive ping timeout".into(),

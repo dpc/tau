@@ -127,6 +127,8 @@ impl<T> DummyState<T> {
             .pending_hold
             .take()
             .expect("correlated hold remains present");
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = hold.signal.send(HoldSignal::Cancel);
         hold.join
             .join()
@@ -136,7 +138,11 @@ impl<T> DummyState<T> {
     /// Stops and joins the active hold without emitting terminal tool output.
     fn shutdown_pending_hold(&mut self) {
         if let Some(hold) = self.pending_hold.take() {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = hold.signal.send(HoldSignal::Shutdown);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = hold.join.join();
         }
     }
@@ -401,6 +407,8 @@ where
         }
         match signals.recv_timeout(hold_timeout) {
             Ok(HoldSignal::Cancel) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = handle.report_tool_cancelled_detached(tau_proto::ToolCancelled {
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
@@ -409,6 +417,8 @@ where
             }
             Ok(HoldSignal::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = handle.report_tool_error_detached(ToolError {
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
@@ -424,7 +434,11 @@ where
         }
     });
     if let Err(error) = readiness.recv_timeout(HOLD_READY_TIMEOUT) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = signal.send(HoldSignal::Shutdown);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = join.join();
         return Err(tau_client::ClientError::handler(format!(
             "hold_no_side_effect worker did not become ready: {error}"

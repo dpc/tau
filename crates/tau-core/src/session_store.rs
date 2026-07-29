@@ -525,6 +525,8 @@ impl SessionStore {
             })?;
         if FileExt::try_lock_exclusive(&file).is_err() {
             let mut holder = String::new();
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = file.read_to_string(&mut holder);
             return Err(SessionStoreError::Locked {
                 path: lock_path,
@@ -695,6 +697,8 @@ impl SessionStore {
         // a sidecar write failure make the caller retry this already-persisted
         // sequence and create a duplicate record.
         if write_to_disk {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = touch_meta(&session_dir.join("meta.json"));
         }
         Ok(AppendOutcome {
@@ -1144,6 +1148,8 @@ pub fn session_is_locked(sessions_dir: &Path, session_id: &str) -> io::Result<bo
     };
     match FileExt::try_lock_exclusive(&file) {
         Ok(()) => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = FileExt::unlock(&file);
             Ok(false)
         }

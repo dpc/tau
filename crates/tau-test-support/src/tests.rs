@@ -350,6 +350,8 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         share_user_cache_key: false,
         operation: tau_proto::PromptOperation::Inference,
     };
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = bus.send_to(
         &provider_id,
         None,
@@ -385,6 +387,8 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         }
     }
 
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = bus.send_to(
         &provider_id,
         None,

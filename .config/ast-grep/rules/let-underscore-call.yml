@@ -1,0 +1,34 @@
+id: let-underscore-call
+language: rust
+severity: warning
+rule:
+  all:
+    - pattern: let _ = $EXPR;
+    - not:
+        inside:
+          stopBy: end
+          kind: mod_item
+          follows:
+            kind: attribute_item
+            regex: "cfg\\(test\\)"
+constraints:
+  EXPR:
+    kind: call_expression
+ignores:
+  - "crates/**/tests/**"
+  - "crates/**/benches/**"
+  - "benches/**"
+  - "tests/**"
+  - "examples/**"
+  - "tracehealth-api/tests/**"
+  - "tracehealth-api/benches/**"
+  - "**/test_utils.rs"
+  - "vendor/**"
+  - ".claude/worktrees/**"
+  - "target/**"
+  - "tracehealth-ios/**"
+message: |
+  Discarded call result — `let _ = expr()` suppresses the unused-Result
+  warning, silently dropping any error. If the call can fail meaningfully,
+  handle or log the error. If failure is truly ignorable, add a comment
+  explaining why.

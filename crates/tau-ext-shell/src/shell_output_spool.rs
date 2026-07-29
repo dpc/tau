@@ -139,6 +139,8 @@ pub(crate) fn save_parts(parts: &[&str], incomplete: bool) -> io::Result<SavedOu
         .to_str()
         .is_none_or(|path| path.chars().any(char::is_control))
     {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = remove_saved(&path);
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -146,8 +148,14 @@ pub(crate) fn save_parts(parts: &[&str], incomplete: bool) -> io::Result<SavedOu
         ));
     }
     if let Err(error) = write_private_parts(&path, parts) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = fs::remove_file(&path);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = fs::remove_file(directory.join(LOCK_FILE_NAME));
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = fs::remove_dir(&directory);
         return Err(error);
     }
@@ -253,6 +261,8 @@ fn cleanup_crash_leftovers() {
                 Err(error) => error.kind() == io::ErrorKind::NotFound,
             };
             if old && owner_dead {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = remove_saved(&entry.path().join(FILE_NAME));
             }
         }

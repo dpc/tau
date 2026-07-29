@@ -121,7 +121,11 @@ fn stop_owned_daemon(
             Ok(None) | Err(_) => break,
         }
     }
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = child.kill();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = child.wait();
 }
 

@@ -1537,6 +1537,8 @@ impl Harness {
             let auth_message_id = request.message_id.clone();
             let result = send_external_agent_message_request(request.clone(), &cancellation);
             if let Some(completion) = completion {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = tx.send(HarnessEvent::Command(
                     HarnessCommand::ExternalMessageToolCompleted(Box::new(
                         ExternalMessageToolCompletedCommand {
@@ -1638,6 +1640,8 @@ impl Harness {
         thread::spawn(move || {
             let result = authenticate_external_agent_message_sender(&request, &cancellation)
                 .map_err(|_| "external message authentication failed".to_owned());
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = tx.send(HarnessEvent::Command(
                 HarnessCommand::ExternalMessageAuthCompleted(Box::new(
                     crate::event::ExternalMessageAuthCompletedCommand {
@@ -2744,6 +2748,8 @@ fn bounded_runtime_lookup(
             deadline,
             &worker_cancelled,
         );
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = tx.send(result);
     });
     loop {

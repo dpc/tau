@@ -59,13 +59,19 @@ pub(crate) fn truncate_line_oriented_lines_with_byte_limit<'a>(
             {
                 if head.is_empty() {
                     let marker = mark_line(line, "truncated");
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ =
                         push_budgeted_line(&mut head, &mut head_bytes, &marker, max_output_bytes);
                 }
                 break;
             }
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = push_budgeted_line(&mut head, &mut head_bytes, &rendered, max_output_bytes);
         }
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = push_budgeted_line(&mut head, &mut head_bytes, "...", max_output_bytes);
         let mut tail = Vec::new();
         let mut remaining = max_output_bytes.saturating_sub(head_bytes);

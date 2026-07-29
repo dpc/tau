@@ -126,6 +126,8 @@ impl GatewayClient {
 
     /// Send a best-effort goodbye and drop the current connection.
     pub(crate) fn goodbye(&self) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.request(GatewayRequestKind::Goodbye, GatewayClientRequest::default());
         *self.stream.lock().expect("gateway stream lock") = None;
     }

@@ -128,6 +128,8 @@ fn virtual_input_shutdown_wakes_blocked_reader() {
     let (term, handle, _input_tx) = Term::new_virtual(40, 5, "> ", Box::new(buf), CursorShape::Bar);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = event_tx.send(term.get_next_event());
     });
 
@@ -152,6 +154,8 @@ fn virtual_input_disconnect_eof_is_sticky() {
     thread::spawn(move || {
         let first = term.get_next_event();
         let second = term.get_next_event();
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = event_tx.send((first, second));
     });
     drop(input_tx);
@@ -1022,6 +1026,8 @@ fn up_lands_at_last_row_same_col_in_previous_entry() {
             KeyModifiers::CONTROL,
         )))
         .expect("enter");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
 
     // Cursor on row 0 visual col 4 (byte 2 = "be|ta\nworld").
@@ -1056,6 +1062,8 @@ fn down_lands_at_first_row_same_col_in_next_entry() {
             KeyModifiers::CONTROL,
         )))
         .expect("enter");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
 
     handle.set_buffer("second".to_owned(), 6);
@@ -1065,6 +1073,8 @@ fn down_lands_at_first_row_same_col_in_next_entry() {
             KeyModifiers::CONTROL,
         )))
         .expect("enter");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
 
     // Draft "abc" with cursor at byte 1 (visual col 3 = "a|bc").
@@ -1077,6 +1087,8 @@ fn down_lands_at_first_row_same_col_in_next_entry() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "second");
     assert_eq!(handle.get_cursor(), 1);
@@ -1089,6 +1101,8 @@ fn down_lands_at_first_row_same_col_in_next_entry() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "first\nlonger");
     assert_eq!(handle.get_cursor(), 9);
@@ -1100,6 +1114,8 @@ fn down_lands_at_first_row_same_col_in_next_entry() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "second");
     assert_eq!(handle.get_cursor(), 1);
@@ -1123,6 +1139,8 @@ fn down_preserves_sticky_column_across_short_line_in_buffer() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 8);
 
@@ -1134,6 +1152,8 @@ fn down_preserves_sticky_column_across_short_line_in_buffer() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 15);
 }
@@ -1153,6 +1173,8 @@ fn typing_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 8);
 
@@ -1164,6 +1186,8 @@ fn typing_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("y");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 9);
 
@@ -1175,6 +1199,8 @@ fn typing_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 12);
 }
@@ -1197,6 +1223,8 @@ fn step_history_preserves_sticky_column_across_short_entry() {
                 KeyModifiers::CONTROL,
             )))
             .expect("ctrl+enter");
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = term.get_next_event().expect("event");
     }
 
@@ -1210,6 +1238,8 @@ fn step_history_preserves_sticky_column_across_short_entry() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "xyzabc");
     assert_eq!(handle.get_cursor(), 4);
@@ -1221,6 +1251,8 @@ fn step_history_preserves_sticky_column_across_short_entry() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "x");
     assert_eq!(handle.get_cursor(), 1);
@@ -1233,6 +1265,8 @@ fn step_history_preserves_sticky_column_across_short_entry() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "abcdef");
     assert_eq!(handle.get_cursor(), 4);
@@ -1255,6 +1289,8 @@ fn up_preserves_sticky_column_across_short_line_in_buffer() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 8);
 
@@ -1265,6 +1301,8 @@ fn up_preserves_sticky_column_across_short_line_in_buffer() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 4);
 }
@@ -1283,6 +1321,8 @@ fn sticky_column_carries_from_buffer_into_history() {
             KeyModifiers::CONTROL,
         )))
         .expect("enter");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
 
     // 3-row buffer with empty middle row. Cursor at end (row 2 col 3).
@@ -1295,6 +1335,8 @@ fn sticky_column_carries_from_buffer_into_history() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 7);
 
@@ -1307,6 +1349,8 @@ fn sticky_column_carries_from_buffer_into_history() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 1);
 
@@ -1318,6 +1362,8 @@ fn sticky_column_carries_from_buffer_into_history() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "pqrstuv");
     assert_eq!(handle.get_cursor(), 1);
@@ -1338,6 +1384,8 @@ fn backspace_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 8);
 
@@ -1349,6 +1397,8 @@ fn backspace_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("backspace");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "abcdef\n\nabcdef");
     assert_eq!(handle.get_cursor(), 7);
@@ -1361,6 +1411,8 @@ fn backspace_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 8);
 }
@@ -1380,6 +1432,8 @@ fn left_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 8);
 
@@ -1398,6 +1452,8 @@ fn left_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 9);
 }
@@ -1417,6 +1473,8 @@ fn home_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 8);
 
@@ -1438,6 +1496,8 @@ fn home_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 8);
 
@@ -1447,6 +1507,8 @@ fn home_clears_sticky_column() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 11);
 }
@@ -1522,6 +1584,8 @@ fn ctrl_up_jumps_to_history_with_column_preserved() {
             KeyModifiers::CONTROL,
         )))
         .expect("enter");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
 
     // Cursor on row 1 of multi-line draft at visual col 4 (byte 10
@@ -1537,6 +1601,8 @@ fn ctrl_up_jumps_to_history_with_column_preserved() {
             KeyModifiers::CONTROL,
         )))
         .expect("ctrl-up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "xyzw");
     assert_eq!(handle.get_cursor(), 2);
@@ -1556,6 +1622,8 @@ fn ctrl_k_steps_history_back_with_column_preserved() {
             KeyModifiers::CONTROL,
         )))
         .expect("enter");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
 
     handle.set_buffer("abc".to_owned(), 1);
@@ -1567,6 +1635,8 @@ fn ctrl_k_steps_history_back_with_column_preserved() {
             KeyModifiers::CONTROL,
         )))
         .expect("ctrl-k");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "xyzw");
     assert_eq!(handle.get_cursor(), 1);
@@ -1579,6 +1649,8 @@ fn ctrl_k_steps_history_back_with_column_preserved() {
             KeyModifiers::CONTROL,
         )))
         .expect("ctrl-j");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "abc");
     assert_eq!(handle.get_cursor(), 1);
@@ -1635,6 +1707,8 @@ fn blocked_terminal_sink_keeps_cancel_input_responsive() {
 
     impl std::io::Write for BlockingWriter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.entered.send(());
             let (lock, wake) = &*self.release;
             let released = lock.lock().expect("release mutex");
@@ -1772,6 +1846,8 @@ fn undo_state_follows_history_entry() {
                 KeyModifiers::NONE,
             )))
             .expect("char");
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = term.get_next_event().expect("event");
     }
     input_tx
@@ -1780,6 +1856,8 @@ fn undo_state_follows_history_entry() {
             KeyModifiers::CONTROL,
         )))
         .expect("enter");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
 
     input_tx
@@ -1788,6 +1866,8 @@ fn undo_state_follows_history_entry() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "first");
 
@@ -1803,6 +1883,8 @@ fn undo_state_follows_history_entry() {
             KeyModifiers::NONE,
         )))
         .expect("bang");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "first!");
 
@@ -1812,6 +1894,8 @@ fn undo_state_follows_history_entry() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
@@ -1819,6 +1903,8 @@ fn undo_state_follows_history_entry() {
             KeyModifiers::NONE,
         )))
         .expect("up again");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "first!");
 
@@ -1831,6 +1917,8 @@ fn undo_state_follows_history_entry() {
             KeyModifiers::NONE,
         )))
         .expect("down after undo");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
@@ -1838,6 +1926,8 @@ fn undo_state_follows_history_entry() {
             KeyModifiers::NONE,
         )))
         .expect("up after undo");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_buffer(), "first");
 }
@@ -1862,6 +1952,8 @@ fn vertical_motion_uses_visual_column_in_wrapped_line() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("event");
     assert_eq!(handle.get_cursor(), 2);
 }
@@ -1919,6 +2011,8 @@ fn down_at_wip_slot_in_nav_mode_pushes_and_resets() {
                 KeyModifiers::NONE,
             )))
             .expect("send char");
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = term.get_next_event().expect("event");
     }
     assert_eq!(handle.get_buffer(), "second");
@@ -2098,6 +2192,8 @@ fn terminal_side_effect_api_encodes_and_validates_osc_user_vars() {
     let (term, handle, _input_tx) =
         Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
     handle.redraw_sync();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = buf.drain_bytes();
 
     handle.print_osc1337_set_user_var("user-notification", "hello", false);
@@ -2206,6 +2302,8 @@ fn external_resume_selects_bracketed_full_render() {
     let (term, handle, _input_tx) =
         Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
     handle.redraw_sync();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = buf.drain_bytes();
 
     term.resume_after_external().expect("virtual resume");
@@ -2678,6 +2776,8 @@ fn prompt_input_plain_up_scrolls_before_history_navigation() {
             KeyModifiers::CONTROL,
         )))
         .expect("submit history");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("submit event");
 
     handle.set_buffer("a\nb\nc\nd\ne".to_owned(), 5);
@@ -2693,6 +2793,8 @@ fn prompt_input_plain_up_scrolls_before_history_navigation() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("up event");
 
     assert_eq!(handle.get_buffer(), "a\nb\nc\nd\ne");
@@ -2705,6 +2807,8 @@ fn prompt_input_plain_up_scrolls_before_history_navigation() {
                 KeyModifiers::NONE,
             )))
             .expect("up");
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = term.get_next_event().expect("up event");
     }
     assert_eq!(handle.get_buffer(), "hist");
@@ -2722,6 +2826,8 @@ fn prompt_input_explicit_history_shortcut_bypasses_local_scroll() {
             KeyModifiers::CONTROL,
         )))
         .expect("submit history");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("submit event");
 
     handle.set_buffer("a\nb\nc\nd\ne".to_owned(), 9);
@@ -2731,6 +2837,8 @@ fn prompt_input_explicit_history_shortcut_bypasses_local_scroll() {
             KeyModifiers::CONTROL,
         )))
         .expect("ctrl-up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("ctrl-up event");
 
     assert_eq!(handle.get_buffer(), "hist");
@@ -2762,6 +2870,8 @@ fn prompt_input_completion_menu_keeps_priority_over_local_scroll() {
             KeyModifiers::NONE,
         )))
         .expect("up");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("up event");
 
     assert_eq!(handle.get_buffer(), "replacement");
@@ -2801,6 +2911,8 @@ fn prompt_input_plain_down_scrolls_before_history_navigation() {
             KeyModifiers::NONE,
         )))
         .expect("down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("down event");
 
     assert_eq!(handle.get_buffer(), "a\nb\nc\nd\ne");
@@ -2824,6 +2936,8 @@ fn prompt_input_explicit_next_history_shortcut_bypasses_local_scroll() {
             KeyModifiers::CONTROL,
         )))
         .expect("ctrl-down");
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = term.get_next_event().expect("ctrl-down event");
 
     assert_eq!(handle.get_buffer(), "");

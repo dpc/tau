@@ -563,6 +563,8 @@ impl PrewarmReservation<'_> {
 impl Drop for PrewarmReservation<'_> {
     fn drop(&mut self) {
         if self.armed {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.pool.abandon_prewarm(&self.key, self.generation);
         }
     }
@@ -1133,6 +1135,8 @@ pub fn run_prewarm_through_shared_pool(
     let cancel_key = key.clone();
     let cancel_generation = reservation.generation;
     let cancel_guard = abort.register_waker(Arc::new(move || {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = cancel_pool.invalidate_prewarm(&cancel_key, cancel_generation);
     }));
 

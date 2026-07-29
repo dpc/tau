@@ -31,6 +31,8 @@ where
                     .and_then(|()| writer.flush().map_err(ClientError::from));
                 let should_stop = result.is_err();
                 let ack_result = result.as_ref().copied().map_err(clone_error);
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = ack.send(ack_result);
                 if should_stop {
                     return result;
@@ -45,6 +47,8 @@ where
             WriterCommand::Shutdown(ack) => {
                 let result = writer.flush().map_err(ClientError::from);
                 let ack_result = result.as_ref().copied().map_err(clone_error);
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = ack.send(ack_result);
                 return result;
             }

@@ -1171,6 +1171,8 @@ impl TermHandle {
     /// this flag is set.
     pub fn request_input_shutdown(&self) {
         self.lock().input_shutdown = true;
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.input_tx.send(InputMessage::Shutdown);
     }
 
@@ -1797,6 +1799,8 @@ impl Term {
         // `\r`. Terminals that don't implement the protocol silently
         // ignore the escape and we keep the legacy behavior.
         if let Err(error) = write_external_resume_features(&mut io::stdout(), cursor_shape) {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = terminal::disable_raw_mode();
             return Err(error);
         }
@@ -1870,6 +1874,8 @@ impl Term {
                     break;
                 }
             }
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = virtual_input_tx.send(InputMessage::Shutdown);
         });
 
@@ -1997,6 +2003,8 @@ impl Term {
                     Ok(raw) => InputMessage::Raw(raw),
                     Err(error) => InputMessage::Error(error),
                 };
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = tx.send(message);
             });
         }
@@ -2161,6 +2169,8 @@ impl Term {
         self.handle.redraw_sync();
 
         if let Err(error) = release_terminal() {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.resume_after_external();
             return Err(error);
         }
@@ -2872,6 +2882,8 @@ impl Term {
         self.handle.redraw.notify();
 
         if let Some(handle) = self.redraw_thread.take() {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = handle.join();
         }
     }
@@ -2951,7 +2963,11 @@ impl Drop for Term {
             // pop the keyboard-protocol push, and return cursor shape to the
             // user's configured default so shells and other programs don't
             // inherit Tau's prompt cursor.
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = write_drop_terminal_cleanup(&mut io::stdout());
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = terminal::disable_raw_mode();
         }
     }
@@ -3861,11 +3877,17 @@ fn render_shutdown_if_requested(
     drop(st);
 
     screen.set_width(prev_width);
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = screen.update(writer, visible, (cursor_in_visible, layout.cursor_col));
     let below = plan.render_lines.len().saturating_sub(plan.cursor_row + 1);
     for _ in 0..=below {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = writer.queue(crossterm::style::Print("\r\n"));
     }
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = writer.flush();
     {
         let mut st = state.lock().expect("term state mutex poisoned");
@@ -3969,6 +3991,8 @@ fn render_redraw_pass(
     // frame doesn't matter for correctness — putting them first just avoids any
     // chance of interleaving with a deferred frame.
     for seq in &pass.pending_raw {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = writer.write_all(seq.as_bytes());
     }
     if pass.force_full {

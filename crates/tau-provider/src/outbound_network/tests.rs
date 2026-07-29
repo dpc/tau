@@ -399,6 +399,8 @@ fn untrusted_direct_target_tls_is_redacted() {
             rustls::ServerConnection::new(Arc::new(server_tls)).expect("server connection");
         let mut stream = rustls::StreamOwned::new(connection, socket);
         let mut byte = [0_u8; 1];
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = stream.read(&mut byte);
     });
     let address = server.address();
@@ -581,6 +583,8 @@ fn untrusted_https_proxy_tls_has_no_direct_fallback_and_is_redacted() {
             rustls::ServerConnection::new(Arc::new(proxy_tls)).expect("proxy TLS state");
         let mut stream = rustls::StreamOwned::new(connection, socket);
         let mut byte = [0_u8; 1];
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = stream.read(&mut byte);
     });
     let address = proxy.address();

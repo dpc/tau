@@ -324,9 +324,15 @@ pub(super) fn create_extension_data_file(
         Ok(())
     })();
     if result.is_err() {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = std::fs::remove_file(&tmp);
         if linked {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = std::fs::remove_file(path);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = sync_parent_dir(path);
         }
     }
@@ -378,6 +384,8 @@ pub(super) fn atomic_replace_extension_data_file(
         Ok(())
     })();
     if result.is_err() {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = std::fs::remove_file(&tmp);
     }
     result

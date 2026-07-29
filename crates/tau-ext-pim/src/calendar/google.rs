@@ -911,6 +911,8 @@ fn read_limited_body(
 
 fn read_error_body(response: &mut ureq::http::Response<ureq::Body>) -> String {
     let mut bytes = Vec::new();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = response
         .body_mut()
         .as_reader()

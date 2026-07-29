@@ -575,6 +575,8 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
             .run(extension_input, extension_output, SwarmRuntime::new())
             .map_err(|error| error.to_string());
         let signal = result.as_ref().map(|_| ()).map_err(Clone::clone);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = runner_done_tx.send(signal);
         result
     });

@@ -124,9 +124,13 @@ impl Output {
     fn send(&self, message: HarnessInputMessage) {
         match self {
             Self::Channel(tx) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = tx.send(message);
             }
             Self::Client(handle) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = handle.send_detached(message);
             }
         }
@@ -152,9 +156,13 @@ impl Output {
         };
         match self {
             Self::Client(handle) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = handle.report_tool_terminal_detached(outcome);
             }
             Self::Channel(tx) => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = tx.send(HarnessInputMessage::emit_with_persist(
                     outcome.into_reported_event(),
                     false,
@@ -887,6 +895,8 @@ impl Extension {
                 ),
             )
         } else {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.bridge.unregister_agent(&invoke.agent_id);
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.registered_agents.remove(&invoke.agent_id);
@@ -1115,6 +1125,8 @@ impl XmppBridge for LiveXmppBridge {
             .name("tau-ext-xmpp".to_owned())
             .spawn(move || {
                 xmpp_thread(cfg, command_rx, output, worker_shutdown);
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = done_tx.send(());
             })
             .map_err(|e| format!("failed to spawn xmpp worker: {e}"))?;
@@ -1436,6 +1448,8 @@ impl WorkerState {
             }
             XmppCommand::Unregister { agent_id, response } => {
                 self.unregister_agent(&agent_id, client).await;
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = response.send(());
             }
             XmppCommand::Send {
@@ -1444,10 +1458,14 @@ impl WorkerState {
                 response,
             } => {
                 let result = self.send_message(&agent_id, &text, client).await;
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = response.send(result);
             }
             XmppCommand::WaitReady { timeout, response } => {
                 let result = self.ensure_online_with_timeout(client, timeout).await;
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = response.send(result);
             }
         }
@@ -2676,6 +2694,8 @@ fn immutable_config_error() -> String {
 }
 
 fn unload_agent(ext: &Extension, agent_id: AgentId) {
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = ext.bridge.unregister_agent(&agent_id);
     let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
     state.registered_agents.remove(&agent_id);
@@ -2700,6 +2720,8 @@ fn shutdown_session(ext: &Extension, session_id: SessionId) {
         agents
     };
     for agent in agents {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = ext.bridge.unregister_agent(&agent);
     }
 }

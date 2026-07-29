@@ -204,6 +204,8 @@ fn listener_forwarder_drop_wakes_while_accept_ready() {
     let connector_path = socket_path.clone();
     let connector = thread::spawn(move || {
         while stop_rx.try_recv().is_err() {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = UnixStream::connect(&connector_path);
         }
     });
@@ -213,9 +215,13 @@ fn listener_forwarder_drop_wakes_while_accept_ready() {
     let (done_tx, done_rx) = mpsc::channel();
     let drop_join = thread::spawn(move || {
         drop(forwarder);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = done_tx.send(());
     });
     let drop_result = done_rx.recv_timeout(Duration::from_secs(1));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = stop_tx.send(());
     connector.join().expect("connector should not panic");
     drop_result.expect("forwarder drop should not wait for accept traffic to quiesce");
@@ -243,6 +249,8 @@ fn drop_forwarder_with_timeout(forwarder: ListenerForwarder) {
     let (done_tx, done_rx) = mpsc::channel();
     let join = thread::spawn(move || {
         drop(forwarder);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = done_tx.send(());
     });
     done_rx

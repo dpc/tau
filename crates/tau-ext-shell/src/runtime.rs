@@ -78,6 +78,8 @@ impl ShellRuntime {
             .cloned()
             .collect::<Vec<_>>();
         for cancel_tx in running {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = cancel_tx.send(());
         }
         let running_ui = self
@@ -88,6 +90,8 @@ impl ShellRuntime {
             .cloned()
             .collect::<Vec<_>>();
         for cancel_tx in running_ui {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = cancel_tx.send(());
         }
         self.cwd_state.take_all_pending_workdirs();
@@ -126,6 +130,8 @@ impl ShellRuntime {
         let dir_lock_disabling = dir_lock_was_enabled && !cfg.dir_lock.enable;
         self.config = cfg;
         if dir_lock_disabling {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.lock_manager.disable();
         }
         if dir_lock_changed {
@@ -273,6 +279,8 @@ impl ShellRuntime {
             return;
         }
         if let Some((session_id, initialization_id)) = self.cwd_state.initialization(&agent_id) {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self
                 .tx
                 .send(HarnessInputMessage::emit_transient(cwd_context_event(
@@ -287,6 +295,8 @@ impl ShellRuntime {
             self.cwd_state
                 .take_committed_pending_workdir_result(&agent_id, &cwd, mutation_id);
         if pending_workdir.is_some() {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.tx.send(HarnessInputMessage::emit(cwd_notice_event(
                 agent_id.clone(),
                 &cwd,
@@ -334,6 +344,8 @@ impl ShellRuntime {
                     originator: pending_workdir.invoke.originator,
                 })
             };
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.tx.report_tool_terminal(with_lock_wait_duration(
                 event,
                 pending_workdir.lock_wait_duration_seconds,
@@ -352,6 +364,8 @@ impl ShellRuntime {
             return;
         }
         if let Some((session_id, initialization_id)) = self.cwd_state.initialization(&agent_id) {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.tx.send(HarnessInputMessage::emit_transient(
                 invalid_cwd_context_event(
                     session_id,
@@ -389,6 +403,8 @@ impl ShellRuntime {
             return;
         }
         if let Ok(cwd) = self.cwd_state.process_default() {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.tx.send(HarnessInputMessage::emit_transient(
                 Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
                     agent_id: unset.agent_id,
@@ -423,6 +439,8 @@ impl ShellRuntime {
                 originator: pending.invoke.originator,
             })
         };
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.tx.report_tool_terminal(event);
     }
 
@@ -430,6 +448,8 @@ impl ShellRuntime {
         if let Some((session_id, agent_initialization_id)) =
             self.cwd_state.take_pending_ready(&agent_id)
         {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.tx.send(HarnessInputMessage::emit_transient(
                 Event::ExtensionContextReady(ExtensionContextReady {
                     session_id,
@@ -457,6 +477,8 @@ impl ShellRuntime {
             return;
         }
         if let Some(cwd) = self.cwd_state.get(&done.agent_id) {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self
                 .tx
                 .send(HarnessInputMessage::emit_transient(cwd_context_event(
@@ -470,6 +492,8 @@ impl ShellRuntime {
             return;
         }
         if self.cwd_state.is_invalid(&done.agent_id) {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = self.tx.send(HarnessInputMessage::emit_transient(
                 invalid_cwd_context_event(
                     session_id.clone(),
@@ -485,6 +509,8 @@ impl ShellRuntime {
             self.cwd_state.take_pending_ready(&done.agent_id);
             return;
         };
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.tx.send(HarnessInputMessage::emit_transient(
             Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
                 agent_id: done.agent_id.clone(),

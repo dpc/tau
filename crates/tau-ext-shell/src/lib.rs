@@ -1431,6 +1431,8 @@ fn schedule_ui_shell_command(
                 .expect("running ui shell registry lock poisoned")
                 .insert(command_id.clone(), cancel_tx.clone());
             if shutdown_generation.load(Ordering::SeqCst) != scheduled_generation {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = cancel_tx.send(());
             }
             crate::tools::shell::dispatch_user_shell_command(
@@ -1570,6 +1572,8 @@ fn dispatch_locked_tool_invoke(
     let wait_shell_command_mode = shell_command_mode;
     let wait_tx = tx.clone();
     let on_wait = move || {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = wait_tx.report_tool_progress(crate::dir_lock::waiting_progress(
             &wait_invoke,
             &wait_dirs,
@@ -1609,6 +1613,8 @@ fn dispatch_locked_tool_invoke(
             return;
         }
         Err(crate::dir_lock::LockAcquireError::Cancelled) => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = tx.report_tool_terminal(Event::ToolCancelled(ToolCancelled {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
@@ -1660,6 +1666,8 @@ fn dispatch_locked_tool_invoke(
 }
 
 fn send_ui_shell_saturated_failure(cmd: tau_proto::UiShellCommand, message: String, tx: &Output) {
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = tx.send(HarnessInputMessage::emit(
         Event::ShellCommandFinishedReported(tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
@@ -1684,6 +1692,8 @@ fn send_tool_failure(
         details,
         display,
     } = failure;
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = tx.report_tool_terminal(Event::ToolError(tau_proto::ToolError {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
@@ -1784,6 +1794,8 @@ fn dispatch_tool_invoke(
                 WorkdirSnapshot::Invalid => None,
                 WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
             });
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = tx.report_tool_terminal(Event::ToolResult(ToolResult {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
@@ -1806,6 +1818,8 @@ fn dispatch_tool_invoke(
                     mutation_id: None,
                     inheritable: true,
                 });
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = tx.send(HarnessInputMessage::emit_transient(metadata));
             }
             return;
@@ -1855,6 +1869,8 @@ fn dispatch_tool_invoke(
                 originator: invoke.originator.clone(),
             });
             let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = tx.report_tool_terminal(event);
             return;
         }
@@ -1886,6 +1902,8 @@ fn dispatch_tool_invoke(
     }
 
     if let Some(display) = crate::tools::initial_display(&invoke) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = tx.report_tool_progress(tau_proto::ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -1898,6 +1916,8 @@ fn dispatch_tool_invoke(
     let events = execute_tool(invoke, world);
     for event in events {
         let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = tx.report_tool_terminal(event);
     }
 }
@@ -1916,6 +1936,8 @@ fn dispatch_cancellable_non_shell_tool(
         .insert(invoke.call_id.clone(), cancel_tx);
 
     if let Some(display) = crate::tools::initial_display(&invoke) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = tx.report_tool_progress(tau_proto::ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -1938,6 +1960,8 @@ fn dispatch_cancellable_non_shell_tool(
         crate::tools::CancellableToolOutcome::Finished(events) => {
             for event in events {
                 let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = tx.report_tool_terminal(event);
             }
         }
@@ -1948,6 +1972,8 @@ fn dispatch_cancellable_non_shell_tool(
                 tool_type: tau_proto::ToolType::Function,
             });
             let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = tx.report_tool_terminal(event);
         }
     }
@@ -1997,6 +2023,8 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         .expect("running call registry lock poisoned")
         .insert(invoke.call_id.clone(), cancel_tx);
 
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = tx.report_tool_progress(tau_proto::ToolProgress {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
@@ -2093,8 +2121,12 @@ fn dispatch_session_discovery_messages(
     tx: &Output,
 ) {
     for message in messages {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = tx.send(message);
     }
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = tx.send(HarnessInputMessage::emit_transient(
         Event::ExtensionSessionContextReady(ExtensionSessionContextReady { session_id }),
     ));
@@ -2115,6 +2147,8 @@ fn apply_started_cwd_metadata(
                     && let Some((session_id, initialization_id)) =
                         cwd_state.initialization(&started.agent_id)
                 {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = tx.send(HarnessInputMessage::emit_transient(cwd_context_event(
                         session_id,
                         started.agent_id.clone(),
@@ -2146,6 +2180,8 @@ fn dispatch_session_agent_loaded(
     }
     publish_agent_discovery_snapshot(&loaded, tx);
     if let Some(cwd) = cwd_state.get(&loaded.agent_id) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = tx.send(HarnessInputMessage::emit_transient(cwd_context_event(
             loaded.session_id.clone(),
             loaded.agent_id.clone(),
@@ -2153,6 +2189,8 @@ fn dispatch_session_agent_loaded(
             &cwd,
             cwd_state,
         )));
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = tx.send(HarnessInputMessage::emit_transient(
             Event::ExtensionContextReady(ExtensionContextReady {
                 session_id: loaded.session_id,
@@ -2171,6 +2209,8 @@ fn dispatch_session_agent_loaded(
     let Ok(cwd) = cwd_state.process_default() else {
         return;
     };
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = tx.send(HarnessInputMessage::emit_transient(
         Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
             agent_id: loaded.agent_id,
@@ -2367,6 +2407,8 @@ fn publish_agent_discovery_snapshot_for(
         match message {
             HarnessInputMessage::Emit(emit) => {
                 if let Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot) = *emit.event {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = tx.send(HarnessInputMessage::emit_transient(
                         Event::ExtensionAgentDiscoverySnapshotDeclared(
                             ExtensionAgentDiscoverySnapshotDeclared {
@@ -2379,10 +2421,14 @@ fn publish_agent_discovery_snapshot_for(
                         ),
                     ));
                 } else {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = tx.send(HarnessInputMessage::Emit(emit));
                 }
             }
             other => {
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = tx.send(other);
             }
         }

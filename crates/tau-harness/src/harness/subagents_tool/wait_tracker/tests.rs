@@ -1747,6 +1747,8 @@ fn exact_wait_after_no_arg_consumes_reports_already_consumed() {
             )
             .is_empty()
     );
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = start_reply(start_wait_any(&mut tracker, &owner, "wait-any"));
 
     let (message, _) = reply_error(start_reply(start_wait_exact(

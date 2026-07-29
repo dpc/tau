@@ -622,6 +622,8 @@ impl FsLockBackend {
     }
 
     pub(super) fn release_auto(&self, id: u64) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = with_registry_lock(&self.state_dir, |registry| {
             let before = registry.automatic.len();
             registry
@@ -1011,6 +1013,8 @@ fn with_registry_lock<T>(
     if result.is_ok() && registry.generation != original_generation {
         write_registry(state_dir, &mut lock, &registry)?;
     }
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = lock.unlock();
     result
 }
@@ -1019,6 +1023,8 @@ fn cleanup_waiter_after_backend_error(backend: &FsLockBackend, waiter_id: Option
     let Some(waiter_id) = waiter_id else {
         return;
     };
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = with_registry_lock(&backend.state_dir, |registry| {
         let before = registry.waiters.len();
         registry.waiters.retain(|waiter| {
@@ -1096,6 +1102,8 @@ fn write_registry(
         .and_then(|()| file.sync_all())
         .map_err(|error| format!("failed to write {}: {error}", temp_path.display()))?;
     fs::rename(&temp_path, &path).map_err(|error| {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = fs::remove_file(&temp_path);
         format!(
             "failed to replace {} with {}: {error}",
@@ -1104,11 +1112,15 @@ fn write_registry(
         )
     })?;
     if let Ok(dir) = File::open(state_dir) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = dir.sync_all();
     }
     // The registry JSON is the source of truth. The marker in `registry.lock`
     // is only a human/debugging hint, so it must not turn an already-renamed
     // successful registry update into an apparent operation failure.
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = lock_file
         .seek(SeekFrom::Start(0))
         .and_then(|_| lock_file.write_all(registry.generation.to_string().as_bytes()))
@@ -1219,6 +1231,8 @@ fn instance_liveness(
     };
     match file.try_lock_exclusive() {
         Ok(()) => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = file.unlock();
             Ok(InstanceLiveness::Dead)
         }

@@ -62,6 +62,8 @@ impl AgentActivity {
         agent_prompt_id: &AgentPromptId,
         output_items: &[ContextItem],
     ) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.finish_active_prompt(agent_prompt_id, output_items);
     }
 

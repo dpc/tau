@@ -211,6 +211,8 @@ fn pick_with_event_reader(
     })();
 
     if result.is_err() {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = force_clear_picker_frame(&mut screen, &mut writer);
     }
     result

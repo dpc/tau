@@ -160,6 +160,8 @@ fn handle_prompt_terminated(terminated: &AgentPromptTerminated) -> Result<bool, 
 }
 
 fn disconnect_prompt_stdin_client(writer: &mut OneShotWriter) {
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = crate::ui_client::send_message(
         writer,
         &HarnessInputMessage::Disconnect(tau_proto::Disconnect {

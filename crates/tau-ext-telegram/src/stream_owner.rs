@@ -137,7 +137,11 @@ impl UpdateStreamLock {
 
 impl Drop for UpdateStreamLock {
     fn drop(&mut self) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.file.set_len(0);
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = FileExt::unlock(&self.file);
         tracing::debug!(
             target: LOG_TARGET,

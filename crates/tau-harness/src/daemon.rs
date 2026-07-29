@@ -261,8 +261,12 @@ impl Drop for ListenerForwarder {
         // listener fd. Shutting down the write side wakes the thread without using
         // the filesystem socket path, and the wake fd is never forwarded as a
         // `NewClient` stream.
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.wake_tx.shutdown(Shutdown::Write);
         if let Some(join) = self.join.take() {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = join.join();
         }
     }
@@ -313,6 +317,8 @@ impl ListenerForwarder {
         let join = thread::spawn(move || {
             loop {
                 if let Some(before_wait_tx) = before_wait_tx.as_ref() {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = before_wait_tx.send(());
                 }
                 match Self::poll_ready(&listener, &wake_rx) {
@@ -530,6 +536,8 @@ pub fn run_embedded_message_with_options(
     let mut outcome = match harness.send_user_message(session_id, message, None) {
         Ok(outcome) => outcome,
         Err(error) => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = harness.shutdown();
             return Err(error);
         }
@@ -593,6 +601,8 @@ pub fn run_embedded_message_with_echo(
     let mut outcome = match harness.send_user_message(session_id, message, None) {
         Ok(outcome) => outcome,
         Err(error) => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = harness.shutdown();
             return Err(error);
         }
@@ -633,6 +643,8 @@ pub fn run_embedded_message_with_test_provider(
     let mut outcome = match harness.send_user_message(session_id, message, None) {
         Ok(outcome) => outcome,
         Err(error) => {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = harness.shutdown();
             return Err(error);
         }
@@ -750,6 +762,8 @@ pub fn run_daemon_with_internal_tools(
     let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = harness.shutdown();
     drop(forwarder);
     drop(listener_handle);
@@ -796,6 +810,8 @@ pub fn run_daemon_with_echo(
     let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = harness.shutdown();
     drop(forwarder);
     drop(listener_handle);
@@ -828,6 +844,8 @@ pub fn run_daemon_with_config(
     let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = harness.shutdown();
     drop(forwarder);
     drop(listener_handle);
@@ -1083,6 +1101,8 @@ pub fn get_daemon_rendered_system_prompt(
     let started_at = Instant::now();
     loop {
         if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = peer.send(&HarnessInputMessage::Disconnect(Disconnect {
                 reason: Some("done".to_owned()),
             }));
@@ -1096,6 +1116,8 @@ pub fn get_daemon_rendered_system_prompt(
                 HarnessOutputMessage::RenderedSystemPromptResult(result)
                     if result.request_id == request_id =>
                 {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = peer.send(&HarnessInputMessage::Disconnect(Disconnect {
                         reason: Some("done".to_owned()),
                     }));
@@ -1137,6 +1159,8 @@ pub fn get_daemon_rendered_tool_definitions(
     let started_at = Instant::now();
     loop {
         if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = peer.send(&HarnessInputMessage::Disconnect(Disconnect {
                 reason: Some("done".to_owned()),
             }));
@@ -1150,6 +1174,8 @@ pub fn get_daemon_rendered_tool_definitions(
                 HarnessOutputMessage::RenderedToolDefinitionsResult(result)
                     if result.request_id == request_id =>
                 {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = peer.send(&HarnessInputMessage::Disconnect(Disconnect {
                         reason: Some("done".to_owned()),
                     }));
@@ -1338,6 +1364,8 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         initial_client_id.as_ref(),
     )?;
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = harness.shutdown();
     drop(forwarder);
     drop(listener_handle);
@@ -1568,16 +1596,24 @@ fn send_initial_client_startup_error(
         #[cfg(test)]
         InitialClientStartupErrorOutput::Stream(stream) => {
             let mut writer = HarnessOutputWriter::new(stream);
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = writer.write_message(&HarnessOutputMessage::Disconnect(Disconnect {
                 reason: Some(format!("harness startup failed: {error}")),
             }));
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = writer.flush();
         }
         InitialClientStartupErrorOutput::Stdout => {
             let mut writer = HarnessOutputWriter::new(io::stdout().lock());
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = writer.write_message(&HarnessOutputMessage::Disconnect(Disconnect {
                 reason: Some(format!("harness startup failed: {error}")),
             }));
+            // This call is intentionally best-effort; preserve the existing discarded
+            // result. ast-grep-ignore: let-underscore-call
             let _ = writer.flush();
         }
     }

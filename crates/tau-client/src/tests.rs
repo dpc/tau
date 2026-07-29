@@ -553,6 +553,8 @@ struct BlockingSignalWriter {
 
 impl Write for BlockingSignalWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.entered.send(());
         let (lock, condvar) = &*self.blocked;
         let mut blocked = lock.lock().expect("lock block flag");
@@ -609,6 +611,8 @@ impl Write for DropSignalWriter {
 
 impl Drop for DropSignalWriter {
     fn drop(&mut self) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.dropped.send(());
     }
 }
@@ -2721,6 +2725,8 @@ fn manual_loop_extension_data_request_preserves_disconnect() {
         runtime.recv().expect("preserved disconnect"),
         ManualRuntimeInput::Message(HarnessOutputMessage::Disconnect(_))
     ));
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = runtime.finish_detached();
 }
 
@@ -4015,6 +4021,8 @@ fn ready_flush_backpressure_does_not_block_detached_config_error() {
                 message: "post-Ready diagnostic".to_owned(),
             },
         ));
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = detached_done_tx.send(result);
     });
     let detached_result = detached_done_rx.recv_timeout(Duration::from_secs(1));

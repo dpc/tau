@@ -214,12 +214,16 @@ fn spawn_reader_thread_inner(
                     }
                 }
                 Ok(None) => {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = tx.send(HarnessEvent::Disconnected {
                         connection_id: connection_id.clone(),
                     });
                     return;
                 }
                 Err(error) => {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = tx.send(HarnessEvent::ReadFailed {
                         connection_id: connection_id.clone(),
                         error: error.to_string(),
@@ -301,7 +305,11 @@ impl Drop for SupervisedWriterHandle {
             return;
         }
         let watchdog = self.start_shutdown_watchdog();
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = self.join();
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = watchdog.join();
     }
 }
@@ -472,7 +480,11 @@ fn spawn_writer_thread_inner(
                     }
                 }
                 WriterCommand::Flush(ack) => {
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = w.flush();
+                    // This call is intentionally best-effort; preserve the existing discarded
+                    // result. ast-grep-ignore: let-underscore-call
                     let _ = ack.send(());
                 }
             }
@@ -506,6 +518,8 @@ fn spawn_writer_thread_inner(
                     .watchdog
                     .cancel_and_deadline(Instant::now() + SUPERVISED_CLEANUP_GRACE);
                 wait_until_deadline(child, deadline);
+                // This call is intentionally best-effort; preserve the existing discarded
+                // result. ast-grep-ignore: let-underscore-call
                 let _ = completion
                     .harness_tx
                     .send(HarnessEvent::SupervisedWriterCleanupComplete {
@@ -549,15 +563,23 @@ fn wait_until_deadline(mut child: Child, deadline: Instant) {
                 break Err(error);
             }
         };
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = done_tx.send(observation);
     });
     if !matches!(
         done_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
         Ok(Ok(()))
     ) {
+        // This call is intentionally best-effort; preserve the existing discarded
+        // result. ast-grep-ignore: let-underscore-call
         let _ = child.kill();
     }
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = child.wait();
+    // This call is intentionally best-effort; preserve the existing discarded
+    // result. ast-grep-ignore: let-underscore-call
     let _ = observer.join();
 }
 
