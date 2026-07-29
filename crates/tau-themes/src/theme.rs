@@ -169,11 +169,11 @@ impl Theme {
 }
 
 fn effective_style(stack: &[ThemeStyle]) -> ThemeStyle {
-    stack
-        .iter()
-        .fold(ThemeStyle::default(), |effective, style| {
-            effective.override_with(*style)
-        })
+    let mut effective = ThemeStyle::default();
+    for style in stack {
+        effective = effective.override_with(*style);
+    }
+    effective
 }
 
 /// A span of text with resolved style attributes.

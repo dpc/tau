@@ -1310,23 +1310,20 @@ fn parsed_body_text(parsed: &mail_parser::Message<'_>) -> String {
 }
 
 fn build_lettre_message(outgoing: &OutgoingMessage, message_id: &str) -> Result<Message, String> {
-    let builder = Message::builder()
+    let mut builder = Message::builder()
         .from(parse_mailbox_header(&outgoing.from, "From")?)
         .subject(outgoing.subject.clone())
         .message_id(Some(message_id.to_owned()))
         .header(LettreContentType::TEXT_PLAIN);
-    let builder = outgoing.to.iter().try_fold(builder, |builder, recipient| {
-        Ok::<_, String>(builder.to(parse_mailbox_header(recipient, "To")?))
-    })?;
-    let builder = outgoing.cc.iter().try_fold(builder, |builder, recipient| {
-        Ok::<_, String>(builder.cc(parse_mailbox_header(recipient, "Cc")?))
-    })?;
-    let mut builder = outgoing
-        .bcc
-        .iter()
-        .try_fold(builder, |builder, recipient| {
-            Ok::<_, String>(builder.bcc(parse_mailbox_header(recipient, "Bcc")?))
-        })?;
+    for recipient in &outgoing.to {
+        builder = builder.to(parse_mailbox_header(recipient, "To")?);
+    }
+    for recipient in &outgoing.cc {
+        builder = builder.cc(parse_mailbox_header(recipient, "Cc")?);
+    }
+    for recipient in &outgoing.bcc {
+        builder = builder.bcc(parse_mailbox_header(recipient, "Bcc")?);
+    }
     if let Some(reply_to) = &outgoing.reply_to {
         builder = builder.reply_to(parse_mailbox_header(reply_to, "Reply-To")?);
     }
