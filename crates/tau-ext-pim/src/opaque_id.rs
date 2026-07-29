@@ -5,8 +5,6 @@ pub(crate) fn encode_component(value: &str) -> String {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             out.push(*byte as char);
         } else {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: push-str-format
             out.push_str(&format!("%{byte:02X}"));
         }
     }

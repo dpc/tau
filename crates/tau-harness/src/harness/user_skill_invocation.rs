@@ -122,8 +122,6 @@ pub(super) fn format_user_invoked_skill_prompt(
         body
     );
     if let Some(total_bytes) = truncated_total_bytes {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: push-str-format
         prompt.push_str(&format!(
             "\n\n[skill content truncated at {MAX_USER_INVOKED_SKILL_BYTES} bytes; file has {total_bytes} bytes]"
         ));

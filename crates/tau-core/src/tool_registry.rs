@@ -1036,8 +1036,6 @@ fn enum_error(
             enum_values.iter().filter_map(serde_json::Value::as_str),
         )
     {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: push-str-format
         message.push_str(&format!("; did you mean `{suggestion}`?"));
     }
     ToolArgumentValidationError::new(path, message)

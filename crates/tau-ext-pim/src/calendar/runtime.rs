@@ -3421,13 +3421,9 @@ fn push_escaped_char(out: &mut String, ch: char, multiline: bool) {
         '\u{1b}' => out.push_str("\\e"),
         '\u{7f}' => out.push_str("\\x7f"),
         ch if (ch as u32) <= 0x1f || (0x80..=0x9f).contains(&(ch as u32)) => {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: push-str-format
             out.push_str(&format!("\\u{{{:04x}}}", ch as u32));
         }
         ch if is_unsafe_format_control(ch) => {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: push-str-format
             out.push_str(&format!("\\u{{{:04x}}}", ch as u32));
         }
         ch => out.push(ch),

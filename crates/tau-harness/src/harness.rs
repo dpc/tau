@@ -723,8 +723,6 @@ fn unavailable_tool_error_message_with_suggestion(
 ) -> String {
     let mut message = unavailable_tool_error_message(tool_name);
     if let Some(suggestion) = suggestion {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: push-str-format
         message.push_str(&format!(" Did you mean `{suggestion}`?"));
     }
     message
@@ -27796,11 +27794,7 @@ impl Harness {
             .ok_or_else(|| HarnessError::Participant("no model available for prompt".to_owned()))?;
         let mut out = String::new();
         out.push_str("================ MODEL / EFFORT ================\n");
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: push-str-format
         out.push_str(&format!("model:  {}\n", prompt.model));
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: push-str-format
         out.push_str(&format!("params: {:?}\n\n", prompt.model_params));
 
         out.push_str("================ SYSTEM PROMPT ================\n");

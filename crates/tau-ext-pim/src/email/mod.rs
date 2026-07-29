@@ -2718,13 +2718,9 @@ fn push_escaped_char(out: &mut String, ch: char, multiline: bool) {
         '\u{1b}' => out.push_str("\\e"),
         '\u{7f}' => out.push_str("\\x7f"),
         ch if (ch as u32) <= 0x1f || (0x80..=0x9f).contains(&(ch as u32)) => {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: push-str-format
             out.push_str(&format!("\\u{{{:04x}}}", ch as u32));
         }
         ch if is_unsafe_format_control(ch) => {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: push-str-format
             out.push_str(&format!("\\u{{{:04x}}}", ch as u32));
         }
         ch => out.push(ch),
@@ -3319,8 +3315,6 @@ fn list_token(value: &str, max_chars: usize) -> String {
         if ch.is_whitespace() || ch == '%' {
             let mut buf = [0; 4];
             for byte in ch.encode_utf8(&mut buf).as_bytes() {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: push-str-format
                 token.push_str(&format!("%{byte:02X}"));
             }
         } else {
@@ -6054,8 +6048,6 @@ fn format_email_log_entry(entry: &EmailLogEntry) -> String {
     }
     push_email_log_part(&mut line, "approval", entry.approval_id.as_deref());
     if let Some(count) = entry.message_count {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: push-str-format
         line.push_str(&format!(" messages={count}"));
     }
     push_email_log_part(&mut line, "reason", entry.reason.as_deref());
@@ -7031,8 +7023,6 @@ fn message_target_display(command: &str, args: Option<&CborValue>) -> Option<Str
         .map(|folder| format!("{command} {}", safe_display_line(folder)))
         .unwrap_or_else(|| command.to_owned());
     if let Some(uid) = uid {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: push-str-format
         display.push_str(&format!(" uid={}", safe_display_line(&uid)));
     }
     Some(display)

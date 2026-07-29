@@ -858,8 +858,6 @@ More specific files usually override broader ones.\n\n",
     }
 
     for file in files {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: push-str-format
         text.push_str(&format!(
             "<AGENTS_FILE path=\"{}\">\n",
             file.file_path.display()

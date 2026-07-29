@@ -31,8 +31,6 @@ pub(crate) fn read_file(
             if error.kind() == std::io::ErrorKind::NotFound
                 && let Some(suggestion) = near_sibling_path_suggestion(&path_buf, world)
             {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: push-str-format
                 message.push_str(&format!("; did you mean `{suggestion}`?"));
             }
             ToolFailure::from(message).with_args(display_args.clone())

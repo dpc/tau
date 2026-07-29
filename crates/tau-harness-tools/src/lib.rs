@@ -903,8 +903,6 @@ fn read_skill_by_name(
         host.emit_info_important(&format!(
             "skill too long: {source_label} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while loading {name}",
         ));
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: push-str-format
         body.push_str(&format!(
             "\n\n[skill content truncated at {MAX_SKILL_CONTENT_BYTES} bytes; file has {} bytes]",
             read.total_bytes
