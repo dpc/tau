@@ -10,6 +10,8 @@ mod priority_line;
 pub mod screen;
 /// Styled text, block, and cell data model.
 pub mod style;
+/// Width-adaptive two-row excerpt layout.
+mod two_line_elision;
 
 pub use priority_line::{
     PriorityLine, PriorityLineAlignment, PriorityLinePriority, PriorityLineTruncation,
@@ -20,3 +22,4 @@ pub use style::{
     next_grapheme_boundary, previous_grapheme_boundary, sanitize_hyperlink_target,
     truncate_to_width,
 };
+pub use two_line_elision::TwoLineElision;

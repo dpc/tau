@@ -64,6 +64,18 @@ prompt use `◯`; configured submitted and prompt symbols replace those respecti
 defaults. Completed agent responses use `◆`, while responses still streaming
 use `◇`.
 
+Queued prompt presentation occupies at most two display rows when its ordinary
+layout would exceed that bound. The first row keeps the beginning of the first
+source line and ends with an omission marker; the second row starts with an
+omission marker, keeps the end of the last source line, and ends with the queued
+label. Narrow layouts compact those adornments rather than exceeding the current
+terminal width. This abbreviation is presentation-only: dispatch, steering, and
+recall retain the complete authoritative prompt text.
+
+For bounded render work, prompts larger than the renderer's fixed source-window
+limit use the abbreviated presentation without first laying out the complete
+prompt.
+
 Provider response stats are a standalone live-indicator status line. The CLI may
 remember the latest `provider.response_updated.response_stats` sample for an
 in-flight prompt only to repaint the transient ellipsis block, and derives

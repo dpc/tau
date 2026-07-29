@@ -11,6 +11,8 @@ pub use crossterm::style::Color;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::TwoLineElision;
+
 /// Maximum OSC 8 target length accepted by Tau's terminal renderer.
 pub const MAX_HYPERLINK_TARGET_BYTES: usize = 4096;
 
@@ -441,6 +443,22 @@ pub enum Align {
     Center,
 }
 
+/// Mutually exclusive content layout selected for one [`StyledBlock`].
+#[derive(Clone, Debug)]
+pub(crate) enum BlockLayout {
+    /// Wrap [`StyledBlock::content`] and optionally attach right content.
+    Ordinary,
+    /// Render one adaptive priority line with its owned detail body.
+    Priority {
+        /// Adaptive single-row header.
+        line: crate::PriorityLine,
+        /// Ordinary detail rows owned by the header.
+        body: StyledText,
+    },
+    /// Render a bounded width-adaptive leading/trailing excerpt.
+    TwoLineElision(TwoLineElision),
+}
+
 /// A unit of layout: styled content with background, alignment, and margins.
 ///
 /// When rendered, the block's content is wrapped at the available
@@ -448,25 +466,16 @@ pub enum Align {
 /// space, and the block's background color fills remaining content-area cells.
 #[derive(Clone, Debug)]
 pub struct StyledBlock {
-    /// Primary content rendered in the block's content area.
+    /// Primary content rendered when ordinary layout is selected.
     pub content: StyledText,
-    /// Optional right-aligned adornment for single-row left-aligned blocks.
+    /// Optional right-aligned adornment for ordinary single-row blocks.
     ///
     /// `layout_block` renders this only when [`Self::align`] is
     /// [`Align::Left`], primary content lays out to one row, and both sides
     /// fit with separator padding.
     pub right_content: StyledText,
-    /// Optional priority-based content rendered as exactly one adaptive line.
-    ///
-    /// When present, `layout_block` uses this instead of [`Self::content`] and
-    /// [`Self::right_content`].
-    pub priority_line: Option<crate::PriorityLine>,
-    /// Optional ordinary body rendered after [`Self::priority_line`].
-    ///
-    /// This stays empty unless a one-line adaptive header owns related
-    /// multi-line detail content. Layout also hides this body when the
-    /// priority line's configured essential band cannot fit.
-    pub priority_line_body: StyledText,
+    /// Mutually exclusive ordinary, priority-line, or two-line-elision layout.
+    pub(crate) layout: BlockLayout,
     /// Optional background color for the content area and its padding.
     pub bg: Option<Color>,
     /// Horizontal alignment applied to primary content.
@@ -489,8 +498,7 @@ impl StyledBlock {
         Self {
             content: content.into(),
             right_content: StyledText::new(),
-            priority_line: None,
-            priority_line_body: StyledText::new(),
+            layout: BlockLayout::Ordinary,
             bg: None,
             align: Align::Left,
             margin_left: 0,
@@ -506,9 +514,11 @@ impl StyledBlock {
     /// predicate.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.priority_line
-            .as_ref()
-            .map_or_else(|| self.content.is_empty(), crate::PriorityLine::is_empty)
+        match &self.layout {
+            BlockLayout::Ordinary => self.content.is_empty(),
+            BlockLayout::Priority { line, .. } => line.is_empty(),
+            BlockLayout::TwoLineElision(elision) => elision.is_empty(),
+        }
     }
 
     /// Returns this block with a content-area background color.
@@ -532,9 +542,18 @@ impl StyledBlock {
         self
     }
 
+    /// Returns this block with width-adaptive two-row excerpt layout.
+    pub fn two_line_elision(mut self, elision: TwoLineElision) -> Self {
+        self.layout = BlockLayout::TwoLineElision(elision);
+        self
+    }
+
     /// Returns this block with priority-based single-line content.
     pub fn priority_line(mut self, line: crate::PriorityLine) -> Self {
-        self.priority_line = Some(line);
+        self.layout = BlockLayout::Priority {
+            line,
+            body: StyledText::new(),
+        };
         self
     }
 
@@ -543,8 +562,29 @@ impl StyledBlock {
     /// The body has no effect unless [`Self::priority_line`] is present, and
     /// it remains hidden whenever that line's essential band fails closed.
     pub fn priority_line_body(mut self, body: impl Into<StyledText>) -> Self {
-        self.priority_line_body = body.into();
+        if let BlockLayout::Priority {
+            body: current_body, ..
+        } = &mut self.layout
+        {
+            *current_body = body.into();
+        }
         self
+    }
+
+    /// Returns priority-line content when this block uses priority layout.
+    pub fn priority_line_content(&self) -> Option<&crate::PriorityLine> {
+        match &self.layout {
+            BlockLayout::Priority { line, .. } => Some(line),
+            BlockLayout::Ordinary | BlockLayout::TwoLineElision(_) => None,
+        }
+    }
+
+    /// Returns the body owned by this block's priority layout, if selected.
+    pub fn priority_line_body_content(&self) -> Option<&StyledText> {
+        match &self.layout {
+            BlockLayout::Priority { body, .. } => Some(body),
+            BlockLayout::Ordinary | BlockLayout::TwoLineElision(_) => None,
+        }
     }
 
     /// Returns this block with a requested transparent left margin.

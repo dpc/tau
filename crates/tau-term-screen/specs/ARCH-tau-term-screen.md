@@ -23,13 +23,22 @@ accepted item in that band cannot fit, the line stays empty instead of showing
 an incomplete meaning. The same empty fallback applies when the
 highest-importance survivor cannot fit after less-important items are removed,
 rather than resurrecting a smaller item, wrapping, or clipping content.
-`StyledBlock::priority_line` selects this layout instead of ordinary and
-right-adornment content. Its optional priority-line body supports related
+`StyledBlock` stores ordinary, priority-line, or two-line-elision layout as one
+exclusive semantic mode. `StyledBlock::priority_line` replaces the selected mode
+with priority layout. Its optional priority-line body supports related
 ordinary detail rows without letting the adaptive header wrap; when an
 essential header band cannot fit, the owned body hides with it so detail rows
 never lose their identity/status context. Ordinary
 `StyledBlock::right_content` remains the atomic right-adornment mechanism used
 by the multi-line-capable prompt.
+
+`StyledBlock::two_line_elision` is the width-adaptive bounded-excerpt layout.
+Callers provide already-bounded styled first/last windows, a prefix, a state
+label candidate list, omission-marker candidate lists, and optionally bounded
+complete content. Candidates are styled and ordered from preferred to most
+compact. Layout uses the current width to emit at most two rows without retaining
+or scanning the caller's full source text. Callers must bound every supplied
+value; layout work scales with those values.
 
 ## Terminal output trust boundary
 

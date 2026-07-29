@@ -3,8 +3,9 @@ use std::collections::{HashMap, HashSet};
 use tau_cli_term_raw::Term;
 
 use super::{
-    AgentActivity, MessageRenderMode, RoleCompletionDetails, role_setting_value_completions,
-    role_value_completion,
+    AgentActivity, MessageRenderMode, QUEUED_PROJECTION_WINDOW_BYTES, RoleCompletionDetails,
+    bounded_queued_line_end, bounded_queued_line_start, queued_prompt_projection,
+    role_setting_value_completions, role_value_completion,
 };
 use crate::chat::{DraftSlot, queue_prompt_draft_snapshot};
 
@@ -25,6 +26,34 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
         tau_cli_term::CompletionData::new(),
         crate::tests::cli_test_theme(),
     )
+}
+
+/// Queued-prompt layout receives fixed-size source windows even for arbitrarily
+/// large ASCII and zero-width Unicode input.
+#[test]
+fn queued_prompt_source_windows_are_bounded() {
+    let ascii = "a".repeat(1024 * 1024);
+    let combining = "\u{301}".repeat(1024 * 1024);
+
+    for source in [&ascii, &combining] {
+        assert!(bounded_queued_line_start(source).len() <= QUEUED_PROJECTION_WINDOW_BYTES);
+        assert!(bounded_queued_line_end(source).len() <= QUEUED_PROJECTION_WINDOW_BYTES);
+    }
+}
+
+/// The production projection builder must not retain a complete huge prompt or
+/// expand any rendered component beyond its fixed source windows.
+#[test]
+fn queued_prompt_projection_drops_huge_unabridged_content() {
+    let source = format!("{}\n{}", "a".repeat(1024 * 1024), "界".repeat(1024 * 1024));
+    let projection =
+        queued_prompt_projection(&crate::tests::cli_test_theme(), false, "◯ ".into(), &source);
+
+    assert!(projection.unabridged.is_none());
+    for excerpt in [&projection.first, &projection.last] {
+        let retained: usize = excerpt.spans().iter().map(|span| span.text.len()).sum();
+        assert!(retained <= QUEUED_PROJECTION_WINDOW_BYTES);
+    }
 }
 
 /// Every bottom-status element must keep the ten-point band documented by

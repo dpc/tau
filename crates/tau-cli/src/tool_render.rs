@@ -1035,7 +1035,7 @@ pub(crate) fn render_diff_tool_block(
     expanded: bool,
 ) -> tau_cli_term::StyledBlock {
     use tau_cli_term::resolve::resolve;
-    use tau_cli_term::{Span, StyledBlock, StyledText};
+    use tau_cli_term::{Span, StyledText};
     use tau_themes::names;
 
     // Reuse the adaptive header and attach only the expanded diff detail body.
@@ -1044,7 +1044,10 @@ pub(crate) fn render_diff_tool_block(
     if !expanded || diff.hunks.is_empty() {
         return header;
     }
-    let priority_line = header.priority_line.expect("tool block priority header");
+    assert!(
+        header.priority_line_content().is_some(),
+        "tool block priority header"
+    );
     let mut spans: Vec<Span> = Vec::new();
 
     let added_style = resolve(theme, names::DIFF_ADDED);
@@ -1088,9 +1091,7 @@ pub(crate) fn render_diff_tool_block(
             }
         }
     }
-    StyledBlock::new("")
-        .priority_line(priority_line)
-        .priority_line_body(StyledText::from(spans))
+    header.priority_line_body(StyledText::from(spans))
 }
 
 /// Like [`render_diff_tool_block`] but keeps file boundaries for multi-file
@@ -1102,7 +1103,7 @@ pub(crate) fn render_multi_diff_tool_block(
     expanded: bool,
 ) -> tau_cli_term::StyledBlock {
     use tau_cli_term::resolve::resolve;
-    use tau_cli_term::{Span, StyledBlock, StyledText};
+    use tau_cli_term::{Span, StyledText};
     use tau_themes::names;
 
     let header = render_tool_block(theme, display);
@@ -1110,7 +1111,10 @@ pub(crate) fn render_multi_diff_tool_block(
     if !expanded || files.iter().all(|file| file.diff.hunks.is_empty()) {
         return header;
     }
-    let priority_line = header.priority_line.expect("tool block priority header");
+    assert!(
+        header.priority_line_content().is_some(),
+        "tool block priority header"
+    );
     let mut spans: Vec<Span> = Vec::new();
 
     let added_style = resolve(theme, names::DIFF_ADDED);
@@ -1160,9 +1164,7 @@ pub(crate) fn render_multi_diff_tool_block(
             }
         }
     }
-    StyledBlock::new("")
-        .priority_line(priority_line)
-        .priority_line_body(StyledText::from(spans))
+    header.priority_line_body(StyledText::from(spans))
 }
 
 fn push_segments(

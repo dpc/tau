@@ -734,27 +734,27 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
     let fill = Cell::new(' ', fill_style);
 
     let mut content_lines = Vec::new();
-    // ast-grep-ignore: if-let-some-else
-    if let Some(priority_line) = &block.priority_line {
-        let priority_layout = priority_line.layout_with_fill(content_width, fill.clone());
-        content_lines.push(priority_layout.row);
-        if priority_layout.required_items_fit && !block.priority_line_body.is_empty() {
+    match &block.layout {
+        crate::style::BlockLayout::TwoLineElision(elision) => {
+            content_lines.extend(elision.layout(content_width));
+        }
+        crate::style::BlockLayout::Priority { line, body } => {
+            let priority_layout = line.layout_with_fill(content_width, fill.clone());
+            content_lines.push(priority_layout.row);
+            if priority_layout.required_items_fit && !body.is_empty() {
+                content_lines.extend(layout_lines().content(body).width(content_width).call());
+            }
+        }
+        crate::style::BlockLayout::Ordinary => {
             content_lines.extend(
                 layout_lines()
-                    .content(&block.priority_line_body)
+                    .content(&block.content)
                     .width(content_width)
                     .call(),
             );
         }
-    } else {
-        content_lines.extend(
-            layout_lines()
-                .content(&block.content)
-                .width(content_width)
-                .call(),
-        );
     }
-    if block.priority_line.is_none()
+    if matches!(block.layout, crate::style::BlockLayout::Ordinary)
         && block.align == Align::Left
         && !block.right_content.is_empty()
         && content_lines.len() == 1

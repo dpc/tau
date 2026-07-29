@@ -394,6 +394,197 @@ fn layout_block_plain() {
     assert!(text[5..].chars().all(|c| c == ' '));
 }
 
+/// Width-adaptive excerpts preserve the first-line beginning and last-line end
+/// while staying at exactly two physical rows after terminal shrink.
+#[test]
+fn two_line_elision_adapts_to_current_width() {
+    let block = StyledBlock::new("").two_line_elision(crate::TwoLineElision {
+        prefix: "◯ ".into(),
+        first: "First line with discarded tail".into(),
+        last: "forgotten start end of last line.".into(),
+        first_omissions: vec!["   ┄".into(), "┄".into()],
+        last_omissions: vec!["┄ ".into(), "┄".into()],
+        labels: vec![" (queued)".into(), " (q)".into(), "q".into()],
+        unabridged: None,
+    });
+
+    let rows = layout_block(&block, 32);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(cols(&rows[0]), 32);
+    assert_eq!(cols(&rows[1]), 32);
+    let text = line_chars(&rows);
+    assert!(text[0].starts_with("◯ First line with discarded"));
+    assert!(text[0].contains('┄'));
+    assert!(text[1].starts_with("┄ "));
+    assert!(text[1].contains("last line. (queued)"));
+}
+
+/// Wide graphemes remain intact and every narrow layout stays within two rows
+/// and its exact terminal-column budget.
+#[test]
+fn two_line_elision_handles_unicode_and_narrow_widths() {
+    let block = StyledBlock::new("").two_line_elision(crate::TwoLineElision {
+        prefix: "◯ ".into(),
+        first: "👩‍🔬研究研究研究".into(),
+        last: "研究研究👩‍🔬".into(),
+        first_omissions: vec!["   ┄".into(), "┄".into()],
+        last_omissions: vec!["┄ ".into(), "┄".into()],
+        labels: vec![" (queued)".into(), " (q)".into(), "q".into()],
+        unabridged: None,
+    });
+
+    for width in 1..=20 {
+        let rows = layout_block(&block, width);
+        assert_eq!(rows.len(), 2, "width {width}");
+        assert!(rows.iter().all(|row| cols(row) == width), "width {width}");
+    }
+}
+
+/// Boundary truncation retains complete grapheme clusters and preserves the
+/// selected excerpt, omission, and label metadata.
+#[test]
+fn two_line_elision_preserves_boundary_graphemes_and_metadata() {
+    let excerpt_style = Style::default().fg(Color::Green);
+    let omission_style = Style::default().fg(Color::Red);
+    let label_style = Style::default().fg(Color::Blue);
+    let block = StyledBlock::new("").two_line_elision(crate::TwoLineElision {
+        prefix: "".into(),
+        first: Span::new("A👩‍🔬B", excerpt_style)
+            .hyperlink("https://example.test/excerpt")
+            .into(),
+        last: Span::new("X👩‍🔬", excerpt_style)
+            .hyperlink("https://example.test/excerpt")
+            .into(),
+        first_omissions: vec![
+            Span::new("too-long", omission_style).into(),
+            Span::new("┄", omission_style)
+                .hyperlink("https://example.test/omission")
+                .into(),
+        ],
+        last_omissions: vec![Span::new("┄", omission_style).into()],
+        labels: vec![
+            Span::new("label", label_style).into(),
+            Span::new("q", label_style)
+                .hyperlink("https://example.test/label")
+                .into(),
+        ],
+        unabridged: None,
+    });
+
+    let rows = layout_block(&block, 4);
+    let text = line_chars(&rows);
+    assert_eq!(text, vec!["A👩‍🔬┄", "┄👩‍🔬q"]);
+    let first_omission = rows[0]
+        .iter()
+        .position(|cell| cell.ch == '┄')
+        .expect("first omission");
+    for cell in &rows[0][..first_omission] {
+        assert_eq!(cell.style, excerpt_style);
+        assert_eq!(
+            cell.hyperlink.as_deref(),
+            Some("https://example.test/excerpt")
+        );
+    }
+    let omission = &rows[0][first_omission];
+    assert_eq!(omission.style, omission_style);
+    assert_eq!(
+        omission.hyperlink.as_deref(),
+        Some("https://example.test/omission")
+    );
+    let last_omission = rows[1]
+        .iter()
+        .position(|cell| cell.ch == '┄')
+        .expect("last omission");
+    let label_index = rows[1]
+        .iter()
+        .position(|cell| cell.ch == 'q')
+        .expect("label");
+    for cell in &rows[1][last_omission + 1..label_index] {
+        assert_eq!(cell.style, excerpt_style);
+        assert_eq!(
+            cell.hyperlink.as_deref(),
+            Some("https://example.test/excerpt")
+        );
+    }
+    let label = &rows[1][label_index];
+    assert_eq!(label.style, label_style);
+    assert_eq!(
+        label.hyperlink.as_deref(),
+        Some("https://example.test/label")
+    );
+}
+
+/// A bounded complete presentation remains natural when it needs no more than
+/// two rows, avoiding unnecessary duplicated head/tail excerpts.
+#[test]
+fn two_line_elision_keeps_short_content_unabridged() {
+    let block = StyledBlock::new("").two_line_elision(crate::TwoLineElision {
+        prefix: "◯ ".into(),
+        first: "short".into(),
+        last: "short".into(),
+        first_omissions: vec!["   ┄".into(), "┄".into()],
+        last_omissions: vec!["┄ ".into(), "┄".into()],
+        labels: vec![" (queued)".into(), " (q)".into(), "q".into()],
+        unabridged: Some("short (queued)".into()),
+    });
+
+    assert_eq!(
+        line_chars(&layout_block(&block, 20)),
+        vec!["◯ short (queued)    "]
+    );
+}
+
+/// Exact two-row complete content stays unabridged, while the same retained
+/// block switches to its excerpt when a narrower width would require three
+/// rows.
+#[test]
+fn two_line_elision_switches_at_exact_row_boundary() {
+    let block = StyledBlock::new("ordinary").two_line_elision(crate::TwoLineElision {
+        prefix: "".into(),
+        first: "1234".into(),
+        last: "5678".into(),
+        first_omissions: vec!["┄".into()],
+        last_omissions: vec!["┄".into()],
+        labels: vec![],
+        unabridged: Some("12345678".into()),
+    });
+
+    assert_eq!(line_chars(&layout_block(&block, 4)), vec!["1234", "5678"]);
+    let narrow = line_chars(&layout_block(&block, 3));
+    assert_eq!(narrow.len(), 2);
+    assert!(narrow.iter().all(|row| row.contains('┄')));
+}
+
+/// Selecting one alternative block layout replaces the previous mode instead of
+/// leaving hidden priority state behind.
+#[test]
+fn styled_block_alternative_layouts_are_exclusive() {
+    let mut line = crate::PriorityLine::new();
+    line.push(
+        crate::PriorityLinePriority::new(0),
+        crate::PriorityLineAlignment::Left,
+        Span::plain("priority"),
+    );
+    let block = StyledBlock::new("ordinary")
+        .priority_line(line)
+        .priority_line_body("hidden body")
+        .two_line_elision(crate::TwoLineElision {
+            prefix: "".into(),
+            first: "first".into(),
+            last: "last".into(),
+            first_omissions: vec!["┄".into()],
+            last_omissions: vec!["┄".into()],
+            labels: vec![],
+            unabridged: None,
+        })
+        .priority_line_body("also hidden");
+
+    let rows = line_chars(&layout_block(&block, 8));
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| !row.contains("priority")));
+    assert!(rows.iter().all(|row| !row.contains("hidden")));
+}
+
 /// Margins are part of the full-width block row but outside the content area;
 /// this protects left/right spacing math.
 #[test]

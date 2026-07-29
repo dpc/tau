@@ -96,6 +96,58 @@ const STREAMING_AGENT_RESPONSE_PREFIX: &str = "◇ ";
 const AGENT_MESSAGE_NAME_MAX_COLUMNS: usize = 48;
 /// Maximum rendered UTF-8 bytes for a supplemental agent message name.
 const AGENT_MESSAGE_NAME_MAX_BYTES: usize = 192;
+const QUEUED_PROJECTION_WINDOW_BYTES: usize = 16 * 1024;
+
+fn bounded_queued_line_start(text: &str) -> &str {
+    let mut end = text.len().min(QUEUED_PROJECTION_WINDOW_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &text[..end];
+    window
+        .find(['\n', '\r'])
+        .map_or(window, |line_end| &window[..line_end])
+}
+
+fn bounded_queued_line_end(text: &str) -> &str {
+    let mut start = text.len().saturating_sub(QUEUED_PROJECTION_WINDOW_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let window = &text[start..];
+    window
+        .rfind(['\n', '\r'])
+        .map_or(window, |line_end| &window[line_end + 1..])
+}
+
+fn queued_prompt_projection(
+    theme: &tau_themes::Theme,
+    osc8_links: bool,
+    prefix: tau_cli_term::StyledText,
+    text: &str,
+) -> tau_cli_term::TwoLineElision {
+    let styled = |value| {
+        markdown_block_with_osc8(
+            theme,
+            tau_themes::names::USER_PROMPT_QUEUED,
+            value,
+            osc8_links,
+        )
+        .content
+    };
+    let unabridged_text =
+        (text.len() <= QUEUED_PROJECTION_WINDOW_BYTES).then(|| format!("{text} (queued)"));
+    let unabridged = unabridged_text.as_deref().map(styled);
+    tau_cli_term::TwoLineElision {
+        prefix,
+        first: styled(bounded_queued_line_start(text)),
+        last: styled(bounded_queued_line_end(text)),
+        first_omissions: vec![styled("   ┄"), styled("┄")],
+        last_omissions: vec![styled("┄ "), styled("┄")],
+        labels: vec![styled(" (queued)"), styled(" (q)"), styled("q")],
+        unabridged,
+    }
+}
 
 fn timer_wakeup_ctx(ctx_id: Option<&str>) -> Option<(&str, &str)> {
     let rest = ctx_id?.strip_prefix(TIMER_WAKEUP_CTX_PREFIX)?;
@@ -5342,13 +5394,20 @@ impl EventRenderer {
                 self.last_user_block = Some((id, text));
             }
         }
-        let block = markdown_prompt_block_with_osc8(
+        let mut block = markdown_prompt_block_with_osc8(
             &self.theme,
             names::USER_PROMPT_QUEUED,
             format!("{} ", self.prompt_symbol),
-            &format!("{} (queued)", queued.text),
+            "",
             self.osc8_links,
         );
+        let prefix = block.content.clone();
+        block = block.two_line_elision(queued_prompt_projection(
+            &self.theme,
+            self.osc8_links,
+            prefix,
+            &queued.text,
+        ));
         let queued_id = self.handle.new_block("user-prompt-queued", block);
         self.handle.push_above_sticky(queued_id);
         self.handle.redraw();

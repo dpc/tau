@@ -112,8 +112,7 @@ fn priority_header_cells(
     width: usize,
 ) -> Vec<tau_cli_term::Cell> {
     block
-        .priority_line
-        .as_ref()
+        .priority_line_content()
         .expect("priority header")
         .layout(width)
 }
@@ -2420,6 +2419,40 @@ fn queued_prompt_uses_composing_marker() {
 
     assert!(vt.screen_contains(80, "⬤ queued marker check"));
     assert!(!vt.screen_contains(80, "◯ queued marker check"));
+}
+
+/// A multiline queued prompt occupies two rows while steering still promotes
+/// the complete original text rather than the bounded presentation windows.
+#[test]
+fn queued_prompt_elides_at_layout_without_changing_authoritative_text() {
+    let (_term, handle, vt) = setup(32, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    let text =
+        "First line with discarded tail\nmiddle line retained\nforgotten start end of last line.";
+
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: text.into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    sync(&handle);
+    let queued = vt.screen_text(32).join("\n");
+    assert!(queued.contains("◯ First line with discarded"));
+    assert!(queued.contains("┄"));
+    assert!(queued.contains("last line. (queued)"));
+    assert!(!queued.contains("middle line retained"));
+
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        text: text.into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        ctx_id: None,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(32, "middle line retained"));
 }
 
 /// An assistant response must visibly transition from the hollow streaming
@@ -12022,7 +12055,8 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
 
     let block = render_diff_tool_block(&cli_test_theme(), &display, &diff, true);
     let text: String = block
-        .priority_line_body
+        .priority_line_body_content()
+        .expect("priority body")
         .spans()
         .iter()
         .map(|span| span.text.as_str())
@@ -12035,7 +12069,8 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
     assert!(!text.contains("\n-     old();"));
     assert!(!text.contains("\n+     new();"));
     let removed_line = block
-        .priority_line_body
+        .priority_line_body_content()
+        .expect("priority body")
         .spans()
         .iter()
         .find(|span| span.text == "-    old();")
@@ -12043,7 +12078,8 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
     assert_eq!(removed_line.style.fg, Some(tau_cli_term::Color::DarkRed));
 
     let added_line = block
-        .priority_line_body
+        .priority_line_body_content()
+        .expect("priority body")
         .spans()
         .iter()
         .find(|span| span.text == "+    new();")
@@ -12051,7 +12087,8 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
     assert_eq!(added_line.style.fg, Some(tau_cli_term::Color::DarkGreen));
 
     let changed_removed = block
-        .priority_line_body
+        .priority_line_body_content()
+        .expect("priority body")
         .spans()
         .iter()
         .find(|span| span.text == "1")
@@ -12060,7 +12097,8 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
     assert!(changed_removed.style.bold);
 
     let changed_added = block
-        .priority_line_body
+        .priority_line_body_content()
+        .expect("priority body")
         .spans()
         .iter()
         .find(|span| span.text == "2")
@@ -12129,7 +12167,8 @@ fn render_multi_diff_tool_block_preserves_file_boundaries() {
     assert_eq!(suffixes, vec!["+1", "-1", "ok"]);
     let block = render_multi_diff_tool_block(&cli_test_theme(), &display, &files, true);
     let text: String = block
-        .priority_line_body
+        .priority_line_body_content()
+        .expect("priority body")
         .spans()
         .iter()
         .map(|span| span.text.as_str())
@@ -12214,7 +12253,8 @@ fn render_tool_block_abbreviates_inline_args_and_error_but_preserves_payload() {
     let block = render_tool_block(&cli_test_theme(), &rendered);
     let header = priority_header_text(&block, 200);
     let body: String = block
-        .priority_line_body
+        .priority_line_body_content()
+        .expect("priority body")
         .spans()
         .iter()
         .map(|span| span.text.as_str())
