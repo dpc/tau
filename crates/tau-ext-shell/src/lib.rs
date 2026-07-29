@@ -1161,15 +1161,11 @@ fn rewrite_invoke_for_cwd(
     } else {
         base.join(path)
     };
-    if let Some(canonical) = canonicalize_existing_dir_for_cwd_field(&absolute, field) {
-        set_cbor_text_field(
-            &mut invoke.arguments,
-            field,
-            canonical.display().to_string(),
-        );
-    } else {
-        set_cbor_text_field(&mut invoke.arguments, field, absolute.display().to_string());
-    }
+    let display = canonicalize_existing_dir_for_cwd_field(&absolute, field).map_or_else(
+        || absolute.display().to_string(),
+        |path| path.display().to_string(),
+    );
+    set_cbor_text_field(&mut invoke.arguments, field, display);
     invoke
 }
 
@@ -1203,6 +1199,7 @@ fn set_cbor_text_field(arguments: &mut CborValue, field: &str, value: String) {
     let CborValue::Map(entries) = arguments else {
         return;
     };
+    // ast-grep-ignore: if-let-some-else
     if let Some((_, existing)) = entries
         .iter_mut()
         .find(|(key, _)| matches!(key, CborValue::Text(key) if key == field))

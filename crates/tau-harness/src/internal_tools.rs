@@ -140,6 +140,7 @@ impl<'a> InternalToolHost<'a> {
 
     /// Register a harness-process internal tool.
     pub fn register_internal_tool(&mut self, spec: ToolSpec, group: Option<tau_proto::ToolGroup>) {
+        // ast-grep-ignore: if-let-some-else
         if let Some(group) = group {
             let _ = self.harness.registry.register_internal_with_group(
                 crate::harness::harness_connection_id(),

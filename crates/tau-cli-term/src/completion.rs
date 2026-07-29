@@ -643,10 +643,11 @@ fn home_dir() -> Option<PathBuf> {
 fn home_expanded_path(prefix: &str, home_dir: Option<&Path>) -> Option<PathBuf> {
     if prefix == "~" {
         Some(home_dir?.to_path_buf())
-    } else if let Some(rest) = prefix.strip_prefix("~/") {
-        Some(home_dir?.join(rest))
     } else {
-        Some(PathBuf::from(prefix))
+        prefix.strip_prefix("~/").map_or_else(
+            || Some(PathBuf::from(prefix)),
+            |rest| home_dir.map(|home| home.join(rest)),
+        )
     }
 }
 

@@ -381,31 +381,35 @@ fn projected_payload_transformations_match_json_and_toon() {
         let decoded: serde_json::Value =
             serde_toon::from_str(std::str::from_utf8(&encoded).expect("UTF-8")).expect("TOON");
         let toon_call = &decoded["items"][0];
-        let toon_output = if let Some(output) = toon_call["output_base64"].as_str() {
-            base64::engine::general_purpose::STANDARD
-                .decode(output)
-                .expect("Base64")
-        } else {
-            toon_call["output"]
-                .as_str()
-                .expect("direct output")
-                .as_bytes()
-                .to_vec()
-        };
+        let toon_output = toon_call["output_base64"].as_str().map_or_else(
+            || {
+                toon_call["output"]
+                    .as_str()
+                    .expect("direct output")
+                    .as_bytes()
+                    .to_vec()
+            },
+            |output| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(output)
+                    .expect("Base64")
+            },
+        );
         assert_eq!(
             toon_output,
             json["output"].as_str().expect("JSON output").as_bytes()
         );
-        let toon_arguments = if let Some(arguments) = toon_call["arguments_json_base64"].as_str() {
-            serde_json::from_slice::<serde_json::Value>(
-                &base64::engine::general_purpose::STANDARD
-                    .decode(arguments)
-                    .expect("Base64"),
-            )
-            .expect("JSON arguments")
-        } else {
-            toon_call["arguments"].clone()
-        };
+        let toon_arguments = toon_call["arguments_json_base64"].as_str().map_or_else(
+            || toon_call["arguments"].clone(),
+            |arguments| {
+                serde_json::from_slice::<serde_json::Value>(
+                    &base64::engine::general_purpose::STANDARD
+                        .decode(arguments)
+                        .expect("Base64"),
+                )
+                .expect("JSON arguments")
+            },
+        );
         assert_eq!(toon_arguments, json["arguments"]);
     }
 }

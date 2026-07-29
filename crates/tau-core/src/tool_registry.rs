@@ -725,6 +725,7 @@ fn repair_object_schema(
             changed = true;
             continue;
         }
+        // ast-grep-ignore: if-let-some-else
         if let Some(repaired_value) = repair_json_schema(field_schema, value, &field_path, trace) {
             repaired_entries.push((key.clone(), repaired_value));
             changed = true;
@@ -747,6 +748,7 @@ fn repair_array_items(
     let mut repaired_values = Vec::with_capacity(values.len());
     for (idx, value) in values.iter().enumerate() {
         let item_path = format!("{path}[{idx}]");
+        // ast-grep-ignore: if-let-some-else
         if let Some(repaired_value) = repair_json_schema(item_schema, value, &item_path, trace) {
             repaired_values.push(repaired_value);
             changed = true;
@@ -1519,6 +1521,7 @@ impl ToolRegistry {
             return report;
         }
 
+        // ast-grep-ignore: if-let-some-else
         if let Some(existing_provider) = providers
             .iter_mut()
             .find(|provider| &provider.connection_id == connection_id)

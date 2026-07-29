@@ -381,6 +381,7 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
     let handle = cx.handle();
     let searcher = Arc::clone(&cx.state.searcher);
     let parallel_client = Arc::clone(&cx.state.parallel_client);
+    // ast-grep-ignore: if-let-some-else
     if let Some(permit) = cx.state.sem.try_acquire() {
         std::thread::spawn(move || {
             let _permit = permit;

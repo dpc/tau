@@ -1438,6 +1438,7 @@ pub fn json_to_cbor(v: &serde_json::Value) -> CborValue {
                 CborValue::Integer(i.into())
             } else if let Some(u) = n.as_u64() {
                 CborValue::Integer(u.into())
+            // ast-grep-ignore: if-let-some-else
             } else if let Some(f) = n.as_f64() {
                 CborValue::Float(f)
             } else {

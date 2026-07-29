@@ -2193,6 +2193,7 @@ impl WorkerState {
         hasher.update(sender_id.as_bytes());
         hasher.update(b"\0");
         hasher.update(conversation_id.as_bytes());
+        // ast-grep-ignore: if-let-some-else
         if let Some(stanza_id) = message.id.as_ref() {
             hasher.update(b"\0stanza\0");
             hasher.update(stanza_id.0.as_bytes());

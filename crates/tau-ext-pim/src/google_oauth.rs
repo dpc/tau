@@ -793,11 +793,9 @@ pub(crate) fn google_oauth_error_message(text: &str) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(sanitize_error_text)
                 .filter(|value| !value.is_empty());
-            if let Some(description) = description {
-                format!("{safe_error}: {description}")
-            } else {
-                safe_error
-            }
+            description
+                .map(|description| format!("{safe_error}: {description}"))
+                .unwrap_or(safe_error)
         }
     };
     Some(message)

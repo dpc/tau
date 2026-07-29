@@ -1274,6 +1274,7 @@ impl HarnessSettings {
             }
         }
 
+        // ast-grep-ignore: if-let-some-else
         if let Some(group) = self
             .role_groups
             .iter_mut()

@@ -251,12 +251,12 @@ impl SlackPostMode {
         if contains_native_control(&text) {
             return Err(PostCompositionError::NativeControlMarkup);
         }
-        let text = if let Some(source_mention) = source_mention {
-            let user_id = source_mention.user_id();
-            format!("<@{user_id}> {text}")
-        } else {
-            text
-        };
+        let text = source_mention
+            .map(|source_mention| {
+                let user_id = source_mention.user_id();
+                format!("<@{user_id}> {text}")
+            })
+            .unwrap_or(text);
         if text.chars().count() > SLACK_POST_SCALAR_LIMIT {
             return Err(PostCompositionError::TooLong);
         }

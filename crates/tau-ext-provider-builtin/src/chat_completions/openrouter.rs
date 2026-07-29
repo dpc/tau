@@ -185,13 +185,12 @@ fn fetch_openrouter_models_from(
         }
         err => {
             let error = match err {
-                Ok(resp) => {
-                    if let Some(error) = network.proxy_response_error(url, resp.status().as_u16()) {
-                        OpenRouterDiscoveryError::Outbound(error)
-                    } else {
-                        OpenRouterDiscoveryError::Status(resp.status().as_u16())
-                    }
-                }
+                Ok(resp) => network
+                    .proxy_response_error(url, resp.status().as_u16())
+                    .map_or_else(
+                        || OpenRouterDiscoveryError::Status(resp.status().as_u16()),
+                        OpenRouterDiscoveryError::Outbound,
+                    ),
                 Err(error) => error,
             };
             cached_or_error(cache_path, error)

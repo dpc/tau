@@ -753,13 +753,14 @@ impl AgentStore {
         };
         let in_memory_display_name = self.agents.get(agent_id).and_then(AgentTree::display_name);
         let checkpoint_path = self.agent_dir(agent_id.as_str()).join("meta.json");
-        let display_projection_bytes = if let Some(display_name) = &in_memory_display_name {
-            display_name.len() as u64
-        } else {
-            fs::metadata(&checkpoint_path)
-                .ok()
-                .map_or(0, |metadata| metadata.len())
-        };
+        let display_projection_bytes = in_memory_display_name.as_ref().map_or_else(
+            || {
+                fs::metadata(&checkpoint_path)
+                    .ok()
+                    .map_or(0, |metadata| metadata.len())
+            },
+            |display_name| display_name.len() as u64,
+        );
         if record_length.saturating_add(display_projection_bytes) > remaining_bytes {
             return Err(AgentCreationFactsBudgetExceeded);
         }
@@ -1024,6 +1025,7 @@ impl AgentStore {
         // Sidecar metadata is derived from the event stream. Do not let a
         // sidecar write failure make the caller retry this already-persisted
         // durable sequence and create a duplicate record.
+        // ast-grep-ignore: if-let-some-else
         if let Some(position) = committed_position {
             let summary = {
                 let summary = self.summaries.entry(sid.clone()).or_default();
@@ -1132,6 +1134,7 @@ impl AgentStore {
         let folded_node_id = tree
             .apply_persisted_record(&record)
             .expect("canonical raw fact matches its journal owner and sequence");
+        // ast-grep-ignore: if-let-some-else
         if let Some(position) = committed_position {
             let summary = {
                 let summary = self.summaries.entry(aid.clone()).or_default();

@@ -41,15 +41,15 @@ impl RendererHandle {
 
     /// Clones the current target's output model.
     pub(crate) fn output_snapshot(&self) -> tau_cli_term::OutputSnapshot {
-        if let Some(output) = &self.detached {
-            output.lock().expect(MUTEX_POISONED).clone()
-        } else {
-            self.terminal.output_snapshot()
-        }
+        self.detached.as_ref().map_or_else(
+            || self.terminal.output_snapshot(),
+            |output| output.lock().expect(MUTEX_POISONED).clone(),
+        )
     }
 
     /// Replaces the current target's complete output model.
     pub(crate) fn replace_output_snapshot(&self, snapshot: tau_cli_term::OutputSnapshot) {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             *output.lock().expect(MUTEX_POISONED) = snapshot;
         } else {
@@ -63,6 +63,7 @@ impl RendererHandle {
         debug_id: impl Into<String>,
         block: impl Into<tau_cli_term::StyledBlock>,
     ) -> tau_cli_term::BlockId {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             output
                 .lock()
@@ -79,6 +80,7 @@ impl RendererHandle {
         id: tau_cli_term::BlockId,
         block: impl Into<tau_cli_term::StyledBlock>,
     ) {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).set_block(id, block);
         } else {
@@ -88,6 +90,7 @@ impl RendererHandle {
 
     /// Removes one block from the current target.
     pub(crate) fn remove_block(&self, id: tau_cli_term::BlockId) {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).remove_block(id);
         } else {
@@ -97,6 +100,7 @@ impl RendererHandle {
 
     /// Appends a block to the current target's committed history.
     pub(crate) fn push_history(&self, id: tau_cli_term::BlockId) {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).push_history(id);
         } else {
@@ -106,6 +110,7 @@ impl RendererHandle {
 
     /// Appends a block above the current target's active region.
     pub(crate) fn push_above_active(&self, id: tau_cli_term::BlockId) {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).push_above_active(id);
         } else {
@@ -118,6 +123,7 @@ impl RendererHandle {
     where
         I: IntoIterator<Item = tau_cli_term::BlockId>,
     {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             output
                 .lock()
@@ -130,6 +136,7 @@ impl RendererHandle {
 
     /// Appends a block above the current target's sticky region.
     pub(crate) fn push_above_sticky(&self, id: tau_cli_term::BlockId) {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).push_above_sticky(id);
         } else {
@@ -139,6 +146,7 @@ impl RendererHandle {
 
     /// Removes a block from the current target's sticky-region ordering.
     pub(crate) fn remove_above_sticky(&self, id: tau_cli_term::BlockId) {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).remove_above_sticky(id);
         } else {
@@ -148,6 +156,7 @@ impl RendererHandle {
 
     /// Appends a block below the current target's active region.
     pub(crate) fn push_below(&self, id: tau_cli_term::BlockId) {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).push_below(id);
         } else {
@@ -161,6 +170,7 @@ impl RendererHandle {
         debug_id: impl Into<String>,
         block: impl Into<tau_cli_term::StyledBlock>,
     ) -> tau_cli_term::BlockId {
+        // ast-grep-ignore: if-let-some-else
         if let Some(output) = &self.detached {
             output
                 .lock()

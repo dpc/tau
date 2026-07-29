@@ -1067,6 +1067,7 @@ fn pool_reopens_aged_out_connections_on_checkout() {
         tau_proto::PromptOriginator::User,
         false,
     );
+    // ast-grep-ignore: if-let-some-else
     if let Some(conn) = pool.conns.get_mut(&key) {
         conn.opened_at = std::time::Instant::now() - MAX_CONNECTION_AGE - Duration::from_secs(1);
     } else {

@@ -168,14 +168,15 @@ impl SwarmRuntime {
             .config
             .as_ref()
             .map_or(4_096, |config| config.limits.change_history_entries);
-        let projection = if let Some(config) = &self.config {
-            SessionProjection::new(capacity).with_byte_limits(
-                config.limits.change_history_bytes,
-                config.limits.publication_bytes,
-            )
-        } else {
-            SessionProjection::new(capacity)
-        };
+        let projection = self.config.as_ref().map_or_else(
+            || SessionProjection::new(capacity),
+            |config| {
+                SessionProjection::new(capacity).with_byte_limits(
+                    config.limits.change_history_bytes,
+                    config.limits.publication_bytes,
+                )
+            },
+        );
         self.projection = Arc::new(tokio::sync::Mutex::new(projection));
         self.changed = Arc::new(tokio::sync::Notify::new());
     }
@@ -249,14 +250,15 @@ impl SwarmRuntime {
             .config
             .as_ref()
             .map_or(4_096, |config| config.limits.change_history_entries);
-        let projection = if let Some(config) = &self.config {
-            SessionProjection::new(capacity).with_byte_limits(
-                config.limits.change_history_bytes,
-                config.limits.publication_bytes,
-            )
-        } else {
-            SessionProjection::new(capacity)
-        };
+        let projection = self.config.as_ref().map_or_else(
+            || SessionProjection::new(capacity),
+            |config| {
+                SessionProjection::new(capacity).with_byte_limits(
+                    config.limits.change_history_bytes,
+                    config.limits.publication_bytes,
+                )
+            },
+        );
         self.projection = Arc::new(tokio::sync::Mutex::new(projection));
         self.changed = Arc::new(tokio::sync::Notify::new());
         if let Some(handle) = &self.handle {

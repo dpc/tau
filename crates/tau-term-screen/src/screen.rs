@@ -732,6 +732,7 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
     let fill = Cell::new(' ', fill_style);
 
     let mut content_lines = Vec::new();
+    // ast-grep-ignore: if-let-some-else
     if let Some(priority_line) = &block.priority_line {
         let priority_layout = priority_line.layout_with_fill(content_width, fill.clone());
         content_lines.push(priority_layout.row);

@@ -1781,6 +1781,7 @@ where
             manual_cooldown_bypass: false,
             cooldown_probe: None,
         };
+        // ast-grep-ignore: if-let-some-else
         if let Some(cooldown) = self
             .shared_cooldowns
             .get(&job.prompt.model.provider)
@@ -1994,6 +1995,7 @@ where
                     request_id,
                     agent_prompt_id,
                 }) => {
+                    // ast-grep-ignore: if-let-some-else
                     let status = if let Some(mut owned_job) = job.take() {
                         if let Some(scheduler) = &self.retry_scheduler {
                             scheduler
@@ -2138,6 +2140,7 @@ where
                                     QUOTA_FETCH_MIN_INTERVAL,
                                 );
                             }
+                        // ast-grep-ignore: if-let-some-else
                         } else if let Some(event) = self.quota.clear_profile(&provider) {
                             self.clear_prewarm_profile(&provider);
                             handle.send(quota_report_message(event))?;
@@ -4104,6 +4107,7 @@ fn finish_chatgpt_refresh_attempt(
     match outcome {
         LockedRefreshOutcome::Credentials(credentials) => {
             refresh_rejections.clear(provider_name);
+            // ast-grep-ignore: if-let-some-else
             if let Some(unlock_error) = unlock_error {
                 Err(RefreshCredentialsError::CredentialsWithUnlockFailure {
                     credentials: Box::new(credentials),
@@ -4114,6 +4118,7 @@ fn finish_chatgpt_refresh_attempt(
             }
         }
         LockedRefreshOutcome::Suppressed { credentials, error } => {
+            // ast-grep-ignore: if-let-some-else
             if let Some(unlock_error) = unlock_error {
                 Err(RefreshCredentialsError::OAuthWithUnlockFailure {
                     credentials: Box::new(credentials),
@@ -4129,6 +4134,7 @@ fn finish_chatgpt_refresh_attempt(
         }
         LockedRefreshOutcome::Rejected { credentials, error } => {
             refresh_rejections.record_if_permanent(provider_name, &credentials, mode, &error);
+            // ast-grep-ignore: if-let-some-else
             if let Some(unlock_error) = unlock_error {
                 Err(RefreshCredentialsError::OAuthWithUnlockFailure {
                     credentials: Box::new(credentials),

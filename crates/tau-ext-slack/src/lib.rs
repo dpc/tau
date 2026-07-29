@@ -601,6 +601,7 @@ impl ExtConfig {
                 proactive_aliases.insert(raw.alias.clone());
             }
             if policy.receive.is_some() {
+                // ast-grep-ignore: if-let-some-else
                 if let Some(thread_ts) = &policy.thread_ts {
                     thread_receives.insert(
                         (policy.conversation_id.clone(), thread_ts.clone()),
@@ -3020,6 +3021,7 @@ impl Extension {
             }
             match resolve_agent(&state, rest.trim()) {
                 Ok(agent_id) => {
+                    // ast-grep-ignore: if-let-some-else
                     if let Some(route_key) = current_route_key(&state, cfg, message) {
                         state
                             .selected_agent_by_route

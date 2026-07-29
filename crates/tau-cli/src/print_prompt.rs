@@ -101,13 +101,15 @@ fn get_rendered_prompt(
             HarnessOutputMessage::RenderedPromptResult(result)
                 if result.request_id == request_id =>
             {
-                let prompt = if let Some(error) = result.error {
-                    Err(CliError::Participant(error))
-                } else {
-                    result.prompt.ok_or_else(|| {
-                        CliError::Participant("daemon returned no rendered prompt".to_owned())
-                    })
-                };
+                let (error, prompt) = (result.error, result.prompt);
+                let prompt = error.map_or_else(
+                    || {
+                        prompt.ok_or_else(|| {
+                            CliError::Participant("daemon returned no rendered prompt".to_owned())
+                        })
+                    },
+                    |error| Err(CliError::Participant(error)),
+                );
                 RenderResponse::Matched(prompt)
             }
             _ => RenderResponse::Ignore,
@@ -130,15 +132,17 @@ fn get_rendered_system_prompt(daemon: &mut DaemonHandle, role: &str) -> Result<S
             HarnessOutputMessage::RenderedSystemPromptResult(result)
                 if result.request_id == request_id =>
             {
-                let prompt = if let Some(error) = result.error {
-                    Err(CliError::Participant(error))
-                } else {
-                    result.prompt.ok_or_else(|| {
-                        CliError::Participant(
-                            "daemon returned no rendered system prompt".to_owned(),
-                        )
-                    })
-                };
+                let (error, prompt) = (result.error, result.prompt);
+                let prompt = error.map_or_else(
+                    || {
+                        prompt.ok_or_else(|| {
+                            CliError::Participant(
+                                "daemon returned no rendered system prompt".to_owned(),
+                            )
+                        })
+                    },
+                    |error| Err(CliError::Participant(error)),
+                );
                 RenderResponse::Matched(prompt)
             }
             _ => RenderResponse::Ignore,

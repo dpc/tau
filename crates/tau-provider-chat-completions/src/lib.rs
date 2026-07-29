@@ -480,6 +480,7 @@ impl StreamState {
             return Err(LlmError::RepetitionDetected(repetition));
         }
         self.text.push_str(delta);
+        // ast-grep-ignore: if-let-some-else
         if let Some(OutputItemAccumulator::Message(text)) = self.output_items.last_mut() {
             text.push_str(delta);
         } else {
@@ -505,6 +506,7 @@ impl StreamState {
             return Err(LlmError::RepetitionDetected(repetition));
         }
         self.thinking.push_str(delta);
+        // ast-grep-ignore: if-let-some-else
         if let Some(OutputItemAccumulator::Reasoning(reasoning)) = self.output_items.last_mut() {
             reasoning.push_str(delta);
         } else {
@@ -1835,17 +1837,12 @@ fn json_to_cbor(value: &serde_json::Value) -> tau_proto::CborValue {
     match value {
         serde_json::Value::Null => tau_proto::CborValue::Null,
         serde_json::Value::Bool(v) => tau_proto::CborValue::Bool(*v),
-        serde_json::Value::Number(v) => {
-            if let Some(n) = v.as_i64() {
-                tau_proto::CborValue::Integer(n.into())
-            } else if let Some(n) = v.as_u64() {
-                tau_proto::CborValue::Integer(n.into())
-            } else if let Some(n) = v.as_f64() {
-                tau_proto::CborValue::Float(n)
-            } else {
-                tau_proto::CborValue::Null
-            }
-        }
+        serde_json::Value::Number(v) => v
+            .as_i64()
+            .map(|n| tau_proto::CborValue::Integer(n.into()))
+            .or_else(|| v.as_u64().map(|n| tau_proto::CborValue::Integer(n.into())))
+            .or_else(|| v.as_f64().map(tau_proto::CborValue::Float))
+            .unwrap_or(tau_proto::CborValue::Null),
         serde_json::Value::String(v) => tau_proto::CborValue::Text(v.clone()),
         serde_json::Value::Array(items) => {
             tau_proto::CborValue::Array(items.iter().map(json_to_cbor).collect())

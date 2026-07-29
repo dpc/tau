@@ -1113,6 +1113,7 @@ impl NotificationLoop {
         if !prompt.originator.is_user() {
             return;
         }
+        // ast-grep-ignore: if-let-some-else
         if let Some(agent_id) = self.agent_prompt_agents.get(&prompt.agent_prompt_id) {
             self.idle.retain(|pending| &pending.agent_id != agent_id);
         } else {

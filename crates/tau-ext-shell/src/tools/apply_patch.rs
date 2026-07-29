@@ -69,6 +69,7 @@ pub(crate) fn lock_directories_in_dir(
                 path, move_path, ..
             } => {
                 let abs = resolve_path(cwd, path);
+                // ast-grep-ignore: if-let-some-else
                 if let Some(move_path) = move_path {
                     dirs.push(crate::dir_lock::canonical_path_parent(&abs)?);
                     let dest_abs = resolve_path(cwd, move_path);
@@ -263,6 +264,7 @@ impl<'world> HunkApplier<'world> {
         let new_content = derive_new_contents_from_chunks(&abs, &old_content, chunks)
             .map_err(|message| self.failure(message))?;
 
+        // ast-grep-ignore: if-let-some-else
         if let Some(move_path) = move_path {
             self.apply_move_update(&abs, move_path, old_content, new_content)
         } else {

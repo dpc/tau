@@ -508,6 +508,7 @@ fn append_suffix(previous: &mut String, current: &str) -> Option<String> {
     if current == previous {
         return None;
     }
+    // ast-grep-ignore: if-let-some-else
     if let Some(suffix) = current.strip_prefix(previous.as_str()) {
         previous.push_str(suffix);
         if suffix.is_empty() {
@@ -684,15 +685,15 @@ impl StreamState {
         text: &str,
     ) -> Result<(), LlmError> {
         let current = self.message_text_at(output_index).unwrap_or_default();
+        // ast-grep-ignore: if-let-some-else
         if let Some(delta) = text.strip_prefix(current) {
             self.check_message_delta(output_index, delta)
-        } else if let Some(repetition) = self
-            .repetition_guard
-            .replace_tail(StreamRepetitionKey::AssistantText { output_index }, text)
-        {
-            Err(LlmError::RepetitionDetected(repetition))
         } else {
-            Ok(())
+            self.repetition_guard
+                .replace_tail(StreamRepetitionKey::AssistantText { output_index }, text)
+                .map_or(Ok(()), |repetition| {
+                    Err(LlmError::RepetitionDetected(repetition))
+                })
         }
     }
 
@@ -730,15 +731,18 @@ impl StreamState {
         text: &str,
     ) -> Result<(), LlmError> {
         let current = self.tool_arguments_at(output_index).unwrap_or_default();
+        // ast-grep-ignore: if-let-some-else
         if let Some(delta) = text.strip_prefix(current) {
             self.check_function_arguments_delta(output_index, delta)
-        } else if let Some(repetition) = self.repetition_guard.replace_tail(
-            StreamRepetitionKey::FunctionCallArguments { output_index },
-            text,
-        ) {
-            Err(LlmError::RepetitionDetected(repetition))
         } else {
-            Ok(())
+            self.repetition_guard
+                .replace_tail(
+                    StreamRepetitionKey::FunctionCallArguments { output_index },
+                    text,
+                )
+                .map_or(Ok(()), |repetition| {
+                    Err(LlmError::RepetitionDetected(repetition))
+                })
         }
     }
 
@@ -762,15 +766,15 @@ impl StreamState {
         text: &str,
     ) -> Result<(), LlmError> {
         let current = self.tool_arguments_at(output_index).unwrap_or_default();
+        // ast-grep-ignore: if-let-some-else
         if let Some(delta) = text.strip_prefix(current) {
             self.check_custom_tool_input_delta(output_index, delta)
-        } else if let Some(repetition) = self
-            .repetition_guard
-            .replace_tail(StreamRepetitionKey::CustomToolInput { output_index }, text)
-        {
-            Err(LlmError::RepetitionDetected(repetition))
         } else {
-            Ok(())
+            self.repetition_guard
+                .replace_tail(StreamRepetitionKey::CustomToolInput { output_index }, text)
+                .map_or(Ok(()), |repetition| {
+                    Err(LlmError::RepetitionDetected(repetition))
+                })
         }
     }
 
@@ -1205,17 +1209,12 @@ pub fn json_to_cbor(v: &serde_json::Value) -> CborValue {
     match v {
         serde_json::Value::Null => CborValue::Null,
         serde_json::Value::Bool(b) => CborValue::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                CborValue::Integer(i.into())
-            } else if let Some(u) = n.as_u64() {
-                CborValue::Integer(u.into())
-            } else if let Some(f) = n.as_f64() {
-                CborValue::Float(f)
-            } else {
-                CborValue::Null
-            }
-        }
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map(|value| CborValue::Integer(value.into()))
+            .or_else(|| n.as_u64().map(|value| CborValue::Integer(value.into())))
+            .or_else(|| n.as_f64().map(CborValue::Float))
+            .unwrap_or(CborValue::Null),
         serde_json::Value::String(s) => CborValue::Text(s.clone()),
         serde_json::Value::Array(arr) => CborValue::Array(arr.iter().map(json_to_cbor).collect()),
         serde_json::Value::Object(map) => CborValue::Map(

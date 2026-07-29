@@ -1322,14 +1322,13 @@ impl ScriptRuntime {
             }
         };
         let had_callback = job.on_complete.is_some();
-        let outcome = if let Some(callback) = job.on_complete {
+        let outcome = job.on_complete.map_or(Ok(Dynamic::UNIT), |callback| {
             callback.call::<Dynamic>(&self.engine, &self.ast, (result_dynamic, job_dynamic))
-        } else {
-            Ok(Dynamic::UNIT)
-        };
+        });
         match (outcome, job.tool_call) {
             (Ok(value), Some(call)) if value.clone().try_cast::<ShellJob>().is_some() => {
                 let chained = value.cast::<ShellJob>();
+                // ast-grep-ignore: if-let-some-else
                 if let Some(pending) = self.host_state.borrow_mut().shell_jobs.get_mut(&chained.id)
                 {
                     if pending.tool_claimed {
@@ -1592,16 +1591,18 @@ fn json_to_dynamic(value: &serde_json::Value) -> Result<Dynamic, String> {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Ok(Dynamic::from_int(i as rhai::INT))
+            // ast-grep-ignore: if-let-some-else
             } else if let Some(u) = n.as_u64() {
                 if let Ok(i) = rhai::INT::try_from(u) {
                     Ok(Dynamic::from_int(i))
                 } else {
                     Ok(Dynamic::from(u.to_string()))
                 }
-            } else if let Some(f) = n.as_f64() {
-                Ok(Dynamic::from_float(f as rhai::FLOAT))
             } else {
-                Err("unsupported JSON number".to_owned())
+                n.as_f64().map_or_else(
+                    || Err("unsupported JSON number".to_owned()),
+                    |f| Ok(Dynamic::from_float(f as rhai::FLOAT)),
+                )
             }
         }
         serde_json::Value::String(v) => Ok(Dynamic::from(v.clone())),

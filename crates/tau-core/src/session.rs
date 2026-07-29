@@ -1023,6 +1023,7 @@ impl AgentTree {
         let mut path = Vec::new();
         let mut current = head;
         while let Some(id) = current {
+            // ast-grep-ignore: if-let-some-else
             if let Some(node) = self.nodes.get(id.get() as usize) {
                 path.push(id);
                 current = node.parent_id;
