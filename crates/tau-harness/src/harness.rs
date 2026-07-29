@@ -1443,9 +1443,9 @@ fn replace_discovery_source(
         });
     }
     candidates.retain(|_, slots| !slots.is_empty());
-    incoming.into_iter().for_each(|(name, skill)| {
+    for (name, skill) in incoming {
         candidates.entry(name).or_default().push(skill);
-    });
+    }
     winners.clear();
     for (name, slots) in candidates.iter() {
         if let Some(winner) = selected_skill_candidate(slots).cloned() {
