@@ -231,8 +231,6 @@ pub fn root_runtime_dir() -> PathBuf {
             }
             #[cfg(not(unix))]
             {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: silent-unwrap-or-else
                 let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned());
                 PathBuf::from(format!("/tmp/tau-{user}"))
             }

@@ -30,8 +30,6 @@ pub fn init_logging_for(log_target: &'static str) {
 /// Installs the stderr subscriber used by first-party extension binaries.
 fn install_subscriber(default_filter: &str) {
     let filter =
-        // Preserve behavior at this site.
-        // ast-grep-ignore: silent-unwrap-or-else
         EnvFilter::try_from_env(ENV_VAR).unwrap_or_else(|_| EnvFilter::new(default_filter));
 
     let subscriber = tracing_subscriber::fmt()

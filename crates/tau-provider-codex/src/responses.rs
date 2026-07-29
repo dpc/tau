@@ -468,8 +468,6 @@ fn send_compact_request_inner(
         .name("responses-compact-http".to_owned())
         .spawn(move || {
             let _permit = permit;
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-unwrap-or-else
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 compact_http_request(&config, &thread_id, &body_str, &network, &network_cancel)
             }))

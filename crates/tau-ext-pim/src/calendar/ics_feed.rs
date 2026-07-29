@@ -879,8 +879,6 @@ fn component_is_all_day(component: &ICalendarComponent) -> bool {
 }
 
 fn format_offset_time(time: OffsetDateTime) -> String {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-unwrap-or-else
     time.format(&Rfc3339).unwrap_or_else(|_| time.to_string())
 }
 

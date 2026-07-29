@@ -93,13 +93,9 @@ impl VcrFixture {
             state_dir,
             harness_state_dir,
             work_dir,
-            // Preserve behavior at this site.
-            // ast-grep-ignore: silent-unwrap-or-else
             session_id: std::env::var("TAU_E2E_SESSION_ID")
                 .unwrap_or_else(|_| DEFAULT_SESSION_ID.to_owned()),
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-unwrap-or-else
         let tau_bin = std::env::var("TAU_E2E_TAU_BIN").unwrap_or_else(|_| "tau".to_owned());
         fixture.write_harness_config(&model, &canonicalize_command_if_path(&tau_bin))?;
         Ok(Some(fixture))
@@ -242,8 +238,6 @@ fn canonicalize_command_if_path(command: &str) -> String {
     if let Ok(canonical) = path.canonicalize() {
         return canonical.display().to_string();
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-unwrap-or-else
     workspace_root()
         .join(path)
         .canonicalize()

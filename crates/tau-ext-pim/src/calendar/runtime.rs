@@ -2511,8 +2511,6 @@ fn event_time_for_output(value: &str, timezone: &time_tz::Tz) -> String {
     else {
         return value.to_owned();
     };
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-unwrap-or-else
     time.to_timezone(timezone)
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| value.to_owned())

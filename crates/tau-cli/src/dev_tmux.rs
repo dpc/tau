@@ -494,8 +494,6 @@ fn reject_unsafe_root_shape(path: &Path) -> Result<(), CliError> {
 }
 
 fn reject_unsafe_root_shape_with_home(path: &Path, home: Option<PathBuf>) -> Result<(), CliError> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-unwrap-or-else
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if canonical.parent().is_none() {
         return Err(CliError::Participant(
@@ -571,8 +569,6 @@ fn absolute_path(path: PathBuf) -> Result<PathBuf, CliError> {
 
 fn path_matches_home_root(canonical_path: &Path, home: PathBuf) -> Result<bool, CliError> {
     let absolute_home = absolute_path(home)?;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-unwrap-or-else
     let canonical_home = absolute_home
         .canonicalize()
         .unwrap_or_else(|_| absolute_home.to_path_buf());
