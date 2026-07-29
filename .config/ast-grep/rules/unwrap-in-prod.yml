@@ -1,0 +1,31 @@
+id: unwrap-in-prod
+language: rust
+severity: error
+rule:
+  all:
+    - pattern: $EXPR.unwrap()
+    - not:
+        inside:
+          stopBy: end
+          kind: mod_item
+          follows:
+            kind: attribute_item
+            regex: "cfg\\(.*\\btest\\b"
+ignores:
+  - "**/benches/**"
+  - "**/examples/**"
+  - "**/tests/**"
+  - "**/tests.rs"
+  - "**/*-tests.rs"
+  - "**/*_test.rs"
+  - "**/*_tests.rs"
+  - "**/test_*.rs"
+  - "**/test_utils.rs"
+  - "vendor/**"
+  - ".claude/worktrees/**"
+  - "target/**"
+  - "tracehealth-ios/**"
+message: |
+  Avoid .unwrap() in production code — prefer .expect("reason"), ?, or
+  combinators (.unwrap_or, .map_or, .ok_or_else) for better diagnostics
+  and graceful error handling.
