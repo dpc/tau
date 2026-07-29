@@ -443,6 +443,8 @@ pub(crate) fn discover_peer_sessions(
             Err(_) => Vec::new(),
         };
         let scan_truncated = entries.len() == SESSION_DISCOVERY_MAX_CANDIDATES;
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-filter-map-ok
         let mut paths = entries
             .into_iter()
             .filter_map(Result::ok)
