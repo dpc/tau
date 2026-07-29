@@ -26857,7 +26857,8 @@ impl Harness {
             return;
         }
         agent.pending_prompts.push_back(PendingPrompt::internal(
-            "Reminder: when working on a task use `status` tool to acknowledge it.".to_owned(),
+            "Reminder: acknowledge meaningful user-level work with `status`; batch it with other independent tool calls when possible."
+                .to_owned(),
         ));
     }
 

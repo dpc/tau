@@ -27101,7 +27101,8 @@ fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
     }
     assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
     assert!(h.agents[&cid].pending_prompts.iter().all(|prompt| {
-        prompt.text == "Reminder: when working on a task use `status` tool to acknowledge it."
+        prompt.text
+            == "Reminder: acknowledge meaningful user-level work with `status`; batch it with other independent tool calls when possible."
     }));
     h.agents
         .get_mut(&cid)
@@ -27246,7 +27247,11 @@ fn coalesced_addressed_work_receives_one_status_reminder() {
         h.agents[&cid]
             .pending_prompts
             .iter()
-            .filter(|prompt| prompt.text.starts_with("Reminder: when working"))
+            .filter(|prompt| {
+                prompt
+                    .text
+                    .starts_with("Reminder: acknowledge meaningful user-level work")
+            })
             .count(),
         1,
         "same activation must retain exactly one reminder"

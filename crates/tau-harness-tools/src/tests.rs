@@ -1,5 +1,17 @@
 use super::*;
 
+/// The model-visible status contract discourages granular reports and avoids a
+/// standalone tool round when independent work can share the call.
+#[test]
+fn status_guidance_prefers_meaningful_batched_reports() {
+    assert_eq!(
+        status::tool_spec().description.as_deref(),
+        Some(
+            "Report meaningful user-level work status to watchers. Avoid routine progress or title-only updates; call alongside other independent tools when possible."
+        )
+    );
+}
+
 /// The handler-bound parser retains the human diagnostic while redacting the
 /// rejected status arguments from durable error details.
 #[test]

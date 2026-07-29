@@ -78,6 +78,9 @@ suppresses reminders across later routine tool-round snapshots. Isolated
 watch-notification turns never request acknowledgement from the watcher. Done
 and Blocked mutate reported status only, never close a turn or install a wait,
 and a later activation does not silently change them.
+Tool guidance asks agents to report meaningful user-level work rather than
+routine progress or title-only changes, and to batch status with independent tool
+calls when possible.
 Rejected `status` calls emit and persist their human-readable diagnostic with
 no `ToolError.details`; rejected state and title fields must not resemble an
 accepted or current status. This event-payload semantic was explicitly approved

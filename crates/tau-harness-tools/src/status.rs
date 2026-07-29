@@ -11,7 +11,10 @@ pub(crate) fn tool_spec() -> ToolSpec {
     ToolSpec {
         name: ToolName::new("status"),
         model_visible_name: None,
-        description: Some("Report this agent's current task status to its watchers.".to_owned()),
+        description: Some(
+            "Report meaningful user-level work status to watchers. Avoid routine progress or title-only updates; call alongside other independent tools when possible."
+                .to_owned(),
+        ),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
