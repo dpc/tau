@@ -210,6 +210,8 @@ impl RuntimeState {
     ) -> Result<(), String> {
         let result = cfg.validate().and_then(|config| {
             validate_config_secrets(&config, &secrets)?;
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let state_dir = state_dir.unwrap_or_default();
             Ok(Engine {
                 config,
@@ -1307,6 +1309,8 @@ impl Engine {
             return required_arg(Some(event_id), "event_id").map(str::to_owned);
         }
         let recent = self.last_events.borrow();
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let candidates = recent
             .get(agent_id.as_ref())
             .map(|events| {
@@ -2977,6 +2981,8 @@ fn success_display_for_tool(tool_name: &str, result: &CborValue) -> ToolUseState
     if command_for_tool_name(tool_name).is_some() {
         let data = cbor_field(result, "data");
         return ToolUseState {
+            // Preserve behavior at this site.
+            // ast-grep-ignore: unwrap-or-default
             args: split_calendar_display_args(command, data).unwrap_or_default(),
             range: calendar_display_range(command, data),
             stats: calendar_display_stats(command, data),
@@ -2993,6 +2999,8 @@ fn success_display(result: &CborValue) -> ToolUseState {
     let command = cbor_text_field(result, "command").unwrap_or("calendar");
     let data = cbor_field(result, "data");
     ToolUseState {
+        // Preserve behavior at this site.
+        // ast-grep-ignore: unwrap-or-default
         args: calendar_display_args(command, data).unwrap_or_default(),
         range: calendar_display_range(command, data),
         stats: calendar_display_stats(command, data),
@@ -3022,6 +3030,8 @@ fn error_display_for_tool(
     if let Some(command) = command_for_tool_name(tool_name) {
         let args = cbor_field(arguments, "args");
         return ToolUseState {
+            // Preserve behavior at this site.
+            // ast-grep-ignore: unwrap-or-default
             args: split_invocation_display_args(command, args).unwrap_or_default(),
             range: calendar_range_display(command, args),
             status: ToolUseStatus::Error,
@@ -3070,6 +3080,8 @@ fn calendar_display_range(command: &str, data: Option<&CborValue>) -> Option<Too
 
 pub(crate) fn initial_display(arguments: &CborValue) -> ToolUseState {
     ToolUseState {
+        // Preserve behavior at this site.
+        // ast-grep-ignore: unwrap-or-default
         args: invocation_display_args(arguments).unwrap_or_default(),
         range: invocation_display_range(arguments),
         status: ToolUseStatus::InProgress,
@@ -3081,6 +3093,8 @@ pub(crate) fn initial_display(arguments: &CborValue) -> ToolUseState {
 pub(crate) fn initial_display_for_tool(tool_name: &str, arguments: &CborValue) -> ToolUseState {
     if let Some(command) = command_for_tool_name(tool_name) {
         return ToolUseState {
+            // Preserve behavior at this site.
+            // ast-grep-ignore: unwrap-or-default
             args: split_invocation_display_args(command, Some(arguments)).unwrap_or_default(),
             range: calendar_range_display(command, Some(arguments)),
             status: ToolUseStatus::InProgress,

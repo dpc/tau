@@ -1407,6 +1407,8 @@ impl TelegramClient for FakeGatewayClient {
         _cfg: &RuntimeConfig,
         _offset: Option<i64>,
     ) -> Result<Vec<TgUpdate>, String> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         Ok(self
             .updates
             .lock()

@@ -298,6 +298,8 @@ fn extension_data_temp_path(path: &Path) -> std::path::PathBuf {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())

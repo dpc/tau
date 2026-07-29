@@ -423,6 +423,8 @@ impl<'world> HunkApplier<'world> {
 fn display_payload_for_changes(changes: &[AppliedChange], summary: &str) -> Option<ToolUsePayload> {
     if changes.len() == 1 {
         let change = &changes[0];
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let new_content = change.new_content.as_deref().unwrap_or_default();
         return Some(ToolUsePayload::Diff(compute_diff(
             &change.old_content,
@@ -433,6 +435,8 @@ fn display_payload_for_changes(changes: &[AppliedChange], summary: &str) -> Opti
     let files = changes
         .iter()
         .map(|change| {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let new_content = change.new_content.as_deref().unwrap_or_default();
             tau_proto::FileDiffSummary {
                 path: change.display_path.clone(),

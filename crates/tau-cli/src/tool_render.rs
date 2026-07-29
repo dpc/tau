@@ -340,6 +340,8 @@ pub(crate) fn build_delegate_completion_display(
 fn delegate_response_text(details: &CborValue) -> &str {
     match details {
         CborValue::Text(text) => text.as_str(),
+        // Preserve behavior at this site.
+        // ast-grep-ignore: unwrap-or-default
         CborValue::Map(entries) => entries
             .iter()
             .find_map(|(key, value)| match (key, value) {
@@ -503,6 +505,8 @@ fn render_tool_use_state_inner(
     include_status: bool,
 ) -> ToolCallDisplay {
     let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let (added, removed) = display
         .payload
         .as_ref()

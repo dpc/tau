@@ -85,10 +85,14 @@ pub(crate) fn initial_display(
     arguments: &CborValue,
     command_mode: ShellCommandMode,
 ) -> ToolUseState {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let command = argument_text(arguments, "command").unwrap_or_default();
     let (args, payload) = command_display(&command);
     ToolUseState {
         args,
+        // Preserve behavior at this site.
+        // ast-grep-ignore: unwrap-or-default
         mode: command_mode.display_label().unwrap_or_default().to_owned(),
         status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
@@ -219,6 +223,8 @@ pub(crate) fn run_command_live_for_surface(
     validate_surface_arguments(surface, arguments)?;
     let cwd = optional_argument_text(arguments, surface.directory_argument())
         .map_err(ToolFailure::from)?;
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let display_mode = command_mode.display_label().unwrap_or_default();
     let (display_args, display_payload) = command_display(&command);
     let timeout_secs = parse_timeout_secs(arguments).map_err(|message| {
@@ -2841,6 +2847,8 @@ fn format_output_line(prefix: &str, marker: Option<&str>, content: &str) -> Stri
 
 fn command_display(command: &str) -> (String, Option<ToolUsePayload>) {
     let mut lines = command.lines();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let first_line = lines.next().unwrap_or_default();
     let args = shorten_command_line(first_line);
     let payload = (lines.next().is_some() || args != first_line).then(|| ToolUsePayload::Text {

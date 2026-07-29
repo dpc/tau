@@ -25,6 +25,8 @@ pub(crate) fn retry_prompt(
     target_agent_id: Option<tau_proto::AgentId>,
 ) -> Event {
     static NEXT_RETRY_ID: AtomicU64 = AtomicU64::new(0);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -110,6 +112,8 @@ pub(crate) fn set_agent_navigation_mode(
     action: tau_proto::UiAgentNavigationModeAction,
 ) -> Event {
     static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

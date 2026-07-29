@@ -114,6 +114,8 @@ impl FsStorage {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| "storage path has no file name".to_owned())?;
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())

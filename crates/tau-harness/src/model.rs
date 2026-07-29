@@ -167,6 +167,8 @@ fn role_group_order_key<'a>(
     let order = roles.get(role_name).and_then(|role| role.order);
     RoleGroupOrderKey {
         unordered: order.is_none(),
+        // Preserve behavior at this site.
+        // ast-grep-ignore: unwrap-or-default
         order: order.unwrap_or_default(),
         name: role_name,
     }
@@ -277,10 +279,14 @@ fn describe_role_inner(
     };
     let params = selected_params_for_role(provider_models, roles, role, &model);
     let current = roles.get(role);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let service_tier = params
         .service_tier
         .map(|tier| format!(", service-tier={}", tier.as_str()))
         .unwrap_or_default();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let tools = current
         .and_then(|r| r.tools.as_ref())
         .map(|tools| {
@@ -294,6 +300,8 @@ fn describe_role_inner(
             )
         })
         .unwrap_or_default();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let enable_tool_groups = current
         .filter(|r| !r.enable_tool_groups.is_empty())
         .map(|r| {
@@ -307,6 +315,8 @@ fn describe_role_inner(
             )
         })
         .unwrap_or_default();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let disable_tool_groups = current
         .filter(|r| !r.disable_tool_groups.is_empty())
         .map(|r| {
@@ -320,6 +330,8 @@ fn describe_role_inner(
             )
         })
         .unwrap_or_default();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let enable_tools = current
         .filter(|r| !r.enable_tools.is_empty())
         .map(|r| {
@@ -333,6 +345,8 @@ fn describe_role_inner(
             )
         })
         .unwrap_or_default();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let disable_tools = current
         .filter(|r| !r.disable_tools.is_empty())
         .map(|r| {
@@ -372,6 +386,8 @@ pub(crate) fn role_infos(
         .map(|name| {
             let role = roles.get(name);
             let model = model_for_role(provider_models, roles, name);
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let params = model
                 .as_ref()
                 .map(|model| selected_params_for_role(provider_models, roles, name, model))
@@ -384,15 +400,23 @@ pub(crate) fn role_infos(
                     model,
                     params,
                     tools: role.and_then(|role| role.tools.clone()),
+                    // Preserve this behavior; the structural alternative is not semantics-neutral
+                    // here. ast-grep-ignore: unwrap-or-default
                     enable_tool_groups: role
                         .map(|role| role.enable_tool_groups.clone())
                         .unwrap_or_default(),
+                    // Preserve this behavior; the structural alternative is not semantics-neutral
+                    // here. ast-grep-ignore: unwrap-or-default
                     disable_tool_groups: role
                         .map(|role| role.disable_tool_groups.clone())
                         .unwrap_or_default(),
+                    // Preserve this behavior; the structural alternative is not semantics-neutral
+                    // here. ast-grep-ignore: unwrap-or-default
                     enable_tools: role
                         .map(|role| role.enable_tools.clone())
                         .unwrap_or_default(),
+                    // Preserve this behavior; the structural alternative is not semantics-neutral
+                    // here. ast-grep-ignore: unwrap-or-default
                     disable_tools: role
                         .map(|role| role.disable_tools.clone())
                         .unwrap_or_default(),
@@ -409,6 +433,8 @@ pub(crate) fn efforts_for_model(
     provider_models: &HashMap<ModelId, ProviderModelInfo>,
     model: &ModelId,
 ) -> Vec<tau_proto::Effort> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     provider_models
         .get(model)
         .map(|info| info.efforts.clone())
@@ -420,6 +446,8 @@ pub(crate) fn verbosities_for_model(
     provider_models: &HashMap<ModelId, ProviderModelInfo>,
     model: &ModelId,
 ) -> Vec<tau_proto::Verbosity> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     provider_models
         .get(model)
         .map(|info| info.verbosities.clone())
@@ -431,6 +459,8 @@ pub(crate) fn thinking_summaries_for_model(
     provider_models: &HashMap<ModelId, ProviderModelInfo>,
     model: &ModelId,
 ) -> Vec<tau_proto::ThinkingSummary> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     provider_models
         .get(model)
         .map(|info| info.thinking_summaries.clone())

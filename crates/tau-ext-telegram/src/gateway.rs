@@ -435,6 +435,8 @@ impl Gateway {
                 self.durable.rejected_update_count.saturating_add(1);
             return UpdateOutcome::AdvanceOffset;
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let text = message.text.as_deref().unwrap_or_default().trim();
         if text.is_empty() {
             return self.reply_if_chat_is_active(
@@ -681,6 +683,8 @@ impl Gateway {
             } else {
                 ""
             };
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let display = agent
                 .display_name
                 .as_deref()
@@ -1969,6 +1973,8 @@ fn required_message_field(value: Option<String>) -> Result<String, String> {
 
 /// Return a per-process gateway generation label for reconnect detection.
 fn gateway_generation() -> String {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

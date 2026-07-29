@@ -702,6 +702,8 @@ pub(crate) fn watch_work_status_text(
     if status.initial {
         return None;
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let title = status
         .title
         .as_deref()

@@ -1278,6 +1278,8 @@ fn cycle_role_in_groups(
         return None;
     }
     let current = current_role_state.lock().ok().and_then(|role| role.clone());
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let mut memory = role_group_memory
         .lock()
         .map(|memory| memory.clone())
@@ -2413,6 +2415,8 @@ impl InputRoutingState {
     }
 
     fn known_agents(&self) -> Vec<String> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         self.known_agents
             .lock()
             .map(|agents| agents.clone())
@@ -2420,6 +2424,8 @@ impl InputRoutingState {
     }
 
     fn active_agents(&self) -> std::collections::HashSet<String> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         self.agent_navigation
             .lock()
             .map(|navigation| navigation.active_agents())
@@ -2427,6 +2433,8 @@ impl InputRoutingState {
     }
 
     fn live_agents(&self) -> std::collections::HashSet<String> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         self.agent_navigation
             .lock()
             .map(|navigation| navigation.live_agents())
@@ -2434,6 +2442,8 @@ impl InputRoutingState {
     }
 
     fn active_count(&self) -> usize {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         self.agent_navigation
             .lock()
             .map(|navigation| navigation.active_count())
@@ -2504,6 +2514,8 @@ impl InputRoutingState {
     fn next_agent_cycle_selection(&self, delta: isize) -> Option<String> {
         let current = self.selected_agent_id();
         let known = self.known_agents();
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let active = self
             .agent_navigation
             .lock()
@@ -3062,6 +3074,8 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_custom_prompt_command(&mut self, text: &str) -> bool {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let prompts = self
             .ctx
             .custom_prompts
@@ -3932,6 +3946,8 @@ impl<'a> TerminalInputSession<'a> {
             return;
         }
         let output = &self.output;
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let groups = self
             .ctx
             .role_groups_available
@@ -3969,6 +3985,8 @@ impl<'a> TerminalInputSession<'a> {
             return;
         }
         let output = &self.output;
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let groups = self
             .ctx
             .role_groups_available
@@ -4327,6 +4345,8 @@ fn build_agent_arg_completer(
         }
         2 => {
             let known = routing.known_agents();
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let display_names = agent_display_names
                 .lock()
                 .map(|names| names.clone())

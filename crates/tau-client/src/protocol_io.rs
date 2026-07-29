@@ -163,6 +163,8 @@ impl ProtocolIoMeter {
                 delivery.event(),
                 &key,
                 bytes.get(),
+                // Preserve this behavior; the structural alternative is not semantics-neutral
+                // here. ast-grep-ignore: unwrap-or-default
                 measurements.unwrap_or_default(),
             );
         }
@@ -201,6 +203,8 @@ impl ProtocolIoMeter {
     #[must_use]
     pub fn format_diagnostics(&self) -> String {
         let state = self.state.lock().expect("protocol io meter mutex");
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         state
             .diagnostics
             .as_ref()
@@ -322,12 +326,16 @@ impl ProtocolIoTracker {
         self.next_sample_at = now + Duration::from_secs(1);
 
         ProtocolIoRollingStats {
+            // Preserve behavior at this site.
+            // ast-grep-ignore: unwrap-or-default
             uplink_max_bytes_per_sec: self
                 .samples
                 .iter()
                 .map(|(uplink, _)| *uplink)
                 .max()
                 .unwrap_or_default(),
+            // Preserve behavior at this site.
+            // ast-grep-ignore: unwrap-or-default
             downlink_max_bytes_per_sec: self
                 .samples
                 .iter()

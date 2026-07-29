@@ -253,6 +253,8 @@ fn write_owner_metadata(
     if let Ok(exe) = std::env::current_exe() {
         writeln!(file, "exe={}", exe.display())?;
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let acquired_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())

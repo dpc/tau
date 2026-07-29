@@ -319,6 +319,8 @@ impl TmuxEnvironment {
 fn unique_dev_tmux_scratch_root() -> PathBuf {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())

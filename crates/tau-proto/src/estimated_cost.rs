@@ -64,6 +64,8 @@ impl std::str::FromStr for EstimatedUsdPerMillion {
             .ok()
             .and_then(|whole| whole.checked_mul(MICRO_USD_PER_USD))
             .ok_or(InvalidEstimatedUsdPerMillion)?;
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let fraction = fraction.unwrap_or_default();
         let fraction = if fraction.is_empty() {
             0

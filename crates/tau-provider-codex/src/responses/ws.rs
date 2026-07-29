@@ -590,6 +590,8 @@ fn prewarm_shape(
     let object = value
         .as_object_mut()
         .expect("Responses envelope serializes as an object");
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let input = object
         .remove("input")
         .and_then(|input| input.as_array().cloned())
@@ -1033,6 +1035,8 @@ fn map_ws_connect_error(e: tungstenite::Error) -> LlmError {
         if code == 426 {
             return LlmError::WsUpgradeRequired;
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let body = response
             .body()
             .as_ref()

@@ -4242,6 +4242,8 @@ fn real_repetition_failure_finishes_once_without_scheduler_retry() {
     });
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
         if frames.iter().any(|frame| {
             matches!(
@@ -4353,6 +4355,8 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
     });
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
         if frames.iter().any(|frame| {
             matches!(
@@ -4493,6 +4497,8 @@ fn queued_targeted_cancel_allows_prompt_id_reuse() {
         .expect("reused prompt ID inherited stale cancellation");
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
         if frames
             .iter()

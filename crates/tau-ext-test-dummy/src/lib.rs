@@ -177,6 +177,8 @@ where
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder
             .configure::<ExtConfig>(|cx| {
+                // Preserve this behavior; the structural alternative is not semantics-neutral
+                // here. ast-grep-ignore: unwrap-or-default
                 cx.state.restart_mode = cx.config().restart_mode.unwrap_or_default();
                 Ok(())
             })

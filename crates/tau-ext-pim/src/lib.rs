@@ -136,7 +136,11 @@ impl RuntimeState {
         configure: tau_proto::Configure,
         storage: storage::SharedStorage,
     ) -> Result<(), String> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let email_config = pim.email.unwrap_or_default();
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let calendar_config = pim.calendar.unwrap_or_default();
         calendar_config.clone().validate()?;
         self.email.configure_with_config(

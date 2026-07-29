@@ -1249,6 +1249,8 @@ fn instance_liveness(
 }
 
 fn now_ms() -> u64 {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

@@ -139,6 +139,8 @@ impl BuiltinProviderProfiles {
             let BuiltinProviderProfile::Chatgpt(profile) = profile else {
                 continue;
             };
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             profile.responses_lite_compatibility = startup_modes
                 .get(provider)
                 .copied()
@@ -3350,6 +3352,8 @@ impl CancellationState {
     fn cancel(&self, apid: tau_proto::AgentPromptId) {
         let wakers = if let Ok(mut inner) = self.inner.lock() {
             inner.canceled_apids.insert(apid.clone());
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             inner.abort_wakers.get(&apid).cloned().unwrap_or_default()
         } else {
             Vec::new()

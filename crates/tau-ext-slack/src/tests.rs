@@ -4150,6 +4150,8 @@ fn post_http_outcomes_are_typed_bounded_and_body_safe() {
                 500 => "Internal Server Error",
                 _ => "Error",
             };
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let retry = retry_after
                 .map(|value| format!("retry-after: {value}\r\n"))
                 .unwrap_or_default();

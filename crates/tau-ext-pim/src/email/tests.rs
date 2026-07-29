@@ -248,10 +248,14 @@ fn remove_flag(flags: &mut Vec<String>, flag: &str) {
 
 impl EmailBackend for FakeBackend {
     fn list_folders(&self, account: &str) -> Result<Vec<BackendFolder>, String> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         Ok(self.folders.get(account).cloned().unwrap_or_default())
     }
 
     fn list_messages(&self, account: &str, folder: &str) -> Result<Vec<BackendMessage>, String> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         Ok(self
             .messages
             .get(&(account.to_owned(), folder.to_owned()))

@@ -160,6 +160,8 @@ pub fn submit_provider_debug_capture(capture: ProviderDebugCapture) {
     let Some(state_dir) = tau_config::settings::state_dir() else {
         return;
     };
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

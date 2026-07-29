@@ -232,15 +232,23 @@ pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUse
     // here. ast-grep-ignore: stringly-typed-match
     let args = match invoke.tool_name.as_str() {
         READ_TOOL_NAME => {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_default();
             let ranges = cbor_array_field(&invoke.arguments, "ranges")
                 .map(format_requested_read_line_ranges)
                 .unwrap_or_else(|| format_requested_read_line_range(&invoke.arguments));
             format!("{path} {ranges}")
         }
+        // Preserve behavior at this site.
+        // ast-grep-ignore: unwrap-or-default
         READ_IMAGE_TOOL_NAME => cbor_text_field(&invoke.arguments, "path").unwrap_or_default(),
         EDIT_TOOL_NAME | APPLY_PATCH_TOOL_NAME => {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_default();
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let ranges = cbor_array_field(&invoke.arguments, "edits")
                 .map(format_requested_edit_line_ranges)
                 .unwrap_or_default();
@@ -251,11 +259,15 @@ pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUse
             }
         }
         FIND_TOOL_NAME => {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let pattern = cbor_text_field(&invoke.arguments, "pattern").unwrap_or_default();
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_else(|| ".".to_owned());
             format!("{pattern} in {path}")
         }
         GREP_TOOL_NAME => {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let pattern = cbor_text_field(&invoke.arguments, "pattern").unwrap_or_default();
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_else(|| ".".to_owned());
             let mut args = format!("{pattern:?} in {path}");

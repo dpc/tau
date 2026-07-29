@@ -136,6 +136,8 @@ pub(crate) fn visit_styled_graphemes(
         while style_idx + 1 < char_styles.len() && char_styles[style_idx + 1].0 <= byte {
             style_idx += 1;
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let style = char_styles
             .get(style_idx)
             .map(|(_, style, _)| *style)

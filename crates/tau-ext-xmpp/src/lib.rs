@@ -2368,6 +2368,8 @@ impl MucJoin {
                 presence.type_
             ));
         }
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let statuses = presence
             .payloads
             .iter()

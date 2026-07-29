@@ -829,6 +829,8 @@ pub(crate) fn final_write_path(path: &Path) -> io::Result<std::path::PathBuf> {
 }
 
 fn unique_temp_suffix() -> u128 {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())

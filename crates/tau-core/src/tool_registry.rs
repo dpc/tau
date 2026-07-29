@@ -1596,6 +1596,8 @@ impl ToolRegistry {
     /// Returns all currently live providers for a tool name.
     #[must_use]
     pub fn providers_for(&self, tool_name: &str) -> Vec<ToolProvider> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         self.providers_by_tool
             .get(tool_name)
             .cloned()

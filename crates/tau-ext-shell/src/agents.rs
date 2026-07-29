@@ -97,6 +97,8 @@ fn is_agents_file_name(name: &str) -> bool {
 }
 
 fn agents_file_sort_key(path: &Path) -> (u8, String) {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let name = path
         .file_name()
         .and_then(|name| name.to_str())

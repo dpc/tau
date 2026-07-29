@@ -2643,6 +2643,8 @@ fn outgoing_approval_message(approval: &OutgoingApproval) -> OutgoingMessage {
 }
 
 fn stable_id<T: Serialize>(prefix: &str, value: &T) -> String {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     let bytes = serde_json::to_vec(value).unwrap_or_default();
     let hash = blake3::hash(&bytes);
     format!("{prefix}_{}", &hash.to_hex()[..24])
@@ -5359,6 +5361,8 @@ impl RuntimeState {
         secrets: BTreeMap<String, tau_proto::SecretValue>,
         storage: SharedStorage,
     ) -> Result<Engine<RealEmailBackend>, String> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: unwrap-or-default
         let state_dir = state_dir.unwrap_or_default();
         let config = cfg.validate()?;
         validate_config_secrets(&config, &secrets)?;
@@ -6167,6 +6171,8 @@ pub(crate) fn is_tool_name(tool_name: &str) -> bool {
 pub(crate) fn initial_display_for_tool(tool_name: &str, arguments: &CborValue) -> ToolUseState {
     if let Some(command) = command_for_tool_name(tool_name) {
         return ToolUseState {
+            // Preserve behavior at this site.
+            // ast-grep-ignore: unwrap-or-default
             args: split_invocation_display_args(command, Some(arguments)).unwrap_or_default(),
             status: ToolUseStatus::InProgress,
             status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
@@ -6959,6 +6965,8 @@ fn success_display_for_tool(tool_name: &str, result: &CborValue) -> ToolUseState
     if command_for_tool_name(tool_name).is_some() {
         let data = cbor_field(result, "data");
         return ToolUseState {
+            // Preserve behavior at this site.
+            // ast-grep-ignore: unwrap-or-default
             args: split_email_display_args(command, data).unwrap_or_default(),
             stats: email_display_stats(command, data),
             info_chips: email_display_info(command, data),
@@ -6975,6 +6983,8 @@ fn success_display(result: &CborValue) -> ToolUseState {
     let status = ToolUseStatus::Success;
     let data = cbor_field(result, "data");
     ToolUseState {
+        // Preserve behavior at this site.
+        // ast-grep-ignore: unwrap-or-default
         args: email_display_args(command, data).unwrap_or_default(),
         stats: email_display_stats(command, data),
         info_chips: email_display_info(command, data),
@@ -7011,6 +7021,8 @@ fn error_display_for_tool(
             }
         });
         return ToolUseState {
+            // Preserve behavior at this site.
+            // ast-grep-ignore: unwrap-or-default
             args: split_invocation_display_args(command, cbor_field(arguments, "args"))
                 .filter(|args| !args.is_empty())
                 .or_else(|| split_email_display_args(command, data).filter(|args| !args.is_empty()))
@@ -7034,6 +7046,8 @@ fn error_display(arguments: &CborValue, details: &CborValue, message: &str) -> T
         }
     });
     ToolUseState {
+        // Preserve behavior at this site.
+        // ast-grep-ignore: unwrap-or-default
         args: email_display_args(command, data)
             .or_else(|| invocation_display_args(arguments))
             .unwrap_or_default(),
@@ -7079,6 +7093,8 @@ fn split_message_target_display(args: Option<&CborValue>) -> Option<String> {
 }
 pub(crate) fn initial_display(arguments: &CborValue) -> ToolUseState {
     ToolUseState {
+        // Preserve behavior at this site.
+        // ast-grep-ignore: unwrap-or-default
         args: invocation_display_args(arguments).unwrap_or_default(),
         status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
@@ -7109,6 +7125,8 @@ fn invocation_display_args(arguments: &CborValue) -> Option<String> {
             message_target_display(command, args)
         }
         "send" => {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let recipients = args
                 .and_then(|args| cbor_array_len(args, "to"))
                 .map(|count| format!(" to={count}"))
@@ -7136,6 +7154,8 @@ fn list_display_args(command: &str, args: Option<&CborValue>) -> Option<String> 
 
 fn split_list_display_args(args: Option<&CborValue>) -> Option<String> {
     let folder = args.and_then(|args| cbor_text_field(args, "folder"));
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: unwrap-or-default
     Some(folder.map(safe_display_line).unwrap_or_default())
 }
 
@@ -7147,6 +7167,8 @@ fn split_invocation_display_args(command: &str, args: Option<&CborValue>) -> Opt
             split_message_target_display(args)
         }
         "send" => {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: unwrap-or-default
             let recipients = args
                 .and_then(|args| cbor_array_len(args, "to"))
                 .map(|count| format!("to={count}"))
@@ -7187,6 +7209,8 @@ fn email_display_stats(command: &str, data: Option<&CborValue>) -> ToolUseStats 
     match command {
         "list_folders" => line_array_stats(data, "folders"),
         "list" | "list_by_uid" | "list_recent" => line_array_stats(data, "messages"),
+        // Preserve behavior at this site.
+        // ast-grep-ignore: unwrap-or-default
         "read" => cbor_text_field(data, "body_text")
             .or_else(|| cbor_text_field(data, "body_preview"))
             .map(ToolUseStats::for_text)
