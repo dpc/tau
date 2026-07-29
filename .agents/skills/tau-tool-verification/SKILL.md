@@ -166,6 +166,9 @@ output rules; the focused skills contain the detailed tool-specific plans.
   `agent_watch`, including routing, validation, queued and active-wait
   interruption, notification formatting, and deduplication. Always pair it
   with `tau-tool-verification-background-cancel` when verifying `agent_start`.
+* `tau-tool-verification-status` — `status` transitions, validation, Working
+  acknowledgement persistence, and activation steering around routine tool
+  rounds and watched-agent events.
 
 If a request spans groups, load all applicable focused skills. Apply the shared
 guidelines in this index to every group, and explicitly report unavailable or
