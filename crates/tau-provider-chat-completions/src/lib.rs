@@ -1795,7 +1795,7 @@ fn append_content_delta(state: &mut StreamState, content: &str) -> Result<bool, 
 
 fn partial_tag_suffix_len(text: &str, tag: &str) -> usize {
     let mut keep = 0;
-    for (len, _) in tag.as_bytes().iter().enumerate().skip(1) {
+    for len in 1..tag.len() {
         if text.ends_with(&tag[..len]) {
             keep = len;
         }
