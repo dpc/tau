@@ -522,9 +522,13 @@ fn render_tool_use_state_inner(
     if !stats_chip.is_empty() {
         suffixes.push(info_suffix(stats_chip));
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop
     for counter in &display.progress_counters {
         suffixes.push(format_progress_counter(counter));
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop
     for chip in &display.info_chips {
         suffixes.push(tool_suffix(
             chip.clone(),

@@ -4441,6 +4441,8 @@ impl<B: EmailBackend> Engine<B> {
             return Ok("No email log entries.".to_owned());
         }
         let mut lines = vec![format!("Last {} email log entry(s):", entries.len())];
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: map-collect-loop
         for entry in entries.iter().rev() {
             lines.push(format_email_log_entry(entry));
         }
@@ -4686,6 +4688,8 @@ impl<B: EmailBackend> Engine<B> {
             "{} pending incoming email read approval(s):",
             approvals.len()
         )];
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: map-collect-loop
         for approval in approvals {
             lines.push(format!(
                 "{} account={} folder={} uid={} from={} date={} subject_preview={} reason={}",

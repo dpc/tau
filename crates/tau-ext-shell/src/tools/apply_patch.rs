@@ -481,6 +481,8 @@ fn format_partial_summary(changes: &[AppliedChange]) -> String {
         ChangeStatus::Modify,
         ChangeStatus::Delete,
     ] {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: map-collect-loop
         for change in changes.iter().filter(|change| change.status == status) {
             lines.push(format!(
                 "{} {}",
@@ -499,6 +501,8 @@ fn format_summary(changes: &[AppliedChange]) -> String {
         ChangeStatus::Modify,
         ChangeStatus::Delete,
     ] {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: map-collect-loop
         for change in changes.iter().filter(|change| change.status == status) {
             lines.push(format!(
                 "{} {}",

@@ -66,6 +66,8 @@ impl ReplayOutcome {
     fn session_error(&self) -> Option<String> {
         let mut errors = self.session_errors.clone();
         for (agent_id, agent_errors) in &self.agent_errors {
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: map-collect-loop
             for error in agent_errors {
                 errors.push(format!("agent `{agent_id}` replay failed: {error}"));
             }

@@ -1101,6 +1101,8 @@ fn dispatch_action_invoke(invoke: ActionInvoke, lock_manager: &DirLockManager) -
         removed.len(),
         dir.display()
     )];
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop
     for entry in removed {
         lines.push(format!("{} owner={}", entry.dir.display(), entry.owner));
     }

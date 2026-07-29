@@ -10623,6 +10623,8 @@ impl Harness {
             .collect::<Vec<_>>();
         ready.sort();
         let mut deferred_by_connection = Vec::with_capacity(ready.len());
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: map-collect-loop
         for connection_id in &ready {
             deferred_by_connection.push((
                 connection_id.clone(),

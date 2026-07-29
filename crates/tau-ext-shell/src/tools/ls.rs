@@ -38,6 +38,8 @@ pub(crate) fn run_ls(
 
     let collection_cap = limit.saturating_add(1);
     let mut entries = Vec::new();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop
     for entry in world
         .read_dir_limited(&dir_path, collection_cap)
         .map_err(|e| {

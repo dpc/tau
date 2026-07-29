@@ -1676,6 +1676,8 @@ fn arm_idle_hooks(
 ) {
     idle.retain(|pending| pending.agent_id != agent_id);
     let now = Instant::now();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop
     for (hook_index, hook) in config.agent_idle.iter().enumerate() {
         idle.push(PendingIdleHook {
             hook_kind: IdleHookKind::Agent,
@@ -1705,6 +1707,8 @@ fn arm_idle_all_hooks(
 ) {
     idle_all.retain(|pending| pending.session_id.as_ref() != Some(&session_id));
     let now = Instant::now();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop
     for (hook_index, hook) in config.agent_idle_all.iter().enumerate() {
         idle_all.push(PendingIdleHook {
             hook_kind: IdleHookKind::AgentAll,

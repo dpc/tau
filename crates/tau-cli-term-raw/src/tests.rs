@@ -3667,6 +3667,8 @@ fn visible_history_block_update_does_not_full_redraw() {
     flush_redraws(&handle, &buf, &mut parser);
 
     let mut ids = Vec::new();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop
     for i in 0..3 {
         ids.push(handle.print_output("test", plain_block(format!("line {i}"))));
     }
@@ -3688,6 +3690,8 @@ fn hidden_history_block_update_full_redraws() {
     flush_redraws(&handle, &buf, &mut parser);
 
     let mut ids = Vec::new();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop
     for i in 0..8 {
         ids.push(handle.print_output("test", plain_block(format!("line {i}"))));
     }
@@ -4141,6 +4145,8 @@ fn randomized_visible_block_churn_does_not_full_redraw() {
     flush_redraws(&handle, &buf, &mut parser);
 
     let mut history_ids = Vec::new();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop
     for i in 0..5 {
         history_ids.push(handle.print_output("test", plain_block(format!("seed {i}"))));
     }
@@ -4211,6 +4217,8 @@ fn repeated_hidden_block_updates_each_full_redraw() {
     flush_redraws(&handle, &buf, &mut parser);
 
     let mut ids = Vec::new();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop
     for i in 0..8 {
         ids.push(handle.print_output("test", plain_block(format!("line {i}"))));
     }

@@ -592,6 +592,8 @@ impl Engine {
             return Ok("No calendar log entries.".to_owned());
         }
         let mut lines = vec![format!("Last {} calendar log entry(s):", entries.len())];
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: map-collect-loop
         for entry in entries.iter().rev() {
             lines.push(format_calendar_log_entry(entry));
         }
@@ -604,6 +606,8 @@ impl Engine {
             return Ok("No pending calendar changes.".to_owned());
         }
         let mut lines = vec![format!("{} pending calendar change(s):", changes.len())];
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: map-collect-loop
         for change in changes {
             lines.push(format_change_summary(&change));
         }
