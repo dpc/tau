@@ -3971,75 +3971,76 @@ impl Harness {
         let mut extension_connects = Vec::new();
         let mut next_iid = instance_id_factory();
         for ext_config in config.extensions.values() {
-            if !(skipped_extensions.contains(&ext_config.name)) {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: match-option-verbose
-                let kind = match ext_config.role.as_deref() {
-                    Some("provider") => ClientKind::Provider,
-                    _ => ClientKind::Tool,
-                };
-
-                let log_path = if self.session_persistence.is_ephemeral() {
-                    None
-                } else {
-                    Some(
-                        extension_stderr_log_path(sessions_dir, eager_session_id, &ext_config.name)
-                            .map_err(|error| HarnessError::Participant(error.to_string()))?,
-                    )
-                };
-                let spawned = match spawn_supervised(ext_config, kind.clone(), log_path, &self.tx) {
-                    Ok(spawned) => spawned,
-                    Err(error) if !ext_config.require => {
-                        tracing::warn!(
-                            target: "tau_harness::startup",
-                            error = %error,
-                            "optional extension did not initialize during spawn"
-                        );
-                        self.emit_optional_extension_skipped(&error.to_string());
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                let conn_id = spawned.connection_id.clone();
-                tracing::info!(
-                    target: "tau_harness::startup",
-                    extension = %ext_config.name,
-                    pid = spawned.child_pid,
-                    elapsed_ms = startup_started_at.elapsed().as_millis(),
-                    "extension spawned",
-                );
-
-                extension_connects.push(ExtensionConnectCommand {
-                    entry: ExtensionEntry {
-                        name: tau_proto::ExtensionName::parse(ext_config.name.clone())
-                            .expect("validated extension config name must remain canonical"),
-                        instance_id: next_iid(),
-                        connection_id: conn_id,
-                        kind: kind.clone(),
-                        peer_capabilities: Default::default(),
-                        tool_prefix: ext_config.tool_prefix.clone(),
-                        require: ext_config.require,
-                        respawn_allowed: true,
-                        pid: Some(spawned.child_pid),
-                        in_process_thread: None,
-                        supervised_config: Some(ext_config.clone()),
-                        // Preserve behavior at this site.
-                        // ast-grep-ignore: unwrap-or-default
-                        secrets: extension_secrets
-                            .get(&ext_config.name)
-                            .cloned()
-                            .unwrap_or_default(),
-                        restart_attempt: 0,
-                        state: ExtensionState::Spawning,
-                        protocol_io: spawned.protocol_io,
-                    },
-                    origin: ConnectionOrigin::Supervised,
-                    writer_tx: spawned.writer_tx,
-                    initialized_ack: spawned.initialized_ack,
-                    supervised_writer: Some(spawned.writer),
-                    replaces: None,
-                });
+            if skipped_extensions.contains(&ext_config.name) {
+                continue;
             }
+            // Preserve this behavior; the structural alternative is not semantics-neutral
+            // here. ast-grep-ignore: match-option-verbose
+            let kind = match ext_config.role.as_deref() {
+                Some("provider") => ClientKind::Provider,
+                _ => ClientKind::Tool,
+            };
+
+            let log_path = if self.session_persistence.is_ephemeral() {
+                None
+            } else {
+                Some(
+                    extension_stderr_log_path(sessions_dir, eager_session_id, &ext_config.name)
+                        .map_err(|error| HarnessError::Participant(error.to_string()))?,
+                )
+            };
+            let spawned = match spawn_supervised(ext_config, kind.clone(), log_path, &self.tx) {
+                Ok(spawned) => spawned,
+                Err(error) if !ext_config.require => {
+                    tracing::warn!(
+                        target: "tau_harness::startup",
+                        error = %error,
+                        "optional extension did not initialize during spawn"
+                    );
+                    self.emit_optional_extension_skipped(&error.to_string());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let conn_id = spawned.connection_id.clone();
+            tracing::info!(
+                target: "tau_harness::startup",
+                extension = %ext_config.name,
+                pid = spawned.child_pid,
+                elapsed_ms = startup_started_at.elapsed().as_millis(),
+                "extension spawned",
+            );
+
+            extension_connects.push(ExtensionConnectCommand {
+                entry: ExtensionEntry {
+                    name: tau_proto::ExtensionName::parse(ext_config.name.clone())
+                        .expect("validated extension config name must remain canonical"),
+                    instance_id: next_iid(),
+                    connection_id: conn_id,
+                    kind: kind.clone(),
+                    peer_capabilities: Default::default(),
+                    tool_prefix: ext_config.tool_prefix.clone(),
+                    require: ext_config.require,
+                    respawn_allowed: true,
+                    pid: Some(spawned.child_pid),
+                    in_process_thread: None,
+                    supervised_config: Some(ext_config.clone()),
+                    // Preserve behavior at this site.
+                    // ast-grep-ignore: unwrap-or-default
+                    secrets: extension_secrets
+                        .get(&ext_config.name)
+                        .cloned()
+                        .unwrap_or_default(),
+                    restart_attempt: 0,
+                    state: ExtensionState::Spawning,
+                    protocol_io: spawned.protocol_io,
+                },
+                origin: ConnectionOrigin::Supervised,
+                writer_tx: spawned.writer_tx,
+                initialized_ack: spawned.initialized_ack,
+                supervised_writer: Some(spawned.writer),
+                replaces: None,
+            });
         }
         for command in extension_connects {
             self.queue_extension_connect(command)?;
@@ -8555,17 +8556,18 @@ impl Harness {
         }
 
         for (connection_id, name, require) in blockers {
-            if !(require) {
-                tracing::warn!(
-                    target: "tau_harness::startup",
-                    extension = %name,
-                    "optional extension did not initialize: timed out before becoming ready"
-                );
-                self.disable_optional_extension(
-                    &connection_id,
-                    &format!("optional extension {name} did not initialize"),
-                );
+            if require {
+                continue;
             }
+            tracing::warn!(
+                target: "tau_harness::startup",
+                extension = %name,
+                "optional extension did not initialize: timed out before becoming ready"
+            );
+            self.disable_optional_extension(
+                &connection_id,
+                &format!("optional extension {name} did not initialize"),
+            );
         }
         self.maybe_finish_extension_activation(None)?;
 
@@ -15410,18 +15412,19 @@ impl Harness {
             })
             .collect();
         for call_id in remaining_calls {
-            if !(to_cancel.iter().any(|target| target.call_id == call_id)) {
-                let Some(tool) = self.pending_tools.get(&call_id).cloned() else {
-                    continue;
-                };
-                let backgrounded = self.tool_turn.is_backgrounded(&call_id);
-                to_cancel.push(CancelTarget {
-                    call_id,
-                    tool_name: tool.name,
-                    tool_type: tool.tool_type,
-                    backgrounded,
-                });
+            if to_cancel.iter().any(|target| target.call_id == call_id) {
+                continue;
             }
+            let Some(tool) = self.pending_tools.get(&call_id).cloned() else {
+                continue;
+            };
+            let backgrounded = self.tool_turn.is_backgrounded(&call_id);
+            to_cancel.push(CancelTarget {
+                call_id,
+                tool_name: tool.name,
+                tool_type: tool.tool_type,
+                backgrounded,
+            });
         }
 
         let mut foreground_call_ids = Vec::new();
@@ -20606,42 +20609,43 @@ impl Harness {
                 })
                 .unwrap_or_default();
             for call in calls {
-                if !(self.is_pending_manual_compaction_call(&call.call_id)) {
-                    count += 1;
-                    self.tool_agents.insert(call.call_id.clone(), cid.clone());
-                    let display = (call.name.as_str() == "wait")
-                        .then(|| {
-                            normalized_wait_timeout_minutes(&call.arguments)
-                                .ok()
-                                .flatten()
-                        })
-                        .flatten()
-                        .map(|minutes| tau_proto::ToolUseState {
-                            args: format!("{minutes}m"),
-                            status: tau_proto::ToolUseStatus::Error,
-                            status_text: "interrupted".to_owned(),
-                            ..Default::default()
-                        });
-                    let error = ToolError {
-                        call_id: call.call_id.clone(),
-                        tool_name: call.name,
-                        tool_type: call.tool_type,
-                        message: restored_tool_call_error_message(&call.call_id),
-                        details: None,
-                        originator: tau_proto::PromptOriginator::User,
-
-                        display,
-                    };
-                    if let Some(call_ref) = self.persisted_tool_call_ref(&cid, &call.call_id) {
-                        self.record_wait_tool_call_ref(call.call_id.clone(), call_ref);
-                    }
-                    self.publish_terminal_tool_error_with_cause(
-                        Some(&cid),
-                        Some(crate::harness::harness_connection_id()),
-                        error,
-                        tau_proto::ToolTerminalCause::RestartRepair,
-                    );
+                if self.is_pending_manual_compaction_call(&call.call_id) {
+                    continue;
                 }
+                count += 1;
+                self.tool_agents.insert(call.call_id.clone(), cid.clone());
+                let display = (call.name.as_str() == "wait")
+                    .then(|| {
+                        normalized_wait_timeout_minutes(&call.arguments)
+                            .ok()
+                            .flatten()
+                    })
+                    .flatten()
+                    .map(|minutes| tau_proto::ToolUseState {
+                        args: format!("{minutes}m"),
+                        status: tau_proto::ToolUseStatus::Error,
+                        status_text: "interrupted".to_owned(),
+                        ..Default::default()
+                    });
+                let error = ToolError {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.name,
+                    tool_type: call.tool_type,
+                    message: restored_tool_call_error_message(&call.call_id),
+                    details: None,
+                    originator: tau_proto::PromptOriginator::User,
+
+                    display,
+                };
+                if let Some(call_ref) = self.persisted_tool_call_ref(&cid, &call.call_id) {
+                    self.record_wait_tool_call_ref(call.call_id.clone(), call_ref);
+                }
+                self.publish_terminal_tool_error_with_cause(
+                    Some(&cid),
+                    Some(crate::harness::harness_connection_id()),
+                    error,
+                    tau_proto::ToolTerminalCause::RestartRepair,
+                );
             }
         }
         count
@@ -20760,37 +20764,38 @@ impl Harness {
                 })
                 .collect::<HashMap<_, _>>();
             for call in calls {
-                if !(self.is_pending_manual_compaction_call(&call.call_id)) {
-                    count += 1;
-                    self.tool_agents.insert(call.call_id.clone(), cid.clone());
-                    if let Some(call_ref) = call_refs.get(&call.call_id).copied() {
-                        self.record_wait_tool_call_ref(call.call_id.clone(), call_ref);
-                        self.observe_tool_terminal(
-                            &cid,
-                            &call.call_id,
-                            tau_proto::ToolTerminalCause::RestartRepair,
-                        );
-                    }
-                    let error = ToolBackgroundError {
-                        call_id: call.call_id.clone(),
-                        tool_name: call.tool_name,
-                        tool_type: call.tool_type,
-                        message: restored_background_tool_call_error_message(&call.call_id),
-                        details: None,
-                        originator: call.originator,
-
-                        display: None,
-                    };
-                    self.pending_background_completion_modes.insert(
-                        call.call_id.clone(),
-                        BackgroundCompletionPromptMode::DoNotQueue,
-                    );
-                    self.publish_terminal_background_error(
+                if self.is_pending_manual_compaction_call(&call.call_id) {
+                    continue;
+                }
+                count += 1;
+                self.tool_agents.insert(call.call_id.clone(), cid.clone());
+                if let Some(call_ref) = call_refs.get(&call.call_id).copied() {
+                    self.record_wait_tool_call_ref(call.call_id.clone(), call_ref);
+                    self.observe_tool_terminal(
                         &cid,
-                        Some(crate::harness::harness_connection_id()),
-                        error,
+                        &call.call_id,
+                        tau_proto::ToolTerminalCause::RestartRepair,
                     );
                 }
+                let error = ToolBackgroundError {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.tool_name,
+                    tool_type: call.tool_type,
+                    message: restored_background_tool_call_error_message(&call.call_id),
+                    details: None,
+                    originator: call.originator,
+
+                    display: None,
+                };
+                self.pending_background_completion_modes.insert(
+                    call.call_id.clone(),
+                    BackgroundCompletionPromptMode::DoNotQueue,
+                );
+                self.publish_terminal_background_error(
+                    &cid,
+                    Some(crate::harness::harness_connection_id()),
+                    error,
+                );
             }
         }
         count

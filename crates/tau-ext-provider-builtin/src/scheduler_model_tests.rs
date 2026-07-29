@@ -170,17 +170,18 @@ impl ReferenceModel {
             } => {
                 let boundary = self.now + u64::from(delay);
                 for (prompt, entry) in &mut self.delayed {
-                    if !(entry.provider != provider) {
-                        if entry.generation.is_none() {
-                            entry.independent_due = entry
-                                .shared_boundary
-                                .map_or(entry.independent_due, |shared| {
-                                    entry.independent_due.max(shared + jitter_ticks(*prompt))
-                                });
-                        }
-                        entry.shared_boundary = Some(boundary);
-                        entry.generation = Some(u64::from(generation));
+                    if entry.provider != provider {
+                        continue;
                     }
+                    if entry.generation.is_none() {
+                        entry.independent_due = entry
+                            .shared_boundary
+                            .map_or(entry.independent_due, |shared| {
+                                entry.independent_due.max(shared + jitter_ticks(*prompt))
+                            });
+                    }
+                    entry.shared_boundary = Some(boundary);
+                    entry.generation = Some(u64::from(generation));
                 }
                 Vec::new()
             }

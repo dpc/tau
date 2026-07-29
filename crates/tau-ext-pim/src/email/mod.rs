@@ -839,48 +839,49 @@ fn validate_config_secrets(
         return Ok(());
     }
     for account in config.accounts.values() {
-        if !(!account.enable) {
-            let Some(auth) = account.auth.as_ref() else {
-                continue;
-            };
-            if matches!(auth.method, AuthMethod::Password) {
-                let secret = auth.password_secret.as_deref().ok_or_else(|| {
-                    format!(
-                        "account `{}` auth.password_secret is required for password auth",
-                        account.id
-                    )
-                })?;
+        if !account.enable {
+            continue;
+        }
+        let Some(auth) = account.auth.as_ref() else {
+            continue;
+        };
+        if matches!(auth.method, AuthMethod::Password) {
+            let secret = auth.password_secret.as_deref().ok_or_else(|| {
+                format!(
+                    "account `{}` auth.password_secret is required for password auth",
+                    account.id
+                )
+            })?;
+            if !secrets.contains_key(secret) {
+                return Err(format!(
+                    "account `{}` auth.password_secret `{secret}` was not provided in Configure.secrets; declare it under the enabled extension's secrets",
+                    account.id
+                ));
+            }
+        } else if matches!(auth.method, AuthMethod::Oauth2) {
+            let client_id_secret = auth.client_id_secret.as_deref().ok_or_else(|| {
+                format!(
+                    "account `{}` auth.client_id_secret is required for oauth2 auth",
+                    account.id
+                )
+            })?;
+            for (field, secret) in [
+                ("auth.client_id_secret", Some(client_id_secret)),
+                (
+                    "auth.client_secret_secret",
+                    auth.client_secret_secret.as_deref(),
+                ),
+                (
+                    "auth.refresh_token_secret",
+                    auth.refresh_token_secret.as_deref(),
+                ),
+            ] {
+                let Some(secret) = secret else { continue };
                 if !secrets.contains_key(secret) {
                     return Err(format!(
-                        "account `{}` auth.password_secret `{secret}` was not provided in Configure.secrets; declare it under the enabled extension's secrets",
+                        "account `{}` {field} `{secret}` was not provided in Configure.secrets; declare it under the enabled extension's secrets",
                         account.id
                     ));
-                }
-            } else if matches!(auth.method, AuthMethod::Oauth2) {
-                let client_id_secret = auth.client_id_secret.as_deref().ok_or_else(|| {
-                    format!(
-                        "account `{}` auth.client_id_secret is required for oauth2 auth",
-                        account.id
-                    )
-                })?;
-                for (field, secret) in [
-                    ("auth.client_id_secret", Some(client_id_secret)),
-                    (
-                        "auth.client_secret_secret",
-                        auth.client_secret_secret.as_deref(),
-                    ),
-                    (
-                        "auth.refresh_token_secret",
-                        auth.refresh_token_secret.as_deref(),
-                    ),
-                ] {
-                    let Some(secret) = secret else { continue };
-                    if !secrets.contains_key(secret) {
-                        return Err(format!(
-                            "account `{}` {field} `{secret}` was not provided in Configure.secrets; declare it under the enabled extension's secrets",
-                            account.id
-                        ));
-                    }
                 }
             }
         }
@@ -1890,17 +1891,17 @@ impl StateStore {
         for status in ["pending", "sending", "approved", "denied"] {
             let dir = format!("approvals/{kind}/{status}");
             for entry in self.storage.list_files(&dir)? {
-                if !(entry.is_dir || !entry.path.ends_with(".json")) {
-                    let Some(stem) =
-                        file_name(&entry.path).and_then(|name| name.strip_suffix(".json"))
-                    else {
-                        continue;
-                    };
-                    if let Ok(id) = stem.parse::<u64>()
-                        && max_id < id
-                    {
-                        max_id = id;
-                    }
+                if entry.is_dir || !entry.path.ends_with(".json") {
+                    continue;
+                }
+                let Some(stem) = file_name(&entry.path).and_then(|name| name.strip_suffix(".json"))
+                else {
+                    continue;
+                };
+                if let Ok(id) = stem.parse::<u64>()
+                    && max_id < id
+                {
+                    max_id = id;
                 }
             }
         }

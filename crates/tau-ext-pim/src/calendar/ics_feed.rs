@@ -444,24 +444,25 @@ fn parse_ics_static_events(text: &str, timezone: Tz) -> Result<Vec<IcsEvent>, St
             Entry::ICalendar(calendar) => {
                 let resolver = calendar.build_tz_resolver().with_default(timezone);
                 for (index, component) in calendar.components.iter().enumerate() {
-                    if !(component.component_type != ICalendarComponentType::VEvent) {
-                        let Some(seed) = build_range_event_seed(component, index, &resolver) else {
-                            continue;
-                        };
-                        if seed.recurrence_id.is_none()
-                            && seed.rrules.is_empty()
-                            && seed.rdates.is_empty()
-                        {
-                            push_seed_occurrence_if_overlaps(
-                                &seed,
-                                seed.start,
-                                OffsetDateTime::from_unix_timestamp(-5_364_662_400)
-                                    .unwrap_or(OffsetDateTime::UNIX_EPOCH),
-                                OffsetDateTime::from_unix_timestamp(253_402_300_799)
-                                    .unwrap_or(OffsetDateTime::UNIX_EPOCH),
-                                &mut events,
-                            );
-                        }
+                    if component.component_type != ICalendarComponentType::VEvent {
+                        continue;
+                    }
+                    let Some(seed) = build_range_event_seed(component, index, &resolver) else {
+                        continue;
+                    };
+                    if seed.recurrence_id.is_none()
+                        && seed.rrules.is_empty()
+                        && seed.rdates.is_empty()
+                    {
+                        push_seed_occurrence_if_overlaps(
+                            &seed,
+                            seed.start,
+                            OffsetDateTime::from_unix_timestamp(-5_364_662_400)
+                                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+                            OffsetDateTime::from_unix_timestamp(253_402_300_799)
+                                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+                            &mut events,
+                        );
                     }
                 }
             }
@@ -502,19 +503,20 @@ fn expand_calendar_events_in_range(
     let mut masters = Vec::new();
     let mut overrides = BTreeMap::<String, BTreeMap<i64, RangeEventSeed<'_>>>::new();
     for (index, component) in calendar.components.iter().enumerate() {
-        if !(component.component_type != ICalendarComponentType::VEvent) {
-            let Some(seed) = build_range_event_seed(component, index, &resolver) else {
-                continue;
-            };
-            // ast-grep-ignore: if-let-some-else
-            if let Some(recurrence_id) = seed.recurrence_id {
-                overrides
-                    .entry(seed.uid.clone())
-                    .or_default()
-                    .insert(recurrence_id, seed);
-            } else {
-                masters.push(seed);
-            }
+        if component.component_type != ICalendarComponentType::VEvent {
+            continue;
+        }
+        let Some(seed) = build_range_event_seed(component, index, &resolver) else {
+            continue;
+        };
+        // ast-grep-ignore: if-let-some-else
+        if let Some(recurrence_id) = seed.recurrence_id {
+            overrides
+                .entry(seed.uid.clone())
+                .or_default()
+                .insert(recurrence_id, seed);
+        } else {
+            masters.push(seed);
         }
     }
 
@@ -533,18 +535,19 @@ fn expand_calendar_events_in_range(
     }
     for override_group in overrides.values() {
         for (recurrence_id, override_seed) in override_group {
-            if !(emitted_override_ids
+            if emitted_override_ids
                 .contains(&override_event_key(&override_seed.uid, *recurrence_id))
-                || is_cancelled(override_seed.component))
+                || is_cancelled(override_seed.component)
             {
-                push_seed_occurrence_if_overlaps(
-                    override_seed,
-                    override_seed.start,
-                    range_min,
-                    range_max,
-                    &mut events,
-                );
+                continue;
             }
+            push_seed_occurrence_if_overlaps(
+                override_seed,
+                override_seed.start,
+                range_min,
+                range_max,
+                &mut events,
+            );
         }
     }
     Ok(events)
@@ -696,23 +699,24 @@ fn expand_master_in_range(
         }
     }
     for (timestamp, start) in starts {
-        if !(master.exdates.contains(&timestamp)) {
-            // ast-grep-ignore: if-let-some-else
-            if let Some(override_seed) = overrides.and_then(|overrides| overrides.get(&timestamp)) {
-                emitted_override_ids.insert(override_event_key(&override_seed.uid, timestamp));
-                if is_cancelled(override_seed.component) {
-                    continue;
-                }
-                push_seed_occurrence_if_overlaps(
-                    override_seed,
-                    override_seed.start,
-                    range_min,
-                    range_max,
-                    events,
-                );
-            } else {
-                push_seed_occurrence_if_overlaps(master, start, range_min, range_max, events);
+        if master.exdates.contains(&timestamp) {
+            continue;
+        }
+        // ast-grep-ignore: if-let-some-else
+        if let Some(override_seed) = overrides.and_then(|overrides| overrides.get(&timestamp)) {
+            emitted_override_ids.insert(override_event_key(&override_seed.uid, timestamp));
+            if is_cancelled(override_seed.component) {
+                continue;
             }
+            push_seed_occurrence_if_overlaps(
+                override_seed,
+                override_seed.start,
+                range_min,
+                range_max,
+                events,
+            );
+        } else {
+            push_seed_occurrence_if_overlaps(master, start, range_min, range_max, events);
         }
     }
     Ok(())

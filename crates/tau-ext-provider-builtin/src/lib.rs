@@ -426,18 +426,19 @@ impl QuotaCoordinator {
             record.updated_sequence > fetch_start_sequence || fetched.contains_key(key)
         });
         for (key, window) in fetched {
-            if !(candidate
+            if candidate
                 .get(&key)
-                .is_some_and(|record| record.updated_sequence > fetch_start_sequence))
+                .is_some_and(|record| record.updated_sequence > fetch_start_sequence)
             {
-                candidate.insert(
-                    key,
-                    QuotaWindowRecord {
-                        window,
-                        updated_sequence: current.sequence.saturating_add(1),
-                    },
-                );
+                continue;
             }
+            candidate.insert(
+                key,
+                QuotaWindowRecord {
+                    window,
+                    updated_sequence: current.sequence.saturating_add(1),
+                },
+            );
         }
         if candidate.len() > tau_proto::MAX_PROVIDER_QUOTA_WINDOWS {
             current.failure_attempt = current.failure_attempt.saturating_add(1);

@@ -485,40 +485,41 @@ fn push_runs(
     show_link_target: bool,
 ) {
     for run in runs {
-        if !(run.text.is_empty()) {
-            let target = run.hyperlink.as_deref();
-            let needs_visible_target = target.is_some_and(|target| {
-                show_link_target || tau_cli_term::sanitize_hyperlink_target(target).is_none()
-            });
-            let text = if let Some(target) = target.filter(|_| needs_visible_target)
-                && target != run.text
-            {
-                format!("{} ({target})", run.text)
-            } else {
-                run.text.clone()
-            };
-            let leaf = if target.is_some() {
-                SpanTree::span(styles.link, vec![SpanTree::text(text)])
-            } else {
-                SpanTree::text(text)
-            };
-            let node = match run.style {
-                MarkdownStyle::Base => leaf,
-                MarkdownStyle::Strong => SpanTree::span(styles.strong, vec![leaf]),
-                MarkdownStyle::StrongEmphasis => SpanTree::span(
-                    styles.strong,
-                    vec![SpanTree::span(styles.emphasis, vec![leaf])],
-                ),
-                MarkdownStyle::Emphasis => SpanTree::span(styles.emphasis, vec![leaf]),
-                MarkdownStyle::Strikethrough => SpanTree::span(styles.strikethrough, vec![leaf]),
-                MarkdownStyle::Heading => SpanTree::span(styles.heading, vec![leaf]),
-                MarkdownStyle::ListMarker => SpanTree::span(styles.list_marker, vec![leaf]),
-                MarkdownStyle::PromptMarker => SpanTree::span(styles.prompt_marker, vec![leaf]),
-                MarkdownStyle::Code => SpanTree::span(styles.code, vec![leaf]),
-                MarkdownStyle::Escape => SpanTree::span(styles.escape, vec![leaf]),
-            };
-            children.push(node);
+        if run.text.is_empty() {
+            continue;
         }
+        let target = run.hyperlink.as_deref();
+        let needs_visible_target = target.is_some_and(|target| {
+            show_link_target || tau_cli_term::sanitize_hyperlink_target(target).is_none()
+        });
+        let text = if let Some(target) = target.filter(|_| needs_visible_target)
+            && target != run.text
+        {
+            format!("{} ({target})", run.text)
+        } else {
+            run.text.clone()
+        };
+        let leaf = if target.is_some() {
+            SpanTree::span(styles.link, vec![SpanTree::text(text)])
+        } else {
+            SpanTree::text(text)
+        };
+        let node = match run.style {
+            MarkdownStyle::Base => leaf,
+            MarkdownStyle::Strong => SpanTree::span(styles.strong, vec![leaf]),
+            MarkdownStyle::StrongEmphasis => SpanTree::span(
+                styles.strong,
+                vec![SpanTree::span(styles.emphasis, vec![leaf])],
+            ),
+            MarkdownStyle::Emphasis => SpanTree::span(styles.emphasis, vec![leaf]),
+            MarkdownStyle::Strikethrough => SpanTree::span(styles.strikethrough, vec![leaf]),
+            MarkdownStyle::Heading => SpanTree::span(styles.heading, vec![leaf]),
+            MarkdownStyle::ListMarker => SpanTree::span(styles.list_marker, vec![leaf]),
+            MarkdownStyle::PromptMarker => SpanTree::span(styles.prompt_marker, vec![leaf]),
+            MarkdownStyle::Code => SpanTree::span(styles.code, vec![leaf]),
+            MarkdownStyle::Escape => SpanTree::span(styles.escape, vec![leaf]),
+        };
+        children.push(node);
     }
 }
 
@@ -700,10 +701,11 @@ fn pad_table_lines(lines: &[(&str, &str)]) -> Option<Vec<String>> {
     }
     let mut widths = vec![3; columns];
     for (row_index, row) in rows.iter().enumerate() {
-        if !(row_index == 1) {
-            for (index, cell) in row.cells.iter().enumerate() {
-                widths[index] = widths[index].max(cell.chars().count());
-            }
+        if row_index == 1 {
+            continue;
+        }
+        for (index, cell) in row.cells.iter().enumerate() {
+            widths[index] = widths[index].max(cell.chars().count());
         }
     }
     if widths.iter().any(|width| TABLE_MAX_CELL_WIDTH < *width) {

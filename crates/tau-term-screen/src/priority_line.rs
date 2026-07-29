@@ -406,13 +406,14 @@ fn grouped_width(
         let mut width = 0;
         let mut has_item = false;
         for (index, item) in items.iter().enumerate() {
-            if !(!retained[index] || item.alignment != alignment) {
-                if has_item && item.separated {
-                    width += 1;
-                }
-                width += item_width(index);
-                has_item = true;
+            if !retained[index] || item.alignment != alignment {
+                continue;
             }
+            if has_item && item.separated {
+                width += 1;
+            }
+            width += item_width(index);
+            has_item = true;
         }
         (width, has_item)
     };
@@ -432,16 +433,17 @@ fn group_cells(
     let mut cells = Vec::new();
     let mut needs_separator = false;
     for (index, item) in items.iter().enumerate() {
-        if !(!retained[index] || item.alignment != alignment) {
-            if needs_separator && item.separated {
-                cells.push(Cell::new(' ', separator_style));
-            }
-            cells.extend(middle_truncated_cells(
-                &item_cells[index],
-                allocations[index],
-            ));
-            needs_separator = true;
+        if !retained[index] || item.alignment != alignment {
+            continue;
         }
+        if needs_separator && item.separated {
+            cells.push(Cell::new(' ', separator_style));
+        }
+        cells.extend(middle_truncated_cells(
+            &item_cells[index],
+            allocations[index],
+        ));
+        needs_separator = true;
     }
     cells
 }

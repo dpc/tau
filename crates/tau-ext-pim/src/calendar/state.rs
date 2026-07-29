@@ -579,17 +579,17 @@ impl StateStore {
         for status in ["pending", "sending", "approved", "denied"] {
             let dir = self.change_dir(status);
             for entry in self.storage.list_files(&dir)? {
-                if !(entry.is_dir || !entry.path.ends_with(".json")) {
-                    let Some(stem) =
-                        file_name(&entry.path).and_then(|name| name.strip_suffix(".json"))
-                    else {
-                        continue;
-                    };
-                    if let Ok(id) = stem.parse::<u64>()
-                        && max_id < id
-                    {
-                        max_id = id;
-                    }
+                if entry.is_dir || !entry.path.ends_with(".json") {
+                    continue;
+                }
+                let Some(stem) = file_name(&entry.path).and_then(|name| name.strip_suffix(".json"))
+                else {
+                    continue;
+                };
+                if let Ok(id) = stem.parse::<u64>()
+                    && max_id < id
+                {
+                    max_id = id;
                 }
             }
         }

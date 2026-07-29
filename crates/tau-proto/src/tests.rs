@@ -2358,23 +2358,24 @@ fn first_party_event_wire_tags_match_event_names_and_persistence() {
     let events = representative_events();
     let mut seen = std::collections::BTreeSet::new();
     for event in events {
-        if !(matches!(event, Event::ExtensionEvent(_))) {
-            let name = event.name();
-            let wire = serde_json::to_value(&event).expect("serialize event");
-            let tag = wire
-                .get("event")
-                .and_then(serde_json::Value::as_str)
-                .expect("event tag");
-
-            assert_eq!(tag, name.to_string(), "wire tag and Event::name diverged");
-            assert_eq!(tag.parse::<EventName>(), Ok(name.clone()));
-            assert_eq!(
-                event.defaults_to_persist(),
-                expected_default_persist(&event),
-                "unexpected default persistence setting for {tag}"
-            );
-            assert!(seen.insert(tag.to_owned()), "duplicate sample for {tag}");
+        if matches!(event, Event::ExtensionEvent(_)) {
+            continue;
         }
+        let name = event.name();
+        let wire = serde_json::to_value(&event).expect("serialize event");
+        let tag = wire
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("event tag");
+
+        assert_eq!(tag, name.to_string(), "wire tag and Event::name diverged");
+        assert_eq!(tag.parse::<EventName>(), Ok(name.clone()));
+        assert_eq!(
+            event.defaults_to_persist(),
+            expected_default_persist(&event),
+            "unexpected default persistence setting for {tag}"
+        );
+        assert!(seen.insert(tag.to_owned()), "duplicate sample for {tag}");
     }
 
     assert_eq!(seen, expected_first_party_event_names());

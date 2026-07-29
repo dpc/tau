@@ -1012,14 +1012,15 @@ fn spawn_storage_responder(
         loop {
             let mut made_progress = false;
             for request in extension_data_requests_from_bytes(writer.bytes()) {
-                if !(!responded.insert(request.request_id.clone())) {
-                    input_writer
-                        .write_message(&extension_data_result_for_request(request))
-                        .expect("write storage response");
-                    input_writer.flush().expect("flush storage response");
-                    last_response = Instant::now();
-                    made_progress = true;
+                if !responded.insert(request.request_id.clone()) {
+                    continue;
                 }
+                input_writer
+                    .write_message(&extension_data_result_for_request(request))
+                    .expect("write storage response");
+                input_writer.flush().expect("flush storage response");
+                last_response = Instant::now();
+                made_progress = true;
             }
             if responded.is_empty() || made_progress {
                 assert!(

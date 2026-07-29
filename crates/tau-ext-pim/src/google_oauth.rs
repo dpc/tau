@@ -791,9 +791,10 @@ fn format_google_oauth_http_error(
 fn redact_exact_sensitive_values(text: &str, sensitive_values: &[&str]) -> String {
     let mut redacted = text.to_owned();
     for value in sensitive_values {
-        if !(value.is_empty()) {
-            redacted = redacted.replace(value, "<redacted>");
+        if value.is_empty() {
+            continue;
         }
+        redacted = redacted.replace(value, "<redacted>");
     }
     redacted
 }

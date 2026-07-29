@@ -1918,9 +1918,10 @@ fn build_input_items(
         data_url_bytes: 0,
     };
     for item in input_items {
-        if !(responses_lite && matches!(item, ContextItem::CompactionTrigger)) {
-            convert_context_item(item, config.supports_phase, &mut image_budget, &mut input);
+        if responses_lite && matches!(item, ContextItem::CompactionTrigger) {
+            continue;
         }
+        convert_context_item(item, config.supports_phase, &mut image_budget, &mut input);
     }
     input
 }
