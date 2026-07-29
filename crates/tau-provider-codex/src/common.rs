@@ -978,6 +978,28 @@ impl StreamState {
             })
     }
 
+    /// Returns whether accepted state contains output that qualifies for the
+    /// provider-owned first-semantic-output timer.
+    ///
+    /// Unlike replay-safety progress, this excludes call ids, compaction, and
+    /// unknown provider items.
+    #[must_use]
+    pub fn has_timed_semantic_output(&self) -> bool {
+        self.thinking
+            .as_ref()
+            .is_some_and(|thinking| !thinking.is_empty())
+            || self.output_items.iter().any(|item| match item {
+                OutputItemAccumulator::Empty
+                | OutputItemAccumulator::Compaction(_)
+                | OutputItemAccumulator::UnknownProviderItem(_) => false,
+                OutputItemAccumulator::Message(message) => !message.text.is_empty(),
+                OutputItemAccumulator::ToolCall(call) => {
+                    !call.name.is_empty() || !call.arguments_json.is_empty()
+                }
+                OutputItemAccumulator::Reasoning(_) => true,
+            })
+    }
+
     /// Adds raw bytes received from the provider transport before semantic
     /// parsing.
     pub(crate) fn record_transport_response_bytes(&mut self, bytes: usize) {

@@ -7871,6 +7871,7 @@ fn provider_response_stats_are_public_provider_updates() {
                         response_bytes_received: 1024,
                         elapsed_micros: 1_000_000,
                     },
+                    first_semantic_output_elapsed_micros: Some(825_000),
                 }),
                 originator: tau_proto::PromptOriginator::User,
             },
@@ -7886,7 +7887,8 @@ fn provider_response_stats_are_public_provider_updates() {
                 if update.agent_id == durable_id
                     && update.response_stats.as_ref().is_some_and(|stats|
                         stats.current.response_bytes_received == 4096
-                            && stats.previous.response_bytes_received == 1024)
+                            && stats.previous.response_bytes_received == 1024
+                            && stats.first_semantic_output_elapsed_micros == Some(825_000))
         )),
         "provider stats update must broadcast unchanged as provider.response_updated"
     );

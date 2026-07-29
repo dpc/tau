@@ -4753,6 +4753,13 @@ pub struct ProviderResponseStats {
     pub current: ProviderResponseStatsSample,
     /// Previously emitted provider-response sample for this prompt.
     pub previous: ProviderResponseStatsSample,
+    /// Elapsed time from finite-attempt backend dispatch until the first
+    /// synchronously accepted semantic output, in microseconds.
+    ///
+    /// Absence means the provider does not support this observation or has not
+    /// observed qualifying output yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_semantic_output_elapsed_micros: Option<u64>,
 }
 
 /// One provider-owned, prompt-local response throughput sample.

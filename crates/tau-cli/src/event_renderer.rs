@@ -1261,7 +1261,23 @@ fn response_stats_indicator_suffix(stats: &tau_proto::ProviderResponseStats) -> 
     let total_bytes_per_sec = total_bytes.saturating_mul(1_000_000) / current.elapsed_micros.max(1);
     let delta_rate = format!("{}/s", format_progress_bytes(delta_bytes_per_sec));
     let total_rate = format!("{}/s", format_progress_bytes(total_bytes_per_sec));
-    format!(" ({elapsed_seconds}s, {bytes}, Δ{delta_rate}, {total_rate})")
+    let first_output = stats
+        .first_semantic_output_elapsed_micros
+        .map(std::time::Duration::from_micros)
+        .map_or_else(String::new, |duration| {
+            format!(", first output {}", format_compact_duration(duration))
+        });
+    format!(" ({elapsed_seconds}s{first_output}, {bytes}, Δ{delta_rate}, {total_rate})")
+}
+
+fn format_compact_duration(duration: std::time::Duration) -> String {
+    if duration < std::time::Duration::from_secs(5) {
+        return format!("{}ms", duration.as_millis());
+    }
+    if duration < std::time::Duration::from_secs(5 * 60) {
+        return format!("{}s", duration.as_secs());
+    }
+    format!("{}m", duration.as_secs() / 60)
 }
 
 fn response_stats_indicator_for_prompt(state: &PromptState) -> String {

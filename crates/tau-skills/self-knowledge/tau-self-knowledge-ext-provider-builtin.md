@@ -172,6 +172,16 @@ boundary before semantic parsing, include non-visible streamed tool-call
 arguments, and do not count request bytes, HTTP headers, or tool execution
 outputs/results. They are not transcript or final-response content.
 
+Built-in providers optionally include provider-owned
+`first_semantic_output_elapsed_micros` in those live stats. It measures from a
+finite attempt's first backend send/enqueue to the first synchronously accepted
+non-empty assistant/reasoning/tool semantic unit; material opaque reasoning is
+observed at completion. Scheduled retries start a fresh measurement, while
+Codex's transparent pre-semantic repair retains the original dispatch boundary.
+The value is captured before batching, repeated on later samples, and remains
+live-only: it is absent from finished output, journals, replay, snapshots, and
+final turn stats.
+
 Built-in providers also run a conservative exact streaming repetition guard over assistant text, reasoning text, and tool-call argument deltas. When a high-volume tight exact loop is detected, the provider clears transient streamed output and finishes with `stop_reason: repetition_detected`, empty final output items, and bounded display-only error text; the harness treats this as a loop-guard trigger rather than retrying the provider turn.
 
 ### Watcher-visible provider work

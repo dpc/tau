@@ -1560,6 +1560,7 @@ fn provider_response_stats_update(
                 response_bytes_received: previous_bytes,
                 elapsed_micros: previous_elapsed_micros,
             },
+            first_semantic_output_elapsed_micros: None,
         }),
         originator: tau_proto::PromptOriginator::User,
     }
@@ -7559,11 +7560,15 @@ fn provider_response_stats_update_suffixes_live_indicator_until_finish() {
         "pre-output stats samples must still refresh elapsed time: {:?}",
         vt.screen_text(80)
     );
-    renderer.handle(&Event::ProviderResponseUpdated(
-        main_provider_response_stats_update("sp-progress", 12 * 1024, 4 * 1024),
-    ));
+    let mut first_output = main_provider_response_stats_update("sp-progress", 12 * 1024, 4 * 1024);
+    first_output
+        .response_stats
+        .as_mut()
+        .expect("response stats")
+        .first_semantic_output_elapsed_micros = Some(820_000);
+    renderer.handle(&Event::ProviderResponseUpdated(first_output));
     sync(&handle);
-    assert!(vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
+    assert!(vt.screen_contains(80, "… (2s, first output 820ms, 12KB, Δ8KB/s, 6KB/s)"));
     assert!(!vt.screen_contains(80, "shell_command"));
     assert!(!vt.screen_contains(80, "tool args"));
     assert!(!vt.screen_contains(80, "tools,"));
@@ -7583,34 +7588,103 @@ fn provider_response_stats_update_suffixes_live_indicator_until_finish() {
     }));
     sync(&handle);
     assert!(
-        vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"),
+        vt.screen_contains(80, "… (2s, first output 820ms, 12KB, Δ8KB/s, 6KB/s)"),
         "updates without a fresh stats sample must not clear cached stats: {:?}",
         vt.screen_text(80)
     );
 
-    renderer.handle(&Event::ProviderResponseUpdated(
-        provider_response_stats_update(
-            "sp-progress",
-            tau_proto::AgentId::parse("main").expect("agent id"),
-            12 * 1024,
-            12 * 1024,
-            3_000_000,
-            2_000_000,
-        ),
-    ));
+    let mut repeated = provider_response_stats_update(
+        "sp-progress",
+        tau_proto::AgentId::parse("main").expect("agent id"),
+        12 * 1024,
+        12 * 1024,
+        3_000_000,
+        2_000_000,
+    );
+    repeated
+        .response_stats
+        .as_mut()
+        .expect("response stats")
+        .first_semantic_output_elapsed_micros = Some(820_000);
+    renderer.handle(&Event::ProviderResponseUpdated(repeated));
     sync(&handle);
     assert!(
-        vt.screen_contains(80, "… (3s, 12KB, Δ0B/s, 4KB/s)"),
+        vt.screen_contains(80, "… (3s, first output 820ms, 12KB, Δ0B/s, 4KB/s)"),
         "idle stats samples must show elapsed time, zero interval rate, and total rate: {:?}",
         vt.screen_text(80)
     );
+
+    renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: test_agent_prompt_id("sp-progress"),
+        agent_id: agent_id("main"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: Some(tau_proto::ProviderResponseStatusUpdate {
+            text: "retrying".to_owned(),
+            clear_response: true,
+            retry: None,
+        }),
+        response_stats: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "first output"));
 
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-progress",
         Vec::new(),
     )));
     sync(&handle);
-    assert!(!vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
+    assert!(!vt.screen_contains(80, "first output"));
+}
+
+/// First-output durations switch units at the approved five-second and
+/// five-minute boundaries without rendering a placeholder for absence.
+#[test]
+fn first_output_duration_uses_compact_boundaries() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-first-output-format",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        main_provider_response_stats_update("sp-first-output-format", 0, 0),
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "first output"));
+
+    for (micros, expected) in [
+        (4_999_999, "first output 4999ms"),
+        (5_000_000, "first output 5s"),
+        (299_999_999, "first output 299s"),
+        (300_000_000, "first output 5m"),
+    ] {
+        let mut update = provider_response_stats_update(
+            "sp-first-output-format",
+            agent_id("main"),
+            1,
+            0,
+            600_000_000,
+            0,
+        );
+        update
+            .response_stats
+            .as_mut()
+            .expect("response stats")
+            .first_semantic_output_elapsed_micros = Some(micros);
+        renderer.handle(&Event::ProviderResponseUpdated(update));
+        sync(&handle);
+        assert!(
+            vt.screen_contains(100, expected),
+            "missing {expected}: {:?}",
+            vt.screen_text(100)
+        );
+    }
 }
 
 /// Ensures response-progress stats are scoped to the agent transcript that owns
@@ -7650,16 +7724,20 @@ fn hidden_provider_response_stats_do_not_update_visible_response_indicator() {
     prompt_b.agent_id = agent_id("agent_b");
     renderer.handle(&Event::AgentPromptCreated(prompt_b));
     renderer.switch_agent("agent_a".to_owned());
-    renderer.handle(&Event::ProviderResponseUpdated(
-        provider_response_stats_update(
-            "ap-agent_b-0",
-            agent_id("agent_b"),
-            12 * 1024,
-            4 * 1024,
-            2_000_000,
-            1_000_000,
-        ),
-    ));
+    let mut hidden_update = provider_response_stats_update(
+        "ap-agent_b-0",
+        agent_id("agent_b"),
+        12 * 1024,
+        4 * 1024,
+        2_000_000,
+        1_000_000,
+    );
+    hidden_update
+        .response_stats
+        .as_mut()
+        .expect("response stats")
+        .first_semantic_output_elapsed_micros = Some(820_000);
+    renderer.handle(&Event::ProviderResponseUpdated(hidden_update));
     sync(&handle);
 
     assert!(
@@ -7672,11 +7750,12 @@ fn hidden_provider_response_stats_do_not_update_visible_response_indicator() {
         "hidden agent B stats must not render in agent A's view: {:?}",
         vt.screen_text(80)
     );
+    assert!(!vt.screen_contains(80, "first output"));
 
     renderer.switch_agent("agent_b".to_owned());
     sync(&handle);
     assert!(
-        vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"),
+        vt.screen_contains(80, "… (2s, first output 820ms, 12KB, Δ8KB/s, 6KB/s)"),
         "hidden stats should be visible when switching to their owning agent: {:?}",
         vt.screen_text(80)
     );
@@ -7769,13 +7848,18 @@ fn late_provider_response_stats_after_finish_does_not_recreate_live_indicator() 
         "sp-progress",
         vec![assistant_message_item("done")],
     )));
-    renderer.handle(&Event::ProviderResponseUpdated(
-        main_provider_response_stats_update("sp-progress", 12 * 1024, 4 * 1024),
-    ));
+    let mut stale = main_provider_response_stats_update("sp-progress", 12 * 1024, 4 * 1024);
+    stale
+        .response_stats
+        .as_mut()
+        .expect("response stats")
+        .first_semantic_output_elapsed_micros = Some(820_000);
+    renderer.handle(&Event::ProviderResponseUpdated(stale));
     sync(&handle);
 
     assert!(vt.screen_contains(80, "done"));
     assert!(!vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
+    assert!(!vt.screen_contains(80, "first output"));
     assert!(!in_progress.load(std::sync::atomic::Ordering::Relaxed));
     assert!(!renderer.main_agent_turn_active_for_test());
 }

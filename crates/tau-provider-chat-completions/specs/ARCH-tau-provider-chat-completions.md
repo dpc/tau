@@ -26,6 +26,13 @@ Providers publish public content-free byte/duration response stats on
 bytes received by the provider transport before semantic parsing; they do not
 carry provider content and are not transcript data.
 
+The backend reports its dispatch instant immediately before the request send is
+first polled and exposes a dedicated timing predicate over accepted typed state.
+That predicate includes non-empty assistant/reasoning text and tool name or
+arguments, while excluding transport bytes, ids, empty state, and buffered
+reasoning delimiters. The extension sampler captures the first qualifying
+callback before cadence filtering.
+
 Streaming parsers may receive upstream chunks at arbitrary cadence, but Tau
 protocol updates are sampled. The extension response sampler starts when the
 finite backend attempt begins. Received stream data advances backend-owned,

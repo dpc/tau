@@ -3976,9 +3976,8 @@ fn provider_response_updated_requires_delta_routing_fields() {
     );
 }
 
-/// Ensures public provider response stats round-trip on provider updates so UI
-/// clients can render provider-owned throughput directly from the broadcast
-/// event.
+/// Provider response stats preserve zero-valued first-output timing, omit and
+/// default its absence, and round-trip provider-owned live observations.
 #[test]
 fn provider_response_updated_response_stats_round_trip() {
     let update = ProviderResponseUpdated {
@@ -3996,6 +3995,7 @@ fn provider_response_updated_response_stats_round_trip() {
                 response_bytes_received: 4096,
                 elapsed_micros: 1_000_000,
             },
+            first_semantic_output_elapsed_micros: Some(0),
         }),
         originator: PromptOriginator::User,
     };
@@ -4005,9 +4005,39 @@ fn provider_response_updated_response_stats_round_trip() {
         value["response_stats"]["current"]["response_bytes_received"],
         12_345
     );
+    assert_eq!(
+        value["response_stats"]["first_semantic_output_elapsed_micros"],
+        0
+    );
     let decoded: ProviderResponseUpdated =
-        serde_json::from_value(value).expect("decode response stats update");
+        serde_json::from_value(value.clone()).expect("decode response stats update");
     assert_eq!(decoded, update);
+
+    let mut absent = value;
+    absent["response_stats"]
+        .as_object_mut()
+        .expect("response stats object")
+        .remove("first_semantic_output_elapsed_micros");
+    let decoded_absent: ProviderResponseUpdated =
+        serde_json::from_value(absent).expect("decode absent first-output timing");
+    assert_eq!(
+        decoded_absent
+            .response_stats
+            .expect("response stats")
+            .first_semantic_output_elapsed_micros,
+        None
+    );
+    assert_eq!(
+        ProviderResponseStats::default().first_semantic_output_elapsed_micros,
+        None
+    );
+    let absent_value =
+        serde_json::to_value(ProviderResponseStats::default()).expect("serialize default stats");
+    assert!(
+        absent_value
+            .get("first_semantic_output_elapsed_micros")
+            .is_none()
+    );
 }
 
 /// Ensures generic watched-agent watch snapshots keep optional change metadata

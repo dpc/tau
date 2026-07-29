@@ -320,7 +320,11 @@ their selected models.
   content-free previous/current response-throughput samples for the current
   provider prompt. Providers count backend response bytes at the transport
   receive boundary before semantic parsing and emit stats at the provider's
-  rate-limited cadence. The harness validates prompt ownership and routing, then
+  rate-limited cadence. The optional
+  `first_semantic_output_elapsed_micros` records provider-observed time from the
+  finite attempt's first backend dispatch to accepted semantic output; it is
+  captured before batching, repeated unchanged, and remains transient. The
+  harness validates prompt ownership and routing, then
   broadcasts these updates unchanged; UI clients render stats directly from this
   event. Stats-only updates are valid and transient.
 

@@ -24,7 +24,8 @@
             "previous": {
               "elapsed_micros": 0,
               "response_bytes_received": 0
-            }
+            },
+            "first_semantic_output_elapsed_micros": 0
           }
         }
       },
@@ -44,7 +45,8 @@
             "previous": {
               "elapsed_micros": 0,
               "response_bytes_received": 196
-            }
+            },
+            "first_semantic_output_elapsed_micros": 0
           }
         }
       },
@@ -118,7 +120,8 @@
             "previous": {
               "elapsed_micros": 0,
               "response_bytes_received": 0
-            }
+            },
+            "first_semantic_output_elapsed_micros": 0
           }
         }
       },
@@ -138,7 +141,8 @@
             "previous": {
               "elapsed_micros": 0,
               "response_bytes_received": 196
-            }
+            },
+            "first_semantic_output_elapsed_micros": 0
           }
         }
       },

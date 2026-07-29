@@ -155,6 +155,7 @@ fn responses_event_snapshot() -> Vec<Event> {
                     response_bytes_received: 42,
                     elapsed_micros: 1_500,
                 },
+                first_semantic_output_elapsed_micros: None,
             },
             &mut writer,
         );
@@ -251,6 +252,7 @@ fn chat_completions_event_snapshot(
                 {
                     stats.previous.elapsed_micros = 0;
                     stats.current.elapsed_micros = 0;
+                    stats.first_semantic_output_elapsed_micros = Some(0);
                 }
                 if let Event::ProviderResponseFinishedReported(finished) = emit.event.as_mut()
                     && let Some(backend) = finished.backend.as_mut()

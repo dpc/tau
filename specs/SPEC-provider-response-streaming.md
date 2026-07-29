@@ -1,5 +1,11 @@
 # SPEC-provider-response-streaming: Provider response streaming
 
+## Record justification
+
+Provider backends, extension samplers, the shared protocol, harness correlation,
+and UI consumers jointly implement this streaming contract, so no single local
+artifact can own it coherently.
+
 Providers submit `provider.response_updated_reported` as transient, prompt-local
 progress. After generic report commit and prompt-owner validation, the harness publishes
 canonical `provider.response_updated`. Assistant text and reasoning use append-only
@@ -16,6 +22,24 @@ to publish an update.
 `provider.response_finished.output_items` is the complete durable replacement and replay source. Consumers clear transient state when an attempt restarts or repetition is rejected, and replace rather than append that state when the terminal response arrives. A valid update observed after late subscription may create an ellipsis-prefixed transient block for an otherwise unknown live prompt. Stale, already-finished, or invalid prompt updates do not create transcript state.
 
 Providers own transport-byte accounting and publish content-free previous/current cumulative `response_stats`; `previous` is the last sample actually emitted. The harness validates provider source and prompt ownership, derives the public agent id from harness state, and broadcasts accepted updates without becoming the accounting authority. Provider-authored errors, bodies, headers, prompt text, tool data, account identifiers, and secrets never enter public stats.
+
+Providers may also publish an immutable first-semantic-output duration in those
+transient stats. It starts immediately before the finite attempt's first backend
+send/enqueue and ends at the first synchronous accepted semantic-state
+observation. Qualifying output is non-empty assistant text, non-empty
+displayable reasoning/summary text, a material opaque reasoning item accepted
+at item completion, a non-empty tool name, non-empty function-call argument
+text, or non-empty custom-tool input. Transport bytes, response/call/item ids,
+role markers, status, finish reasons, usage, quota, annotations, empty item
+allocations/deltas, reasoning-summary delimiters without text,
+compaction/control output, unknown provider items, rejected repetition deltas,
+and tool execution progress/results/errors do not qualify. Scheduled retries reset the duration;
+transparent pre-semantic repair within one finite attempt does not.
+
+Capture precedes publication batching, and later samples repeat the immutable
+value without changing cadence. Absence means unsupported or not observed.
+Neither the harness nor durable finished output, journals, replay, snapshots, or
+final turn stats derive or retain it.
 
 Stats count backend response bytes received at the provider transport before
 semantic parsing. They exclude prompts, tool execution output and results, UI

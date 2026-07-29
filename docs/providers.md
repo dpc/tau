@@ -191,6 +191,16 @@ by the harness terminal pipeline closes the prompt.
 
 Providers attach public content-free `response_stats` previous/current samples to these rate-limited updates. Providers own prompt-local response byte counting because they read the upstream stream, and first-party providers advance that counter from lower-layer received backend response bytes before semantic parsing so progress does not wait for a complete response item. `previous` is the last provider response sample that was actually emitted for that prompt, while `current` is the new cumulative sample measured since backend request dispatch.
 
+Providers may set `first_semantic_output_elapsed_micros` to the finite-attempt
+duration from first backend send/enqueue until their first synchronously accepted
+semantic output. Follow the exact qualifying and excluded categories in
+[SPEC-provider-response-streaming](../specs/SPEC-provider-response-streaming.md);
+in particular, function arguments and custom-tool input must be non-empty, and
+opaque reasoning qualifies only when a material completed item is accepted.
+Capture the value before update batching and repeat it unchanged on later
+samples. Omit it when unsupported or not observed. The field is live-only and
+must not be copied to finished output or replay state.
+
 The harness first commits the report, then validates provider prompt ownership, fixes
 routing identity, and publishes canonical `provider.response_updated`. It must not
 strip `response_stats`, derive its own response byte counters, or publish a separate

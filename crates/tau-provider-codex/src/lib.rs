@@ -78,6 +78,12 @@ pub fn test_append_custom_tool_input(state: &mut StreamState, output_index: usiz
         .push_str(input);
 }
 
+/// Adds transport-only bytes to a synthetic stream state.
+#[cfg(feature = "test-support")]
+pub fn test_record_transport_response_bytes(state: &mut StreamState, bytes: usize) {
+    state.record_transport_response_bytes(bytes);
+}
+
 /// Startup-resolved ChatGPT credentials used by one backend configuration.
 ///
 /// This type intentionally has no `Debug` implementation so bearer material

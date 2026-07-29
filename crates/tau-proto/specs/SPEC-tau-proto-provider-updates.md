@@ -2,6 +2,11 @@
 
 This protocol record refines [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md), [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md), and [SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 
+## Record justification
+
+Provider extensions, protocol DTOs, harness validation, and UI consumers share
+this update contract, so no single implementation area can own it coherently.
+
 ## Provider response streaming updates
 
 `provider.response_updated_reported` is the Provider-authored transient append-delta
@@ -11,6 +16,11 @@ surface. After generic commit and owner validation, the harness publishes canoni
 in the separate `status` field because they are provider-authored, not
 assistant-authored. Live byte/duration stats are provider-owned content-free metadata carried in
 `response_stats`; UIs render them directly from `provider.response_updated`.
+The optional `first_semantic_output_elapsed_micros` member is the provider's
+finite-attempt duration from first backend dispatch to its first synchronously
+accepted semantic output. Providers repeat an observed value on later live
+samples; absence means unsupported or not observed. The field remains transient
+and is not part of the finished response or replay contract.
 Fresh transport setup may emit a fixed content-free status with no retry facts;
 it must not expose endpoints, credentials, accounts, or raw transport errors.
 `provider.response_finished.output_items` remains the complete durable response

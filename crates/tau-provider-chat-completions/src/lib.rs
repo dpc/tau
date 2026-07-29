@@ -315,6 +315,21 @@ impl AttemptProgress<'_> {
     pub fn semantic_progress(&self) -> SemanticProgress {
         self.state.semantic_progress
     }
+
+    /// Return whether the accepted state contains output that qualifies for
+    /// first-semantic-output timing.
+    #[must_use]
+    pub fn has_timed_semantic_output(&self) -> bool {
+        self.state.has_timed_semantic_output()
+    }
+}
+
+/// One synchronous observation from a finite Chat Completions attempt.
+pub enum AttemptUpdate<'a> {
+    /// The backend request is about to be sent for the first time.
+    Dispatched(Instant),
+    /// Accepted parser state changed or transport progress was observed.
+    Progress(AttemptProgress<'a>),
 }
 
 /// Run exactly one finite provider attempt without event writes or retry
@@ -325,23 +340,28 @@ pub fn run_attempt(
     config: &AttemptConfig,
     model: &AttemptModel,
     debug_provider_requests: bool,
-    on_progress: &mut impl FnMut(AttemptProgress<'_>),
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
     let mut progress = SemanticProgress::None;
     let result = {
-        let mut on_update = |state: &StreamState| {
+        let on_attempt_update = std::cell::RefCell::new(on_update);
+        let mut on_state_update = |state: &StreamState| {
             let snapshot = AttemptProgress { state };
             progress = snapshot.semantic_progress();
-            on_progress(snapshot);
+            on_attempt_update.borrow_mut()(AttemptUpdate::Progress(snapshot));
+        };
+        let mut on_dispatched = |at| {
+            on_attempt_update.borrow_mut()(AttemptUpdate::Dispatched(at));
         };
         chat_completions_stream(
             config,
             model,
             prompt,
             debug_provider_requests,
-            &mut on_update,
+            &mut on_state_update,
+            &mut on_dispatched,
             is_canceled,
             network,
         )
@@ -458,6 +478,19 @@ impl StreamState {
         visible_bytes
             .saturating_add(non_visible_bytes)
             .max(self.transport_response_bytes)
+    }
+
+    fn has_timed_semantic_output(&self) -> bool {
+        !self.text.is_empty()
+            || !self.thinking.is_empty()
+            || self.output_items.iter().any(|item| match item {
+                OutputItemAccumulator::ToolCall(call) => {
+                    !call.name.is_empty() || !call.arguments.is_empty()
+                }
+                OutputItemAccumulator::Message(text) | OutputItemAccumulator::Reasoning(text) => {
+                    !text.is_empty()
+                }
+            })
     }
 
     fn record_transport_response_bytes(&mut self, bytes: usize) {
@@ -777,12 +810,14 @@ fn apply_chat_stream_lines(
     Ok(false)
 }
 
+#[allow(clippy::too_many_arguments)] // Dispatch and state callbacks have distinct timing ownership.
 fn chat_completions_stream(
     provider: &AttemptConfig,
     model: &AttemptModel,
     prompt: &tau_proto::AgentPromptCreated,
     debug_provider_requests: bool,
     on_update: &mut impl FnMut(&StreamState),
+    on_dispatched: &mut impl FnMut(Instant),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<StreamState, LlmError> {
@@ -810,6 +845,7 @@ fn chat_completions_stream(
             debug_provider_requests,
         },
         on_update,
+        on_dispatched,
         is_canceled,
         network,
     ))?;
@@ -842,6 +878,7 @@ struct AsyncAttemptContext<'a> {
 async fn chat_completions_stream_async(
     context: AsyncAttemptContext<'_>,
     on_update: &mut impl FnMut(&StreamState),
+    on_dispatched: &mut impl FnMut(Instant),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<(StreamState, Vec<serde_json::Value>), LlmError> {
@@ -857,11 +894,16 @@ async fn chat_completions_stream_async(
         request = request.bearer_auth(&context.provider.api_key);
     }
     let mut send = Box::pin(request.send());
-    let header_started_at = Instant::now();
+    let mut header_started_at = None;
     let mut response = loop {
         if is_canceled() {
             return Err(LlmError::Canceled);
         }
+        let header_started_at = *header_started_at.get_or_insert_with(|| {
+            let at = Instant::now();
+            on_dispatched(at);
+            at
+        });
         if let Ok(result) = tokio::time::timeout(STREAM_READ_POLL_TIMEOUT, &mut send).await {
             break result.map_err(|error| {
                 LlmError::Outbound(network.reqwest_error(

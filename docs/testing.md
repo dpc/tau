@@ -279,6 +279,17 @@ Provider streaming tests must also assert response/progress rate-limit boundarie
 
 Harness tests for provider response stats should assert only validation and pass-through: wrong-owner reports commit observation-only, accepted stats-only reports derive canonical `provider.response_updated` events for subscribers, `agent_id` is rewritten from prompt ownership, and no separate harness-owned response-throughput projection is emitted.
 
+First-output timing tests split ownership by layer. Backend parser tests assert
+the exact accepted semantic predicate and dispatch boundary, including Codex
+transparent-repair reuse; repetition-guard tests prove rejected deltas do not
+mutate the accepted state inspected by that predicate. Provider sampler tests
+assert capture before cadence filtering, immutable repetition, fresh-attempt
+reset, and terminal flush. Protocol tests cover present, zero, absent/default,
+and omitted wire forms. Harness tests only prove correlation and byte-for-byte
+forwarding. CLI tests cover optional wording and compact-duration boundaries,
+prompt/agent isolation, retry clearing, finish removal, and stale post-finish
+suppression.
+
 Provider retry scheduler tests should use injected/fake time and deterministic
 jitter rather than real multi-minute sleeps. Cover retry-to-park handoff,
 released worker capacity, due/fresh fairness, shared-cooldown extension,

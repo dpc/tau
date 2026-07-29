@@ -338,6 +338,76 @@ fn attempt_transport_failure_redacts_backend_canaries() {
     }
 }
 
+/// A finite attempt reports exactly one dispatch observation before the backend
+/// can accept its first request bytes.
+#[test]
+fn attempt_dispatch_precedes_backend_send_and_occurs_once() {
+    let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_observation = std::sync::Arc::clone(&dispatched);
+    let server = ScriptedTcpServer::spawn(move |mut socket| {
+        assert!(server_observation.load(std::sync::atomic::Ordering::SeqCst));
+        let mut request = [0_u8; 4096];
+        let bytes_read = std::io::Read::read(&mut socket, &mut request).expect("read request");
+        assert!(0 < bytes_read);
+    });
+    let mut configured = provider();
+    configured.base_url = format!("http://{}/v1", server.address());
+    let model = configured.models[0].clone();
+    let resolved = resolved_provider(&configured);
+    let mut dispatch_count = 0;
+    let outcome = run_attempt(
+        &prompt(),
+        &resolved,
+        &model,
+        false,
+        &mut |update| {
+            if matches!(update, AttemptUpdate::Dispatched(_)) {
+                dispatch_count += 1;
+                dispatched.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        },
+        &mut || false,
+        &tau_provider::OutboundNetworkPolicy::from_environment(
+            std::collections::BTreeMap::new(),
+            None,
+        ),
+    );
+    server.finish();
+    assert_eq!(dispatch_count, 1);
+    assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
+}
+
+/// First-output timing uses accepted semantic state rather than replay-safety
+/// progress, raw delimiters, ids, or empty structures.
+#[test]
+fn timed_semantic_output_predicate_matches_chat_contract() {
+    let mut state = StreamState::new();
+    state.record_transport_response_bytes(10);
+    state.pending_content.push_str("<think>");
+    state.tool_call_at_mut(0).id.push_str("call-only");
+    assert!(!state.has_timed_semantic_output());
+
+    state.tool_call_at_mut(0).name.push_str("lookup");
+    assert!(state.has_timed_semantic_output());
+
+    let mut arguments = StreamState::new();
+    arguments
+        .append_tool_arguments_delta(0, "{\"q\":")
+        .expect("accepted arguments");
+    assert!(arguments.has_timed_semantic_output());
+
+    let mut text = StreamState::new();
+    text.append_assistant_text_delta("hello")
+        .expect("accepted assistant text");
+    assert!(text.has_timed_semantic_output());
+
+    let mut reasoning = StreamState::new();
+    reasoning
+        .append_reasoning_delta("why")
+        .expect("accepted reasoning text");
+    assert!(reasoning.has_timed_semantic_output());
+}
+
 /// Ensures a malicious provider cannot grow the pending SSE-line buffer
 /// without bound by streaming bytes forever without a newline.
 #[test]

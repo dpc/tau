@@ -5,6 +5,12 @@ This record refines
 and
 [SPEC-tau-proto-provider-data](../../tau-proto/specs/SPEC-tau-proto-provider-data.md).
 
+## Record justification
+
+Codex stream parsing, replay-sidecar preservation, extension sampling, and
+protocol publication jointly implement this contract, so no single local
+artifact can own it coherently.
+
 ## Streaming provider output
 
 Responses streams may deliver visible assistant text, reasoning summaries, large
@@ -24,6 +30,14 @@ the prompt and `current` = the new cumulative sample. A terminal flush is the ot
 normal bypass and is allowed immediately before the provider prompt closes. The harness
 validates provider ownership and broadcasts these stats unchanged; UI clients render
 them directly from provider updates.
+
+The response sampler also captures first semantic output against the backend's
+single finite-attempt dispatch instant before rate limiting. Assistant text,
+reasoning summary text, completed material opaque reasoning, tool names,
+function arguments, and custom-tool input qualify. Call ids, empty items,
+compaction, and unknown provider items do not. A transparent pre-semantic socket
+repair retains the original dispatch instant and cumulative timing; a scheduled
+retry constructs a fresh sampler.
 
 ## Replay-sidecar trust boundary
 

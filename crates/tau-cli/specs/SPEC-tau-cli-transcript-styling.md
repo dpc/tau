@@ -86,3 +86,9 @@ text into editor current-response state, prompt-stdin capture, durable
 transcripts, or final response rendering. The live throughput suffix is a pure
 render of the latest provider stats sample; the CLI must not interpolate elapsed
 time or recompute `Δ` on redraw/timer ticks.
+
+When stats carry first-semantic-output timing, the indicator inserts `first
+output <duration>` after elapsed time. It renders milliseconds below five
+seconds, whole seconds below five minutes, and whole minutes thereafter.
+Absence renders no placeholder. The value has the same in-flight lifetime and
+prompt/agent isolation as the surrounding indicator.

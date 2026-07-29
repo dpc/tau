@@ -90,7 +90,14 @@ pub fn run_prompt_attempt<W: std::io::Write>(
         &config,
         &wire_model,
         debug_provider_requests,
-        &mut |progress| sampler.emit_if_due(agent_prompt_id, prompt, progress, writer),
+        &mut |update| match update {
+            tau_provider_chat_completions::AttemptUpdate::Dispatched(at) => {
+                sampler.mark_dispatched(at);
+            }
+            tau_provider_chat_completions::AttemptUpdate::Progress(progress) => {
+                sampler.emit_if_due(agent_prompt_id, prompt, progress, writer);
+            }
+        },
         is_canceled,
         network,
     );

@@ -132,6 +132,63 @@ fn semantic_progress_excludes_transport_and_includes_output_items() {
     assert!(state.has_semantic_progress());
 }
 
+/// First-output timing includes typed user-facing/model-authored material while
+/// excluding replay-only ids, compaction, unknown items, and empty slots.
+#[test]
+fn timed_semantic_output_has_narrow_metric_categories() {
+    let mut state = StreamState::new();
+    state.output_items.push(OutputItemAccumulator::Empty);
+    state
+        .output_items
+        .push(OutputItemAccumulator::UnknownProviderItem(
+            tau_proto::OpaqueProviderItem::new(tau_proto::CborValue::Null),
+        ));
+    state
+        .output_items
+        .push(OutputItemAccumulator::Compaction(None));
+    state
+        .output_items
+        .push(OutputItemAccumulator::ToolCall(ToolCallAccumulator {
+            id: "call-only".to_owned(),
+            ..ToolCallAccumulator::new(tau_proto::ToolType::Function)
+        }));
+    assert!(!state.has_timed_semantic_output());
+
+    state
+        .tool_call_at_mut(3, tau_proto::ToolType::Function)
+        .name = "lookup".to_owned();
+    assert!(state.has_timed_semantic_output());
+
+    let mut assistant = StreamState::new();
+    assistant.message_at_mut(0).text.push_str("hello");
+    assert!(assistant.has_timed_semantic_output());
+
+    let mut summary = StreamState::new();
+    summary.append_reasoning_summary_delta_at(0, "why");
+    assert!(summary.has_timed_semantic_output());
+
+    let mut arguments = StreamState::new();
+    arguments
+        .tool_call_at_mut(0, tau_proto::ToolType::Function)
+        .arguments_json
+        .push_str("{\"q\":");
+    assert!(arguments.has_timed_semantic_output());
+
+    let mut custom = StreamState::new();
+    custom
+        .tool_call_at_mut(0, tau_proto::ToolType::Custom)
+        .arguments_json
+        .push_str("raw input");
+    assert!(custom.has_timed_semantic_output());
+
+    let mut opaque = StreamState::new();
+    opaque.set_reasoning_item_json_at(
+        0,
+        r#"{"type":"reasoning","id":"reasoning-1","encrypted_content":"opaque"}"#,
+    );
+    assert!(opaque.has_timed_semantic_output());
+}
+
 #[test]
 fn usage_limit_429_retries_after_reset_seconds() {
     let error = LlmError::HttpStatus(

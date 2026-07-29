@@ -4749,6 +4749,9 @@ struct RateLimitedResponseUpdateEmitter {
     last_update_emitted_at: Option<Instant>,
     last_stats_sample: tau_proto::ProviderResponseStatsSample,
     emitted_non_empty_sample: bool,
+    /// Immutable elapsed duration captured at the first qualifying parser
+    /// state.
+    first_semantic_output_elapsed: Option<Duration>,
 }
 
 struct ResponseUpdateTarget<'a> {
@@ -4769,6 +4772,7 @@ impl RateLimitedResponseUpdateEmitter {
             last_update_emitted_at: None,
             last_stats_sample: tau_proto::ProviderResponseStatsSample::default(),
             emitted_non_empty_sample: false,
+            first_semantic_output_elapsed: None,
         }
     }
 
@@ -4819,6 +4823,10 @@ impl RateLimitedResponseUpdateEmitter {
         now: Instant,
         terminal_flush: bool,
     ) {
+        if self.first_semantic_output_elapsed.is_none() && state.has_timed_semantic_output() {
+            self.first_semantic_output_elapsed =
+                Some(now.saturating_duration_since(self.started_at));
+        }
         let response_stats = self.response_stats_at(state, now);
         let first_non_empty_sample =
             !self.emitted_non_empty_sample && response_stats.current.response_bytes_received > 0;
@@ -4861,6 +4869,9 @@ impl RateLimitedResponseUpdateEmitter {
         ProviderResponseStats {
             current,
             previous: self.last_stats_sample,
+            first_semantic_output_elapsed_micros: self
+                .first_semantic_output_elapsed
+                .map(|duration| duration.as_micros().min(u128::from(u64::MAX)) as u64),
         }
     }
 }

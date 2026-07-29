@@ -1421,6 +1421,7 @@ fn chatgpt_stream_update_emits_response_stats_without_text_deltas() {
                     elapsed_micros: 1_000_000,
                 },
                 previous: tau_proto::ProviderResponseStatsSample::default(),
+                first_semantic_output_elapsed_micros: None,
             },
             &mut writer,
         );
@@ -1548,6 +1549,7 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
                 response_bytes_received: 0,
                 elapsed_micros: 0,
             },
+            first_semantic_output_elapsed_micros: Some(0),
         })
     );
     assert_eq!(
@@ -1569,7 +1571,100 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
                 response_bytes_received: "hel".len() as u64,
                 elapsed_micros: 0,
             },
+            first_semantic_output_elapsed_micros: Some(0),
         })
+    );
+}
+
+/// Codex captures semantic onset even when its callback is cadence-suppressed,
+/// repeats the value at terminal flush, and a fresh finite attempt starts
+/// empty.
+#[test]
+fn chatgpt_first_output_capture_survives_batching_flush_and_attempt_reset() {
+    let prompt = minimal_prompt();
+    let start = std::time::Instant::now();
+    let target = ResponseUpdateTarget {
+        agent_prompt_id: &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+            .expect("test prompt id"),
+        agent_id: &prompt.agent_id,
+        originator: &prompt.originator,
+    };
+    let mut state = tau_provider_codex::test_stream_state();
+    tau_provider_codex::test_record_transport_response_bytes(&mut state, 1);
+    let mut bytes = Vec::new();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        emitter.emit_at(&target, &state, &mut writer, start, false);
+        tau_provider_codex::test_append_message_delta(&mut state, 0, "hello");
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
+            false,
+        );
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
+            false,
+        );
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL * 2,
+            true,
+        );
+
+        let fresh_state = tau_provider_codex::test_stream_state();
+        let mut fresh = RateLimitedResponseUpdateEmitter::new_at(start);
+        fresh.emit_at(
+            &target,
+            &fresh_state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
+            true,
+        );
+    }
+    let updates: Vec<_> = decode_frames(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
+                tau_proto::Event::ProviderResponseUpdatedReported(update) => Some(update),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 4);
+    assert_eq!(
+        updates[0]
+            .response_stats
+            .as_ref()
+            .expect("transport stats")
+            .first_semantic_output_elapsed_micros,
+        None
+    );
+    for update in &updates[1..3] {
+        assert_eq!(
+            update
+                .response_stats
+                .as_ref()
+                .expect("semantic stats")
+                .first_semantic_output_elapsed_micros,
+            Some(500_000)
+        );
+    }
+    assert_eq!(
+        updates[3]
+            .response_stats
+            .as_ref()
+            .expect("fresh-attempt stats")
+            .first_semantic_output_elapsed_micros,
+        None
     );
 }
 
@@ -1636,6 +1731,7 @@ fn chatgpt_response_update_emitter_emits_due_stats_only_sample() {
                 response_bytes_received: 0,
                 elapsed_micros: 0,
             },
+            first_semantic_output_elapsed_micros: None,
         })
     );
     assert_eq!(
@@ -1649,6 +1745,7 @@ fn chatgpt_response_update_emitter_emits_due_stats_only_sample() {
                 response_bytes_received: 0,
                 elapsed_micros: 1_000_000,
             },
+            first_semantic_output_elapsed_micros: None,
         })
     );
 }
@@ -1742,6 +1839,7 @@ fn chatgpt_response_update_emitter_emits_first_bytes_after_idle_sample_promptly(
                 response_bytes_received: 0,
                 elapsed_micros: 1_000_000,
             },
+            first_semantic_output_elapsed_micros: Some(1_500_000),
         })
     );
     assert_eq!(
