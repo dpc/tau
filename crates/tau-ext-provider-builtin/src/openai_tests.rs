@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::{BufReader, Cursor, Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,20 +15,37 @@ use super::*;
 /// Shared byte sink used by tests that run tau-client's writer thread.
 #[derive(Clone, Default)]
 struct SharedWriter {
-    /// Shared byte buffer written by the provider runtime.
-    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Shared byte buffer and notification for runtime output observers.
+    bytes: Arc<(Mutex<Vec<u8>>, Condvar)>,
 }
 
 impl SharedWriter {
     /// Returns a snapshot of bytes written so far.
     fn bytes(&self) -> Vec<u8> {
-        self.bytes.lock().expect("lock shared writer").clone()
+        self.bytes.0.lock().expect("lock shared writer").clone()
+    }
+
+    /// Waits until the runtime appends bytes or the supplied deadline expires.
+    fn wait_for_change(&self, previous_len: usize, deadline: Instant) {
+        let (lock, cv) = &*self.bytes;
+        let bytes = lock.lock().expect("lock shared writer");
+        if bytes.len() != previous_len {
+            return;
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return;
+        };
+        let _ = cv
+            .wait_timeout_while(bytes, remaining, |bytes| bytes.len() == previous_len)
+            .expect("wait for shared writer");
     }
 }
 
 impl Write for SharedWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.bytes.lock().expect("lock shared writer").extend(buf);
+        let (lock, cv) = &*self.bytes;
+        lock.lock().expect("lock shared writer").extend(buf);
+        cv.notify_all();
         Ok(buf.len())
     }
 
@@ -201,7 +218,12 @@ fn try_decode_frames(bytes: &[u8]) -> Option<Vec<HarnessInputMessage>> {
         match reader.read_message() {
             Ok(Some(frame)) => frames.push(frame),
             Ok(None) => return Some(frames),
-            Err(_) => return None,
+            Err(tau_proto::DecodeError::Io(error))
+                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                return None;
+            }
+            Err(error) => panic!("decode concurrent runtime frame: {error}"),
         }
     }
 }
@@ -240,7 +262,8 @@ fn wait_for_runtime_frames(
 ) -> Vec<HarnessInputMessage> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if let Some(frames) = try_decode_frames(&output.bytes())
+        let bytes = output.bytes();
+        if let Some(frames) = try_decode_frames(&bytes)
             && predicate(&frames)
         {
             return frames;
@@ -249,7 +272,7 @@ fn wait_for_runtime_frames(
             Instant::now() < deadline,
             "runtime output boundary not reached"
         );
-        thread::yield_now();
+        output.wait_for_change(bytes.len(), deadline);
     }
 }
 
@@ -3109,35 +3132,35 @@ fn context_window_rejection_finishes_once_without_retry_status() {
         .expect("run provider");
     });
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let frames = decode_frames(&output.bytes());
-        let terminal: Vec<_> = frames
-            .iter()
-            .filter_map(|frame| match input_event(frame) {
-                Some(Event::ProviderResponseFinishedReported(finished))
-                    if finished.agent_prompt_id.as_str() == "sp-1" =>
-                {
-                    Some(finished)
-                }
-                _ => None,
-            })
-            .collect();
-        if let Some(finished) = terminal.first() {
-            assert_eq!(terminal.len(), 1);
-            assert_eq!(
-                finished.failure_kind,
-                Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
-            );
-            assert!(!frames.iter().any(|frame| matches!(
+    let frames = wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
                 input_event(frame),
-                Some(Event::ProviderResponseUpdatedReported(update)) if update.status.is_some()
-            )));
-            break;
-        }
-        assert!(Instant::now() < deadline, "terminal response not emitted");
-        thread::sleep(Duration::from_millis(5));
-    }
+                Some(Event::ProviderResponseFinishedReported(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            )
+        })
+    });
+    let terminal = frames
+        .iter()
+        .filter_map(|frame| match input_event(frame) {
+            Some(Event::ProviderResponseFinishedReported(finished))
+                if finished.agent_prompt_id.as_str() == "sp-1" =>
+            {
+                Some(finished)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(
+        terminal[0].failure_kind,
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+    assert!(!frames.iter().any(|frame| matches!(
+        input_event(frame),
+        Some(Event::ProviderResponseUpdatedReported(update)) if update.status.is_some()
+    )));
     input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
         tau_proto::Disconnect {
             reason: Some("done".to_owned()),
@@ -3797,11 +3820,13 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     let active_cancel_rx = Mutex::new(active_cancel_rx);
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let executor_calls = Arc::clone(&calls);
+    let initial_workers_started = Arc::new(Barrier::new(2));
     let executor: PromptExecutor = Arc::new(move |execution| {
         let id = execution.job.agent_prompt_id.to_string();
         executor_calls.lock().expect("mixed calls").push(id.clone());
         match id.as_str() {
             "mixed-delayed" => {
+                initial_workers_started.wait();
                 send_worker_message(
                     &execution.output_tx,
                     &execution.output_waker,
@@ -3815,6 +3840,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                 delayed_tx.send(()).expect("report delayed state");
             }
             "mixed-active" => {
+                initial_workers_started.wait();
                 let cancel_tx = active_cancel_tx.clone();
                 let _active_abort_waker_guard = execution.cancellation.register_abort_waker(
                     &execution.job.agent_prompt_id,
@@ -3824,25 +3850,11 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                     }),
                 );
                 active_tx.send(()).expect("report active state");
-                if matches!(shutdown, MixedStateShutdown::Eof) {
-                    let deadline = Instant::now() + MIXED_STATE_TIMEOUT;
-                    while !execution
-                        .cancellation
-                        .is_canceled(&execution.job.agent_prompt_id)
-                    {
-                        assert!(
-                            Instant::now() < deadline,
-                            "EOF did not cancel active provider attempt"
-                        );
-                        thread::yield_now();
-                    }
-                } else {
-                    active_cancel_rx
-                        .lock()
-                        .expect("active cancel receiver")
-                        .recv_timeout(MIXED_STATE_TIMEOUT)
-                        .expect("global cancel did not wake active backend");
-                }
+                active_cancel_rx
+                    .lock()
+                    .expect("active cancel receiver")
+                    .recv_timeout(MIXED_STATE_TIMEOUT)
+                    .expect("shutdown did not wake active backend");
                 let mut writer = execution.frame_writer();
                 writer
                     .write_message(&HarnessInputMessage::emit_transient(
@@ -3942,10 +3954,8 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     }
 
     if matches!(shutdown, MixedStateShutdown::GlobalCancel) {
-        let deadline = Instant::now() + MIXED_STATE_TIMEOUT;
-        loop {
-            let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
-            let canceled = frames
+        wait_for_runtime_frames(&output, |frames| {
+            frames
                 .iter()
                 .filter(|frame| {
                     matches!(
@@ -3954,16 +3964,9 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                             if finished.error.as_deref() == Some("(cancelled by harness)")
                     )
                 })
-                .count();
-            if canceled == 4 {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "global cancel did not close all mixed states"
-            );
-            thread::yield_now();
-        }
+                .count()
+                == 4
+        });
         input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
             tau_proto::Disconnect {
                 reason: Some("done".to_owned()),

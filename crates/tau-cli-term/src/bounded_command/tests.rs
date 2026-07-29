@@ -195,7 +195,13 @@ fn process_group_timeout_kills_descendant() {
         .expect("foreground claim test lock");
     let dir = tempfile::tempdir().expect("tempdir");
     let pid_path = dir.path().join("child.pid");
-    let script = format!("sleep 5 & echo $! > {}; sleep 5", pid_path.display());
+    let pending_pid_path = dir.path().join("child.pid.pending");
+    let script = format!(
+        "sleep 5 & printf '%s\n' $! > {} && mv {} {}; sleep 5",
+        pending_pid_path.display(),
+        pending_pid_path.display(),
+        pid_path.display()
+    );
     let mut command = std::process::Command::new("sh");
     command
         .arg("-c")
@@ -203,12 +209,22 @@ fn process_group_timeout_kills_descendant() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
 
-    let err = run_with_bounded_stdout(
+    let err = run_with_bounded_stdout_after_spawn(
         &mut command,
         None,
         1024,
         std::time::Duration::from_millis(100),
         ProcessOwnership::ProcessGroup,
+        || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !pid_path.exists() {
+                if deadline <= std::time::Instant::now() {
+                    return Err("descendant PID was not published after command spawn".to_owned());
+                }
+                std::thread::yield_now();
+            }
+            Ok(())
+        },
     )
     .expect_err("process group should time out");
     assert!(err.contains("timeout"));

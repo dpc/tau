@@ -81,6 +81,25 @@ pub(crate) fn run_with_bounded_stdout(
     timeout: std::time::Duration,
     ownership: ProcessOwnership,
 ) -> Result<BoundedCommandOutput, String> {
+    run_with_bounded_stdout_after_spawn(
+        command,
+        stdin_input,
+        stdout_limit,
+        timeout,
+        ownership,
+        || Ok(()),
+    )
+}
+
+/// Runs a bounded command after allowing a test fixture to observe its spawn.
+fn run_with_bounded_stdout_after_spawn(
+    command: &mut std::process::Command,
+    stdin_input: Option<&[u8]>,
+    stdout_limit: usize,
+    timeout: std::time::Duration,
+    ownership: ProcessOwnership,
+    after_spawn: impl FnOnce() -> Result<(), String>,
+) -> Result<BoundedCommandOutput, String> {
     configure_process_ownership(command, ownership)?;
     if stdin_input.is_some() {
         command.stdin(std::process::Stdio::piped());
@@ -102,6 +121,10 @@ pub(crate) fn run_with_bounded_stdout(
             return Err(error);
         }
     };
+    if let Err(error) = after_spawn() {
+        terminate_child(&mut child, process_group.child_pgid());
+        return Err(error);
+    }
 
     BoundedStdoutRun::start(child, process_group, stdin_input, stdout_limit)?.finish(timeout)
 }
