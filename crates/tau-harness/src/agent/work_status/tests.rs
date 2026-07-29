@@ -23,28 +23,29 @@ fn report_validation_rejects_non_model_phases_and_titles() {
     }
 }
 
-/// A Working report acknowledges later routine tool-round snapshots while each
-/// still-unreported snapshot retains an acknowledgement opportunity.
+/// Accepted status reports and delivered notices suppress routine repeats until
+/// a genuine activation explicitly offers one new acknowledgement.
 #[test]
-fn working_acknowledgement_survives_routine_snapshot_resets() {
+fn acknowledgement_is_scoped_to_genuine_activations() {
     let mut status = WorkStatus::default();
-    status.prepare_ack_notice_for_snapshot();
     assert!(status.mark_ack_notice_delivered());
-    status.prepare_ack_notice_for_snapshot();
+    assert!(!status.mark_ack_notice_delivered());
+    status.begin_ack_activation(tau_proto::ObservationId::random());
     assert!(status.mark_ack_notice_delivered());
-    status.prepare_ack_notice_for_snapshot();
     assert!(report(
         &mut status,
         AgentWorkStatusPhase::Working,
         "first title"
     ));
-    status.prepare_ack_notice_for_snapshot();
     assert!(!status.mark_ack_notice_delivered());
-    assert!(report(
-        &mut status,
-        AgentWorkStatusPhase::Working,
-        "changed title"
-    ));
+    assert!(report(&mut status, AgentWorkStatusPhase::Done, "done"));
+    assert!(!status.mark_ack_notice_delivered());
+    status.begin_ack_activation(tau_proto::ObservationId::random());
+    assert!(status.mark_ack_notice_delivered());
+    status.join_ack_activation(tau_proto::ObservationId::random());
+    assert!(!status.mark_ack_notice_delivered());
+    status.begin_ack_activation(tau_proto::ObservationId::random());
+    status.retire_ack_notice_for_activation();
     assert!(!status.mark_ack_notice_delivered());
 }
 

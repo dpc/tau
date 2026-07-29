@@ -707,15 +707,15 @@ pub(crate) fn watch_work_status_text(
         .as_deref()
         .map(tau_proto::visible_escape_metadata)
         .unwrap_or_default();
-    let transition = match status.phase {
+    let state = match status.phase {
         tau_proto::AgentWorkStatusPhase::Unreported => return None,
-        tau_proto::AgentWorkStatusPhase::Working => "started working",
-        tau_proto::AgentWorkStatusPhase::Done => "reported done",
-        tau_proto::AgentWorkStatusPhase::Blocked => "is blocked",
-        tau_proto::AgentWorkStatusPhase::Unknown => "stopped reporting a reliable status",
+        tau_proto::AgentWorkStatusPhase::Working => "working",
+        tau_proto::AgentWorkStatusPhase::Done => "done",
+        tau_proto::AgentWorkStatusPhase::Blocked => "blocked",
+        tau_proto::AgentWorkStatusPhase::Unknown => "unknown",
     };
     Some(format!(
-        "[tau-internal]: Watched agent {sender_label} {transition}: {title}"
+        "[tau-internal]: Watched agent {sender_label} status: {state} on {title}"
     ))
 }
 

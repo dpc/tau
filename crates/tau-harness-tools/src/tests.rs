@@ -1,5 +1,25 @@
 use super::*;
 
+/// The handler-bound parser retains the human diagnostic while redacting the
+/// rejected status arguments from durable error details.
+#[test]
+fn status_errors_redact_rejected_arguments() {
+    let arguments = CborValue::Map(vec![
+        (
+            CborValue::Text("state".to_owned()),
+            CborValue::Text("working".to_owned()),
+        ),
+        (
+            CborValue::Text("title".to_owned()),
+            CborValue::Text(String::new()),
+        ),
+    ]);
+    let (message, details) = status::parse_tool_args(&arguments).expect_err("invalid title");
+    assert_eq!(message, "status title must not be empty");
+    assert_eq!(details, None);
+    assert!(!message.contains("working"));
+}
+
 /// The status parser accepts only the closed state set and canonicalizes
 /// titles.
 #[test]

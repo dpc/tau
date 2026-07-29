@@ -4,10 +4,21 @@ use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::interception::AgentPublishCompletion;
 use crate::harness::{
     BackgroundCompletionPromptMode, PendingTool, RestoredCheckpointAuthority,
-    background_completion_prompt, extension_disconnected_background_tool_call_error_message,
+    agent_message_activation_class, background_completion_prompt,
+    extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
-    restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
+    restore_notice_prompt_for_elapsed, unavailable_tool_error_message, working_status_reminder,
 };
+
+/// Still-Working steering uses the concise generic wording approved for status
+/// lifecycle guidance.
+#[test]
+fn working_status_reminder_uses_approved_wording() {
+    assert_eq!(
+        working_status_reminder("STATUS-WATCH-4D8B"),
+        "Your `status` is set to `working` on \"STATUS-WATCH-4D8B\". Set it to `done` or `blocked` to finish or call `wait` when waiting for external events."
+    );
+}
 
 fn test_session_id(value: impl Into<String>) -> tau_proto::SessionId {
     tau_proto::SessionId::parse(value).expect("test session id")
@@ -27085,10 +27096,13 @@ fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
             .get_mut(&cid)
             .expect("agent")
             .work_status
-            .prepare_ack_notice_for_snapshot();
+            .begin_ack_activation(tau_proto::ObservationId::random());
         h.queue_status_acknowledgement_if_needed(&cid, call);
     }
     assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
+    assert!(h.agents[&cid].pending_prompts.iter().all(|prompt| {
+        prompt.text == "Reminder: when working on a task use `status` tool to acknowledge it."
+    }));
     h.agents
         .get_mut(&cid)
         .expect("agent")
@@ -27107,7 +27121,7 @@ fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
         .get_mut(&cid)
         .expect("agent")
         .work_status
-        .prepare_ack_notice_for_snapshot();
+        .begin_ack_activation(tau_proto::ObservationId::random());
     h.report_agent_work_status(
         &cid,
         crate::WorkStatusReport::new(
@@ -27119,13 +27133,153 @@ fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
     .expect("changed Working report");
     let changed_prompt = test_agent_prompt_id("ack-changed");
     h.prompt_tool_specs
-        .insert(changed_prompt.clone(), vec![status_spec]);
+        .insert(changed_prompt.clone(), vec![status_spec.clone()]);
     h.prompt_tool_call_prompts
         .insert("ack-changed-call".into(), changed_prompt);
     h.queue_status_acknowledgement_if_needed(&cid, "ack-changed-call");
     assert!(h.agents[&cid].pending_prompts.is_empty());
 
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Done,
+            "completed".to_owned(),
+        )
+        .expect("valid Done report"),
+    )
+    .expect("report Done");
+    for call in ["post-done-call-1", "post-done-call-2"] {
+        let prompt = test_agent_prompt_id(call);
+        h.prompt_tool_specs
+            .insert(prompt.clone(), vec![status_spec.clone()]);
+        h.prompt_tool_call_prompts.insert(call.into(), prompt);
+        h.queue_status_acknowledgement_if_needed(&cid, call);
+    }
+    assert!(
+        h.agents[&cid].pending_prompts.is_empty(),
+        "Done status must suppress same-activation acknowledgement repeats"
+    );
+
     h.shutdown().expect("shutdown");
+}
+
+/// Actual visible-user dispatch re-arms acknowledgement, while queued
+/// observation alone cannot disturb the active turn's delivered decision.
+#[test]
+fn status_acknowledgement_resets_at_addressed_work_dispatch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+    status.begin_ack_activation(tau_proto::ObservationId::random());
+    assert!(status.mark_ack_notice_delivered());
+    h.observe_activation_queued(&cid, tau_proto::ActivationKind::VisibleUser, None, None);
+    assert!(
+        !h.agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status
+            .mark_ack_notice_delivered(),
+        "queueing future work must not reset the active turn"
+    );
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .work_status
+        .retire_ack_notice_for_activation();
+    let mut prompt = PendingPrompt::human_ui("new addressed work".to_owned());
+    h.ensure_prompt_activation_observed(&cid, &mut prompt);
+    h.dispatch_prompt_for_agent(&cid, prompt)
+        .expect("dispatch visible user prompt");
+    assert!(
+        h.agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status
+            .mark_ack_notice_delivered(),
+        "actual visible-user dispatch must offer one acknowledgement"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A queued addressed activation coalesced with the preceding tool completion
+/// keeps the first reminder delivered when that same activation dispatches.
+#[test]
+fn coalesced_addressed_work_receives_one_status_reminder() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let mut prompt = PendingPrompt::human_ui("queued addressed work".to_owned());
+    h.ensure_prompt_activation_observed(&cid, &mut prompt);
+    let activation = prompt.activation_observation.expect("activation identity");
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .pending_prompts
+        .push_back(prompt.clone());
+    assert_eq!(h.ready_addressed_ack_activation(&cid), Some(activation));
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .work_status
+        .begin_ack_activation(activation);
+
+    let status_spec = shared_test_tool_spec("status");
+    for call in ["coalesced-call-1", "coalesced-call-2"] {
+        let prompt_id = test_agent_prompt_id(call);
+        h.prompt_tool_specs
+            .insert(prompt_id.clone(), vec![status_spec.clone()]);
+        h.prompt_tool_call_prompts
+            .insert(call.to_owned().into(), prompt_id);
+    }
+    h.queue_status_acknowledgement_if_needed(&cid, "coalesced-call-1");
+    assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
+    h.join_addressed_ack_activation(&cid, tau_proto::ObservationId::random());
+
+    h.dispatch_prompt_for_agent(&cid, prompt)
+        .expect("dispatch coalesced activation");
+    h.queue_status_acknowledgement_if_needed(&cid, "coalesced-call-2");
+    assert_eq!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .filter(|prompt| prompt.text.starts_with("Reminder: when working"))
+            .count(),
+        1,
+        "same activation must retain exactly one reminder"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Watch prompts activate like direct messages and final responses, while
+/// status/progress notifications remain isolated.
+#[test]
+fn agent_message_status_activation_class_covers_watch_prompt() {
+    let make = |kind| tau_proto::AgentMessageReceived {
+        message_id: "message-1".parse().expect("message id"),
+        sender_id: "sender".parse().expect("sender id"),
+        sender_session_id: None,
+        recipient_id: "recipient".parse().expect("recipient id"),
+        kind,
+        watch_turn_state: None,
+        watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
+        message: String::new(),
+    };
+    for kind in [
+        tau_proto::AgentMessageKind::Message,
+        tau_proto::AgentMessageKind::WatchResponse,
+        tau_proto::AgentMessageKind::WatchPrompt,
+    ] {
+        assert_eq!(
+            agent_message_activation_class(&make(kind)),
+            Some(crate::agent::AgentMessageActivationClass::OrdinaryAgentInput)
+        );
+    }
 }
 
 /// Isolated watched-agent progress remains model-visible without steering the

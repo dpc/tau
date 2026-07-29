@@ -34,6 +34,11 @@ distinct nonce.
   prompt, a direct agent message, and a watched child's final response. Each
   activation should cause at most one acknowledgement request for that work,
   not a reminder loop.
+* Steering and watched progress use concise, generic shapes:
+  `Reminder: when working on a task use \`status\` tool to acknowledge it.`,
+  `Your \`status\` is set to \`working\` on "<title>". Set it to \`done\` or
+  \`blocked\` to finish or call \`wait\` when waiting for external events.`,
+  and `Watched agent <agent-id> status: <state> on <title>`.
 
 ## Efficient live plan
 
@@ -89,9 +94,9 @@ Do not infer causality merely because two events are adjacent. Strong evidence
 is an acknowledgement directive source-linked to the watched event in a trace,
 or a controlled comparison where the directive appears only after that event.
 Verify that all progress arrives without watcher status steering, while the
-final response remains a distinct activating input. Note wording that renders
-every Working title update as “started working”; that wording can obscure the
-difference between initial transition and progress update.
+final response remains a distinct activating input. Require the same generic
+`status: <state> on <title>` shape for initial reports and title updates; do not
+expect sequencing language such as “started” or “updated”.
 
 ### Genuine activation paths
 
@@ -123,7 +128,6 @@ them:
 * Implementation-level empty and overlong-title errors may echo the requested
   state and title, which looks like current-state output even though no
   acceptance occurred.
-* Repeated Working status updates may all be rendered as “started working”.
 * A delegate that reports Done can receive repeated directives to return to
   Working after subsequent parent/delegate messages or lifecycle events. Bound
   the observation window and report the exact triggering sequence; do not keep

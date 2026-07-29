@@ -63,17 +63,26 @@ title of at most 160 UTF-8 bytes. The title is nonempty, trimmed, single-line,
 and contains no control characters. An `unreported` notification carries no
 title. Initial snapshots do not activate the watcher. Later status transitions
 are durable typed, isolated notifications. Prompt presentation escapes the title
-as untrusted visible metadata. The former content-free `WatchTurnState` schema
+as untrusted visible metadata and uses the generic shape
+`[tau-internal]: Watched agent <agent-id> status: <state> on <title>` without
+inferring start/update sequencing. The former content-free `WatchTurnState` schema
 remains accepted only for compatibility and replay; the harness no longer
 produces lifecycle notifications.
 
 The default `status` tool remains subject to each effective prompt's ordinary
-tool policy. An unreported ordinary work turn containing `status` receives an
-acknowledgement opportunity. An accepted Working report suppresses reminders
-across later routine tool-round snapshots, including after a changed Working
-title. Isolated watch-notification turns never request acknowledgement from the
-watcher. Done and Blocked mutate reported status only, never close a turn or
-install a wait, and a later activation does not silently change them.
+tool policy. Each dispatched visible-user or external-message activation and
+each ordinary agent-message activation (direct message, watched final response,
+or watched user prompt) containing `status` receives one acknowledgement
+opportunity. An accepted status report or delivered notice
+suppresses reminders across later routine tool-round snapshots. Isolated
+watch-notification turns never request acknowledgement from the watcher. Done
+and Blocked mutate reported status only, never close a turn or install a wait,
+and a later activation does not silently change them.
+Rejected `status` calls emit and persist their human-readable diagnostic with
+no `ToolError.details`; rejected state and title fields must not resemble an
+accepted or current status. This event-payload semantic was explicitly approved
+under
+[GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
 
 Successful no-tool finals while Working are durable candidate responses. Watch,
 delegated result, and detach projections remain withheld until the candidate's

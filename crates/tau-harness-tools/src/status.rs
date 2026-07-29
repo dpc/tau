@@ -35,11 +35,12 @@ pub(crate) fn handle_tool_call(
     let conversation_id = owner.conversation_id();
     let call = owner.call();
     let visible_tool_name = owner.visible_tool_name().clone();
-    let parsed = parse_args(&call.arguments);
+    let parsed = parse_tool_args(&call.arguments);
     match parsed.and_then(|report| {
         let phase = report.phase();
         let title = report.title().to_owned();
         host.report_work_status(owner, report)
+            .map_err(|message| (message, None))
             .map(|_| (phase, title))
     }) {
         Ok((phase, title)) => host.finish_tool_with_result(
@@ -50,16 +51,23 @@ pub(crate) fn handle_tool_call(
             format!("Status accepted: {} — {title}", phase_name(phase)),
             None,
         ),
-        Err(message) => host.finish_tool_with_error(
+        Err((message, details)) => host.finish_tool_with_error(
             conversation_id,
             call.id.clone(),
             visible_tool_name,
             call.tool_type,
             message,
-            Some(call.arguments.clone()),
+            details,
         ),
     }
     Ok(())
+}
+
+/// Parse a tool call while redacting rejected arguments from its error.
+pub(super) fn parse_tool_args(
+    arguments: &CborValue,
+) -> Result<WorkStatusReport, (String, Option<CborValue>)> {
+    parse_args(arguments).map_err(|message| (message, None))
 }
 
 /// Parse and canonicalize the closed status argument contract.

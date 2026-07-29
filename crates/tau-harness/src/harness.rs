@@ -4734,6 +4734,18 @@ impl Harness {
         );
     }
 
+    /// Join one dispatched addressed input to the current acknowledgement
+    /// batch.
+    pub(crate) fn join_addressed_ack_activation(
+        &mut self,
+        cid: &AgentId,
+        activation: tau_proto::ObservationId,
+    ) {
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.work_status.join_ack_activation(activation);
+        }
+    }
+
     /// Preallocate a canonical terminal identity and submit its classification
     /// without making either journal append control terminal publication.
     fn observe_tool_terminal(
@@ -6125,9 +6137,9 @@ impl Harness {
                 WorkingFinalDisposition::Challenge { title } => {
                     if let Some(agent) = self.agents.get_mut(cid) {
                         agent.work_status.record_final_challenge();
-                        agent.pending_prompts.push_back(PendingPrompt::internal(format!(
-                            "You are still marked as working on {title:?}. Continue the work, call `status` with state `done` or `blocked`, or use `wait` when waiting for input."
-                        )));
+                        agent
+                            .pending_prompts
+                            .push_back(PendingPrompt::internal(working_status_reminder(&title)));
                     }
                     self.continue_after_working_final_challenge(cid);
                 }
@@ -7586,12 +7598,32 @@ impl Harness {
                     .collect()
             })
             .unwrap_or_default();
-        if let Some(agent) = self.agents.get_mut(cid) {
+        let addressed_activation = self.agents.get_mut(cid).and_then(|agent| {
             agent.pending_replay_activation = false;
+            let addressed_activation = agent.pending_message_wakes.iter().find_map(|wake| {
+                (wake
+                    .node_id
+                    .is_some_and(|node_id| branch.contains(&node_id))
+                    && matches!(
+                        wake.source,
+                        crate::agent::PendingMessageWakeSource::MessageFact { .. }
+                            | crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                                activation_class:
+                                    crate::agent::AgentMessageActivationClass::OrdinaryAgentInput,
+                                ..
+                            }
+                    ))
+                .then_some(wake.activation_observation)
+                .flatten()
+            });
             agent.pending_message_wakes.retain(|wake| {
                 wake.node_id
                     .is_none_or(|node_id| !branch.contains(&node_id))
             });
+            addressed_activation
+        });
+        if let Some(activation) = addressed_activation {
+            self.join_addressed_ack_activation(cid, activation);
         }
     }
 
@@ -21135,6 +21167,7 @@ impl Harness {
             && let Some(agent) = self.agents.get_mut(cid)
         {
             agent.lifecycle_notification_only_turn = false;
+            agent.work_status.retire_ack_notice_for_activation();
         }
     }
 
@@ -23354,12 +23387,8 @@ impl Harness {
                     .is_some_and(|(_, _, resume)| resume.is_some()),
             ),
         );
-        let status_available = tool_specs.iter().any(|spec| spec.name.as_str() == "status");
         self.prompt_tool_specs
             .insert(agent_prompt_id.clone(), tool_specs);
-        if status_available && let Some(agent) = self.agents.get_mut(cid) {
-            agent.work_status.prepare_ack_notice_for_snapshot();
-        }
         let session_id = self
             .agents
             .get(cid)
@@ -26730,6 +26759,11 @@ impl Harness {
             false
         };
         if should_send {
+            if let Some(activation) = self.ready_addressed_ack_activation(cid)
+                && let Some(agent) = self.agents.get_mut(cid)
+            {
+                agent.work_status.begin_ack_activation(activation);
+            }
             self.queue_status_acknowledgement_if_needed(cid, completed_call_id);
             let pending_ui = self.pending_ui_compactions_after_wait.remove(cid);
             if let Some(pending) = pending_ui
@@ -26815,9 +26849,43 @@ impl Harness {
             return;
         }
         agent.pending_prompts.push_back(PendingPrompt::internal(
-            "[tau-internal]: Use `status` with state `working` and a short title to acknowledge this work."
-                .to_owned(),
+            "Reminder: when working on a task use `status` tool to acknowledge it.".to_owned(),
         ));
+    }
+
+    /// Return addressed work already selected to share the next continuation.
+    fn ready_addressed_ack_activation(&self, cid: &AgentId) -> Option<tau_proto::ObservationId> {
+        let agent = self.agents.get(cid)?;
+        if let Some(activation) = agent.pending_prompts.iter().find_map(|prompt| {
+            matches!(
+                prompt.activation_kind(),
+                tau_proto::ActivationKind::VisibleUser | tau_proto::ActivationKind::ExternalMessage
+            )
+            .then_some(prompt.activation_observation)
+            .flatten()
+        }) {
+            return Some(activation);
+        }
+        let ready_nodes: HashSet<_> = agent
+            .agent_id
+            .as_deref()
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .map(|tree| tree.branch_node_ids_from(agent.head).into_iter().collect())
+            .unwrap_or_default();
+        agent.pending_message_wakes.iter().find_map(|wake| {
+            (wake.node_id.is_some_and(|node| ready_nodes.contains(&node))
+                && matches!(
+                    wake.source,
+                    crate::agent::PendingMessageWakeSource::MessageFact { .. }
+                        | crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                            activation_class:
+                                crate::agent::AgentMessageActivationClass::OrdinaryAgentInput,
+                            ..
+                        }
+                ))
+            .then_some(wake.activation_observation)
+            .flatten()
+        })
     }
 
     fn has_pending_agent_message_wake(&self, cid: &AgentId) -> bool {
@@ -27419,6 +27487,13 @@ impl Harness {
 
         Ok(())
     }
+}
+
+/// Render the exact model-visible reminder for a final response left Working.
+fn working_status_reminder(title: &str) -> String {
+    format!(
+        "Your `status` is set to `working` on {title:?}. Set it to `done` or `blocked` to finish or call `wait` when waiting for external events."
+    )
 }
 
 /// Return the first duplicate alias in a simultaneously advertised effective

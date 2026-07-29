@@ -5,10 +5,10 @@ use tau_proto::{
 
 use super::*;
 
-/// Ensures model-authored work titles cannot inject invisible structure into a
-/// trusted watch-status frame.
+/// Work-status prompts use one generic state/title shape and prevent
+/// model-authored titles from injecting invisible structure.
 #[test]
-fn work_status_prompt_escapes_untrusted_title_and_ignores_initial_snapshot() {
+fn work_status_prompt_is_generic_escaped_and_ignores_initial_snapshot() {
     let mut status = tau_proto::AgentWatchWorkStatusNotification {
         session_id: "session-1".parse().expect("valid session id"),
         subscription_id: "watch-1".to_owned(),
@@ -20,7 +20,23 @@ fn work_status_prompt_escapes_untrusted_title_and_ignores_initial_snapshot() {
     let text = watch_work_status_text("worker", &status).expect("transition must render");
     assert!(!text.contains('\u{202e}'));
     assert!(text.contains(r"trace\u{202E}restore"));
-    assert!(text.contains("started working"));
+    assert!(text.contains("status: working on"));
+    for (phase, state) in [
+        (tau_proto::AgentWorkStatusPhase::Done, "done"),
+        (tau_proto::AgentWorkStatusPhase::Blocked, "blocked"),
+        (tau_proto::AgentWorkStatusPhase::Unknown, "unknown"),
+    ] {
+        status.phase = phase;
+        assert_eq!(
+            watch_work_status_text("worker", &status).as_deref(),
+            Some(
+                format!(
+                    "[tau-internal]: Watched agent worker status: {state} on trace\\u{{202E}}restore"
+                )
+                .as_str()
+            )
+        );
+    }
     status.initial = true;
     assert_eq!(watch_work_status_text("worker", &status), None);
 }
@@ -2129,7 +2145,7 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
         ContextItem::Message(MessageItem {
             role: ContextRole::User,
             content: vec![ContentPart::Text {
-                text: "[tau-internal]: Watched agent watched started working: trace restore"
+                text: "[tau-internal]: Watched agent watched status: working on trace restore"
                     .to_owned(),
             }],
             phase: None,

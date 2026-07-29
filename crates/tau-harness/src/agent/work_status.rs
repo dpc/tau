@@ -109,6 +109,8 @@ pub(crate) struct WorkStatus {
     epoch: u64,
     /// Whether the acknowledgement notice was already scheduled.
     ack_notice_delivered: bool,
+    /// Addressed-work activation currently owning the acknowledgement decision.
+    ack_activation: Option<tau_proto::ObservationId>,
     /// Number of committed nominal final responses challenged in this epoch.
     final_reminders_sent: u8,
     /// Wait duration completed during the current Working epoch.
@@ -129,6 +131,7 @@ impl Default for WorkStatus {
             title: None,
             epoch: 0,
             ack_notice_delivered: false,
+            ack_activation: None,
             final_reminders_sent: 0,
             completed_wait: Duration::ZERO,
             wait_started_at: None,
@@ -164,8 +167,8 @@ impl WorkStatus {
     ) -> bool {
         let WorkStatusReport { phase, title } = report;
         if self.phase == phase && self.title.as_deref() == Some(title.as_str()) {
+            self.ack_notice_delivered = true;
             if phase == AgentWorkStatusPhase::Working {
-                self.ack_notice_delivered = true;
                 self.synchronize_wait_at(wait_installed, now);
             }
             return false;
@@ -183,9 +186,7 @@ impl WorkStatus {
         }
         self.phase = phase;
         self.title = Some(title);
-        if phase == AgentWorkStatusPhase::Working {
-            self.ack_notice_delivered = true;
-        }
+        self.ack_notice_delivered = true;
         true
     }
 
@@ -322,16 +323,25 @@ impl WorkStatus {
         Some(WorkingFinalDecision::Challenge)
     }
 
-    /// Reset acknowledgement delivery unless this work is already acknowledged.
-    ///
-    /// Provider continuations may materialize several effective snapshots for
-    /// one reported Working epoch. Retain that acknowledgement across those
-    /// routine tool rounds instead of repeatedly steering the model back to
-    /// `status`.
-    pub(crate) fn prepare_ack_notice_for_snapshot(&mut self) {
-        if self.phase != AgentWorkStatusPhase::Working {
+    /// Offer one acknowledgement for a newly accepted work activation.
+    pub(crate) fn begin_ack_activation(&mut self, activation: tau_proto::ObservationId) {
+        if self.ack_activation != Some(activation) {
+            self.ack_activation = Some(activation);
             self.ack_notice_delivered = false;
         }
+    }
+
+    /// Join addressed input to an acknowledgement batch already being formed.
+    pub(crate) fn join_ack_activation(&mut self, activation: tau_proto::ObservationId) {
+        if self.ack_activation.is_none() {
+            self.begin_ack_activation(activation);
+        }
+    }
+
+    /// Retire any unused acknowledgement when its outer turn settles.
+    pub(crate) fn retire_ack_notice_for_activation(&mut self) {
+        self.ack_activation = None;
+        self.ack_notice_delivered = true;
     }
 
     /// Mark the acknowledgement as delivered unless it was already delivered.
