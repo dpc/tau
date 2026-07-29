@@ -1645,8 +1645,6 @@ impl Harness {
         cancellations.retain(|pending| pending.strong_count() > 0);
         cancellations.push(Arc::downgrade(&cancellation));
         thread::spawn(move || {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             let result = authenticate_external_agent_message_sender(&request, &cancellation)
                 .map_err(|_| "external message authentication failed".to_owned());
             let _ = tx.send(HarnessEvent::Command(

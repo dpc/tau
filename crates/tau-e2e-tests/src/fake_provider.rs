@@ -1562,8 +1562,6 @@ impl FakeState {
         // A timeout may win the deadline race and drop its receiver first. That
         // is already a terminal outcome, not a provider protocol failure.
         let _ = hold.cancel.send(prompt_id.clone());
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         let outcome = hold
             .join
             .join()
@@ -1602,8 +1600,6 @@ impl FakeState {
             let Some(hold) = self.holds.remove(&id) else {
                 continue;
             };
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             let outcome = hold
                 .join
                 .join()
@@ -1745,12 +1741,8 @@ impl FakeState {
                 else {
                     return Err(self.mismatch(cursor, "agent_start result lacks sub_agent_id"));
                 };
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: silent-map-err
                 let self_agent_id = tau_proto::AgentId::parse(self_agent_id)
                     .map_err(|_| self.mismatch(cursor, "agent_start returned invalid self id"))?;
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: silent-map-err
                 let child_agent_id = tau_proto::AgentId::parse(child_agent_id)
                     .map_err(|_| self.mismatch(cursor, "agent_start returned invalid child id"))?;
                 let CborValue::Map(entries) = &results[0].output.raw else {
@@ -2414,8 +2406,6 @@ impl ScenarioConfig {
 
 fn write_shared_trace(trace: &Arc<Mutex<File>>, message: &str) -> ClientResult<()> {
     let bounded = bounded_trace_message(message);
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let mut file = trace
         .lock()
         .map_err(|_| ClientError::handler("trace lock poisoned"))?;

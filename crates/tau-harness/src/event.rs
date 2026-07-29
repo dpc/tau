@@ -159,8 +159,6 @@ pub(crate) struct ChannelSink {
 
 impl ConnectionSink for ChannelSink {
     fn send(&mut self, routed: tau_core::RoutedFrame) -> Result<(), ConnectionSendError> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         self.tx
             .send(WriterCommand::Message(routed.frame))
             .map_err(|_| ConnectionSendError::new("writer closed"))

@@ -351,8 +351,6 @@ impl<'world> HunkApplier<'world> {
     }
 
     fn ensure_not_dir_for_delete(&mut self, abs: &Path) -> Result<(), ApplyPatchFailure> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         if self
             .world
             .is_dir(abs)
@@ -364,16 +362,12 @@ impl<'world> HunkApplier<'world> {
     }
 
     fn read_file_to_delete(&mut self, abs: &Path) -> Result<String, ApplyPatchFailure> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         self.world
             .read_to_string_limited(abs, MAX_SAFE_FILE_READ_BYTES)
             .map_err(|_| self.failure(format!("Failed to delete file {}", render_path(abs))))
     }
 
     fn remove_file_to_delete(&mut self, abs: &Path) -> Result<(), ApplyPatchFailure> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         self.world
             .remove_file(abs)
             .map_err(|_| self.failure(format!("Failed to delete file {}", render_path(abs))))
@@ -393,8 +387,6 @@ impl<'world> HunkApplier<'world> {
 
     fn remove_move_source(&mut self, source_abs: &Path) -> Result<(), ApplyPatchFailure> {
         let message = || format!("Failed to remove original {}", render_path(source_abs));
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         if self
             .world
             .is_dir(source_abs)
@@ -402,8 +394,6 @@ impl<'world> HunkApplier<'world> {
         {
             return Err(self.failure(message()));
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         self.world
             .remove_file(source_abs)
             .map_err(|_| self.failure(message()))

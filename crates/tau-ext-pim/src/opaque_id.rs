@@ -32,8 +32,6 @@ pub(crate) fn decode_component(value: &str) -> Result<String, String> {
             bytes.push(byte);
         }
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     String::from_utf8(bytes).map_err(|_| "opaque id is not valid UTF-8".to_owned())
 }
 

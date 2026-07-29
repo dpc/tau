@@ -1432,8 +1432,6 @@ impl ComponentLaunch {
             Self::Direct(_) => Ok(runtime_dir::HarnessInstanceId::mint()),
             Self::SpawnedInitialUiStdio => match transport {
                 Some(value) => {
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: silent-map-err
                     runtime_dir::HarnessInstanceId::parse(value.into_string().map_err(|_| {
                         std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,

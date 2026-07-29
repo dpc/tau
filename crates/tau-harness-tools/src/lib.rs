@@ -1439,8 +1439,6 @@ fn parse_discovery_args(arguments: &CborValue, agent_list: bool) -> Result<Disco
             ("group", CborValue::Text(value)) if agent_list => parsed.group = Some(value.clone()),
             ("state", CborValue::Text(value)) if agent_list => parsed.state = Some(value.clone()),
             ("limit", CborValue::Integer(value)) => {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: silent-map-err
                 let limit: u64 = (*value)
                     .try_into()
                     .map_err(|_| "`limit` must be a positive integer".to_owned())?;

@@ -304,8 +304,6 @@ async fn read_bounded_oauth_body(
     if bytes.len() > MAX_OAUTH_RESPONSE_BODY_BYTES as usize {
         return Err(OAuthBodyReadError::TooLarge);
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     String::from_utf8(bytes).map_err(|_| OAuthBodyReadError::InvalidEncoding)
 }
 

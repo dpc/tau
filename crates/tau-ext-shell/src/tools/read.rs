@@ -453,8 +453,6 @@ fn parse_required_range_line(range: &CborValue, key: &str) -> Result<usize, Tool
     match optional_argument_int_strict(range, key).map_err(ToolFailure::new)? {
         Some(value) if value < 1 => Err(ToolFailure::new(format!("{key} must be >= 1"))),
         Some(value) => {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             usize::try_from(value).map_err(|_| ToolFailure::new(format!("{key} is too large")))
         }
         None => Err(ToolFailure::new(format!(
@@ -486,8 +484,6 @@ fn parse_read_start_line(value: Option<i64>) -> Result<usize, ToolFailure> {
         None => Ok(1),
         Some(value) if value < 1 => Err(ToolFailure::new("start_line must be >= 1")),
         Some(value) => {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             usize::try_from(value).map_err(|_| ToolFailure::new("start_line is too large"))
         }
     }
@@ -503,8 +499,6 @@ fn parse_read_end_line(
     if value < 1 {
         return Err(ToolFailure::new("end_line must be >= 1"));
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let end_line = usize::try_from(value).map_err(|_| ToolFailure::new("end_line is too large"))?;
     validate_read_end_line(start_line, end_line)?;
     Ok(Some(end_line))

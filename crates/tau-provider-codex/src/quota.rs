@@ -104,8 +104,6 @@ pub fn fetch_usage(
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<FullQuotaSnapshot, UsageFetchError> {
     let url = format!("{}/wham/usage", base_url.trim_end_matches('/'));
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -150,8 +148,6 @@ pub fn fetch_usage(
             }
             bytes.extend_from_slice(&chunk);
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         String::from_utf8(bytes).map_err(|_| UsageFetchError::InvalidJson)
     })?;
     parse_full_usage_json(&body)
@@ -187,8 +183,6 @@ struct RawWindow {
 /// independently.
 pub fn parse_full_usage_json(body: &str) -> Result<FullQuotaSnapshot, UsageFetchError> {
     let payload: serde_json::Value =
-        // Preserve behavior at this site.
-        // ast-grep-ignore: silent-map-err
         serde_json::from_str(body).map_err(|_| UsageFetchError::InvalidJson)?;
     let payload = payload.as_object().ok_or(UsageFetchError::InvalidJson)?;
     let mut pools = Vec::new();

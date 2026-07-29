@@ -558,8 +558,6 @@ async fn list_recent_messages_page_async(
 }
 
 fn imap_since_date(days: u32) -> Result<String, String> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let now_days = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "internal_error: system clock is before Unix epoch".to_owned())?
@@ -865,8 +863,6 @@ async fn connect_smtp_for_auth(account: &RealAccount) -> Result<AsyncSmtpConnect
     let smtp = account.smtp_config()?;
     let client_id = ClientId::default();
     let tls_parameters = || {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         TlsParameters::builder(smtp.host.clone())
             .certificate_store(CertificateStore::WebpkiRoots)
             .build()
@@ -1001,15 +997,11 @@ async fn tls_connect(host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>,
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let provider = rustls::crypto::ring::default_provider();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let config = ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
         .map_err(|_| "tls_error: failed to configure TLS versions".to_owned())?
         .with_root_certificates(roots)
         .with_no_client_auth();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let server_name = ServerName::try_from(host.to_owned())
         .map_err(|_| "tls_error: invalid TLS server name".to_owned())?;
     TlsConnector::from(Arc::new(config))
@@ -1020,8 +1012,6 @@ async fn tls_connect(host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>,
 
 fn smtp_tls(host: &str, mode: TlsMode) -> Result<Tls, String> {
     let params = || {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         TlsParameters::builder(host.to_owned())
             .certificate_store(CertificateStore::WebpkiRoots)
             .build()
@@ -1330,8 +1320,6 @@ fn build_lettre_message(outgoing: &OutgoingMessage, message_id: &str) -> Result<
     if let Some(in_reply_to) = &outgoing.in_reply_to {
         builder = builder.in_reply_to(in_reply_to.clone());
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     builder
         .body(outgoing.body_text.clone())
         .map_err(|_| "smtp_error: failed to build email message".to_owned())
@@ -1347,15 +1335,11 @@ pub(crate) fn parse_mailbox_header(input: &str, field: &str) -> Result<Mailbox, 
         let (local, domain) = address
             .split_once('@')
             .ok_or_else(|| format!("invalid_input: invalid {field} address"))?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         let email = lettre::Address::new(local, domain)
             .map_err(|_| format!("invalid_input: invalid {field} address"))?;
         let name = (!name.is_empty()).then(|| name.to_owned());
         return Ok(Mailbox::new(name, email));
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     raw.parse()
         .map_err(|_| format!("invalid_input: invalid {field} address"))
 }

@@ -68,8 +68,6 @@ impl std::str::FromStr for EstimatedUsdPerMillion {
         let fraction = if fraction.is_empty() {
             0
         } else {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             let parsed = fraction
                 .parse::<u64>()
                 .map_err(|_| InvalidEstimatedUsdPerMillion)?;
@@ -145,8 +143,6 @@ impl<'de> Deserialize<'de> for EstimatedUsdPerMillion {
             where
                 E: de::Error,
             {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: silent-map-err
                 u64::try_from(value)
                     .map_err(|_| E::custom("estimated USD price must not be negative"))
                     .and_then(|value| self.visit_u64(value))

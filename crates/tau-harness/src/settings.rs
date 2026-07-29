@@ -611,8 +611,6 @@ pub(crate) fn parse_extension_cli_overrides_transport(
     let Some(value) = value else {
         return Ok(Vec::new());
     };
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let value = value.into_string().map_err(|_| {
         format!("{EXTENSION_CLI_OVERRIDES_ENV} internal transport must be valid UTF-8 JSON")
     })?;

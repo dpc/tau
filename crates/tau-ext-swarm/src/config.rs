@@ -162,8 +162,6 @@ impl ExtConfig {
         if 128 < self.endpoint.peer_id.len() {
             return Err("endpoint.peer_id exceeds 128 bytes".into());
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         let peer_id = EndpointId::from_str(&self.endpoint.peer_id)
             .map_err(|_| "endpoint.peer_id is not a valid Iroh EndpointId")?;
         let relay = self
@@ -174,8 +172,6 @@ impl ExtConfig {
                 if 2_048 < text.len() {
                     return Err(String::from("endpoint.relay_url exceeds 2048 bytes"));
                 }
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: silent-map-err
                 text.parse::<RelayUrl>()
                     .map_err(|_| String::from("endpoint.relay_url is invalid"))
             })
@@ -185,8 +181,6 @@ impl ExtConfig {
         }
         let mut direct = HashSet::new();
         for text in &self.endpoint.direct_addresses {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             let address = text
                 .parse::<SocketAddr>()
                 .map_err(|_| "endpoint.direct_addresses contains an invalid socket address")?;
@@ -357,8 +351,6 @@ fn system_hostname() -> Result<String, String> {
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(bytes.len());
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     std::str::from_utf8(&bytes[..len])
         .map(str::to_owned)
         .map_err(|_| "system hostname is not UTF-8".into())

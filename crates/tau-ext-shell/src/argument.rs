@@ -34,8 +34,6 @@ pub(crate) fn optional_argument_int_strict(
             .iter()
             .find_map(|(k, v)| match k {
                 CborValue::Text(k) if k == key => Some(match v {
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: silent-map-err
                     CborValue::Integer(n) => i128::from(*n).try_into().map(Some).map_err(|_| {
                         format!("argument `{key}` must fit in a signed 64-bit integer")
                     }),

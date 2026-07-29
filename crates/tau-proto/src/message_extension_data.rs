@@ -326,8 +326,6 @@ fn validate_value_structure(
 /// Validate the standalone encoded size of a materialized value.
 fn validate_encoded_extension_data(value: &CborValue) -> Result<(), MessageExtensionDataError> {
     let mut encoded = Vec::new();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     ciborium::into_writer(value, &mut encoded)
         .map_err(|_| MessageExtensionDataError::EncodedBytes)?;
     if encoded.len() > MESSAGE_EXTENSION_DATA_MAX_BYTES {

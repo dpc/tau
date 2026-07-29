@@ -290,8 +290,6 @@ impl BoundedStdoutRun {
     /// Waits briefly for stdout EOF after the direct child has exited.
     fn receive_stdout_after_child_exit(&mut self) -> Result<LimitedRead, String> {
         while self.stdout_result.is_none() {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             let event = self
                 .event_rx
                 .recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT)
@@ -308,8 +306,6 @@ impl BoundedStdoutRun {
     /// Waits briefly for the stdin writer after the direct child has exited.
     fn wait_for_stdin_after_child_exit(&mut self) -> Result<(), String> {
         while !self.stdin_done {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             let event = self
                 .event_rx
                 .recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT)
@@ -339,8 +335,6 @@ impl BoundedStdoutRun {
     /// Waits briefly for the child waiter after sending termination.
     fn wait_for_child_after_terminate(&mut self) -> Result<(), String> {
         while self.child_result.is_none() {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             let event = self
                 .event_rx
                 .recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT)

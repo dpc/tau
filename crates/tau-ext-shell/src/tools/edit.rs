@@ -601,8 +601,6 @@ fn parse_required_line(
             display_args,
             ToolFailure::new(format!("{key} must be at least 1")),
         )),
-        // Preserve behavior at this site.
-        // ast-grep-ignore: silent-map-err
         Some(n) => usize::try_from(n).map_err(|_| {
             with_display_args(
                 display_args,

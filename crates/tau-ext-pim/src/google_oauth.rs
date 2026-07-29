@@ -322,8 +322,6 @@ impl GoogleOauthClient {
 
     /// Invalidate any cached access token for an account.
     pub(crate) fn invalidate_access_token(&self, account_id: &str) -> Result<(), String> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         let mut cache = self
             .access_token_cache
             .lock()
@@ -389,8 +387,6 @@ impl GoogleOauthClient {
 
     fn cached_access_token(&self, account_id: &str) -> Result<Option<String>, String> {
         let now = Instant::now();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         let mut cache = self
             .access_token_cache
             .lock()
@@ -418,8 +414,6 @@ impl GoogleOauthClient {
         else {
             return Ok(());
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         let mut cache = self
             .access_token_cache
             .lock()
@@ -504,8 +498,6 @@ pub(crate) fn parse_installed_app_redirect_url(
     }
     let stored = validate_loopback_redirect_uri(stored_redirect_uri)?;
     let parsed =
-        // Preserve behavior at this site.
-        // ast-grep-ignore: silent-map-err
         Url::parse(pasted_url).map_err(|_| "Google redirect URL was not a valid URL".to_owned())?;
     validate_installed_app_redirect_target(&parsed, &stored)?;
 
@@ -601,8 +593,6 @@ fn set_unique_redirect_query_value(
 /// Validate a stored loopback redirect URI and return its parsed URL.
 pub(crate) fn validate_loopback_redirect_uri(redirect_uri: &str) -> Result<Url, String> {
     let parsed =
-        // Preserve behavior at this site.
-        // ast-grep-ignore: silent-map-err
         Url::parse(redirect_uri).map_err(|_| "Google redirect URI was invalid".to_owned())?;
     if parsed.scheme() != "http"
         || parsed.host_str() != Some("127.0.0.1")
@@ -838,8 +828,6 @@ fn read_limited_body(
     if MAX_JSON_BODY_BYTES < bytes.len() {
         return Err(format!("{context} was too large"));
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     String::from_utf8(bytes).map_err(|_| format!("{context} was not valid UTF-8"))
 }
 

@@ -233,8 +233,6 @@ where
     fn parse(&mut self) -> Result<RawGatewayArgs, String> {
         let mut raw = RawGatewayArgs::default();
         while let Some(arg) = self.args.next() {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             let arg = arg
                 .into_string()
                 .map_err(|_| "telegram gateway arguments must be valid UTF-8".to_owned())?;
@@ -267,8 +265,6 @@ where
 
     /// Return the next argument as this flag's value.
     fn next_value(&mut self, flag: &str) -> Result<String, String> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         self.args
             .next()
             .ok_or_else(|| format!("missing value for {flag}"))?
@@ -2044,8 +2040,6 @@ where
 
 /// Parse one signed integer command-line flag value.
 fn parse_i64_flag(flag: &str, value: &str) -> Result<i64, String> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     value
         .trim()
         .parse()
@@ -2054,8 +2048,6 @@ fn parse_i64_flag(flag: &str, value: &str) -> Result<i64, String> {
 
 /// Parse one unsigned integer command-line flag value.
 fn parse_u64_flag(flag: &str, value: &str) -> Result<u64, String> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     value
         .trim()
         .parse()

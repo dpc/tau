@@ -107,8 +107,6 @@ impl<T> DummyState<T> {
                 .pending_hold
                 .take()
                 .expect("finished hold remains present");
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             hold.join.join().map_err(|_| {
                 tau_client::ClientError::handler("hold_no_side_effect worker panicked")
             })?;
@@ -130,8 +128,6 @@ impl<T> DummyState<T> {
             .take()
             .expect("correlated hold remains present");
         let _ = hold.signal.send(HoldSignal::Cancel);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         hold.join
             .join()
             .map_err(|_| tau_client::ClientError::handler("hold_no_side_effect worker panicked"))

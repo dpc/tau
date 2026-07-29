@@ -134,8 +134,6 @@ fn read_file_secret(state_dir: &Path, name: &str) -> Result<Option<String>, Secr
     let path = state_dir.join("secrets").join(format!("{name}.yaml"));
     match std::fs::read(&path) {
         Ok(bytes) => {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             let text = String::from_utf8(bytes)
                 .map_err(|_| SecretsError::InvalidUtf8 { path: path.clone() })?;
             let value = text.trim().to_owned();

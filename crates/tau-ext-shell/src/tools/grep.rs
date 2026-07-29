@@ -194,8 +194,6 @@ fn optional_bounded_usize_argument(
         return Err(ToolFailure::new(format!("{name} must be >= {min}")));
     }
     let value =
-        // Preserve behavior at this site.
-        // ast-grep-ignore: silent-map-err
         usize::try_from(value).map_err(|_| ToolFailure::new(format!("{name} is too large")))?;
     if max < value {
         return Err(ToolFailure::new(format!("{name} must be <= {max}")));
@@ -261,8 +259,6 @@ fn run_ripgrep(
         let _ = stop_tx.send(());
     }
 
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let wait = wait_handle
         .join()
         .map_err(|_| ToolFailure::from("ripgrep waiter thread panicked".to_owned()))?;

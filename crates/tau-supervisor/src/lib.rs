@@ -520,8 +520,6 @@ fn kill_pidfd(pidfd: &OwnedFd) -> io::Result<()> {
 
 #[cfg(target_os = "linux")]
 fn pid_to_rustix_pid(pid: u32) -> io::Result<Pid> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let pid = i32::try_from(pid).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,

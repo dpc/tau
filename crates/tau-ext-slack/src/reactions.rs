@@ -857,8 +857,6 @@ impl HttpSlackClient {
             ReactionActionKind::Remove => "reactions.remove",
         };
         let url = format!("{}/{method}", cfg.api_base);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         let mut response = self
             .agent
             .post(&url)
@@ -886,8 +884,6 @@ impl HttpSlackClient {
         if 500 <= status {
             return Err(ReactionApiError::OutcomeUnknown);
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         let text = response
             .body_mut()
             .with_config()
@@ -895,8 +891,6 @@ impl HttpSlackClient {
             .read_to_string()
             .map_err(|_| ReactionApiError::OutcomeUnknown)?;
         let value: serde_json::Value =
-            // Preserve behavior at this site.
-            // ast-grep-ignore: silent-map-err
             serde_json::from_str(&text).map_err(|_| ReactionApiError::OutcomeUnknown)?;
         if (200..300).contains(&status)
             && value.get("ok").and_then(serde_json::Value::as_bool) == Some(true)

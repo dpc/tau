@@ -145,8 +145,6 @@ fn fetch_openrouter_models_from(
     url: &str,
     cache_path: Option<&Path>,
 ) -> Result<Vec<ChatCompletionsModel>, Box<dyn std::error::Error>> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -242,8 +240,6 @@ async fn read_openrouter_models(
         bytes.extend_from_slice(&chunk);
     }
     let parsed: OpenRouterModelsResponse =
-        // Preserve behavior at this site.
-        // ast-grep-ignore: silent-map-err
         serde_json::from_slice(&bytes).map_err(|_| OpenRouterDiscoveryError::InvalidResponse)?;
     Ok(parsed
         .data

@@ -205,8 +205,6 @@ impl RuntimeState {
         let Some(event) = event else {
             return Ok(None);
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         let mut outcome = tau_client::ToolTerminalOutcome::try_from(event).map_err(|_| {
             tau_client::ClientError::handler("PIM tool dispatch returned a non-terminal event")
         })?;

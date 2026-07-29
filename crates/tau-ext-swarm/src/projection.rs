@@ -242,8 +242,6 @@ impl SessionProjection {
         let wire = tau_swarm_client_api::SubmitSnapshotRequest {
             snapshot: self.snapshot().snapshot.into(),
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         bincode::encode_to_vec(wire, bincode::config::standard())
             .map(|encoded| encoded.len())
             .map_err(|_| "snapshot encoding failed")
@@ -296,8 +294,6 @@ fn change_encoded_len(change: SessionChange) -> Result<usize, &'static str> {
         sequence: 0,
         change: tau_swarm_client_api::v2::SessionChange::from(change),
     };
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     bincode::encode_to_vec(wire, bincode::config::standard())
         .map(|encoded| encoded.len())
         .map_err(|_| "change encoding failed")

@@ -757,8 +757,6 @@ fn project_keyed_facts(
         if let Event::ProviderResponseFinished(response) = &fact.event {
             for (index, item) in response.output_items.iter().enumerate() {
                 if let ContextItem::ToolCall(call) = item {
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: silent-map-err
                     let item_index = u32::try_from(index).map_err(|_| {
                         InspectError::Trace(crate::AgentTraceError::Projection(
                             "tool item index exceeds u32".into(),

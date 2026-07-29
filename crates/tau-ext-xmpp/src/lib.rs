@@ -1135,16 +1135,12 @@ impl XmppBridge for LiveXmppBridge {
     ) -> Result<String, String> {
         let tx = self.command_sender()?;
         let (response_tx, response_rx) = mpsc::channel();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         tx.send(XmppCommand::Register {
             agent_id: agent_id.clone(),
             room_localpart: room_localpart.map(ToOwned::to_owned),
             response: response_tx,
         })
         .map_err(|_| "xmpp worker is not running".to_owned())?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         response_rx
             .recv_timeout(COMMAND_TIMEOUT)
             .map_err(|_| "timed out waiting for xmpp registration".to_owned())?
@@ -1153,15 +1149,11 @@ impl XmppBridge for LiveXmppBridge {
     fn unregister_agent(&self, agent_id: &AgentId) -> Result<(), String> {
         let tx = self.command_sender()?;
         let (response_tx, response_rx) = mpsc::channel();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         tx.send(XmppCommand::Unregister {
             agent_id: agent_id.clone(),
             response: response_tx,
         })
         .map_err(|_| "xmpp worker is not running".to_owned())?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         response_rx
             .recv_timeout(COMMAND_TIMEOUT)
             .map_err(|_| "timed out waiting for xmpp unregister".to_owned())
@@ -1170,15 +1162,11 @@ impl XmppBridge for LiveXmppBridge {
     fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
         let tx = self.command_sender()?;
         let (response_tx, response_rx) = mpsc::channel();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         tx.send(XmppCommand::WaitReady {
             timeout,
             response: response_tx,
         })
         .map_err(|_| "xmpp worker is not running".to_owned())?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         response_rx
             .recv_timeout(timeout + READY_RESPONSE_SLACK)
             .map_err(|_| "timed out waiting for xmpp readiness".to_owned())?
@@ -1187,16 +1175,12 @@ impl XmppBridge for LiveXmppBridge {
     fn send_message(&self, agent_id: &AgentId, text: &str) -> Result<(), String> {
         let tx = self.command_sender()?;
         let (response_tx, response_rx) = mpsc::channel();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         tx.send(XmppCommand::Send {
             agent_id: agent_id.clone(),
             text: text.to_owned(),
             response: response_tx,
         })
         .map_err(|_| "xmpp worker is not running".to_owned())?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         response_rx
             .recv_timeout(COMMAND_TIMEOUT)
             .map_err(|_| "timed out waiting for xmpp send".to_owned())?
@@ -1219,15 +1203,11 @@ impl XmppBridge for LiveXmppBridge {
         let Some(worker_ref) = worker.as_ref() else {
             return Ok(());
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         worker_ref
             .done_rx
             .recv_timeout(timeout)
             .map_err(|_| "timed out waiting for xmpp worker shutdown".to_owned())?;
         let worker = worker.take().expect("worker checked above");
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         worker
             .join
             .join()
@@ -1698,8 +1678,6 @@ impl WorkerState {
                 }
             }
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         tokio::time::timeout(timeout, wait)
             .await
             .map_err(|_| {
@@ -1950,8 +1928,6 @@ impl WorkerState {
                 }
             }
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         tokio::time::timeout(STANZA_TIMEOUT, wait)
             .await
             .map_err(|_| {
@@ -2448,8 +2424,6 @@ async fn send_presence(client: &mut Client, presence: Presence) -> Result<(), St
 }
 
 async fn send_stanza_with_timeout(client: &mut Client, stanza: Stanza) -> Result<(), String> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     tokio::time::timeout(STANZA_TIMEOUT, client.send_stanza(stanza))
         .await
         .map_err(|_| "timed out sending xmpp stanza".to_owned())?
@@ -2462,8 +2436,6 @@ async fn send_stanza_until(
     stanza: Stanza,
     deadline: tokio::time::Instant,
 ) -> Result<(), String> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     tokio::time::timeout_at(deadline, client.send_stanza(stanza))
         .await
         .map_err(|_| "timed out sending xmpp stanza before shutdown deadline".to_owned())?

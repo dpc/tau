@@ -88,8 +88,6 @@ fn acquire_compact_transport(
             changed.notify_all();
         }
     }));
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let mut state = state
         .lock()
         .map_err(|_| LlmError::InvalidResponse("compact transport lock poisoned".to_owned()))?;
@@ -99,8 +97,6 @@ fn acquire_compact_transport(
             && state.wake_generation == generation
             && !abort.is_aborted()
         {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: silent-map-err
             state = changed.wait(state).map_err(|_| {
                 LlmError::InvalidResponse("compact transport lock poisoned".to_owned())
             })?;
@@ -497,30 +493,22 @@ fn send_compact_request_inner(
         })
         .map_err(LlmError::Io)?;
     let (result_slot, changed) = &*completion;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let mut slot = result_slot
         .lock()
         .map_err(|_| LlmError::InvalidResponse("compact completion lock poisoned".to_owned()))?;
     while slot.result.is_none() && !slot.canceled {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         slot = changed.wait(slot).map_err(|_| {
             LlmError::InvalidResponse("compact completion lock poisoned".to_owned())
         })?;
     }
     let canceled = slot.canceled || abort.is_aborted();
     drop(slot);
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     worker.join().map_err(|_| {
         LlmError::InvalidResponse("compact HTTP worker did not stop cleanly".to_owned())
     })?;
     if canceled {
         return Err(LlmError::Canceled);
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let mut slot = result_slot
         .lock()
         .map_err(|_| LlmError::InvalidResponse("compact completion lock poisoned".to_owned()))?;
@@ -646,8 +634,6 @@ async fn read_compact_body(
         }
         bytes.extend_from_slice(&chunk);
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     String::from_utf8(bytes)
         .map_err(|_| LlmError::InvalidResponse("compact response was not UTF-8".to_owned()))
 }

@@ -90,8 +90,6 @@ fn parse_find_limit(arguments: &CborValue) -> Result<usize, ToolFailure> {
     if value < 1 {
         return Err(ToolFailure::new("limit must be >= 1"));
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let limit = usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large"))?;
     if MAX_FIND_LIMIT < limit {
         return Err(ToolFailure::new(format!(

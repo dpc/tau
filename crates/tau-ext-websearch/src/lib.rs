@@ -449,8 +449,6 @@ fn dispatch_tool_invoke(
 /// Submit one internally constructed terminal outcome through the typed report
 /// helpers while retaining `Event` as the pure dispatch/test return type.
 fn report_terminal_detached(handle: &ClientHandle, event: Event) -> ClientResult<()> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let outcome = tau_client::ToolTerminalOutcome::try_from(event).map_err(|_| {
         tau_client::ClientError::handler("websearch dispatch returned a non-terminal tool event")
     })?;

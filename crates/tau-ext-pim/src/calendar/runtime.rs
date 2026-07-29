@@ -2212,8 +2212,6 @@ fn google_write_from_change(change: &CalendarChangeApproval) -> GoogleEventWrite
 fn parse_log_limit(argv: &[String]) -> Result<usize, String> {
     let limit = match argv {
         [] => CALENDAR_LOG_DEFAULT_LIMIT,
-        // Preserve behavior at this site.
-        // ast-grep-ignore: silent-map-err
         [value] if !value.trim().is_empty() => value
             .parse::<usize>()
             .map_err(|_| "log limit must be a positive integer".to_owned())?,
@@ -2748,12 +2746,8 @@ fn split_flattened_calendar_id(calendar_id: &str) -> Result<(String, String), St
     let Some((account, calendar)) = calendar_id.split_once('/') else {
         return Err("calendar must be a calendar id from calendar_list_calendars".to_owned());
     };
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let account = crate::opaque_id::decode_component(account)
         .map_err(|_| "calendar must be a calendar id from calendar_list_calendars".to_owned())?;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: silent-map-err
     let calendar = crate::opaque_id::decode_component(calendar)
         .map_err(|_| "calendar must be a calendar id from calendar_list_calendars".to_owned())?;
     if account.trim().is_empty() || calendar.trim().is_empty() {

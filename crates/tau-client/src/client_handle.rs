@@ -54,8 +54,6 @@ impl ClientHandle {
                 "tool_prefix changed after initial Configure; restart the extension to change tool identity",
             ));
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         self.tool_name_scope
             .set(scope)
             .map_err(|_| ClientError::handler("failed to establish tool-name scope"))
@@ -393,8 +391,6 @@ impl ClientHandle {
     }
 
     fn wait_for_ack(ack: mpsc::Receiver<ClientResult<()>>) -> ClientResult<()> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         ack.recv().map_err(|_| ClientError::WriterClosed)?
     }
 
@@ -739,21 +735,15 @@ impl ClientHandle {
             .expect("lock client handle sender")
             .take()
             .ok_or(ClientError::WriterClosed)?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         sender
             .send(WriterCommand::Shutdown(ack_sender))
             .map_err(|_| ClientError::WriterClosed)?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         ack_receiver.recv().map_err(|_| ClientError::WriterClosed)?
     }
 
     fn enqueue(&self, command: WriterCommand) -> ClientResult<()> {
         let sender = self.sender.lock().expect("lock client handle sender");
         let sender = sender.as_ref().ok_or(ClientError::WriterClosed)?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: silent-map-err
         sender.send(command).map_err(|_| ClientError::WriterClosed)
     }
 }
