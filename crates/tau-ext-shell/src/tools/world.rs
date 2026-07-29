@@ -45,6 +45,8 @@ impl ShellWorld {
     pub(crate) fn real() -> Self {
         Self {
             mode: WorldMode::Real,
+            // Preserve behavior at this site.
+            // ast-grep-ignore: silent-unwrap-or-else
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         }
     }
@@ -56,6 +58,8 @@ impl ShellWorld {
         arguments: &CborValue,
         config: Option<tau_vcr::VcrConfig>,
     ) -> Result<Self, ToolFailure> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-unwrap-or-else
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         Self::for_tool_in_dir(tool_name, call_id, arguments, config, cwd)
     }

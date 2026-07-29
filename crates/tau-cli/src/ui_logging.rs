@@ -15,6 +15,8 @@ const DEFAULT_FILTER: &str = "info";
 /// have their own logging setup. Uses `TAU_LOG` so startup can be
 /// traced across the parent CLI and harness child with one knob.
 pub fn init_stderr_from_env(default_filter: &str) {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     let filter = EnvFilter::try_from_env(UI_LOG_ENV)
         .or_else(|_| EnvFilter::try_new(default_filter))
         .unwrap_or_else(|_| EnvFilter::new("info"));
@@ -126,6 +128,8 @@ pub fn init(state_dir: &Path) -> io::Result<UiLogging> {
 /// in-memory sink so `tau --ephemeral` does not leave UI log artifacts on disk.
 /// The returned paths are display-only sentinels.
 pub fn init_ephemeral() -> UiLogging {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     let filter = EnvFilter::try_from_env(UI_LOG_ENV)
         .or_else(|_| EnvFilter::try_new(DEFAULT_FILTER))
         .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));

@@ -590,6 +590,8 @@ fn cbor_value_within_budget(value: &CborValue, char_budget: usize, node_budget: 
 }
 
 fn render_cbor_json(value: &CborValue) -> String {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     serde_json::to_string(&cbor_to_json_value(value)).unwrap_or_else(|_| format!("{value:?}"))
 }
 

@@ -1481,6 +1481,8 @@ fn run_component_with_internal_tools_and_initial_client(
         .map(|InitialClient::Stdio| InitialClientStartupErrorOutput::Stdout);
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let startup_started_at = Instant::now();
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-unwrap-or-else
         let current_exe = std::env::current_exe()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_owned());
@@ -1508,6 +1510,8 @@ fn run_component_with_internal_tools_and_initial_client(
         // SESSION_ID env var when spawning a daemon. Fallback to
         // `default_session_id()` covers a bare `tau component harness`
         // launched without a CLI in front of it.
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-unwrap-or-else
         let eager_session_id = std::env::var("TAU_SESSION_ID")
             .unwrap_or_else(|_| tau_session_inspect::default_session_id().to_owned());
         let session_status = match std::env::var("TAU_SESSION_STATUS").as_deref() {

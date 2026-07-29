@@ -1137,6 +1137,8 @@ pub(super) fn default_fs_state_dir() -> Result<PathBuf, String> {
     let tmp = std::env::var_os("TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned());
     Ok(tmp.join(format!("tau-ext-shell-dir-locks-{user}")))
 }

@@ -172,6 +172,8 @@ fn idle_summary_query_ids_are_namespaced_by_process_generation() {
 fn init_test_tracing() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-unwrap-or-else
         let filter = EnvFilter::try_from_env("TAU_LOG").unwrap_or_else(|_| EnvFilter::new("off"));
         // This call is intentionally best-effort; preserve the existing discarded
         // result. ast-grep-ignore: let-underscore-call

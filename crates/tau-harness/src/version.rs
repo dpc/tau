@@ -68,6 +68,8 @@ pub fn build_revision() -> String {
         };
     }
     let short = bytes.get(..7).unwrap_or(&bytes);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     std::str::from_utf8(short)
         .map(str::to_owned)
         .unwrap_or_else(|_| "unknown".to_owned())

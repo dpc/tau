@@ -659,6 +659,8 @@ impl ProcessGroupHandle {
     #[cfg(unix)]
     fn claim_foreground(child_id: u32) -> Result<Self, String> {
         let parent_pgid =
+            // Preserve behavior at this site.
+            // ast-grep-ignore: silent-unwrap-or-else
             current_foreground_process_group().unwrap_or_else(|_| nix::unistd::getpgrp());
         let child_pgid = ChildProcessGroupId::from_child_id(child_id);
         set_foreground_process_group(child_pgid.as_nix_pid())

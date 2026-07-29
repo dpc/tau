@@ -406,6 +406,8 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
         // can still override/filter with `TAU_LOG`.
         .env(
             "TAU_LOG",
+            // Preserve behavior at this site.
+            // ast-grep-ignore: silent-unwrap-or-else
             std::env::var("TAU_LOG").unwrap_or_else(|_| {
                 "tau_harness=info,tau_cli=info,provider-builtin=info".to_owned()
             }),

@@ -456,6 +456,8 @@ fn split_extension_argv(argv: Vec<String>) -> Option<(String, Vec<String>)> {
 }
 
 fn current_tau_executable() -> String {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     std::env::current_exe()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "tau".to_owned())

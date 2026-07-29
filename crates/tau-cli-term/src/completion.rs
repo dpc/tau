@@ -629,6 +629,8 @@ fn build_agent_mention_candidates(
 }
 
 fn cwd() -> PathBuf {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 

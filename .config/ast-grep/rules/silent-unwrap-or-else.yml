@@ -1,0 +1,31 @@
+id: silent-unwrap-or-else
+language: rust
+severity: warning
+rule:
+  all:
+    - pattern: $EXPR.unwrap_or_else(|_| $$$BODY)
+    - not:
+        inside:
+          stopBy: end
+          kind: mod_item
+          follows:
+            kind: attribute_item
+            regex: "cfg\\(test\\)"
+ignores:
+  - "crates/**/tests/**"
+  - "crates/**/benches/**"
+  - "benches/**"
+  - "tests/**"
+  - "examples/**"
+  - "tracehealth-api/tests/**"
+  - "tracehealth-api/benches/**"
+  - "**/test_utils.rs"
+  - "vendor/**"
+  - ".claude/worktrees/**"
+  - "target/**"
+  - "tracehealth-ios/**"
+message: |
+  Silent error swallow — .unwrap_or_else(|_| ...) discards the error and
+  returns a default value. If this operation fails, the bug will be invisible.
+  Log the error first with .inspect_err(|e| warn!(%e, "context")), or
+  propagate with ?.

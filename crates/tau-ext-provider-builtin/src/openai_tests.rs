@@ -932,10 +932,14 @@ fn retry_schedule_queue_enforces_shared_cooldown_without_cross_provider_herd() {
     let unaffected_due = epoch + Duration::from_secs(12);
     let mut queue = RetryScheduleQueue::default();
     for id in ["same-1", "same-2", "same-3", "same-4"] {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-unwrap-or-else
         queue
             .schedule(initial_due, None, scheduled_job(id, "limited"))
             .unwrap_or_else(|_| panic!("unique parked prompt"));
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     queue
         .schedule(unaffected_due, None, scheduled_job("peer", "healthy"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
@@ -995,6 +999,8 @@ fn retry_schedule_queue_release_is_provider_scoped_and_jittered() {
     let unrelated_due = epoch + Duration::from_secs(90);
     let mut queue = RetryScheduleQueue::default();
     for id in ["limited-1", "limited-2", "limited-3"] {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: silent-unwrap-or-else
         queue
             .schedule(
                 epoch,
@@ -1007,6 +1013,8 @@ fn retry_schedule_queue_release_is_provider_scoped_and_jittered() {
             .unwrap_or_else(|_| panic!("unique parked prompt"));
     }
     let independent_due = epoch + Duration::from_secs(45);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     queue
         .schedule(
             independent_due,
@@ -1014,6 +1022,8 @@ fn retry_schedule_queue_release_is_provider_scoped_and_jittered() {
             scheduled_job("independent", "limited"),
         )
         .unwrap_or_else(|_| panic!("unique independent backoff"));
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     queue
         .schedule(
             epoch,
@@ -1024,6 +1034,8 @@ fn retry_schedule_queue_release_is_provider_scoped_and_jittered() {
             scheduled_job("newer-generation", "limited"),
         )
         .unwrap_or_else(|_| panic!("unique newer-generation cooldown"));
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     queue
         .schedule(unrelated_due, None, scheduled_job("unrelated", "healthy"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
@@ -1484,9 +1496,13 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
 fn retry_schedule_queue_cancellation_is_prompt_scoped_and_immediate() {
     let due = Instant::now() + Duration::from_secs(86_400);
     let mut queue = RetryScheduleQueue::default();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     queue
         .schedule(due, None, scheduled_job("target", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     queue
         .schedule(due, None, scheduled_job("peer", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
@@ -1513,6 +1529,8 @@ fn retry_schedule_queue_cancellation_is_prompt_scoped_and_immediate() {
 fn retry_schedule_queue_timer_and_manual_release_are_mutually_exclusive() {
     let now = Instant::now();
     let mut timer_wins = RetryScheduleQueue::default();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     timer_wins
         .schedule(now, None, scheduled_job("timer-wins", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
@@ -1528,6 +1546,8 @@ fn retry_schedule_queue_timer_and_manual_release_are_mutually_exclusive() {
     );
 
     let mut manual_wins = RetryScheduleQueue::default();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     manual_wins
         .schedule(now, None, scheduled_job("manual-wins", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
@@ -1550,9 +1570,13 @@ fn retry_schedule_queue_timer_and_manual_release_are_mutually_exclusive() {
 fn retry_schedule_queue_double_manual_release_moves_exactly_one_job() {
     let due = Instant::now() + Duration::from_secs(60);
     let mut queue = RetryScheduleQueue::default();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     queue
         .schedule(due, None, scheduled_job("target", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     queue
         .schedule(due, None, scheduled_job("peer", "limited"))
         .unwrap_or_else(|_| panic!("unique parked prompt"));
@@ -2037,6 +2061,8 @@ fn prompt_workers_start_concurrently() {
 fn retry_schedule_rejects_duplicate_prompt_identity() {
     let mut queue = RetryScheduleQueue::default();
     let due = Instant::now() + Duration::from_secs(30);
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: silent-unwrap-or-else
     queue
         .schedule(due, None, scheduled_job("same", "limited"))
         .unwrap_or_else(|_| panic!("first owner"));
