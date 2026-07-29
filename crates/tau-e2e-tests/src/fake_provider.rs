@@ -1619,8 +1619,6 @@ impl FakeState {
     }
 
     fn v2(&self) -> ClientResult<&ScenarioV2> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match self.scenario.as_ref() {
             Some(ScenarioConfig::V2(scenario)) => Ok(scenario),
             _ => Err(ClientError::handler("V2 scenario not configured")),

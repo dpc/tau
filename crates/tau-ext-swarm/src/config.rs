@@ -197,8 +197,6 @@ impl ExtConfig {
         validate_reconnect(&self.reconnect)?;
         in_range("command_timeout_ms", self.command_timeout_ms, 1_000, 25_000)?;
         self.limits.validate()?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let hostname = match self.hostname {
             Some(hostname) => hostname,
             None => system_hostname()?,

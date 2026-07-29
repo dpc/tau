@@ -204,8 +204,6 @@ impl EventName {
         if !prefix.starts_with(cat) {
             return false;
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match prefix.as_bytes().get(cat.len()) {
             Some(&b'.') => self.call.as_str().starts_with(&prefix[cat.len() + 1..]),
             _ => false,

@@ -53,8 +53,6 @@ pub(crate) fn prompt_input_placeholder(
         Some((AgentNavigationState::ActiveAuto, false)) => vec![SpanTree::text(
             "This active-auto agent is idle. Use :resume to keep it in navigation.",
         )],
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         _ => match current_agent_id {
             Some(agent_id) => vec![
                 SpanTree::text("Write a message to "),

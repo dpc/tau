@@ -554,8 +554,6 @@ impl<State> ExtensionBuilder<State> {
 
     /// Converts any accumulated builder error into a result.
     pub(crate) fn validate(&mut self) -> ClientResult<()> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match self.error.take() {
             Some(error) => Err(error),
             None => Ok(()),

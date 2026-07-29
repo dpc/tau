@@ -225,8 +225,6 @@ fn restart_tool_config_success_returns_tool_result() {
 
     let result = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .find_map(|frame| match emitted_event(frame) {
             Some(Event::ToolResultReported(result)) => Some(result),
             _ => None,
@@ -254,8 +252,6 @@ fn restart_tool_config_error_overrides_random_exit() {
 
     let error = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .find_map(|frame| match emitted_event(frame) {
             Some(Event::ToolErrorReported(error)) => Some(error),
             _ => None,
@@ -379,8 +375,6 @@ fn hold_no_side_effect_rejects_wrong_cancel_and_concurrent_call() {
 
     let errors = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .filter_map(|frame| match emitted_event(frame) {
             Some(Event::ToolErrorReported(error)) => Some(error),
             _ => None,
@@ -388,8 +382,6 @@ fn hold_no_side_effect_rejects_wrong_cancel_and_concurrent_call() {
         .collect::<Vec<_>>();
     let cancellations = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .filter_map(|frame| match emitted_event(frame) {
             Some(Event::ToolCancelledReported(cancelled)) => Some(cancelled),
             _ => None,
@@ -423,8 +415,6 @@ fn hold_no_side_effect_deadline_is_terminal() {
     let frames = decode_output(output);
     let errors = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .filter_map(|frame| match emitted_event(frame) {
             Some(Event::ToolErrorReported(error)) => Some(error),
             _ => None,
@@ -448,8 +438,6 @@ fn restart_tool_result_preserves_originator() {
 
     let result = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .find_map(|frame| match emitted_event(frame) {
             Some(Event::ToolResultReported(result)) => Some(result),
             _ => None,
@@ -469,8 +457,6 @@ fn restart_tool_error_preserves_originator() {
 
     let error = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .find_map(|frame| match emitted_event(frame) {
             Some(Event::ToolErrorReported(error)) => Some(error),
             _ => None,
@@ -507,8 +493,6 @@ fn replayed_exit_restart_does_not_prevent_later_live_tool_result() {
 
     let results = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .filter_map(|frame| match emitted_event(frame) {
             Some(Event::ToolResultReported(result)) => Some(result),
             _ => None,

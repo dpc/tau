@@ -898,8 +898,6 @@ pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
         }
         let harness_path = sock.with_extension("");
 
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let metadata = match read_metadata(&harness_path) {
             Some(metadata) => metadata,
             None => continue,

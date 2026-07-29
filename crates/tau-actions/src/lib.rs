@@ -270,8 +270,6 @@ impl ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match self.usage.as_deref() {
             Some(usage) => write!(f, "{}\nusage: {usage}", self.message),
             None => f.write_str(&self.message),

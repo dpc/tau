@@ -875,8 +875,6 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
     )));
     let results: Vec<_> = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .filter_map(|frame| match emitted_event(frame) {
             Some(Event::ToolResultReported(result)) => Some(result),
             _ => None,
@@ -1185,8 +1183,6 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
 
     let results: Vec<_> = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .filter_map(|frame| match emitted_event(frame) {
             Some(Event::ToolResultReported(result)) => Some(&result.result),
             _ => None,
@@ -1424,8 +1420,6 @@ fn shell_timeout_kills_process_group_and_returns_result() {
 
     let result = frames
         .iter()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         .find_map(|frame| match emitted_event(frame) {
             Some(Event::ToolResultReported(result)) => Some(&result.result),
             _ => None,

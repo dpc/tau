@@ -196,8 +196,6 @@ fn short_built_time(time: &str) -> Option<String> {
 
 pub(crate) fn build_label_parts() -> (String, String) {
     let version = format!("tau {}", env!("CARGO_PKG_VERSION"));
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-option-verbose
     let build = match build_last_modified() {
         Some(date) => format!("({}, {})", build_revision(), date),
         None => format!("({})", build_revision()),

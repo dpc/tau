@@ -621,8 +621,6 @@ impl CodexRuntime {
         match result {
             Ok(result) => AttemptOutcome::Finished(Box::new(result)),
             Err(common::LlmError::Canceled) => AttemptOutcome::Canceled { progress },
-            // Preserve behavior at this site.
-            // ast-grep-ignore: match-option-verbose
             Err(error) => match error.retry_decision() {
                 Some(decision) => AttemptOutcome::Retry { decision, progress },
                 None => AttemptOutcome::Terminal {
@@ -664,8 +662,6 @@ impl CodexRuntime {
             Ok(Some(_)) => PrewarmOutcome::Installed,
             Ok(None) => PrewarmOutcome::SkippedBusy,
             Err(common::LlmError::Canceled) => PrewarmOutcome::Canceled,
-            // Preserve behavior at this site.
-            // ast-grep-ignore: match-option-verbose
             Err(error) => match error.retry_decision() {
                 Some(decision) => PrewarmOutcome::Retry(decision),
                 None => PrewarmOutcome::Terminal(CodexError(error)),
@@ -724,8 +720,6 @@ impl CodexRuntime {
             Ok(output) => output,
             Err(common::LlmError::Canceled) => return CompactOutcome::Canceled,
             Err(error) => {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: match-option-verbose
                 return match error.retry_decision() {
                     Some(decision) => CompactOutcome::Retry(decision),
                     None => CompactOutcome::Terminal(CodexError(error)),

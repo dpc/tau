@@ -1439,8 +1439,6 @@ fn parsed_address_list(address: Option<&ParsedAddress<'_>>) -> Vec<String> {
 }
 
 fn content_type_string(content_type: &mail_parser::ContentType<'_>) -> String {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-option-verbose
     match content_type.subtype() {
         Some(subtype) => format!("{}/{}", content_type.ctype(), subtype),
         None => content_type.ctype().to_owned(),

@@ -1261,8 +1261,6 @@ impl ProtocolMessageBytes {
     /// Construct a nonzero count observed by the protocol codec.
     #[must_use]
     pub const fn new(bytes: u64) -> Option<Self> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match std::num::NonZeroU64::new(bytes) {
             Some(bytes) => Some(Self { bytes }),
             None => None,

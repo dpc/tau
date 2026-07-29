@@ -567,8 +567,6 @@ impl ShellRuntime {
             );
             return Ok(());
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let cwd = match cmd.target_agent_id.as_ref() {
             Some(agent_id) => self.cwd_state.get_or_default(agent_id),
             None => self.cwd_state.process_default(),

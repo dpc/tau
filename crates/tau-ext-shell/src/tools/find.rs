@@ -154,8 +154,6 @@ fn collect_find_matches(
                 format!("failed to walk {}: {e}", search.path.display()),
             )
         })?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let file_type = match entry.file_type() {
             Some(file_type) => file_type,
             None => continue,

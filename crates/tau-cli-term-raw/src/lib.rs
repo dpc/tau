@@ -3768,8 +3768,6 @@ fn redraw_loop(
             target: "tau_cli_term_raw::frontend_progress",
             "redraw prepare started"
         );
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let pass = match prepare_redraw_pass(
             &state,
             &mut history_cache,

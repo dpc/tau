@@ -3973,8 +3973,6 @@ impl Harness {
             if skipped_extensions.contains(&ext_config.name) {
                 continue;
             }
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: match-option-verbose
             let kind = match ext_config.role.as_deref() {
                 Some("provider") => ClientKind::Provider,
                 _ => ClientKind::Tool,
@@ -9085,8 +9083,6 @@ impl Harness {
             );
             let specs =
                 self.gather_effective_tool_specs_for_role_model(&request.role, model.as_ref());
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: match-option-verbose
             match duplicate_model_visible_tool_name(&specs) {
                 Some(name) => (
                     None,
@@ -12984,8 +12980,6 @@ impl Harness {
 
     /// Propagate a fatal error raised synchronously by downstream publish work.
     fn take_pending_publish_error(&mut self) -> Result<(), HarnessError> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match self.pending_publish_error.take() {
             Some(error) => Err(error),
             None => Ok(()),
@@ -18204,8 +18198,6 @@ impl Harness {
             );
             return;
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let target_cid = match target_agent_id {
             Some(target) => self.runtime_agent_id_for_target_agent(Some(target.as_str())),
             None => Some(caller_cid.clone()),
@@ -18993,8 +18985,6 @@ impl Harness {
             tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
                 compaction_threshold,
             } => {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: match-option-verbose
                 next_role.compaction = Some(match compaction_threshold {
                     Some(threshold) => tau_config::settings::RoleCompaction::Threshold(threshold),
                     None => tau_config::settings::RoleCompaction::ProviderDefault,
@@ -23650,8 +23640,6 @@ impl Harness {
             .and_then(|agent_id| self.frozen_agent_discovery.get(agent_id))
             .map_or(&self.discovered_skills, |snapshot| &snapshot.skills);
         let role_group = self.role_group_name_for_role(role_name);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let template_context = match agent_id {
             Some(agent_id) => RolePromptTemplateContext::for_agent(role_name, agent_id),
             None => RolePromptTemplateContext::for_role(role_name),

@@ -142,8 +142,6 @@ fn provider_access_from_settings(
     scratch_state_dir: PathBuf,
     settings: Option<TestingSettings>,
 ) -> TestingProviderAccess {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-option-verbose
     let config = match settings {
         Some(settings) => TestingProviderConfig::Configured {
             allowed_profiles: settings.testing_providers.into_iter().collect(),

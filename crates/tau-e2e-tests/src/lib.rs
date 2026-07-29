@@ -221,8 +221,6 @@ fn e2e_model_from_env() -> Result<Option<String>, Box<dyn std::error::Error>> {
 }
 
 fn vcr_enabled(mode: Option<&str>, has_vcr_dir: bool) -> Result<bool, Box<dyn std::error::Error>> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-option-verbose
     let mode = match mode {
         Some(value) => tau_vcr::VcrMode::parse(value)?,
         None => tau_vcr::VcrMode::Off,

@@ -807,8 +807,6 @@ impl StreamState {
     }
 
     fn message_text_at(&self, output_index: usize) -> Option<&str> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match self.output_items.get(output_index) {
             Some(OutputItemAccumulator::Message(message)) => Some(&message.text),
             _ => None,
@@ -816,8 +814,6 @@ impl StreamState {
     }
 
     fn tool_arguments_at(&self, output_index: usize) -> Option<&str> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match self.output_items.get(output_index) {
             Some(OutputItemAccumulator::ToolCall(call)) => Some(&call.arguments_json),
             _ => None,

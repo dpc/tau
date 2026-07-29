@@ -21,8 +21,6 @@ impl EstimatedUsdPerMillion {
     /// Construct a whole-dollar price per million tokens when it fits.
     #[must_use]
     pub const fn checked_from_usd(usd: u64) -> Option<Self> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match usd.checked_mul(MICRO_USD_PER_USD) {
             Some(micro_usd) => Some(Self(micro_usd)),
             None => None,

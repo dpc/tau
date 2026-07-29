@@ -726,8 +726,6 @@ impl Extension {
 
 /// Validate the strict outbound emoji grammar without normalization.
 pub(super) fn valid_outbound_emoji(value: &str) -> bool {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-option-verbose
     let (base, tone) = match value.split_once("::") {
         Some((base, tone)) => (base, Some(tone)),
         None => (value, None),

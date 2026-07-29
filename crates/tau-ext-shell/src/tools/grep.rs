@@ -124,8 +124,6 @@ impl GrepOptions {
     }
 
     fn display_args(&self) -> String {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match self.glob.as_deref() {
             Some(g) => format!("{:?} in {} [{g}]", self.pattern, self.search_path()),
             None => format!("{:?} in {}", self.pattern, self.search_path()),

@@ -289,14 +289,10 @@ pub fn parse_ws_event(body: &str) -> Option<RollingQuotaObservation> {
     if event.kind != "codex.rate_limits" {
         return None;
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-option-verbose
     let metered_limit_id = match event.metered_limit_name.as_deref() {
         Some(raw) => Some(normalize_limit_id(raw)?),
         None => None,
     };
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-option-verbose
     let legacy_limit_id = match event.limit_name.as_deref() {
         Some(raw) => Some(normalize_limit_id(raw)?),
         None => None,

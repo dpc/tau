@@ -293,8 +293,6 @@ fn tool_call_preview(call: &ToolCallItem) -> String {
         }),
         _ => None,
     };
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-option-verbose
     match args {
         Some(args) if !args.is_empty() => format!("tool.call {} {args}", call.name),
         _ => format!("tool.call {}", call.name),

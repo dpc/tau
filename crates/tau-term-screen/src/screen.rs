@@ -341,8 +341,6 @@ impl Screen {
                 .map(|line| line.as_slice());
             let new = all_lines.get(line_idx).map(|line| line.as_slice());
             if old != new {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: match-option-verbose
                 changed_range = Some(match changed_range {
                     Some(range) => ChangedLineRange {
                         first_line: range.first_line,

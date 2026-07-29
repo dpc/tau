@@ -382,8 +382,6 @@ fn finish_attempt(
             response_bytes_received: state.response_bytes_received(),
         }),
         Err(LlmError::Canceled) => AttemptOutcome::Canceled { progress },
-        // Preserve behavior at this site.
-        // ast-grep-ignore: match-option-verbose
         Err(error) => match error.retry_decision() {
             Some(decision) => AttemptOutcome::Retryable { decision, progress },
             None => AttemptOutcome::Terminal(AttemptFailure {
@@ -504,8 +502,6 @@ impl StreamState {
             return Ok(());
         }
         self.semantic_progress = SemanticProgress::Parsed;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let output_index = match self.output_items.last() {
             Some(OutputItemAccumulator::Message(_)) => self.output_items.len() - 1,
             _ => self.output_items.len(),
@@ -531,8 +527,6 @@ impl StreamState {
             return Ok(());
         }
         self.semantic_progress = SemanticProgress::Parsed;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let output_index = match self.output_items.last() {
             Some(OutputItemAccumulator::Reasoning(_)) => self.output_items.len() - 1,
             _ => self.output_items.len(),
@@ -963,8 +957,6 @@ async fn chat_completions_stream_async(
             code,
             &body,
         );
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         return Err(match retry_after {
             Some(delay) => LlmError::HttpStatusHinted(code, body, delay),
             None => LlmError::HttpStatus(code, body),

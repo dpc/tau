@@ -262,8 +262,6 @@ impl TmuxEnvironment {
     fn new(common: DevTmuxCommonArgs, workdir: Option<PathBuf>) -> Result<Self, CliError> {
         let target = TmuxTarget::for_start(common)?;
         let scratch_root = target.scratch_root.clone();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         let (workdir, workdir_is_scratch) = match workdir {
             Some(path) => (absolute_path(path)?, false),
             None => (scratch_root.join("work"), true),

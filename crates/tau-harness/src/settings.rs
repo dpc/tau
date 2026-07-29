@@ -444,8 +444,6 @@ fn resolved_extension_entries(
         if !entry.enable {
             continue;
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: match-option-verbose
         match entry.into_enabled_extension_config(name.clone())? {
             Some(extension) => extensions.push(extension),
             None => push_optional_empty_command_diagnostic(name, &mut diagnostics),

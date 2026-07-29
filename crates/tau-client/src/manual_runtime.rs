@@ -169,8 +169,6 @@ impl fmt::Display for ExtensionDataRpcError {
             Self::Harness { kind, message } => write!(f, "{kind:?}: {message}"),
             Self::Timeout => f.write_str("extension data request timed out"),
             Self::InputClosed => f.write_str("harness input closed during extension data request"),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: match-option-verbose
             Self::Disconnect(disconnect) => match &disconnect.reason {
                 Some(reason) => write!(
                     f,

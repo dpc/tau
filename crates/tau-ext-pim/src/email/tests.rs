@@ -599,8 +599,6 @@ fn map_get<'a>(value: &'a CborValue, name: &str) -> Option<&'a CborValue> {
 }
 
 fn text_field(value: &CborValue, name: &str) -> Option<String> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: match-option-verbose
     match map_get(value, name) {
         Some(CborValue::Text(text)) => Some(text.clone()),
         _ => None,
