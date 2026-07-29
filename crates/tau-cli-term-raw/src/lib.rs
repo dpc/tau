@@ -4399,45 +4399,46 @@ fn full_render(
     let replay_start = full_render_replay_start(layout, plan, redraw_history_size);
     let replay_lines = &all_lines[replay_start..];
     let replay_total = replay_lines.len();
-
-    stdout.queue(terminal::BeginSynchronizedUpdate)?;
-    // Clear screen, home cursor, and clear scrollback. The scrollback is rebuilt
-    // by replaying the capped no-rubber suffix below. Disable autowrap while
-    // replaying so exact-width rows don't create phantom blank rows before the
-    // explicit CRLF between logical rows.
-    stdout.queue(Print("\x1b[2J\x1b[H\x1b[3J\x1b[?7l"))?;
-
-    // Output the capped logical suffix starting at the top. Overflow scrolls
-    // into scrollback naturally. Short content stays at the top, so the prompt
-    // sits directly under content instead of being bottom-pinned by rubber.
-    for (i, line) in replay_lines.iter().enumerate() {
-        if i > 0 {
-            stdout.queue(Print("\r\n"))?;
-        }
-        emit_styled_cells(stdout, line)?;
-    }
-
-    stdout.queue(Print("\x1b[?7h"))?;
-
-    // After outputting, the cursor is at the last content line. When content
-    // overflowed, that line is at the terminal bottom; otherwise it is at its
-    // natural row below the transcript.
-    let current_screen_row = if height <= replay_total {
-        height - 1
-    } else {
-        replay_total.saturating_sub(1)
-    };
-
     let effective_viewport_start =
         full_render_effective_viewport_start(layout, plan, height, redraw_history_size);
-    let cursor_screen_row = plan.cursor_row.saturating_sub(effective_viewport_start);
 
-    let up = current_screen_row.saturating_sub(cursor_screen_row);
-    if up > 0 {
-        stdout.queue(MoveUp(up as u16))?;
-    }
-    stdout.queue(MoveToColumn(layout.cursor_col as u16))?;
-    stdout.queue(terminal::EndSynchronizedUpdate)?;
+    with_synchronized_update(stdout, |stdout| {
+        // Clear screen, home cursor, and clear scrollback. The scrollback is rebuilt
+        // by replaying the capped no-rubber suffix below. Disable autowrap while
+        // replaying so exact-width rows don't create phantom blank rows before the
+        // explicit CRLF between logical rows.
+        stdout.queue(Print("\x1b[2J\x1b[H\x1b[3J\x1b[?7l"))?;
+
+        // Output the capped logical suffix starting at the top. Overflow scrolls
+        // into scrollback naturally. Short content stays at the top, so the prompt
+        // sits directly under content instead of being bottom-pinned by rubber.
+        for (i, line) in replay_lines.iter().enumerate() {
+            if i > 0 {
+                stdout.queue(Print("\r\n"))?;
+            }
+            emit_styled_cells(stdout, line)?;
+        }
+
+        stdout.queue(Print("\x1b[?7h"))?;
+
+        // After outputting, the cursor is at the last content line. When content
+        // overflowed, that line is at the terminal bottom; otherwise it is at its
+        // natural row below the transcript.
+        let current_screen_row = if height <= replay_total {
+            height - 1
+        } else {
+            replay_total.saturating_sub(1)
+        };
+
+        let cursor_screen_row = plan.cursor_row.saturating_sub(effective_viewport_start);
+
+        let up = current_screen_row.saturating_sub(cursor_screen_row);
+        if 0 < up {
+            stdout.queue(MoveUp(up as u16))?;
+        }
+        stdout.queue(MoveToColumn(layout.cursor_col as u16))?;
+        Ok(())
+    })?;
 
     // Track what's visible on the terminal so the next
     // screen.update() can diff correctly.
@@ -4447,6 +4448,22 @@ fn full_render(
     screen.reset_to(visible_lines, cursor_in_visible, layout.cursor_col);
 
     Ok(())
+}
+
+/// Queues one balanced synchronized-update transaction without flushing.
+///
+/// The closing marker is attempted even when `body` fails. If both operations
+/// fail, the body error takes precedence because it identifies the first loss
+/// of frame output.
+fn with_synchronized_update<W, F>(writer: &mut W, body: F) -> io::Result<()>
+where
+    W: Write,
+    F: FnOnce(&mut W) -> io::Result<()>,
+{
+    writer.queue(terminal::BeginSynchronizedUpdate)?;
+    let body_result = body(writer);
+    let end_result = writer.queue(terminal::EndSynchronizedUpdate).map(|_| ());
+    body_result.and(end_result)
 }
 
 // --- Helpers ---

@@ -76,6 +76,17 @@ Scrollback is cleared on resize because the old scrollback contains lines
 wrapped at the old terminal width. Replaying logical content produces correctly
 reflowed scrollback for the new width.
 
+Full renders are bracketed with DECSET 2026 synchronized-output markers. Ordinary
+differential and scrolling repaints are deliberately not bracketed: stock tmux
+3.7b redraws the whole pane when synchronization ends, which can amplify small
+updates rather than optimize them.
+
+tmux 3.7 first recognizes incoming mode 2026. tmux 3.7a has a final-redraw
+regression. Stock 3.7b fixes that regression, but it still leaks structural
+operations during the interval and redraws the whole pane at the end. For the
+intended full optimization, use current upstream containing commits `11b6e784`
+and `565db46`, or a later release containing both.
+
 ## When mutations need a full redraw
 
 The diff renderer (Path 1) only repaints the **visible viewport** — the last

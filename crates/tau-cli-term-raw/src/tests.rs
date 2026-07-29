@@ -2123,6 +2123,99 @@ fn terminal_side_effect_api_encodes_and_validates_osc_user_vars() {
     drop(term);
 }
 
+/// The redraw pipeline must emit pending raw side effects before a bracketed
+/// full frame while leaving ordinary differential and scrolling paths unmarked.
+#[test]
+fn redraw_pipeline_brackets_only_full_frames_after_pending_side_effects() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(40, 4, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    handle.invalidate_screen();
+    handle.redraw_sync();
+    let initial = buf.drain_bytes();
+    assert_eq!(
+        initial
+            .windows(8)
+            .filter(|window| *window == b"\x1b[?2026h")
+            .count(),
+        1
+    );
+    assert_eq!(
+        initial
+            .windows(8)
+            .filter(|window| *window == b"\x1b[?2026l")
+            .count(),
+        1
+    );
+
+    handle.set_buffer("diff".to_owned(), 4);
+    handle.redraw_sync();
+    let diff = buf.drain_bytes();
+    assert!(!diff.windows(8).any(|window| window == b"\x1b[?2026h"));
+    assert!(!diff.windows(8).any(|window| window == b"\x1b[?2026l"));
+
+    for line in 0..8 {
+        handle.print_output("scroll", format!("scroll {line}"));
+    }
+    handle.redraw_sync();
+    let scroll = buf.drain_bytes();
+    assert!(!scroll.windows(8).any(|window| window == b"\x1b[?2026h"));
+    assert!(!scroll.windows(8).any(|window| window == b"\x1b[?2026l"));
+
+    handle.print_osc1337_set_user_var("order", "before", false);
+    handle.invalidate_screen();
+    handle.redraw_sync();
+    let full = buf.drain_bytes();
+    let osc = full
+        .windows(b"\x1b]1337;SetUserVar=".len())
+        .position(|window| window == b"\x1b]1337;SetUserVar=")
+        .expect("pending OSC");
+    let begin = full
+        .windows(8)
+        .position(|window| window == b"\x1b[?2026h")
+        .expect("BSU");
+    let end = full
+        .windows(8)
+        .position(|window| window == b"\x1b[?2026l")
+        .expect("ESU");
+    assert!(osc < begin && begin < end);
+    assert_eq!(
+        full.windows(8)
+            .filter(|window| *window == b"\x1b[?2026h")
+            .count(),
+        1
+    );
+    assert_eq!(
+        full.windows(8)
+            .filter(|window| *window == b"\x1b[?2026l")
+            .count(),
+        1
+    );
+
+    drop(term);
+    let shutdown = buf.drain_bytes();
+    assert!(!shutdown.windows(8).any(|window| window == b"\x1b[?2026h"));
+    assert!(!shutdown.windows(8).any(|window| window == b"\x1b[?2026l"));
+}
+
+/// Resuming from an external command must invalidate the virtual terminal and
+/// select the synchronized full-render path on the next completed repaint.
+#[test]
+fn external_resume_selects_bracketed_full_render() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    handle.redraw_sync();
+    let _ = buf.drain_bytes();
+
+    term.resume_after_external().expect("virtual resume");
+    handle.redraw_sync();
+    let resumed = buf.drain_bytes();
+
+    assert!(resumed.windows(8).any(|window| window == b"\x1b[?2026h"));
+    assert!(resumed.windows(8).any(|window| window == b"\x1b[?2026l"));
+}
+
 /// Helper: get visible rows from a vt100 parser as trimmed strings.
 fn vt100_rows(parser: &vt100::Parser, cols: u16) -> Vec<String> {
     parser.screen().rows(0, cols).collect()
@@ -3117,6 +3210,117 @@ fn full_redraw_queues_without_flushing_mid_frame() {
         "small frame should write through once"
     );
     assert_eq!(writer.flush_count(), 1, "caller should flush once");
+}
+
+/// Records transaction bytes and injects failures at individual marker stages.
+#[derive(Default)]
+struct RecordingFailureWriter {
+    /// Bytes accepted by the writer.
+    bytes: Vec<u8>,
+    /// Number of explicit flush calls.
+    flushes: usize,
+    /// Whether writing the test body fails.
+    fail_body: bool,
+    /// Whether writing BSU fails.
+    fail_begin: bool,
+    /// Whether writing ESU fails.
+    fail_end: bool,
+}
+
+impl Write for RecordingFailureWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.fail_body && bytes == b"body" {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "body failed"));
+        }
+        if self.fail_begin && bytes == b"\x1b[?2026h" {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "BSU failed",
+            ));
+        }
+        if self.fail_end && bytes == b"\x1b[?2026l" {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "ESU failed"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flushes += 1;
+        Ok(())
+    }
+}
+
+/// Synchronized updates must encode one exact BSU/body/ESU sequence and leave
+/// flushing to the redraw-pass owner.
+#[test]
+fn synchronized_update_queues_exact_balanced_markers_without_flushing() {
+    let mut writer = RecordingFailureWriter::default();
+
+    with_synchronized_update(&mut writer, |writer| writer.write_all(b"body"))
+        .expect("synchronized update");
+
+    assert_eq!(writer.bytes, b"\x1b[?2026hbody\x1b[?2026l");
+    assert_eq!(writer.flushes, 0);
+}
+
+/// Failure to queue BSU must return immediately without invoking the body or
+/// attempting an unmatched ESU.
+#[test]
+fn synchronized_update_stops_after_begin_error() {
+    let mut writer = RecordingFailureWriter {
+        fail_begin: true,
+        ..RecordingFailureWriter::default()
+    };
+    let body_called = std::cell::Cell::new(false);
+
+    let error = with_synchronized_update(&mut writer, |writer| {
+        body_called.set(true);
+        writer.write_all(b"body")
+    })
+    .expect_err("BSU should fail");
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(!body_called.get());
+    assert!(writer.bytes.is_empty());
+}
+
+/// A recoverable body-write failure must still attempt ESU so a terminal does
+/// not remain synchronized until its implementation-specific timeout.
+#[test]
+fn synchronized_update_attempts_end_after_body_error() {
+    let mut writer = RecordingFailureWriter {
+        fail_body: true,
+        ..RecordingFailureWriter::default()
+    };
+
+    let error = with_synchronized_update(&mut writer, |writer| writer.write_all(b"body"))
+        .expect_err("body should fail");
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(writer.bytes, b"\x1b[?2026h\x1b[?2026l");
+}
+
+/// The body error must win when both the body and closing marker fail; when
+/// only ESU fails, its error must be returned to the caller.
+#[test]
+fn synchronized_update_preserves_error_precedence() {
+    let mut both_fail = RecordingFailureWriter {
+        fail_body: true,
+        fail_end: true,
+        ..RecordingFailureWriter::default()
+    };
+    let body_error = with_synchronized_update(&mut both_fail, |writer| writer.write_all(b"body"))
+        .expect_err("body and ESU should fail");
+    assert_eq!(body_error.kind(), io::ErrorKind::InvalidData);
+
+    let mut end_fails = RecordingFailureWriter {
+        fail_end: true,
+        ..RecordingFailureWriter::default()
+    };
+    let end_error = with_synchronized_update(&mut end_fails, |writer| writer.write_all(b"body"))
+        .expect_err("ESU should fail");
+    assert_eq!(end_error.kind(), io::ErrorKind::BrokenPipe);
 }
 
 /// Verify that notifications coalesce: while the redraw thread
