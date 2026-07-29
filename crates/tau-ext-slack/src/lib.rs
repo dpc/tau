@@ -5398,8 +5398,6 @@ fn agents_text(state: &State) -> String {
     let mut lines = vec!["Registered Tau agents:".to_owned()];
     let mut agents = state.registered_agents.iter().collect::<Vec<_>>();
     agents.sort();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: map-collect-loop
     for agent_id in agents {
         lines.push(format!("- {}", agent_designator(state, agent_id)));
     }

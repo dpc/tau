@@ -1067,8 +1067,6 @@ fn shell_completions_are_not_starved_by_ready_harness_input() {
             tool_started("host_echo", CborValue::Map(Vec::new())),
         ),
     ];
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: map-collect-loop
     for i in 0..200 {
         input.push(HarnessOutputMessage::deliver_live(
             UnixMicros::new(2 + i),

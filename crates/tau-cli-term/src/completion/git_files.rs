@@ -157,8 +157,6 @@ fn relative_path(base: &Path, target: &Path) -> Option<PathBuf> {
     for _ in common_len..base_components.len() {
         result.push("..");
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: map-collect-loop
     for component in &target_components[common_len..] {
         result.push(component);
     }

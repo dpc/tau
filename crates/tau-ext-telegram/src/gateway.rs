@@ -245,8 +245,6 @@ where
                         .push(parse_i64_flag(&arg, &self.next_value(&arg)?)?);
                 }
                 "--allowed-user-ids" => {
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: map-collect-loop
                     for value in self.next_value(&arg)?.split(',') {
                         raw.allowed_user_ids.push(parse_i64_flag(&arg, value)?);
                     }

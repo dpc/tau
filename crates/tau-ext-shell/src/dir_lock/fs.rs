@@ -837,8 +837,6 @@ impl FsRegistry {
     }
 
     fn add_manual(&mut self, owner: FsOwner, dirs: Vec<PathBuf>, now_ms: u64) {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: map-collect-loop
         for dir in dirs {
             self.manual.push(FsManualLock {
                 owner: owner.clone(),
