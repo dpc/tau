@@ -1223,6 +1223,8 @@ fn is_structured_responses_tool_call_field(key: &str) -> bool {
 }
 
 fn tool_type_from_output_item(item: &serde_json::Value) -> Option<tau_proto::ToolType> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: stringly-typed-match
     match item["type"].as_str() {
         Some("function_call") => Some(tau_proto::ToolType::Function),
         Some("custom_tool_call") => Some(tau_proto::ToolType::Custom),

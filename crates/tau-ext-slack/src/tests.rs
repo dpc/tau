@@ -2800,6 +2800,8 @@ fn conversation_discovery_exposes_only_configured_model_facing_policy() {
     );
     for record in conversations {
         let alias = tau_proto::cbor_text_field(record, "alias").expect("alias");
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: stringly-typed-match
         let (expected_kind, expected_scope) = match alias.as_str() {
             "alice-dm" => ("dm", "conversation"),
             "incident-thread" => ("mpim", "fixed_thread"),

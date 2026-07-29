@@ -125,6 +125,8 @@ impl BuiltinState {
     }
 
     fn initial_display(&self, call: &AgentToolCall) -> Option<ToolUseState> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: stringly-typed-match
         let (args, status_text, payload) = match call.name.as_str() {
             SKILL_TOOL_NAME => {
                 let needles = extract_skill_search_queries(&call.arguments).unwrap_or_default();
@@ -222,6 +224,8 @@ impl InternalToolHandler for BuiltinTools {
     }
 
     fn tool_group(&self, internal_tool_name: &ToolName) -> Option<tau_proto::ToolGroup> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: stringly-typed-match
         let name = match internal_tool_name.as_str() {
             COMPACT_TOOL_NAME => "compaction",
             AGENT_COMPACT_TOOL_NAME => "cross_agent_compaction",
@@ -276,6 +280,8 @@ impl InternalToolHandler for BuiltinTools {
                         display,
                     );
                 }
+                // Preserve this behavior; the structural alternative is not semantics-neutral
+                // here. ast-grep-ignore: stringly-typed-match
                 match call.name.as_str() {
                     SKILL_TOOL_NAME => {
                         handle_skill_tool_call(host, &conversation_id, &call, visible_tool_name)

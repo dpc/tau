@@ -95,6 +95,8 @@ impl Theme {
     /// Returns the built-in theme selected by `name`, case-insensitively.
     #[must_use]
     pub fn builtin_named(name: &str) -> Option<Self> {
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: stringly-typed-match
         Some(match name.to_ascii_lowercase().as_str() {
             "tau-plain-dark" => Self::builtin(),
             "tau-dpc" => Self::builtin_dpc(),

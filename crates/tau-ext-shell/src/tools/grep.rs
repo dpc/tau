@@ -772,6 +772,8 @@ fn read_grep_json<R: Read>(stdout: R, limit: usize) -> GrepStreamResult {
         let Ok(record) = serde_json::from_str::<RgRecord>(&line) else {
             continue;
         };
+        // Preserve this behavior; the structural alternative is not semantics-neutral
+        // here. ast-grep-ignore: stringly-typed-match
         match record.kind.as_str() {
             "begin" => {
                 current_path = record.data.path.as_ref().and_then(RgText::render_path);

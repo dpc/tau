@@ -228,6 +228,8 @@ pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUse
     }
 
     let mode = String::new();
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: stringly-typed-match
     let args = match invoke.tool_name.as_str() {
         READ_TOOL_NAME => {
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_default();

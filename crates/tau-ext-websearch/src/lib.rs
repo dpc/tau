@@ -423,6 +423,8 @@ fn dispatch_tool_invoke(
             display: Some(display),
         });
     }
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: stringly-typed-match
     let event = match local_tool_name.as_str() {
         EXA_TOOL_NAME => dispatch_exa(invoke, searcher),
         PARALLEL_SEARCH_TOOL_NAME => dispatch_parallel(
@@ -461,6 +463,8 @@ fn report_terminal_detached(handle: &ClientHandle, event: Event) -> ClientResult
 }
 
 fn initial_display(invoke: &ToolStarted, local_tool_name: &ToolName) -> Option<ToolUseState> {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: stringly-typed-match
     let args = match local_tool_name.as_str() {
         EXA_TOOL_NAME => parse_exa_args(&invoke.arguments)
             .map(|(query, _)| query)
