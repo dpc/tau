@@ -664,25 +664,19 @@ fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) 
         }
     }
     for i in search_start..=lines.len().saturating_sub(pattern.len()) {
-        let mut ok = true;
-        for (p_idx, pat) in pattern.iter().enumerate() {
-            if lines[i + p_idx].trim_end() != pat.trim_end() {
-                ok = false;
-                break;
-            }
-        }
+        let ok = pattern
+            .iter()
+            .enumerate()
+            .all(|(p_idx, pat)| lines[i + p_idx].trim_end() == pat.trim_end());
         if ok {
             return Some(i);
         }
     }
     for i in search_start..=lines.len().saturating_sub(pattern.len()) {
-        let mut ok = true;
-        for (p_idx, pat) in pattern.iter().enumerate() {
-            if lines[i + p_idx].trim() != pat.trim() {
-                ok = false;
-                break;
-            }
-        }
+        let ok = pattern
+            .iter()
+            .enumerate()
+            .all(|(p_idx, pat)| lines[i + p_idx].trim() == pat.trim());
         if ok {
             return Some(i);
         }
