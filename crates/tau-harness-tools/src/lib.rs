@@ -171,6 +171,7 @@ impl BuiltinState {
                 Ok(target) => (target.to_string(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
                 Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
             },
+            STATUS_TOOL_NAME => return status::initial_display(&call.arguments),
             _ => return None,
         };
         Some(ToolUseState {

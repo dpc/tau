@@ -10195,6 +10195,54 @@ fn tool_progress_display_replaces_live_state_generically() {
     assert!(vt.screen_contains(80, "waiting"));
 }
 
+/// A status call's semantic descriptor must survive the complete event-renderer
+/// lifecycle, with terminal duration and outcome retained in their real order.
+#[test]
+fn status_descriptor_survives_terminal_tool_result() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle_recorded_at(
+        &tool_started("status-call", "status", CborValue::Map(Vec::new())),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &initial_tool_progress(
+            "status-call",
+            "status",
+            "working: implementing renderer coverage",
+            "",
+        ),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &Event::ToolResult(ToolResult {
+            call_id: "status-call".into(),
+            tool_name: tau_proto::ToolName::new("status"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("Status accepted".into()),
+            provider_content: Vec::new(),
+            kind: tau_proto::ToolResultKind::Final,
+            display: Some(tau_proto::ToolUseState {
+                args: "working: implementing renderer coverage".into(),
+                status: tau_proto::ToolUseStatus::Success,
+                status_text: "ok".into(),
+                ..Default::default()
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(3_000_000),
+    );
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "status working: implementing renderer coverage 2s ok"));
+    assert!(!vt.screen_contains(80, "status 2s ok"));
+}
+
 /// A harness-originated message call must leave the live-progress set when its
 /// canonical provider terminal arrives, even when the renderer does not receive
 /// the redundant transient `tool.result` projection.
@@ -11288,6 +11336,40 @@ fn structured_counters_outrank_generic_info() {
 
     let header = priority_header_text(&render_tool_block(&cli_test_theme(), &display), 18);
     assert_eq!(header, "tool count: 1 2 ok");
+}
+
+/// A status descriptor keeps its state and title visible beside terminal
+/// duration/outcome metadata, and truncates the title before hiding the
+/// outcome.
+#[test]
+fn status_tool_header_preserves_semantics_and_outcome_when_narrow() {
+    use tau_proto::{ToolUseState, ToolUseStatus};
+
+    let mut display = render_tool_use_state(
+        "status",
+        &ToolUseState {
+            args: "working: implementing focused renderer regression coverage".into(),
+            status: ToolUseStatus::Success,
+            status_text: "ok".into(),
+            ..Default::default()
+        },
+    );
+    let status_index = display.suffixes.len().saturating_sub(1);
+    display.suffixes.insert(
+        status_index,
+        crate::tool_render::tool_duration_suffix(std::time::Duration::from_secs(12)),
+    );
+    let block = render_tool_block(&cli_test_theme(), &display);
+
+    assert_eq!(
+        priority_header_text(&block, 100),
+        "status working: implementing fo┄rer regression coverage 12s ok"
+    );
+    assert_eq!(
+        priority_header_text(&block, 25),
+        "status worki┄erage 12s ok"
+    );
+    assert_eq!(priority_header_text(&block, 9), "status ok");
 }
 
 /// Only a complete syntactically valid agent reference receives the agent-id

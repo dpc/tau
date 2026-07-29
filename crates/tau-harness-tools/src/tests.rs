@@ -75,6 +75,36 @@ fn status_title_validation_uses_utf8_bytes() {
     }
 }
 
+/// Status calls must expose both the requested state and canonical title in the
+/// generic display descriptor instead of degrading to a bare lifecycle row.
+#[test]
+fn status_initial_display_exposes_state_and_title() {
+    let call = AgentToolCall {
+        call_ref: None,
+        id: ToolCallId::from("status-call"),
+        name: ToolName::new(STATUS_TOOL_NAME),
+        tool_type: ToolType::Function,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("state".to_owned()),
+                CborValue::Text("blocked".to_owned()),
+            ),
+            (
+                CborValue::Text("title".to_owned()),
+                CborValue::Text("  waiting for maintainer input  ".to_owned()),
+            ),
+        ]),
+    };
+
+    let display = BuiltinState::default()
+        .initial_display(&call)
+        .expect("valid status display");
+
+    assert_eq!(display.args, "blocked: waiting for maintainer input");
+    assert_eq!(display.status, ToolUseStatus::InProgress);
+    assert_eq!(display.status_text, tau_proto::PROGRESS_INDICATOR_TEXT);
+}
+
 /// Hidden repository verification sub-skills must remain exact-query loadable
 /// through the same selection, bounded read, and body extraction path as the
 /// model-visible `skill` tool.

@@ -1,7 +1,10 @@
 //! Harness-owned semantic work-status tool.
 
 use tau_harness::{AgentOwnedInternalToolCall, HarnessError, InternalToolHost, WorkStatusReport};
-use tau_proto::{AgentWorkStatusPhase, BackgroundSupport, CborValue, ToolName, ToolSpec, ToolType};
+use tau_proto::{
+    AgentWorkStatusPhase, BackgroundSupport, CborValue, ToolName, ToolSpec, ToolType, ToolUseState,
+    ToolUseStatus,
+};
 
 /// Build the model-visible status tool contract.
 pub(crate) fn tool_spec() -> ToolSpec {
@@ -43,14 +46,17 @@ pub(crate) fn handle_tool_call(
             .map_err(|message| (message, None))
             .map(|_| (phase, title))
     }) {
-        Ok((phase, title)) => host.finish_tool_with_result(
-            conversation_id,
-            call.id.clone(),
-            visible_tool_name,
-            call.tool_type,
-            format!("Status accepted: {} — {title}", phase_name(phase)),
-            None,
-        ),
+        Ok((phase, title)) => {
+            let result = format!("Status accepted: {} — {title}", phase_name(phase));
+            host.finish_tool_with_cbor_result(
+                conversation_id,
+                call.id.clone(),
+                visible_tool_name,
+                call.tool_type,
+                CborValue::Text(result),
+                Some(display(phase, &title, ToolUseStatus::Success, "ok")),
+            );
+        }
         Err((message, details)) => host.finish_tool_with_error(
             conversation_id,
             call.id.clone(),
@@ -98,6 +104,32 @@ pub(crate) fn parse_args(arguments: &CborValue) -> Result<WorkStatusReport, Stri
         phase,
         title.ok_or_else(|| "status requires title".to_owned())?,
     )
+}
+
+/// Build the generic tool display that keeps a status report's semantic payload
+/// visible while the call is running and after it settles.
+pub(crate) fn initial_display(arguments: &CborValue) -> Option<ToolUseState> {
+    let report = parse_args(arguments).ok()?;
+    Some(display(
+        report.phase(),
+        report.title(),
+        ToolUseStatus::InProgress,
+        tau_proto::PROGRESS_INDICATOR_TEXT,
+    ))
+}
+
+fn display(
+    phase: AgentWorkStatusPhase,
+    title: &str,
+    status: ToolUseStatus,
+    status_text: &str,
+) -> ToolUseState {
+    ToolUseState {
+        args: format!("{}: {title}", phase_name(phase)),
+        status,
+        status_text: status_text.to_owned(),
+        ..Default::default()
+    }
 }
 
 fn phase_name(phase: AgentWorkStatusPhase) -> &'static str {
