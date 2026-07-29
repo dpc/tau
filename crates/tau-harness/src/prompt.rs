@@ -844,6 +844,8 @@ fn value_type_rank(value: &serde_json::Value) -> u8 {
 pub(crate) fn render_agents_context_message<'a>(
     files: impl IntoIterator<Item = &'a DiscoveredAgentsFile>,
 ) -> String {
+    use std::fmt::Write as _;
+
     let mut files = files.into_iter().peekable();
     let mut text = String::from(
         "# AGENTS.md instructions\n\n\
@@ -856,10 +858,11 @@ More specific files usually override broader ones.\n\n",
     }
 
     for file in files {
-        text.push_str(&format!(
-            "<AGENTS_FILE path=\"{}\">\n",
+        let _ = writeln!(
+            &mut text,
+            "<AGENTS_FILE path=\"{}\">",
             file.file_path.display()
-        ));
+        );
         text.push_str(&file.content);
         if !file.content.ends_with('\n') {
             text.push('\n');

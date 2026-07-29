@@ -3299,13 +3299,14 @@ fn format_list_message_line(message: BackendMessage, access: &str) -> String {
 }
 
 fn list_token(value: &str, max_chars: usize) -> String {
+    use std::fmt::Write as _;
     let value = safe_model_line(value, max_chars);
     let mut token = String::new();
     for ch in value.chars() {
         if ch.is_whitespace() || ch == '%' {
             let mut buf = [0; 4];
             for byte in ch.encode_utf8(&mut buf).as_bytes() {
-                token.push_str(&format!("%{byte:02X}"));
+                let _ = write!(&mut token, "%{byte:02X}");
             }
         } else {
             token.push(ch);

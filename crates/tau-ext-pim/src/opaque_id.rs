@@ -1,11 +1,12 @@
 /// Encode one opaque model-visible id component.
 pub(crate) fn encode_component(value: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::new();
     for byte in value.as_bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             out.push(*byte as char);
         } else {
-            out.push_str(&format!("%{byte:02X}"));
+            let _ = write!(&mut out, "%{byte:02X}");
         }
     }
     out

@@ -311,12 +311,14 @@ impl TimerRuntime {
             timer.fired_count = timer.fired_count.saturating_add(1);
             let ctx_id = timer_ctx_id(&timer.timer_id, timer.fired_count);
             let mut prompt = format!("Timer `{}` fired: {}", timer.timer_id, timer.message);
+            use std::fmt::Write as _;
             if let Some(interval) = timer.interval_seconds {
                 let missed = missed_intervals(timer.next_fire_at, now, interval);
                 if 1 < missed {
-                    prompt.push_str(&format!(
+                    let _ = write!(
+                        &mut prompt,
                         "\n\nCoalesced {missed} missed scheduled firings while Tau was unavailable."
-                    ));
+                    );
                 }
                 timer.next_fire_at =
                     add_seconds(timer.next_fire_at, interval.saturating_mul(missed));
