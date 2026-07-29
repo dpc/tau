@@ -770,11 +770,14 @@ fn dismiss_completion_menu_closes_rendered_completion_menu() {
 fn agent_fzf_output_parses_one_row() {
     assert_eq!(
         parse_agent_fzf_output(
-            b"agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tdisplay\n"
+            b"agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle\tdisplay\n"
                 .to_vec()
         )
         .expect("valid output"),
-        Some("agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00".to_owned())
+        Some(
+            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle"
+                .to_owned()
+        )
     );
     assert_eq!(
         parse_agent_fzf_output(Vec::new()).expect("empty output"),
@@ -795,9 +798,9 @@ fn agent_fzf_output_rejects_malformed_selection() {
 #[test]
 fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
     let rows = concat!(
-        "agent-a\tlive\tidle\tactive\tdurable\tavailable\tdev\t-\t1\t短名\t$.00\n",
-        "agent-longer\tlive\trunning\tactive_auto\tephemeral\tavailable\t研究員\tparent\t2\t-\t$2.1\n",
-        "é\tlive\tidle\tactive\tdurable\tavailable\tline\\nrole\t-\t3\twide界\t-\n",
+        "agent-a\tlive\tidle\tactive\tdurable\tavailable\tdev\t-\t1\t短名\t$.00\tworking\ttrace parser\n",
+        "agent-longer\tlive\trunning\tactive_auto\tephemeral\tavailable\t研究員\tparent\t2\t-\t$2.1\tblocked\tawait review\n",
+        "é\tlive\tidle\tactive\tdurable\tavailable\tline\\nrole\t-\t3\twide界\t-\tunreported\t-\n",
     );
     let formatted = format_agent_picker_rows(rows, 100).expect("valid picker rows");
     let formatted_rows = formatted.lines().collect::<Vec<_>>();
@@ -809,32 +812,25 @@ fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
         .collect::<Vec<_>>();
     assert_eq!(
         displays[0].split_whitespace().take(3).collect::<Vec<_>>(),
-        ["agent-a", "$.00", "dev"]
+        ["agent-a", "working", "$.00"]
     );
     assert_eq!(
         displays[1].split_whitespace().take(3).collect::<Vec<_>>(),
-        ["agent-longer", "$2.1", "研究員"]
+        ["agent-longer", "blocked", "$2.1"]
     );
     assert_eq!(
         displays[2].split_whitespace().take(3).collect::<Vec<_>>(),
-        ["é", "-", "line\\nrole"]
+        ["é", "unreported", "-"]
     );
     for display in &displays {
         assert!(display_width(display) <= 96);
     }
     let starts = displays
         .iter()
-        .map(|display| {
-            let role = display
-                .find(if display.contains("dev") {
-                    "dev"
-                } else if display.contains("研究員") {
-                    "研究員"
-                } else {
-                    "line\\nrole"
-                })
-                .expect("role");
-            display_width(&display[..role])
+        .zip(["trace parser", "await review", "-"])
+        .map(|(display, title)| {
+            let title = display.rfind(title).expect("title");
+            display_width(&display[..title])
         })
         .collect::<Vec<_>>();
     assert!(starts.windows(2).all(|pair| pair[0] == pair[1]));
@@ -848,19 +844,22 @@ fn agent_picker_rows_align_unicode_and_round_trip_source_rows() {
     }
 }
 
-/// Width pressure retains identity first and cost second, then omits later
-/// descriptive columns without changing the source row.
+/// Once width permits more than identity, status has second priority and lower
+/// descriptive columns remain omitted without changing the source row.
 #[test]
-fn agent_picker_cost_has_second_narrow_column_priority() {
-    let row = "agent-a\tlive\trunning\tactive\tdurable\tavailable\tengineer\t-\t1\tname\t$2.1\n";
-    let display = format_agent_picker_rows(row, 10)
+fn agent_picker_status_has_second_narrow_column_priority() {
+    let row = "agent-a\tlive\trunning\tactive\tdurable\tavailable\tengineer\t-\t1\tname\t$2.1\tworking\timplement picker\n";
+    let display = format_agent_picker_rows(row, 30)
         .expect("valid picker row")
         .trim_end()
         .rsplit_once('\t')
         .expect("display field")
         .1
         .to_owned();
-    assert_eq!(display, "a…  $…");
+    assert_eq!(
+        display.split_whitespace().collect::<Vec<_>>(),
+        ["agent-a", "working"]
+    );
 }
 
 /// Narrow terminals truncate safely to their display budget and progressively
@@ -868,10 +867,11 @@ fn agent_picker_cost_has_second_narrow_column_priority() {
 #[test]
 fn agent_picker_rows_fit_narrow_and_long_values() {
     let rows = format!(
-        "{}\tlive\trunning\tactive_auto\tdurable\tavailable\t{}\t-\t1\t{}\t$2.1\n",
+        "{}\tlive\trunning\tactive_auto\tdurable\tavailable\t{}\t-\t1\t{}\t$2.1\tworking\t{}\n",
         "agent-id-".repeat(20),
         "役割".repeat(30),
         "display-name-".repeat(20),
+        "status-title-".repeat(20),
     );
     for terminal_width in [1, 8, 20, 40, 80] {
         let formatted = format_agent_picker_rows(&rows, terminal_width).expect("valid picker row");
@@ -883,6 +883,33 @@ fn agent_picker_rows_fit_narrow_and_long_values() {
         assert!(
             display_width(display)
                 <= terminal_width.saturating_sub(AGENT_PICKER_FZF_DECORATION_WIDTH)
+        );
+    }
+}
+
+/// Practical-width pickers omit low-priority trailing columns before collapsing
+/// similar agent identities into indistinguishable prefixes.
+#[test]
+fn agent_picker_practical_width_preserves_similar_agent_ids() {
+    let rows = concat!(
+        "reviewer-security-a1\tlive\trunning\tactive\tdurable\tavailable\treviewer\t-\t1\tSecurity\t$1.2\tworking\treviewing trust boundary\n",
+        "reviewer-reliability-b2\tlive\trunning\tactive\tdurable\tavailable\treviewer\t-\t2\tReliability\t$1.3\tworking\treviewing retries\n",
+    );
+
+    for terminal_width in [50, 64] {
+        let formatted = format_agent_picker_rows(rows, terminal_width).expect("valid picker rows");
+        let displays = formatted
+            .lines()
+            .map(|row| row.rsplit_once('\t').expect("display field").1)
+            .collect::<Vec<_>>();
+
+        assert!(displays[0].starts_with("reviewer-securi"));
+        assert!(displays[1].starts_with("reviewer-relia"));
+        assert_ne!(displays[0], displays[1]);
+        assert!(
+            displays
+                .iter()
+                .all(|display| display_width(display) <= terminal_width - 4)
         );
     }
 }
@@ -915,24 +942,26 @@ fn agent_fzf_command_uses_bounded_direct_process() {
 test "$#" -eq 6
 test "$1" = "--height=100%"
 test "$2" = "$(printf '%s\t' '--delimiter=')"
-test "$3" = "--with-nth=12"
+test "$3" = "--with-nth=14"
 test "$4" = "--no-multi"
 test "$5" = "--no-hscroll"
 test "$6" = "--prompt=agent> "
 cat >/dev/null
-printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tdisplay\n'"#,
+printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle\tdisplay\n'"#,
     );
 
     let selected = run_agent_fzf_command_with_ownership(
         program.as_os_str(),
-        "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tdisplay\n",
+        "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle\tdisplay\n",
         ProcessOwnership::ProcessGroup,
     )
     .expect("fake fzf succeeds");
 
     assert_eq!(
         selected.as_deref(),
-        Some("agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00")
+        Some(
+            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle"
+        )
     );
 }
 

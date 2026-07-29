@@ -195,7 +195,8 @@ trusting adjacent metadata. See
 `get_session_agent_list` is a separate UI-only, requester-directed RPC for the
 harness's exact current session. Its bounded result contains membership
 lifecycle, persistence, runtime/navigation classification for live rows, and
-content-minimized creation labels. It is not an event and has no
+content-minimized creation labels. Live rows also carry their current canonical
+work-status phase/title snapshot. It is not an event and has no
 extension/external request path.
 
 Session discovery uses transient session-provider registration, complete atomic

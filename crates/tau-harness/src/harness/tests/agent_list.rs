@@ -1,6 +1,7 @@
 use super::*;
 
-/// Current and historical roster scopes preserve harness lifecycle authority.
+/// Current and historical roster scopes preserve harness lifecycle authority,
+/// expose canonical status only for live agents, and omit it once unavailable.
 #[test]
 fn roster_scope_distinguishes_live_and_unloaded_agents() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -20,6 +21,20 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
             ephemeral: false,
         }),
     );
+    harness
+        .agents
+        .get_mut(&cid)
+        .expect("live agent runtime")
+        .work_status
+        .report_at(
+            crate::agent::WorkStatusReport::new(
+                tau_proto::AgentWorkStatusPhase::Working,
+                "implement picker status".to_owned(),
+            )
+            .expect("valid work status"),
+            std::time::Instant::now(),
+            false,
+        );
 
     let current = harness
         .build_session_agent_list(
@@ -42,6 +57,13 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
         current[0].facts,
         tau_proto::SessionAgentFacts::Available { .. }
     ));
+    assert_eq!(
+        current[0].work_status,
+        Some(tau_proto::SessionAgentWorkStatus {
+            phase: tau_proto::AgentWorkStatusPhase::Working,
+            title: Some("implement picker status".to_owned()),
+        })
+    );
 
     harness
         .agents
@@ -60,6 +82,7 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
         stopping[0].lifecycle,
         tau_proto::SessionAgentLifecycle::Unavailable
     );
+    assert_eq!(stopping[0].work_status, None);
 
     harness.agents.remove(&cid);
     harness.publish_event(

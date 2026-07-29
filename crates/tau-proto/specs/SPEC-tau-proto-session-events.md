@@ -167,7 +167,10 @@ Row lifecycle is `live`, `unavailable`, or `unloaded`. Runtime and navigation
 fields are present only for `live`. Persistence is `durable` or `ephemeral`.
 Creation-fact status is `available`, `missing`, `invalid`, or `unreadable`;
 available rows may carry start time, parent, creation role, and an in-memory or
-checkpoint display-name projection.
+checkpoint display-name projection. Live rows also carry the harness's current
+runtime-only canonical work-status phase and title; rows without a live agent
+carry no work-status snapshot. Phase and title invariants follow
+[`SPEC-agent-watch`](../../../specs/SPEC-agent-watch.md).
 
 The fixed limits are 4096 distinct agents checked against the maintained
 membership cache before ids are cloned, 256 KiB for one first creation record,

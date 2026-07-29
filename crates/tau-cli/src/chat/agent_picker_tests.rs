@@ -14,19 +14,27 @@ fn auto_entry(runtime_state: tau_proto::AgentRuntimeState) -> tau_proto::Session
             role: "engineer".to_owned(),
             display_name: None,
         },
+        work_status: Some(tau_proto::SessionAgentWorkStatus {
+            phase: tau_proto::AgentWorkStatusPhase::Working,
+            title: Some("shipping picker status".to_owned()),
+        }),
     }
 }
 
-/// A running automatic agent that becomes idle between the displayed and fresh
-/// snapshots must preserve selection/draft in the active picker, while the
-/// all-agent picker must retain the initiating category and select it.
+/// A running automatic agent forwards canonical status into picker rows before
+/// fresh-snapshot revalidation; becoming idle preserves selection/draft in the
+/// active picker, while the all-agent picker retains its category and selects
+/// it.
 #[test]
 fn picker_orchestration_revalidates_with_initiating_category() {
     let running = auto_entry(tau_proto::AgentRuntimeState::Running);
     let idle = auto_entry(tau_proto::AgentRuntimeState::Idle);
     let pick_auto = |rows: &str| {
         assert!(rows.contains("auto\tlive\trunning\tactive_auto\t"));
-        assert!(rows.lines().all(|row| row.ends_with("\t$.00")));
+        assert!(
+            rows.lines()
+                .all(|row| row.ends_with("\t$.00\tworking\tshipping picker status"))
+        );
         Ok(Some("auto\tlive\trunning\tactive_auto".to_owned()))
     };
 

@@ -374,6 +374,8 @@ validated committed membership before runtime restoration and updated only after
 later membership commits. Restore/commit failures invalidate the projection.
 The RPC checks the entry limit before cloning ids, joins live runtime/navigation
 state, then adds shallow bounded creation facts.
+Live rows also copy phase and title directly from each agent's harness-owned
+runtime work status.
 Results are correlated and requester-directed; they are not events and never
 enter persistence, interception, publication, subscription replay, or extension
 delivery. Exact wire behavior is specified by

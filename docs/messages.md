@@ -201,11 +201,12 @@ members whose latest membership fact is unload. The directed
 all rows or one typed error without partial output.
 
 The result carries harness-authoritative lifecycle, runtime, shared navigation
-mode, and persistence plus bounded creation and display-name projections. It does
-not publish events, scan unrelated agent directories, load agents, or expose
-transcript content. Extension and non-UI client connections cannot request or
-observe the result. See [Listing and picking session agents](list-agents.md) for
-the command, filtering, and stable TSV contract.
+mode, and persistence plus bounded creation and display-name projections. Live
+rows also carry the current canonical self-reported work-status phase and title.
+It does not publish events, scan unrelated agent directories, load agents, or
+expose transcript content. Extension and non-UI client connections cannot request
+or observe the result. See [Listing and picking session agents](list-agents.md)
+for the command, filtering, and stable TSV contract.
 
 ## Extension data RPC
 

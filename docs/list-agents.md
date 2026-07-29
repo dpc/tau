@@ -61,14 +61,18 @@ column, which continues to show `running` or `idle` in both pickers.
 `fzf` is optional and is started only when a picker command or configured
 binding action is used. Tau passes rows through stdin and invokes `fzf` directly
 rather than interpolating agent data into a shell command. The picker shows
-agent id, cumulative estimated API cost, role, display name, lifecycle, and
-runtime in space-padded, terminal-width-aware columns. It uses the latest
+agent id, current work-status phase, cumulative estimated API cost, work-status
+title, role, display name, lifecycle, and runtime in space-padded,
+terminal-width-aware columns. Work status comes from the same fresh harness
+snapshot as roster membership and uses `unreported`, `working`, `done`,
+`blocked`, or `unknown`; an unreported title is `-`. The picker uses the latest
 canonical per-agent cost processed by the renderer: known zero is `$.00`,
 known nonzero values use the compact status-line format, and an unavailable
 value is `-`. Trailing columns are progressively omitted under width pressure,
-keeping identity before cost. Long values are truncated for display only; the
+keeping identity before status and cost. Long values are truncated for display only; the
 selected stable id and original escaped picker row remain unchanged. This
-picker-only cost field does not change the ten-field `tau agent list` output.
+picker-only cost/phase/title projection does not change the ten-field
+`tau agent list` output.
 
 Canceling the picker, a missing `fzf`, malformed output, or a stale selection
 does not change the selected transcript or prompt draft. Before switching, Tau

@@ -233,23 +233,47 @@ pub(crate) fn format_rows(agents: &[SessionAgentListEntry]) -> String {
     format_rows_with(agents, |_| None)
 }
 
-/// Formats picker rows with each agent's canonical runtime cost appended.
+/// Formats picker rows with canonical runtime cost and work status appended.
 pub(crate) fn format_picker_rows(
     agents: &[SessionAgentListEntry],
     cost_for_agent: impl Fn(&tau_proto::AgentId) -> Option<tau_proto::EstimatedApiCost>,
 ) -> String {
     format_rows_with(agents, |agent| {
-        Some(
-            cost_for_agent(&agent.agent_id)
-                .map(crate::estimated_cost::format_compact)
-                .unwrap_or_else(dash),
-        )
+        let cost = cost_for_agent(&agent.agent_id)
+            .map(crate::estimated_cost::format_compact)
+            .unwrap_or_else(dash);
+        let (phase, title) = agent.work_status.as_ref().map_or_else(
+            || ("-".to_owned(), dash()),
+            |status| {
+                (
+                    work_status_phase_name(status.phase).to_owned(),
+                    status
+                        .title
+                        .as_deref()
+                        .map(tau_proto::visible_escape_metadata)
+                        .as_deref()
+                        .map(crate::line_output::escape_field)
+                        .unwrap_or_else(dash),
+                )
+            },
+        );
+        Some(vec![cost, phase, title])
     })
+}
+
+fn work_status_phase_name(phase: tau_proto::AgentWorkStatusPhase) -> &'static str {
+    match phase {
+        tau_proto::AgentWorkStatusPhase::Unreported => "unreported",
+        tau_proto::AgentWorkStatusPhase::Working => "working",
+        tau_proto::AgentWorkStatusPhase::Done => "done",
+        tau_proto::AgentWorkStatusPhase::Blocked => "blocked",
+        tau_proto::AgentWorkStatusPhase::Unknown => "unknown",
+    }
 }
 
 fn format_rows_with(
     agents: &[SessionAgentListEntry],
-    extra_field: impl Fn(&SessionAgentListEntry) -> Option<String>,
+    extra_fields: impl Fn(&SessionAgentListEntry) -> Option<Vec<String>>,
 ) -> String {
     let mut output = String::new();
     for agent in agents {
@@ -280,8 +304,8 @@ fn format_rows_with(
                 .map(crate::line_output::escape_field)
                 .unwrap_or_else(dash),
         ];
-        if let Some(extra_field) = extra_field(agent) {
-            fields.push(extra_field);
+        if let Some(extra_fields) = extra_fields(agent) {
+            fields.extend(extra_fields);
         }
         output.push_str(&fields.join("\t"));
         output.push('\n');

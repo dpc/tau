@@ -688,6 +688,21 @@ pub struct SessionAgentListEntry {
     pub persistence: SessionAgentPersistence,
     /// Bounded creation-fact enrichment.
     pub facts: SessionAgentFacts,
+    /// Current runtime-only canonical work status, absent without a live agent.
+    pub work_status: Option<SessionAgentWorkStatus>,
+}
+
+/// Current canonical self-reported work status for one live roster agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionAgentWorkStatus {
+    /// Closed self-reported task phase.
+    pub phase: crate::AgentWorkStatusPhase,
+    /// Canonical model-authored title: absent for `Unreported`; otherwise
+    /// present, nonempty, trimmed, single-line, control-free, and at most
+    /// 160 UTF-8 bytes.
+    ///
+    /// Consumers must treat the title as untrusted display metadata.
+    pub title: Option<String>,
 }
 
 /// Stable whole-request error category for an agent-roster snapshot.

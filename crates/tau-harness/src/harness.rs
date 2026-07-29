@@ -9229,6 +9229,13 @@ impl Harness {
                     tau_proto::SessionAgentFacts::Unreadable
                 }
             };
+            let work_status = matches!(&lifecycle, tau_proto::SessionAgentLifecycle::Live { .. })
+                .then(|| self.agents.get(&agent_id))
+                .flatten()
+                .map(|agent| tau_proto::SessionAgentWorkStatus {
+                    phase: agent.work_status.phase(),
+                    title: agent.work_status.title().map(ToOwned::to_owned),
+                });
             agents.push(tau_proto::SessionAgentListEntry {
                 agent_id: agent_id.clone(),
                 lifecycle,
@@ -9242,6 +9249,7 @@ impl Harness {
                     tau_proto::SessionAgentPersistence::Durable
                 },
                 facts,
+                work_status,
             });
         }
         Ok(agents)

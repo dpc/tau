@@ -673,9 +673,12 @@ model access and are intentionally not durable.
 The directed agent-roster RPC is available only to same-user local connections
 classified as UI clients. It exposes stable ids, lifecycle/persistence,
 navigation/runtime status, creation role/parent/time, and a verified display
-name, including unloaded history when requested. These are content-minimized
-coordination labels, not secrets or an authorization boundary. Results go only to
-the requester and never enter event publication, interception, subscription
+name, including unloaded history when requested. Live rows also include the
+agent's current self-reported work-status phase and model-authored title. Titles
+are untrusted presentation metadata; the picker visibly escapes them before
+passing roster rows to the trusted local `fzf`. These are content-minimized
+coordination labels, not secrets or an authorization boundary. Results go only
+to the requester and never enter event publication, interception, subscription
 replay, or extension delivery.
 The harness seeds roster caches atomically from validated committed membership
 before runtime restoration and updates them only after later membership commits;

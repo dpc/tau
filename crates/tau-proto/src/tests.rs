@@ -2171,6 +2171,10 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
                         role: "engineer".to_owned(),
                         display_name: Some("Agent one".to_owned()),
                     },
+                    work_status: Some(SessionAgentWorkStatus {
+                        phase: AgentWorkStatusPhase::Working,
+                        title: Some("testing roster status".to_owned()),
+                    }),
                 }],
             },
         })),

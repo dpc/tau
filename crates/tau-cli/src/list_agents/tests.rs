@@ -29,6 +29,10 @@ fn entry(id: &str, parent: Option<&str>, started_at: Option<u64>) -> SessionAgen
             role: "engineer".to_owned(),
             display_name: None,
         },
+        work_status: Some(tau_proto::SessionAgentWorkStatus {
+            phase: tau_proto::AgentWorkStatusPhase::Unreported,
+            title: None,
+        }),
     }
 }
 
@@ -150,12 +154,16 @@ fn all_picker_includes_suspended_agents_and_preserves_runtime_column() {
     assert!(output.contains("auto-idle\tlive\tidle\tactive_auto\tdurable\tmissing\t"));
 }
 
-/// Picker rows distinguish known zero, known nonzero, and unavailable canonical
-/// per-agent costs without changing the shared roster fields or ordering.
+/// Picker rows append canonical cost and status facts without changing public
+/// roster fields or ordering.
 #[test]
-fn picker_rows_append_canonical_cost_states() {
+fn picker_rows_append_canonical_cost_and_status() {
     let zero = entry("zero", None, Some(1));
-    let nonzero = entry("nonzero", None, Some(2));
+    let mut nonzero = entry("nonzero", None, Some(2));
+    nonzero.work_status = Some(tau_proto::SessionAgentWorkStatus {
+        phase: tau_proto::AgentWorkStatusPhase::Working,
+        title: Some("verify \\ picker\u{202e} rows".to_owned()),
+    });
     let unavailable = entry("unavailable", None, Some(3));
     let output = format_picker_rows(&[zero, nonzero, unavailable], |agent_id| {
         match agent_id.as_str() {
@@ -166,11 +174,29 @@ fn picker_rows_append_canonical_cost_states() {
             _ => None,
         }
     });
-    let costs = output
+    let extras = output
         .lines()
-        .map(|row| row.rsplit_once('\t').expect("cost field").1)
+        .map(|row| row.split('\t').skip(10).collect::<Vec<_>>())
         .collect::<Vec<_>>();
-    assert_eq!(costs, ["$.00", "$2.1", "-"]);
+    assert_eq!(
+        extras,
+        [
+            vec!["$.00", "unreported", "-"],
+            vec!["$2.1", "working", r"verify \\ picker\\u{202E} rows"],
+            vec!["-", "unreported", "-"],
+        ]
+    );
+}
+
+/// Every closed canonical work-status phase maps to its stable picker spelling.
+#[test]
+fn picker_work_status_phase_names_are_complete() {
+    use tau_proto::AgentWorkStatusPhase::{Blocked, Done, Unknown, Unreported, Working};
+
+    assert_eq!(
+        [Unreported, Working, Done, Blocked, Unknown].map(work_status_phase_name),
+        ["unreported", "working", "done", "blocked", "unknown"]
+    );
 }
 
 /// Picker membership uses live lifecycle authority even when independent
