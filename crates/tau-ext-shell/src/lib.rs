@@ -2459,6 +2459,8 @@ fn push_skill_diagnostic_requests(
     messages: &mut Vec<HarnessInputMessage>,
     diagnostics: Vec<tau_skills::SkillDiagnostic>,
 ) {
+    // Preserve this behavior; the structural alternative is not semantics-neutral
+    // here. ast-grep-ignore: map-collect-loop-with-let
     for diagnostic in diagnostics {
         let (kind, level) = match diagnostic.kind {
             tau_skills::DiagnosticKind::Warning => ("warning", tau_proto::NoticeLevel::Info),
