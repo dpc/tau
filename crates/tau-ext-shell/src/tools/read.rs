@@ -303,16 +303,18 @@ impl SliceState {
             || String::from_utf8_lossy(line).into_owned(),
             ToOwned::to_owned,
         );
-        for (range, chunk) in self.ranges.iter().zip(self.chunks.iter_mut()) {
-            if range.contains_line(self.total_lines) {
+        self.ranges
+            .iter()
+            .zip(self.chunks.iter_mut())
+            .filter(|(range, _)| range.contains_line(self.total_lines))
+            .for_each(|(_, chunk)| {
                 chunk.push(ReadLine {
                     number: self.total_lines,
                     content: content.clone(),
                     invalid_utf8: valid_line.is_none(),
                     ending,
                 });
-            }
-        }
+            });
     }
 
     fn finish(self) -> ReadSlice {

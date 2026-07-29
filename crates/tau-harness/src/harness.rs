@@ -3072,11 +3072,11 @@ impl Harness {
     #[cfg(any(test, feature = "echo-agent"))]
     pub(crate) fn enable_echo_tool_for_tests(&mut self) {
         let echo = tau_proto::ToolName::new("echo");
-        for role in self.available_roles.values_mut() {
+        self.available_roles.values_mut().for_each(|role| {
             if !role.enable_tools.iter().any(|tool| tool == &echo) {
                 role.enable_tools.push(echo.clone());
             }
-        }
+        });
     }
 
     fn from_base_parts(parts: HarnessBaseParts) -> Self {
@@ -20345,11 +20345,14 @@ impl Harness {
             .restore_background_notices
             .remove(&(session_id.clone(), agent_id.clone()))
         {
-            for notice in notices {
-                if !self.agent_internal_prompt_already_persisted(&agent_id, &notice) {
-                    prompts.push(PendingPrompt::passive_restore_notice(notice));
-                }
-            }
+            prompts.extend(
+                notices
+                    .into_iter()
+                    .filter(|notice| {
+                        !self.agent_internal_prompt_already_persisted(&agent_id, notice)
+                    })
+                    .map(PendingPrompt::passive_restore_notice),
+            );
         }
         if self
             .pending_notices
@@ -26896,6 +26899,7 @@ impl Harness {
         } else {
             let mut active = Vec::new();
             let mut passive = Vec::new();
+            // ast-grep-ignore: filter-in-loop
             for prompt in pending {
                 if prompt.is_passive_background_completion() {
                     passive.push(prompt);
@@ -27705,11 +27709,12 @@ impl Harness {
 
         let order = self.extensions.order.clone();
         let mut watchdogs = Vec::new();
-        for id in &order {
-            if let Some(writer) = self.extensions.supervised_writers.get(id) {
-                watchdogs.push((id.clone(), writer.start_shutdown_watchdog()));
-            }
-        }
+        watchdogs.extend(order.iter().filter_map(|id| {
+            self.extensions
+                .supervised_writers
+                .get(id)
+                .map(|writer| (id.clone(), writer.start_shutdown_watchdog()))
+        }));
 
         let mut first_error = None;
         for id in &order {

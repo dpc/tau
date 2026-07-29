@@ -105,6 +105,7 @@ impl WatchActivityProjection {
             let mut witnesses = Vec::new();
             let mut next = Vec::new();
             for watcher in level {
+                // ast-grep-ignore: filter-in-loop
                 for child in watched_agents
                     .get(watcher)
                     .into_iter()

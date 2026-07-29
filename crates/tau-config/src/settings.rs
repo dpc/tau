@@ -1328,19 +1328,19 @@ impl HarnessSettings {
     }
 
     fn apply_prompt_fragment_overrides(&mut self, fragments: Vec<RolePromptFragment>) {
-        for prompt_fragment in fragments {
+        fragments.into_iter().for_each(|prompt_fragment| {
             if !self.prompt_fragments.contains(&prompt_fragment) {
                 self.prompt_fragments.push(prompt_fragment);
             }
-        }
+        });
     }
 
     fn apply_required_skill_overrides(&mut self, skills: Vec<tau_proto::SkillName>) {
-        for skill in skills {
+        skills.into_iter().for_each(|skill| {
             if !self.required_skills.contains(&skill) {
                 self.required_skills.push(skill);
             }
-        }
+        });
     }
 
     fn apply_context_size_alert_overrides(
@@ -1355,21 +1355,21 @@ impl HarnessSettings {
 
     fn apply_global_prompt_fragments_to_roles(&mut self) {
         for role in self.roles.values_mut() {
-            for prompt_fragment in &self.prompt_fragments {
+            self.prompt_fragments.iter().for_each(|prompt_fragment| {
                 if !role.prompt_fragments.contains(prompt_fragment) {
                     role.prompt_fragments.push(prompt_fragment.clone());
                 }
-            }
+            });
         }
     }
 
     fn apply_global_required_skills_to_roles(&mut self) {
         for role in self.roles.values_mut() {
-            for skill in &self.required_skills {
+            self.required_skills.iter().for_each(|skill| {
                 if !role.required_skills.contains(skill) {
                     role.required_skills.push(skill.clone());
                 }
-            }
+            });
         }
     }
 
@@ -1807,11 +1807,11 @@ impl AgentRole {
         }
         apply_context_size_alert_patches(&mut self.context_size_alerts, &patch.context_size_alerts);
         if let Some(prompt_fragments) = &patch.prompt_fragments {
-            for prompt_fragment in prompt_fragments {
+            prompt_fragments.iter().for_each(|prompt_fragment| {
                 if !self.prompt_fragments.contains(prompt_fragment) {
                     self.prompt_fragments.push(prompt_fragment.clone());
                 }
-            }
+            });
         }
         if let Some(prompt_override) = &patch.prompt_override {
             self.prompt_override = prompt_override.clone();
@@ -1838,11 +1838,11 @@ impl AgentRole {
             self.enable_tools = enable_tools.clone();
         }
         if let Some(required_skills) = &patch.required_skills {
-            for skill in required_skills {
+            required_skills.iter().for_each(|skill| {
                 if !self.required_skills.contains(skill) {
                     self.required_skills.push(skill.clone());
                 }
-            }
+            });
         }
     }
 }

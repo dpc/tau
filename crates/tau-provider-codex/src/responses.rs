@@ -2231,13 +2231,11 @@ fn update_raw_assistant_message(
 
 fn raw_message_text_parts(item: &serde_json::Value) -> Option<Vec<&str>> {
     let content = item.get("content")?.as_array()?;
-    let mut parts = Vec::new();
-    for part in content {
-        if is_responses_text_part(part) {
-            parts.push(part.get("text")?.as_str()?);
-        }
-    }
-    Some(parts)
+    content
+        .iter()
+        .filter(|part| is_responses_text_part(part))
+        .map(|part| part.get("text")?.as_str())
+        .collect()
 }
 
 fn raw_message_text_matches(item: &serde_json::Value, text_parts: &[&str]) -> bool {

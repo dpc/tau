@@ -194,6 +194,7 @@ impl CompletionData {
             let needle = args[0].to_lowercase();
             let mut prefix_matches = Vec::new();
             let mut substr_matches = Vec::new();
+            // ast-grep-ignore: filter-in-loop
             for (item, value_lower) in indexed.iter() {
                 if needle.is_empty() || value_lower.starts_with(&needle) {
                     prefix_matches.push(item.clone());

@@ -1,6 +1,7 @@
 /// Encode one opaque model-visible id component.
 pub(crate) fn encode_component(value: &str) -> String {
     let mut out = String::new();
+    // ast-grep-ignore: filter-in-loop
     for byte in value.as_bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             out.push(*byte as char);

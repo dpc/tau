@@ -993,20 +993,20 @@ fn project_keyed_facts(
         .collect::<HashSet<_>>();
     for fact in &facts {
         if let Event::ProviderResponseFinished(response) = &fact.event {
-            for (item_index, item) in response.output_items.iter().enumerate() {
-                if let Some(projection) =
-                    semantic::project_provider_item(item, &response.agent_prompt_id, mode)
-                {
-                    records.push(KeyedRecord {
-                        recorded_at: fact.at,
-                        agent_id: fact.agent_id.clone(),
-                        journal_seq: fact.seq,
-                        item_index: Some(item_index as u64),
-                        tie_rank: projection.rank,
-                        record: Record::Semantic(projection.record),
-                    });
-                }
-            }
+            records.extend(response.output_items.iter().enumerate().filter_map(
+                |(item_index, item)| {
+                    semantic::project_provider_item(item, &response.agent_prompt_id, mode).map(
+                        |projection| KeyedRecord {
+                            recorded_at: fact.at,
+                            agent_id: fact.agent_id.clone(),
+                            journal_seq: fact.seq,
+                            item_index: Some(item_index as u64),
+                            tie_rank: projection.rank,
+                            record: Record::Semantic(projection.record),
+                        },
+                    )
+                },
+            ));
         }
         if let Some(projection) = semantic::project_message_event(&fact.event, mode) {
             push_event_record(

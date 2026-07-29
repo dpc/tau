@@ -1019,14 +1019,12 @@ fn decode_mcp_text_result(payload: &str, provider: &str) -> Result<String, Strin
         .and_then(|r| r.get("content"))
         .and_then(|c| c.as_array())
         .ok_or_else(|| format!("{provider} MCP response missing `result.content`"))?;
-    let mut chunks = Vec::new();
-    for part in content {
-        if part.get("type").and_then(|v| v.as_str()) == Some("text")
-            && let Some(text) = part.get("text").and_then(|v| v.as_str())
-        {
-            chunks.push(text.to_owned());
-        }
-    }
+    let chunks = content
+        .iter()
+        .filter(|part| part.get("type").and_then(|v| v.as_str()) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(|v| v.as_str()))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
     if chunks.is_empty() {
         return Err(format!("{provider} MCP response had no text content"));
     }

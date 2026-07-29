@@ -571,14 +571,11 @@ fn build_range_event_seed<'a>(
             }
             (ICalendarProperty::Rdate, _) => {
                 let tz_id = entry.tz_id().or(dt_start_tzid);
-                for value in &entry.values {
-                    if let Some(date) = value_partial_datetime(value)
+                rdates.extend(entry.values.iter().filter_map(|value| {
+                    value_partial_datetime(value)
                         .and_then(|dt| dt.to_date_time())
                         .and_then(|dt| dt.to_date_time_with_tz(resolver.resolve_or_default(tz_id)))
-                    {
-                        rdates.push(date);
-                    }
-                }
+                }));
             }
             (ICalendarProperty::Exdate, _) => {
                 let tz_id = entry.tz_id().or(dt_start_tzid);

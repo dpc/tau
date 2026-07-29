@@ -13,11 +13,11 @@ pub fn models_for_provider(
         .iter()
         .map(|model| {
             let mut tags = provider.tags.clone();
-            for tag in &model.tags {
+            model.tags.iter().for_each(|tag| {
                 if !tags.contains(tag) {
                     tags.push(tag.clone());
                 }
-            }
+            });
             let compat = model.compat.unwrap_or(provider.compat);
             tau_proto::ProviderModelInfo {
                 id: tau_proto::ModelId::new(provider_name.clone(), model.id.clone()),

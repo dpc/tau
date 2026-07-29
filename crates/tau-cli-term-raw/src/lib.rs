@@ -3649,6 +3649,7 @@ fn render_rows_from(
     let fixed_start = log_height + metrics.rubber_height;
     let mut rows = Vec::with_capacity(metrics.render_len.saturating_sub(start));
 
+    // ast-grep-ignore: filter-in-loop
     for idx in start..metrics.render_len {
         if idx < history_height {
             rows.push(

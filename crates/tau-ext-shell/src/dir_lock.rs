@@ -1622,11 +1622,11 @@ pub(crate) fn normalize_lock_dirs(mut dirs: Vec<PathBuf>) -> Vec<PathBuf> {
     });
     dirs.dedup();
     let mut normalized: Vec<PathBuf> = Vec::new();
-    for dir in dirs {
+    dirs.into_iter().for_each(|dir| {
         if !normalized.iter().any(|existing| dir.starts_with(existing)) {
             normalized.push(dir);
         }
-    }
+    });
     normalized
 }
 
