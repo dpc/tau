@@ -1699,8 +1699,6 @@ fn tool_error_with_args(
         message,
         details,
         display: Some(ToolUseState {
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             args: args.unwrap_or_default(),
             status: ToolUseStatus::Error,
             status_text: "dir_lock failed".to_owned(),

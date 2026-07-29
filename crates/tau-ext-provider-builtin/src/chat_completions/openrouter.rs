@@ -250,8 +250,6 @@ async fn read_openrouter_models(
 
 fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel> {
     let id = ModelName::try_new(entry.id).ok()?;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let supports_reasoning = entry
         .supported_parameters
         .as_deref()

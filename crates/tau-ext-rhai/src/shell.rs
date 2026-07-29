@@ -200,18 +200,10 @@ pub(crate) fn run_shell_command(
     stdout_stop.request();
     stderr_stop.request();
 
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let out = stdout
-        // Preserve behavior at this site.
-        // ast-grep-ignore: unwrap-or-default
         .map(|h| h.join().unwrap_or_default())
         .unwrap_or_default();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let err = stderr
-        // Preserve behavior at this site.
-        // ast-grep-ignore: unwrap-or-default
         .map(|h| h.join().unwrap_or_default())
         .unwrap_or_default();
     let mut bytes = out.bytes;

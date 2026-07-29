@@ -48,8 +48,6 @@ impl TestTerm {
     /// Returns the text on a given terminal row (trimmed of trailing
     /// whitespace).
     fn row_text(&self, row: usize) -> String {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         self.term
             .screen()
             .rows(0, self.term.screen().size().1)
@@ -763,8 +761,6 @@ fn layout_block_renders_through_vt100() {
     screen.update(&mut buf, &lines, cursor).expect("render ok");
     term.process(&buf);
 
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let row = term.screen().rows(0, 20).next().unwrap_or_default();
     assert!(row.starts_with(" test"), "row: {row:?}");
 

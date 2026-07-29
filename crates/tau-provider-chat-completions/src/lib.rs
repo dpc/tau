@@ -1267,20 +1267,14 @@ fn provider_response_debug_metadata(
     if let serde_json::Value::Object(map) = &mut metadata {
         map.insert(
             "usage".to_owned(),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             serde_json::to_value(state.usage()).unwrap_or_default(),
         );
         map.insert(
             "stop_reason".to_owned(),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             serde_json::to_value(state.stop_reason).unwrap_or_default(),
         );
         map.insert(
             "output_items".to_owned(),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             serde_json::to_value(state.output_items()).unwrap_or_default(),
         );
         map.insert(
@@ -1463,8 +1457,6 @@ fn append_context_block(block: &tau_proto::ContextBlock, messages: &mut Vec<serd
 
 fn function_call_arguments_json(call: &ToolCallItem) -> String {
     call.raw_arguments_json.clone().unwrap_or_else(|| {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         serde_json::to_string(&cbor_to_json(&call.arguments)).unwrap_or_default()
     })
 }
@@ -1870,8 +1862,6 @@ fn cbor_to_json(value: &tau_proto::CborValue) -> serde_json::Value {
             for (key, value) in entries {
                 let key = match key {
                     tau_proto::CborValue::Text(text) => text.clone(),
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: unwrap-or-default
                     other => serde_json::to_string(&cbor_to_json(other)).unwrap_or_default(),
                 };
                 map.insert(key, cbor_to_json(value));

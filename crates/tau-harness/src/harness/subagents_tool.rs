@@ -1043,8 +1043,6 @@ impl Harness {
 
     /// Return a sorted snapshot of current watcher ids for a watched agent.
     pub(crate) fn watchers_for_agent(&self, watched_agent_id: &str) -> Vec<String> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         self.agent_watchers
             .get(watched_agent_id)
             .map(|watchers| watchers.iter().cloned().collect())
@@ -1089,11 +1087,7 @@ impl Harness {
             }
             batch.retain_recipients(|(watcher_id, _)| watcher_id != agent_id)
         });
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let outgoing = self.agent_watches.remove(agent_id).unwrap_or_default();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let incoming = self.agent_watchers.remove(agent_id).unwrap_or_default();
 
         for watched_agent_id in outgoing {
@@ -1147,8 +1141,6 @@ impl Harness {
         changed_agent_id: Option<&str>,
         cause: AgentWatchUpdateCause,
     ) {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let watched_agent_ids = self
             .agent_watches
             .get(watcher_id)
@@ -1219,8 +1211,6 @@ impl Harness {
         else {
             return;
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let status = self
             .agent_routes
             .get(watched_agent_id)

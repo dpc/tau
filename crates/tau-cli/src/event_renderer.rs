@@ -1193,8 +1193,6 @@ fn status_chip(
 }
 
 pub(crate) fn unix_time_millis() -> u64 {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1808,8 +1806,6 @@ impl EventRenderer {
             || self.visible_no_agent_snapshot_needs_preservation();
         if needs_snapshot_swap {
             self.store_visible_agent_state();
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let state = self.agents_ui_state.remove(&agent_id).unwrap_or_default();
             self.restore_visible_agent_state(state);
             self.rerender_visible_for_current_settings();
@@ -1987,8 +1983,6 @@ impl EventRenderer {
             self.clear_watched_agent_blocks();
             return;
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let watched = self
             .watched_agents
             .get(&current)
@@ -2719,8 +2713,6 @@ impl EventRenderer {
                 continue;
             };
             let block = if self.show_thinking {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let display = state.thinking_text.clone().unwrap_or_default();
                 markdown_streaming_block_with_osc8(
                     &self.theme,
@@ -4136,8 +4128,6 @@ impl EventRenderer {
         let visible_agent_id = self.displayed_agent_id.clone();
         let visible_state =
             self.take_visible_agent_state_with_output(tau_cli_term::OutputSnapshot::default());
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let mut target_state = self
             .agents_ui_state
             .remove(&target_agent_id)
@@ -5928,8 +5918,6 @@ impl EventRenderer {
         let spid = finished.agent_prompt_id.as_str();
         // Drain the whole per-prompt state in one shot — every field tracked
         // through the stream is consumed here.
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let prompt_state = self.prompts.remove(spid).unwrap_or_default();
         let turn_latency = prompt_state
             .started_at
@@ -6522,8 +6510,6 @@ impl EventRenderer {
         let known_main_tool = prior
             .as_ref()
             .is_some_and(|prior| !prior.is_sub_agent && originator_is_user);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let prior = prior.unwrap_or_default();
         if prior.is_sub_agent {
             return None;

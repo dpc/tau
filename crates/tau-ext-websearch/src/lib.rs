@@ -455,18 +455,12 @@ fn report_terminal_detached(handle: &ClientHandle, event: Event) -> ClientResult
 
 fn initial_display(invoke: &ToolStarted, local_tool_name: &ToolName) -> Option<ToolUseState> {
     let args = match local_tool_name.as_str() {
-        // Preserve behavior at this site.
-        // ast-grep-ignore: unwrap-or-default
         EXA_TOOL_NAME => parse_exa_args(&invoke.arguments)
             .map(|(query, _)| query)
             .unwrap_or_default(),
         PARALLEL_SEARCH_TOOL_NAME => {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             cbor_text_field(&invoke.arguments, "query").unwrap_or_default()
         }
-        // Preserve behavior at this site.
-        // ast-grep-ignore: unwrap-or-default
         PARALLEL_FETCH_TOOL_NAME => cbor_text_field(&invoke.arguments, "url").unwrap_or_default(),
         _ => return None,
     };

@@ -2686,8 +2686,6 @@ where
                 .last()
                 .is_some_and(|item| matches!(item, ContextItem::ToolResult(_)));
             if is_tool_result {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let text = context_items
                     .last()
                     .and_then(|item| match item {
@@ -2723,8 +2721,6 @@ where
                     }),
                 ))?;
             } else {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let user_text = context_items
                     .iter()
                     .rev()
@@ -4020,8 +4016,6 @@ impl Harness {
                     pid: Some(spawned.child_pid),
                     in_process_thread: None,
                     supervised_config: Some(ext_config.clone()),
-                    // Preserve behavior at this site.
-                    // ast-grep-ignore: unwrap-or-default
                     secrets: extension_secrets
                         .get(&ext_config.name)
                         .cloned()
@@ -4545,8 +4539,6 @@ impl Harness {
         // the branch iterator borrows the tree, so we materialize it
         // into an owned Vec first to release the tree borrow.
         let agent_id = self.agents.get(cid)?.agent_id.clone();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let branch: Vec<tau_core::AgentEntry> = agent_id
             .as_deref()
             .and_then(|agent_id| self.agent_store.agent(agent_id))
@@ -7591,8 +7583,6 @@ impl Harness {
     /// its head.
     fn acknowledge_message_wakes_through(&mut self, cid: &AgentId, through: tau_proto::AgentHead) {
         self.resolve_materialized_message_wakes(cid);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let branch: HashSet<_> = self
             .agents
             .get(cid)
@@ -8685,8 +8675,6 @@ impl Harness {
                 break;
             };
             if work_wait == Some(deadline) {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let budget = self.long_wait_materialization_budget.unwrap_or_default();
                 let next_non_work = [input, background, extension]
                     .into_iter()
@@ -9922,8 +9910,6 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         models: Vec<ProviderModelInfo>,
     ) {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let previous_model_info = self
             .provider_models_by_extension
             .get(source_id)
@@ -14849,8 +14835,6 @@ impl Harness {
                     return None;
                 }
                 let agent_id = conv.agent_id.clone()?;
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let interaction_order = self
                     .user_interaction_order
                     .get(&agent_id)
@@ -17523,8 +17507,6 @@ impl Harness {
         // owns the triggering tool call; non-tool requests use an explicit
         // `parent_agent` when provided; otherwise they start with no parent.
         let parent_cid = self.resolve_start_agent_parent_cid(&query)?;
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let persistence = parent_cid
             .as_ref()
             .and_then(|cid| self.agents.get(cid))
@@ -18941,8 +18923,6 @@ impl Harness {
         role_name: &str,
         action: tau_proto::UiRoleUpdateAction,
     ) -> Option<tau_config::settings::AgentRole> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let mut next_role = self
             .available_roles
             .get(role_name)
@@ -19167,8 +19147,6 @@ impl Harness {
                         model,
                     )
                 }),
-                // Preserve behavior at this site.
-                // ast-grep-ignore: unwrap-or-default
                 model_params: selected_model
                     .as_ref()
                     .map(|model| self.params_for_role_model(&self.selected_role, model))
@@ -20184,8 +20162,6 @@ impl Harness {
     }
 
     fn loaded_agent_ids_for_session(&self, session_id: &SessionId) -> Vec<tau_proto::AgentId> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         self.store
             .session(session_id.as_str())
             .map(|membership| membership.loaded_agents().into_iter().cloned().collect())
@@ -20459,8 +20435,6 @@ impl Harness {
         }
         let mut count = 0;
         for cid in self.restored_agent_ids(session_id) {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let calls: Vec<ToolCallItem> = self
                 .agents
                 .get(&cid)
@@ -20534,8 +20508,6 @@ impl Harness {
             tracing::warn!(target: "tau_harness", %agent_id, "failed to load restored agent events");
             return Vec::new();
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         self.agent_store
             .agent(agent_id)
             .map(|tree| tree.background_tool_calls_from(head, &events))
@@ -20596,8 +20568,6 @@ impl Harness {
                 tracing::warn!(target: "tau_harness", %agent_id, "failed to load restored agent events");
                 continue;
             };
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let calls = self
                 .agent_store
                 .agent(agent_id)
@@ -21577,8 +21547,6 @@ impl Harness {
                 .agent_store
                 .agent(agent_id.as_str())
                 .and_then(tau_core::AgentTree::inference_dispatch_recovery);
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let defer_manual_checkpoint = self
                 .agent_store
                 .agent(agent_id.as_str())
@@ -21849,8 +21817,6 @@ impl Harness {
             .agents
             .iter()
             .flat_map(|(cid, agent)| {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 agent
                     .agent_id
                     .as_deref()
@@ -22192,8 +22158,6 @@ impl Harness {
         tau_proto::PromptOriginator,
         tau_proto::AgentNavigationMode,
     ) {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let events = self
             .agent_store
             .agent_events(agent_id)
@@ -22608,8 +22572,6 @@ impl Harness {
             .map(|conv| self.role_name_for_agent(conv))?;
         let agent_id = self.mint_available_agent_id_for_role(&role);
         let display_name = self.display_name_for_new_agent(&agent_id, &role, None);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let persistence = self
             .agents
             .get(cid)
@@ -22709,8 +22671,6 @@ impl Harness {
             .agent_store
             .agent_has_committed_identity(&agent_id_proto);
         if !has_creation {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let persistence = self
                 .agents
                 .get(cid)
@@ -22762,8 +22722,6 @@ impl Harness {
         // New agents reached this point only after their creation record
         // committed; existing agents already have validated journal identity.
         self.agent_routes.insert(agent_id.to_owned(), cid.clone());
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let default_navigation_mode = self
             .agents
             .get(cid)
@@ -22776,8 +22734,6 @@ impl Harness {
             .agents
             .get(cid)
             .map(|conv| self.role_name_for_agent(conv));
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let persistence = self
             .agents
             .get(cid)
@@ -23230,8 +23186,6 @@ impl Harness {
                 tau_proto::PromptOperation::Inference,
             ),
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let prompt_params = prompt_model
             .as_ref()
             .map(|model| self.params_for_role_model(&role_name, model))
@@ -23412,8 +23366,6 @@ impl Harness {
         self.prompt_context_limits
             .insert(agent_prompt_id.clone(), context_limit_snapshot);
         let role_name = self.role_name_for_agent_id(cid);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let context_size_alerts = self
             .available_roles
             .get(&role_name)
@@ -23539,8 +23491,6 @@ impl Harness {
     }
 
     pub(crate) fn selected_model_params(&self) -> tau_proto::ModelParams {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         self.selected_model
             .as_ref()
             .map(|model| self.params_for_role_model(&self.selected_role, model))
@@ -24310,8 +24260,6 @@ impl Harness {
             source,
         );
 
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let context_size_alerts = self
             .prompt_context_size_alerts
             .remove(&response.agent_prompt_id)
@@ -24382,8 +24330,6 @@ impl Harness {
         self.add_finished_response_estimated_cost(&cid, &mut response, source);
         let (requested_tool_calls, tool_calls_with_non_tool_stop) =
             self.reconcile_finished_response_tool_call_stop(&response, &tool_calls);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let prompt_operation = self
             .prompt_operations
             .remove(&response.agent_prompt_id)
@@ -24470,8 +24416,6 @@ impl Harness {
                         .and_then(|agent| agent.head)
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
                     disposition: WorkingFinalDisposition::Challenge {
-                        // Preserve behavior at this site.
-                        // ast-grep-ignore: unwrap-or-default
                         title: self
                             .agents
                             .get(&cid)
@@ -25690,8 +25634,6 @@ impl Harness {
         );
         let result = tau_proto::StartAgentResult {
             query_id: query_id.clone(),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             text: side.assistant_text.unwrap_or_default().to_owned(),
             error,
         };
@@ -25753,8 +25695,6 @@ impl Harness {
             Some(format!(
                 "non-tool extension query attempted to call {tool_call_count} tool(s); refusing to execute"
             ))
-        // Preserve behavior at this site.
-        // ast-grep-ignore: unwrap-or-default
         } else if assistant_text.unwrap_or_default().is_empty()
             && matches!(
                 response.stop_reason,
@@ -26344,8 +26284,6 @@ impl Harness {
         let Some(tool) = self.pending_tools.get(call_id).cloned() else {
             return;
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let agent_id_headers = agent_ids
             .map(|(self_agent_id, sub_agent_id)| {
                 format!("self_agent_id: {self_agent_id}\nsub_agent_id: {sub_agent_id}\n")
@@ -26920,8 +26858,6 @@ impl Harness {
         }) {
             return Some(activation);
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let ready_nodes: HashSet<_> = agent
             .agent_id
             .as_deref()
@@ -27032,8 +26968,6 @@ impl Harness {
         cid: &AgentId,
         completion: Option<AgentPublishCompletion>,
     ) -> bool {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let mut pending: Vec<PendingPrompt> = self
             .agents
             .get_mut(cid)
@@ -27148,8 +27082,6 @@ impl Harness {
     }
 
     fn tool_owner_originator(&self, cid: &AgentId) -> PromptOriginator {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         self.agents
             .get(cid)
             .map(|conv| conv.originator.clone())
@@ -27651,8 +27583,6 @@ impl Harness {
                     progress_messages,
                     tool_calls,
                     tool_results,
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: unwrap-or-default
                     response: final_text.unwrap_or_default(),
                 });
             }

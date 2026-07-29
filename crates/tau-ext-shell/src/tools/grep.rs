@@ -262,8 +262,6 @@ fn run_ripgrep(
     let wait = wait_handle
         .join()
         .map_err(|_| ToolFailure::from("ripgrep waiter thread panicked".to_owned()))?;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let stderr = stderr_handle.join().unwrap_or_default();
     let (exit_status, cancelled) = wait?;
 
@@ -753,8 +751,6 @@ fn read_grep_json<R: Read>(stdout: R, limit: usize) -> GrepStreamResult {
                 current_path = record.data.path.as_ref().and_then(RgText::render_path);
             }
             "match" | "context" => {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let path = record
                     .data
                     .path
@@ -763,8 +759,6 @@ fn read_grep_json<R: Read>(stdout: R, limit: usize) -> GrepStreamResult {
                     .or_else(|| current_path.clone())
                     .unwrap_or_default();
                 let lineno = record.data.line_number.unwrap_or(0);
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let text = record
                     .data
                     .lines

@@ -637,8 +637,6 @@ pub fn load_skill_from_content(
         None
     };
 
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let name = fm
         .get("name")
         .cloned()

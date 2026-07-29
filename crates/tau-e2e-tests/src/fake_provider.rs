@@ -509,15 +509,11 @@ impl FakeState {
             ));
         };
         let cursor = self.lane_cursors.get(lane_index).copied().unwrap_or(0);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let progress = self
             .watch_progress
             .get(&message.recipient_id)
             .copied()
             .unwrap_or_default();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let queued = self
             .watch_notifications
             .get(&message.recipient_id)
@@ -554,8 +550,6 @@ impl FakeState {
         let (expected_notification, chain_progress) = match expectation {
             WatchExpectation::Ordered(expected) => (expected, None),
             WatchExpectation::Chains => {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let mut progress = self
                     .watch_chain_progress
                     .get(&message.recipient_id)
@@ -674,15 +668,11 @@ impl FakeState {
         response: String,
         handle: &tau_client::ClientHandle,
     ) -> ClientResult<()> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let progress = self
             .watch_progress
             .get(&prompt.agent_id)
             .copied()
             .unwrap_or_default();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let queued_len = self
             .watch_notifications
             .get(&prompt.agent_id)
@@ -742,8 +732,6 @@ impl FakeState {
         contents: WatchChainContents,
         handle: &tau_client::ClientHandle,
     ) -> ClientResult<()> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let progress = self
             .watch_progress
             .get(&prompt.agent_id)
@@ -800,8 +788,6 @@ impl FakeState {
             },
         ))?;
         let terminal_response = if next_progress == 2 {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let admitted = self
                 .watch_chain_progress
                 .remove(&prompt.agent_id)
@@ -835,8 +821,6 @@ impl FakeState {
         let Some(child_agent_id) = self.current_child_agent(&prompt.agent_id).cloned() else {
             return Err(self.mismatch(cursor, "watch prompt has no validated child identity"));
         };
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let actual = self
             .watch_notifications
             .get(&prompt.agent_id)
@@ -1392,8 +1376,6 @@ impl FakeState {
                     return Err(ClientError::handler("barrier over-subscribed"));
                 }
                 if pending.len() == participants {
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: unwrap-or-default
                     let completed = self.barriers.remove(&barrier).unwrap_or_default();
                     for participant in completed {
                         handle.emit_transient(Event::ProviderResponseFinishedReported(
@@ -1754,8 +1736,6 @@ impl FakeState {
                 {
                     return Err(self.mismatch(cursor, "agent_start result identity mismatch"));
                 }
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let children = self
                     .child_agents
                     .get(&self_agent_id)
@@ -2345,8 +2325,6 @@ impl ScenarioConfig {
                 let mut children = std::collections::HashSet::new();
                 for binding in checkpoint.child_agents {
                     let parent_lane = agent_lanes.get(&binding.parent_agent_id).copied();
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: unwrap-or-default
                     let consumed_start_count = consumed_start_counts
                         .get(&binding.parent_agent_id)
                         .copied()

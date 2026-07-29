@@ -5490,11 +5490,7 @@ fn validate_reaction_name(value: &str) -> Result<(), ()> {
 
 fn validate_slack_ts(value: &str) -> Result<(), ()> {
     let mut parts = value.split('.');
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let seconds = parts.next().unwrap_or_default();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let micros = parts.next().unwrap_or_default();
     if seconds.is_empty()
         || micros.is_empty()

@@ -278,12 +278,8 @@ impl ResolvedExtension {
 
     fn from_user_entry(user: &ExtensionEntry) -> Self {
         Self {
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             prefix: user.prefix.clone().unwrap_or_default(),
             command: user.command.clone(),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             suffix: user.suffix.clone().unwrap_or_default(),
             enable: user.enable.unwrap_or(true),
             require: user.require.unwrap_or(true),
@@ -294,8 +290,6 @@ impl ResolvedExtension {
                 .config
                 .clone()
                 .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             secrets: user.secrets.clone().unwrap_or_default(),
         }
     }
@@ -519,8 +513,6 @@ pub(crate) fn load_harness_settings_or_warn(
     dirs: &tau_config::settings::TauDirs,
 ) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
     let role_overrides = role_cli_overrides_from_env();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let harness_config_overrides = harness_config_overrides_from_env().unwrap_or_default();
     load_harness_settings_with_overrides_or_warn(
         dirs,
@@ -585,8 +577,6 @@ fn apply_startup_role_override(mut settings: HarnessSettings) -> HarnessSettings
 }
 
 fn role_cli_overrides_from_env() -> Vec<RoleCliOverride> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     std::env::var(ROLE_CLI_OVERRIDES_ENV)
         .ok()
         .and_then(|value| serde_json::from_str(&value).ok())
@@ -598,8 +588,6 @@ fn harness_config_overrides_from_env() -> Result<Vec<HarnessConfigCliOverride>, 
         .ok()
         .map(|value| serde_json::from_str(&value))
         .transpose()
-        // Preserve behavior at this site.
-        // ast-grep-ignore: unwrap-or-default
         .map(|overrides| overrides.unwrap_or_default())
 }
 
@@ -637,23 +625,17 @@ pub fn builtin_extensions() -> Vec<BuiltinExtension> {
         .iter()
         .map(|def| BuiltinExtension {
             name: def.name.clone(),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             prefix: def.prefix.clone().unwrap_or_default(),
             command: def
                 .command
                 .clone()
                 .unwrap_or_else(|| vec![tau_binary.clone()]),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             suffix: def.suffix.clone().unwrap_or_default(),
             role: def.role.clone(),
             cwd: def.cwd.clone(),
             enable: def.enable,
             require: def.require,
             config: def.config.clone(),
-            // Preserve behavior at this site.
-            // ast-grep-ignore: unwrap-or-default
             secrets: def.secrets.clone().unwrap_or_default(),
         })
         .collect()

@@ -223,8 +223,6 @@ fn pick_resume_session(_cwd: &Path) -> Result<Option<tau_proto::SessionId>, CliE
     if rows.iter().all(|(_, _, locked)| *locked) {
         return Ok(None);
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let default = rows
         .iter()
         .position(|(_, _, locked)| !*locked)

@@ -518,8 +518,6 @@ fn format_stats(stats: &Stats) -> String {
                 .downlink
                 .get(&attach)
                 .and_then(|by_kind| by_kind.get(&delivery));
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let total = entries
                 .map(total_protocol_io_frame_stats)
                 .unwrap_or_default();

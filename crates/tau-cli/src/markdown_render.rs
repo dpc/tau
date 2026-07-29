@@ -100,8 +100,6 @@ impl<'line> TableRow<'line> {
                 rendered.push('|');
             }
             rendered.push(' ');
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let cell = self.cells.get(index).copied().unwrap_or_default();
             match row_kind {
                 TableRowKind::Separator => rendered.push_str(&render_separator_cell(cell, width)),

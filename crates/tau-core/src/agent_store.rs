@@ -1208,8 +1208,6 @@ impl AgentStore {
                 source,
             })?;
         if self.ephemeral_agents.contains(&parsed_agent_id) {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let events = self
                 .ephemeral_events
                 .get(&parsed_agent_id)

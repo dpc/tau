@@ -800,8 +800,6 @@ impl Harness {
                 self.send_catch_up_event(client_id, None, event);
             }
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let effort_levels = self
             .selected_model
             .as_ref()
@@ -814,8 +812,6 @@ impl Harness {
         if selector_matches_event(selectors, &effort_levels_event) {
             self.send_catch_up_event(client_id, None, effort_levels_event);
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let verbosity_levels = self
             .selected_model
             .as_ref()
@@ -828,8 +824,6 @@ impl Harness {
         if selector_matches_event(selectors, &verbosity_levels_event) {
             self.send_catch_up_event(client_id, None, verbosity_levels_event);
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let thinking_levels = self
             .selected_model
             .as_ref()

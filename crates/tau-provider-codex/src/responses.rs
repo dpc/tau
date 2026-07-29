@@ -668,8 +668,6 @@ pub(super) fn stream_idle_timeout_error(
     source: Option<std::io::Error>,
 ) -> LlmError {
     let now = Instant::now();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let source = source
         .map(|error| format!(" source={}", error.kind()))
         .unwrap_or_default();
@@ -2359,8 +2357,6 @@ fn convert_function_call_item(call: &ToolCallItem) -> serde_json::Value {
 fn function_call_arguments_json(call: &ToolCallItem) -> String {
     call.raw_arguments_json.clone().unwrap_or_else(|| {
         let args_json = cbor_to_json(&call.arguments);
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         serde_json::to_string(&args_json).unwrap_or_default()
     })
 }
@@ -2369,8 +2365,6 @@ fn convert_custom_tool_call_item(call: &ToolCallItem) -> serde_json::Value {
     let id_str = call.call_id.as_str();
     let input = match &call.arguments {
         tau_proto::CborValue::Text(text) => text.clone(),
-        // Preserve behavior at this site.
-        // ast-grep-ignore: unwrap-or-default
         other => serde_json::to_string(&cbor_to_json(other)).unwrap_or_default(),
     };
     let mut item = responses_tool_call_base(call, "ctc_");

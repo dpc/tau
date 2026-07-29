@@ -197,8 +197,6 @@ impl OneShotOutput {
                 .or_default()
                 .push_str(&thinking);
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let text = assistant_text_from_update(update).unwrap_or_default();
         if !text.is_empty() {
             self.response_by_prompt

@@ -123,8 +123,6 @@ impl Theme {
 
     /// Looks up the style for a name, falling back to the default.
     pub fn resolve_style(&self, name: &StyleName) -> ThemeStyle {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         self.styles.get(name).copied().unwrap_or_default()
     }
 
@@ -150,8 +148,6 @@ impl Theme {
             }),
             SpanTree::Span { style, text } => {
                 stack.push(
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: unwrap-or-default
                     themed
                         .style_name(*style)
                         .map(|name| self.resolve_style(name))

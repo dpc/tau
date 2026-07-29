@@ -683,8 +683,6 @@ impl StreamState {
         output_index: usize,
         text: &str,
     ) -> Result<(), LlmError> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let current = self.message_text_at(output_index).unwrap_or_default();
         if let Some(delta) = text.strip_prefix(current) {
             self.check_message_delta(output_index, delta)
@@ -731,8 +729,6 @@ impl StreamState {
         output_index: usize,
         text: &str,
     ) -> Result<(), LlmError> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let current = self.tool_arguments_at(output_index).unwrap_or_default();
         if let Some(delta) = text.strip_prefix(current) {
             self.check_function_arguments_delta(output_index, delta)
@@ -765,8 +761,6 @@ impl StreamState {
         output_index: usize,
         text: &str,
     ) -> Result<(), LlmError> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let current = self.tool_arguments_at(output_index).unwrap_or_default();
         if let Some(delta) = text.strip_prefix(current) {
             self.check_custom_tool_input_delta(output_index, delta)

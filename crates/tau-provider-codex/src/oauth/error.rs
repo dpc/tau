@@ -142,8 +142,6 @@ impl OAuthError {
     }
 
     pub(super) fn http(status: u16, body: Option<&str>) -> Self {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let fields = body.map(parse_oauth_error_fields).unwrap_or_default();
         Self {
             kind: OAuthErrorKind::Http,

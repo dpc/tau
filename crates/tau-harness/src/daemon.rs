@@ -814,8 +814,6 @@ pub fn run_daemon_with_config(
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
     let listener_handle = open_listener(&socket_path)?;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let dirs = options.dirs.clone().unwrap_or_default();
     let mut harness = Harness::from_config(
         config,
@@ -1015,8 +1013,6 @@ fn handle_daemon_trace_event(
                 progress_messages: std::mem::take(state.progress_messages),
                 tool_calls: Vec::new(),
                 tool_results: Vec::new(),
-                // Preserve behavior at this site.
-                // ast-grep-ignore: unwrap-or-default
                 response: assistant_text_from_output_items(&finished.output_items)
                     .unwrap_or_default(),
             }));
@@ -1298,8 +1294,6 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     )?;
 
     let state_dir = tau_session_inspect::default_state_dir();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let dirs = options.dirs.clone().unwrap_or_default();
     tracing::debug!(target: "tau_harness::startup", state_dir = %state_dir.display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "constructing harness");
     let (mut harness, initial_client_id) = notify_startup_error(

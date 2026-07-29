@@ -127,8 +127,6 @@ impl BuiltinState {
     fn initial_display(&self, call: &AgentToolCall) -> Option<ToolUseState> {
         let (args, status_text, payload) = match call.name.as_str() {
             SKILL_TOOL_NAME => {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let needles = extract_skill_search_queries(&call.arguments).unwrap_or_default();
                 let search_content = extract_optional_bool(&call.arguments, "search_content")
                     .ok()
@@ -189,8 +187,6 @@ impl BuiltinState {
         if let Ok(Some(minutes)) = tau_harness::normalized_wait_timeout_minutes(arguments) {
             return format!("{minutes}m");
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         wait_target_call_id(arguments)
             .and_then(|call_id| self.in_progress_tool_names.get(call_id))
             .map(ToString::to_string)

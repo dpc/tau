@@ -1303,8 +1303,6 @@ impl Extension {
         message: &TgMessage,
         config_generation: ConfigGeneration,
     ) -> Option<String> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let text = message.text.as_deref().unwrap_or_default().trim();
         if text.is_empty() {
             self.reply(
@@ -2501,8 +2499,6 @@ fn decode_webhook_info(value: &serde_json::Value) -> Result<TgWebhookInfo, Strin
     let result = value
         .get("result")
         .ok_or_else(|| "Telegram getWebhookInfo response missing result".to_owned())?;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let url = result
         .get("url")
         .and_then(|value| value.as_str())

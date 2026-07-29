@@ -425,8 +425,6 @@ async fn list_messages_by_uid_page_async(
 ) -> Result<BackendMessagePage, String> {
     let mut session = connect_imap(account).await?;
     let mailbox = session.examine(folder).await.map_err(imap_error)?;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let uidvalidity = mailbox
         .uid_validity
         .map(|value| value.to_string())
@@ -486,8 +484,6 @@ async fn list_recent_messages_page_async(
     }
     let mut session = connect_imap(account).await?;
     let mailbox = session.examine(folder).await.map_err(imap_error)?;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let uidvalidity = mailbox
         .uid_validity
         .map(|value| value.to_string())
@@ -526,8 +522,6 @@ async fn list_recent_messages_page_async(
         .map_err(imap_error)?;
     let mut messages = Vec::new();
     while let Some(fetch) = fetches.try_next().await.map_err(imap_error)? {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let internal_timestamp = fetch
             .internal_date()
             .map(|date| date.timestamp())
@@ -592,8 +586,6 @@ async fn message_metadata_async(
 ) -> Result<BackendMessage, String> {
     let mut session = connect_imap(account).await?;
     let mailbox = session.examine(folder).await.map_err(imap_error)?;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let uidvalidity = mailbox
         .uid_validity
         .map(|value| value.to_string())
@@ -622,8 +614,6 @@ async fn read_message_async(
 ) -> Result<BackendMessage, String> {
     let mut session = connect_imap(account).await?;
     let mailbox = session.examine(folder).await.map_err(imap_error)?;
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let uidvalidity = mailbox
         .uid_validity
         .map(|value| value.to_string())
@@ -1094,8 +1084,6 @@ fn metadata_from_fetch(fetch: &async_imap::types::Fetch, uidvalidity: &str) -> B
     let fallback = BackendMessage {
         uid: fetch.uid.unwrap_or(fetch.message).to_string(),
         uidvalidity: uidvalidity.to_owned(),
-        // Preserve behavior at this site.
-        // ast-grep-ignore: unwrap-or-default
         date: fetch
             .internal_date()
             .map(|date| date.to_rfc3339())

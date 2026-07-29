@@ -518,8 +518,6 @@ fn parse_proxy(value: Option<&str>) -> Result<Option<ProxyEndpoint>, OutboundErr
     } else {
         let username = percent_decode(endpoint.username())
             .map_err(|_| proxy_config_error("invalid proxy credentials"))?;
-        // Preserve behavior at this site.
-        // ast-grep-ignore: unwrap-or-default
         let password = percent_decode(endpoint.password().unwrap_or_default())
             .map_err(|_| proxy_config_error("invalid proxy credentials"))?;
         if username.contains(':')
@@ -575,8 +573,6 @@ fn hex(value: u8) -> Result<u8, OutboundError> {
 }
 
 fn parse_no_proxy(value: Option<&str>) -> Result<Vec<NoProxyEntry>, OutboundError> {
-    // Preserve this optional-input fallback.
-    // ast-grep-ignore: unwrap-or-default
     value
         .unwrap_or_default()
         .split(',')

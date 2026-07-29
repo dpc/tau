@@ -69,8 +69,6 @@ pub(crate) fn parse_tool_list_update(
 }
 
 fn parse_tool_override_list_update(value: &str) -> Result<Vec<tau_proto::ToolName>, String> {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     Ok(parse_tool_list_update(value)?.unwrap_or_default())
 }
 

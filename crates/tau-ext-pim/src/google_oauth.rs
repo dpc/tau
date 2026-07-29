@@ -193,8 +193,6 @@ impl GoogleOauthClient {
                 &[
                     code,
                     pkce_verifier,
-                    // Preserve this behavior; the structural alternative is not semantics-neutral
-                    // here. ast-grep-ignore: unwrap-or-default
                     client_secret.as_deref().unwrap_or_default(),
                 ],
             ));
@@ -248,8 +246,6 @@ impl GoogleOauthClient {
         if client_secret.is_some() {
             body.append_pair(
                 "client_secret",
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 client_secret.as_deref().unwrap_or_default(),
             );
         }
@@ -263,8 +259,6 @@ impl GoogleOauthClient {
             return Err(google_oauth_http_error(
                 "finishing Google authorization",
                 &mut response,
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 &[device_code, client_secret.as_deref().unwrap_or_default()],
             ));
         }
@@ -361,8 +355,6 @@ impl GoogleOauthClient {
         if client_secret.is_some() {
             body.append_pair(
                 "client_secret",
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 client_secret.as_deref().unwrap_or_default(),
             );
         }
@@ -376,8 +368,6 @@ impl GoogleOauthClient {
             return Err(google_oauth_http_error(
                 "refreshing Google access token",
                 &mut response,
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 &[refresh_token, client_secret.as_deref().unwrap_or_default()],
             ));
         }

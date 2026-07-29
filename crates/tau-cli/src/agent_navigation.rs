@@ -69,8 +69,6 @@ impl AgentNavigation {
 
     /// Return the stored mode, using the ordinary-agent `active` default.
     pub(crate) fn mode(&self, agent_id: &str) -> tau_proto::AgentNavigationMode {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         self.modes.get(agent_id).copied().unwrap_or_default()
     }
 

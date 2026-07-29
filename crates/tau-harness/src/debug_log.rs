@@ -643,15 +643,11 @@ fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_j
             }
             let mut redacted = message.clone();
             redact_harness_input_message_binary_content(&mut redacted);
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             serde_json::to_value(redacted).unwrap_or_default()
         }
         _ => {
             let mut redacted = message.clone();
             redact_harness_input_message_binary_content(&mut redacted);
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             serde_json::to_value(redacted).unwrap_or_default()
         }
     }
@@ -677,8 +673,6 @@ fn debug_event_json(event: &Event) -> serde_json::Value {
     }
     let mut redacted = event.clone();
     redact_event_binary_content(&mut redacted);
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     serde_json::to_value(redacted).unwrap_or_default()
 }
 

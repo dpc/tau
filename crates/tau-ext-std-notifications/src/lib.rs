@@ -114,8 +114,6 @@ fn hostname() -> String {
 }
 
 fn cwd_parts() -> (String, String) {
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let cwd = std::env::current_dir().unwrap_or_default();
     let cwd_short = cwd
         .file_name()
@@ -397,8 +395,6 @@ impl SessionIdleTracker {
     }
 
     fn sessions_for_agent(&self, agent_id: &tau_proto::AgentId) -> Vec<tau_proto::SessionId> {
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         self.agent_sessions
             .get(agent_id)
             .map(|sessions| sessions.iter().cloned().collect())
@@ -909,8 +905,6 @@ impl NotificationLoop {
             Event::ProviderResponseFinished(finished)
                 if finished.originator.is_user() && !finished.stop_reason.requests_tool_calls() =>
             {
-                // Preserve this behavior; the structural alternative is not semantics-neutral
-                // here. ast-grep-ignore: unwrap-or-default
                 let user_prompt = self
                     .agent_turns
                     .get(&finished.agent_id)
@@ -967,8 +961,6 @@ impl NotificationLoop {
             .session_idle
             .unload_agent(&unloaded.session_id, &unloaded.agent_id)
         {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let context = self
                 .all_idle_context
                 .get(&unloaded.agent_id)
@@ -1015,8 +1007,6 @@ impl NotificationLoop {
 
     fn track_idle_agent(&mut self, agent_id: &tau_proto::AgentId, idle_duration: Duration) {
         for session_id in self.session_idle.mark_idle(agent_id) {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let context = self
                 .all_idle_context
                 .get(agent_id)

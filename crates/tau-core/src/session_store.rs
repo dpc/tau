@@ -666,8 +666,6 @@ impl SessionStore {
             recorded_at,
         };
         if retain_membership_overlay {
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let mut candidate = self
                 .ephemeral_membership_overlay
                 .get(&sid)
@@ -712,8 +710,6 @@ impl SessionStore {
     ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
         if self.mode.is_ephemeral() {
             let session_id = validate_session_id(session_id)?;
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             let events = self
                 .ephemeral_events
                 .get(&session_id)
@@ -748,8 +744,6 @@ impl SessionStore {
         if self.mode.is_ephemeral() {
             return Ok(Vec::new());
         }
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let events = self
             .ephemeral_membership_overlay
             .get(&session_id)
@@ -835,8 +829,6 @@ impl SessionStore {
     ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
         if self.mode.is_ephemeral() {
             let session_id = validate_session_id(session_id)?;
-            // Preserve this behavior; the structural alternative is not semantics-neutral
-            // here. ast-grep-ignore: unwrap-or-default
             return Ok(self
                 .restore_events
                 .get(&session_id)
@@ -1007,8 +999,6 @@ impl SessionStore {
         let _ = self.lock_and_load_session(session_id.as_str())?;
         let path = self.session_dir(&session_id).join("meta.json");
         let now = unix_now();
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let mut meta = read_meta(&path).unwrap_or_default();
         if meta.created_at == 0 {
             meta.created_at = now;
@@ -1186,8 +1176,6 @@ fn write_meta(path: &Path, meta: &SessionMeta) -> Result<(), SessionStoreError> 
 
 fn touch_meta(path: &Path) -> Result<(), SessionStoreError> {
     let now = unix_now();
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     let mut meta = read_meta(path).unwrap_or_default();
     if meta.created_at == 0 {
         meta.created_at = now;

@@ -181,8 +181,6 @@ pub(crate) fn available_theme_choices(dirs: &TauDirs) -> Vec<ThemeChoice> {
     for name in tau_themes::theme::BUILTIN_THEME_NAMES {
         let theme =
             tau_themes::Theme::builtin_named(name).expect("built-in theme registry name resolves");
-        // Preserve this behavior; the structural alternative is not semantics-neutral
-        // here. ast-grep-ignore: unwrap-or-default
         let description = theme.description().unwrap_or_default().to_owned();
         choices.insert((*name).to_owned(), description);
     }
@@ -255,8 +253,6 @@ fn read_theme_choice_description(path: &Path) -> String {
     if contents.len() as u64 > THEME_CHOICE_METADATA_LIMIT {
         return String::new();
     }
-    // Preserve this behavior; the structural alternative is not semantics-neutral
-    // here. ast-grep-ignore: unwrap-or-default
     tau_themes::Theme::parse(&contents)
         .ok()
         .and_then(|theme| theme.description().map(str::to_owned))
