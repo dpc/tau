@@ -4494,6 +4494,31 @@ fn event_delivery_helpers_expose_replay_marker_and_inner_event() {
     assert_eq!(non_delivery.into_delivered_event(), None);
 }
 
+/// Context-bearing shell completions default durable while UI-only completions
+/// remain transient, preventing `!!` commands from entering replay journals.
+#[test]
+fn shell_completion_persistence_default_tracks_context_inclusion() {
+    let completion = |include_in_context| {
+        Event::ShellCommandFinished(ShellCommandFinished {
+            command_id: ShellCommandId::parse("shell-default")
+                .expect("test identifier must satisfy its grammar"),
+            session_id: SessionId::parse("session-default")
+                .expect("test identifier must satisfy its grammar"),
+            command: "printf output".to_owned(),
+            include_in_context,
+            target_agent_id: Some(
+                AgentId::parse("agent-default").expect("test identifier must satisfy its grammar"),
+            ),
+            output: "output".to_owned(),
+            exit_code: Some(0),
+            cancelled: false,
+        })
+    };
+
+    assert!(completion(true).defaults_to_persist());
+    assert!(!completion(false).defaults_to_persist());
+}
+
 /// Ensures positive default-persistence classification separates live-only and
 /// durable event families.
 #[test]

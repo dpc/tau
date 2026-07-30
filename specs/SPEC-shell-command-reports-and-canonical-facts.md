@@ -50,9 +50,14 @@ injection.
 ## Persistence and replay
 
 Reports default to `persist=false` and never enter agent, session, or restore semantic
-stores for either caller-supplied `persist` value. Canonical progress and
-completion retain their existing persistence classifications; this slice does
-not change UI replay or transcript history. Runtime event logs and ordinary
+stores for either caller-supplied `persist` value. Canonical progress remains
+transient. A canonical completion enters only its non-ephemeral target agent's
+journal, and only when `include_in_context=true`; it is a self-contained replay
+fact carrying the target, command, context flag, bounded final output, and
+exit-or-cancel outcome. Thus cold attach can reconstruct exactly one completed
+terminal without replaying the transient request or progress observations.
+`include_in_context=false` (`!!`), MemoryOnly targets, and other ephemeral
+targets remain non-durable. Runtime event logs and ordinary
 debug JSONL show authorized non-ephemeral committed reports before their
 canonical successors. Debug classification captures the original private route
 beside the immutable publisher envelope and rechecks any replacement route

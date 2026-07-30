@@ -3861,6 +3861,10 @@ pub struct ShellCommandProgress {
 /// The provider also echoes the opaque harness route id it received; the
 /// harness maps that id back to the UI lifecycle id before publishing the
 /// immutable, must-pass [`Event::ShellCommandFinished`] fact.
+///
+/// A canonical completion defaults to durable only when `include_in_context`
+/// is true. Its complete payload then supports self-contained terminal replay;
+/// reports and UI-only completions remain transient.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ShellCommandFinished {
     /// Private provider route id in reports; public UI lifecycle id in
@@ -6153,6 +6157,9 @@ impl Event {
     /// override.
     #[must_use]
     pub const fn defaults_to_persist(&self) -> bool {
+        if let Self::ShellCommandFinished(finished) = self {
+            return finished.include_in_context;
+        }
         !matches!(
             self,
             Self::ToolRegistrationDeclared(_)

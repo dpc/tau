@@ -166,11 +166,15 @@ fn terminal_report_commits_before_canonical_completion_and_injection() {
         )
         .expect("commit replacement report");
 
-    assert!(matches!(
-        committed_shell_events(&harness).as_slice(),
-        [(Some(source), Event::ShellCommandFinishedReported(finished))]
-            if source == "shell-owner" && finished.output == "replacement"
-    ));
+    let committed = committed_shell_events(&harness);
+    assert!(
+        matches!(
+            committed.as_slice(),
+            [(Some(source), Event::ShellCommandFinishedReported(finished))]
+                if source == "shell-owner" && finished.output == "replacement"
+        ),
+        "{committed:#?}"
+    );
     assert!(matches!(
         harness
             .pending_intercept
@@ -199,8 +203,137 @@ fn terminal_report_commits_before_canonical_completion_and_injection() {
             && report.output == "replacement"
             && canonical.command_id == command.command_id
             && canonical.output == "replacement"
-            && injected.text.contains("replacement")
+             && injected.text.contains("replacement")
     ));
+    assert!(
+        loaded_agent_events(&harness, command.session_id.as_str())
+            .iter()
+            .any(|event| matches!(
+                event,
+                Event::ShellCommandFinished(finished)
+                    if finished.command_id == command.command_id
+                        && finished.output == "replacement"
+            ))
+    );
+}
+
+/// A UI-only `!!` completion remains live even when its provider report is
+/// accepted, so attach replay cannot expose commands excluded from context.
+#[test]
+fn ui_only_terminal_completion_does_not_enter_target_journal() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-ui-only",
+        false,
+    );
+
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(finished_report(&route_id, &command, "ui-only")),
+        )
+        .expect("commit UI-only shell completion");
+
+    assert!(committed_shell_events(&harness).iter().any(|(_, event)| {
+        matches!(
+            event,
+            Event::ShellCommandFinished(finished)
+                if finished.command_id == command.command_id
+        )
+    }));
+    assert!(
+        !loaded_agent_events(&harness, command.session_id.as_str())
+            .iter()
+            .any(|event| matches!(event, Event::ShellCommandFinished(_)))
+    );
+}
+
+/// A failed target-journal append still settles one live terminal while
+/// suppressing context injection, replay, leaked lifecycle state, and
+/// duplicates.
+#[test]
+fn terminal_append_failure_settles_live_without_durable_side_effects() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let sink = connect_test_client(&mut harness, "shell-ui", tau_proto::ClientKind::Ui);
+    harness
+        .handle_client_event(
+            "shell-ui",
+            TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+                historical_selectors: Vec::new(),
+                live_selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::SHELL_COMMAND_FINISHED,
+                )],
+            })),
+        )
+        .expect("subscribe to shell completions");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-store-fault",
+        true,
+    );
+    let agent_id = command.target_agent_id.as_ref().expect("resolved target");
+    let journal = harness
+        .state_dir
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let backup = journal.with_extension("cbor.test-backup");
+    std::fs::rename(&journal, &backup).expect("park target journal");
+    std::fs::create_dir(&journal).expect("block target journal path");
+    let report = finished_report(&route_id, &command, "unpersisted");
+
+    harness
+        .handle_extension_event("shell-owner", TestProtocolItem::Event(report.clone()))
+        .expect("report remains an observation despite append failure");
+    harness
+        .handle_extension_event("shell-owner", TestProtocolItem::Event(report))
+        .expect("late duplicate remains an observation");
+
+    let live = sink
+        .lock()
+        .expect("sink")
+        .iter()
+        .filter(|routed| {
+            matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if !delivery.replay
+                        && matches!(&*delivery.event, Event::ShellCommandFinished(finished)
+                            if finished.command_id == command.command_id
+                                && finished.output == "unpersisted")
+            )
+        })
+        .count();
+    assert_eq!(live, 1);
+    assert!(
+        !harness
+            .active_ui_shell_command_ids
+            .contains(&command.command_id)
+    );
+    assert!(
+        !harness
+            .pending_ui_shell_output_injections
+            .contains(&command.command_id)
+    );
+    assert!(!harness.pending_ui_shell_commands.contains_key(&route_id));
+    assert!(
+        !loaded_agent_events(&harness, command.session_id.as_str())
+            .iter()
+            .any(|event| matches!(
+                event,
+                Event::ShellCommandFinished(_) | Event::AgentUserMessageInjected(_)
+            ))
+    );
+
+    std::fs::remove_dir(&journal).expect("remove journal blocker");
+    std::fs::rename(&backup, &journal).expect("restore target journal");
 }
 
 /// A Core shell provider uses the same report boundary, with the harness

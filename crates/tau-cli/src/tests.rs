@@ -4980,7 +4980,7 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
                 .expect("test identifier must satisfy its grammar"),
             session_id: test_session_id("s1"),
             command: "printf replay-output".into(),
-            include_in_context: false,
+            include_in_context: true,
             target_agent_id: Some(agent_id("worker-1")),
             output: "replay-output".into(),
             exit_code: Some(0),

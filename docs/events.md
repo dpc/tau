@@ -779,9 +779,10 @@ transcript injection cannot diverge.
   or was cancelled. Echoes session id, command, optional target agent id,
   and `include_in_context` flag from the originating request, plus the
   truncated combined output, exit code, and `cancelled` flag. When
-  `include_in_context` is set, the harness injects the output only into the
+  `include_in_context` is set, the harness stores this self-contained event in
+  the non-ephemeral target agent journal and injects the output only into the
   harness-recorded target agent for that session after the canonical completion
-  commits. See
+  commits. UI-only `!!` completions remain transient. See
   [`SPEC-shell-command-reports-and-canonical-facts`](../specs/SPEC-shell-command-reports-and-canonical-facts.md).
 
 ## Term (terminal-output side effects)

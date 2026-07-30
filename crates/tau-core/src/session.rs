@@ -2125,6 +2125,11 @@ impl AgentTree {
             Event::ProviderResponseFinished(response) if response.agent_id == self.agent_id => {
                 Some(self.validate_provider_response(response))
             }
+            Event::ShellCommandFinished(finished)
+                if finished.target_agent_id.as_ref() == Some(&self.agent_id) =>
+            {
+                Some(Ok(()))
+            }
             _ => None,
         }
     }

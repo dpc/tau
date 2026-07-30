@@ -23,3 +23,31 @@ fn late_subscriber_replays_manual_compaction_acceptance() {
 
     assert!(should_replay_agent_event_to_late_subscriber(&event));
 }
+
+/// A completed context shell command is a self-contained final transcript fact,
+/// while its running observations remain outside late-subscriber replay.
+#[test]
+fn late_subscriber_replays_only_completed_context_shell_fact() {
+    let target = crate::parse_agent_id("worker");
+    let finished = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
+        command_id: tau_proto::ShellCommandId::parse("shell-replay").expect("command id"),
+        session_id: tau_proto::SessionId::parse("session-replay").expect("session id"),
+        command: "sh -c 'printf output; exit 7'".to_owned(),
+        include_in_context: true,
+        target_agent_id: Some(target.clone()),
+        output: "output".to_owned(),
+        exit_code: Some(7),
+        cancelled: false,
+    });
+
+    assert!(should_replay_agent_event_to_late_subscriber(&finished));
+    assert_eq!(project_agent_replay_event(finished.clone(), true), finished);
+    assert!(!should_replay_agent_event_to_late_subscriber(
+        &Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
+            command_id: tau_proto::ShellCommandId::parse("shell-replay").expect("command id"),
+            stream: tau_proto::ShellStream::Stdout,
+            chunk: "output".to_owned(),
+            target_agent_id: Some(target),
+        })
+    ));
+}

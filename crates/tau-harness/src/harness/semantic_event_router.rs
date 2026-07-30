@@ -7,8 +7,15 @@ use tau_proto::{Event, SessionId};
 /// Events that do not request persistence normally exist only for live
 /// observers. `AgentPromptStarted` and canonical terminal tool completions are
 /// exceptions because `AgentTree` folds them into prompt-generation and
-/// terminal-tool state.
+/// terminal-tool state. A shell completion explicitly excluded from context
+/// remains transient even if a caller requests persistence.
 pub(crate) fn should_persist_event(event: &Event, persist: bool) -> bool {
+    if matches!(
+        event,
+        Event::ShellCommandFinished(finished) if !finished.include_in_context
+    ) {
+        return false;
+    }
     if matches!(event, Event::AgentPromptCreated(_)) {
         return false;
     }

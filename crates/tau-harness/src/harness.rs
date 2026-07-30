@@ -5829,6 +5829,21 @@ impl Harness {
             Ok(append_outcome) => append_outcome,
             Err(error) => {
                 commit_timing.result = CommitEventTimingResult::SemanticPersistError;
+                if let Event::ShellCommandFinished(finished) = &event {
+                    // The provider route has already completed. Settle the live UI
+                    // exactly once even though this fact cannot enter replay, and
+                    // never inject output whose canonical durability failed.
+                    self.pending_ui_shell_output_injections
+                        .remove(&finished.command_id);
+                    self.active_ui_shell_command_ids
+                        .remove(&finished.command_id);
+                    self.release_pending_ephemeral_shell_canonical_marker(&finished.command_id);
+                    let frame = HarnessOutputMessage::deliver_live(
+                        recorded_at,
+                        Event::ShellCommandFinished(finished.clone()),
+                    );
+                    let _ = self.bus.publish_from(source, frame);
+                }
                 self.rollback_rejected_activation_successor(&event);
                 self.rollback_failed_wait_compaction_terminal(&event);
                 self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
@@ -8579,6 +8594,7 @@ impl Harness {
             Event::AgentMessageSent(message) => Some(message.sender_id.clone()),
             Event::AgentMessageReceived(message) => Some(message.recipient_id.clone()),
             Event::AgentHeadMoved(moved) => Some(moved.agent_id.clone()),
+            Event::ShellCommandFinished(finished) => finished.target_agent_id.clone(),
             Event::ProviderResponseFinished(finished) => Some(finished.agent_id.clone()),
             Event::ProviderToolResult(result) => self
                 .tool_agents

@@ -388,8 +388,8 @@ fn tool_progress_never_enters_semantic_history() {
     }
 }
 
-/// Peer shell reports never enter semantic history, while the existing
-/// canonical progress/completion classifications stay unchanged.
+/// Peer shell reports and canonical progress never enter semantic history,
+/// while canonical completion persists only when included in context.
 #[test]
 fn shell_reports_never_enter_semantic_history() {
     let progress = tau_proto::ShellCommandProgress {
@@ -424,7 +424,13 @@ fn shell_reports_never_enter_semantic_history() {
         false
     ));
     assert!(should_persist_event(
-        &Event::ShellCommandFinished(finished),
+        &Event::ShellCommandFinished(finished.clone()),
+        true
+    ));
+    let mut ui_only_finished = finished;
+    ui_only_finished.include_in_context = false;
+    assert!(!should_persist_event(
+        &Event::ShellCommandFinished(ui_only_finished),
         true
     ));
 }

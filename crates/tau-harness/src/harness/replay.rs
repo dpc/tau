@@ -875,6 +875,7 @@ fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
             | Event::ToolBackgroundResult(_)
             | Event::ToolBackgroundError(_)
             | Event::ToolCancelled(_)
+            | Event::ShellCommandFinished(_)
             | Event::ProviderResponseFinished(_)
     )
 }
