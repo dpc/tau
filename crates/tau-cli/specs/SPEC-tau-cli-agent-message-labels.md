@@ -2,10 +2,10 @@
 
 ## Record justification
 
-Agent identity and activity presentation spans transcript event folding,
-session-scoped metadata, watch, and navigation caches, message and status-row
-rendering, and lifecycle replay. No single owning module can state their combined
-identity, authority, and projection rules coherently.
+Because agent identity and activity presentation spans transcript event folding,
+session-scoped metadata, watch and navigation caches, message and status-row
+rendering, and lifecycle replay, no single owning module can state their
+combined identity, authority, and projection rules coherently.
 
 The CLI presents an agent endpoint in harness-owned message activity as its
 unambiguous `@`-prefixed routing id followed by a supplemental display name in
@@ -37,10 +37,14 @@ same-spelled agent in a subsequently resumed session can never relabel older
 history. Replay therefore produces the same presentation after that session's
 metadata has folded without rewriting the immutable message event or its body.
 
-Watch-response and watch-prompt projections use the same endpoint formatter,
-while their source/recipient wording and structured lifecycle rendering remain
-unchanged. Canonical transport endpoints retain their explicit transport and
-session qualification.
+Ordinary directed communication, including watched responses, is labeled
+`Message`. In a selected-agent transcript the selected endpoint is implicit:
+received messages show only `Message from <sender>`, and sent messages show only
+`Message to <recipient>`. The no-selection overview shows both endpoints as
+`Message from <sender> to <recipient>`. Message bodies remain below these
+headers. Watch-prompt projections keep their distinct lifecycle wording while
+using the same endpoint formatter. Canonical transport endpoints retain their
+explicit transport and session qualification.
 
 ## Watch state and navigation
 
@@ -68,12 +72,12 @@ input to the selected existing agent makes that exact target `active` for
 subsequent navigation; complete harness stats, not the local prompt event, update
 the CLI cache.
 
-Current CLI activity comes from the latest watched-agent `TurnState` record
+Current CLI activity rows come from the latest watched-agent `TurnState` record
 cached on each directed watch edge. `Running` renders as active and `Idle` does
 not. Before an edge receives its first `TurnState`, active prompt tracking for
-the target is the edge-local compatibility/catch-up fallback. The CLI does not
-yet consume structured `WorkStatus`; semantic status migration belongs to a
-later explicitly approved client change.
+the target is the edge-local compatibility/catch-up fallback. Structured
+`WorkStatus` reports supply transcript status updates but do not replace
+`TurnState` as activity-row authority.
 
 The CLI derives recursive activity exactly over the current live watch DAG. A
 direct target whose edge reports Running renders as `running [name] @id`. An otherwise
@@ -94,6 +98,11 @@ Harness-authored watched-turn lifecycle records are structured state, not
 watched-agent messages. The CLI renders their structured payload as a compact
 single-line status, suppresses any compatibility body, and bypasses
 `show-messages`.
+
+Harness-authored watched-agent `WorkStatus` records are likewise structured
+state rather than ordinary messages. Working, done, and blocked reports render
+as `Status update from <sender>: <phase> (<reported task>)`, suppress their
+empty compatibility body, and bypass `show-messages`.
 
 Genuine watched responses and direct-user-prompt notifications retain their
 `WatchResponse` and `WatchPrompt` kinds, sender/watcher attribution, history

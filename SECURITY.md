@@ -220,7 +220,9 @@ serialization changes. See
 
 Work-status titles are model-authored cross-agent content, not trusted routing
 or instruction data. The harness keeps their typed phase and epoch separate and
-applies visible trusted-frame escaping before prompt interpolation. Long-wait
+applies visible trusted-frame escaping before prompt interpolation, while the
+CLI applies the same escaping before placing titles in its one-line status
+frame. Long-wait
 notifications contain only harness-derived numeric thresholds. Their scheduler
 uses actual monotonic installed-wait intervals, advances even without watchers,
 and never reconstructs runtime clocks or re-fans committed thresholds on replay.

@@ -434,6 +434,42 @@ fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::
     })
 }
 
+fn received_agent_message(
+    sender_id: &str,
+    sender_session_id: Option<&str>,
+    recipient_id: &str,
+    message: &str,
+) -> tau_proto::Event {
+    tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse(format!(
+            "received-{sender_id}-{recipient_id}"
+        ))
+        .expect("test identifier must satisfy its grammar"),
+        sender_id: agent_id(sender_id),
+        sender_session_id: sender_session_id.map(|value| {
+            value
+                .parse()
+                .expect("test session id must satisfy its grammar")
+        }),
+        recipient_id: agent_id(recipient_id),
+        kind: tau_proto::AgentMessageKind::Message,
+        watch_turn_state: None,
+        watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
+        message: message.to_owned(),
+    })
+}
+
+fn block_text(block: &tau_cli_term::StyledBlock) -> String {
+    block
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect()
+}
+
 /// Large hidden transcripts must fold one event without cloning the selected
 /// terminal snapshot; this guards the permanent-freeze amplification found
 /// under sustained multi-agent traffic.
@@ -828,8 +864,8 @@ fn late_agent_name_updates_reproject_message_history() {
     );
 }
 
-/// Watch content projections preserve their distinct response/prompt wording
-/// while using the same supplemental endpoint labels as explicit messages.
+/// Watched responses are ordinary messages, while watched prompts retain their
+/// distinct lifecycle wording and both use supplemental endpoint labels.
 #[test]
 fn watch_content_summaries_preserve_wording_with_names() {
     let mut renderer = renderer_for_agent_id_tests();
@@ -838,7 +874,7 @@ fn watch_content_summaries_preserve_wording_with_names() {
     let cases = [
         (
             tau_proto::AgentMessageKind::WatchResponse,
-            "Response from @worker (research task) to @manager (coordination)",
+            "Message from @worker (research task) to @manager (coordination)",
         ),
         (
             tau_proto::AgentMessageKind::WatchPrompt,
@@ -858,6 +894,148 @@ fn watch_content_summaries_preserve_wording_with_names() {
         });
         assert_eq!(renderer.agent_message_summary(&event), expected);
     }
+}
+
+/// Selected transcript projections omit the endpoint already established by
+/// the view while retaining the remote endpoint's task label.
+#[test]
+fn selected_agent_messages_show_only_the_remote_endpoint() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.remember_agent_display_name("worker", "implementation");
+    renderer.remember_agent_display_name("manager", "coordination");
+    renderer.displayed_agent_id = Some("manager".to_owned());
+    let inbound = received_agent_message("worker", None, "manager", "inbound body");
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&inbound)),
+        format!(
+            "{} Message from @worker (implementation):\ninbound body",
+            renderer.submitted_prompt_symbol
+        )
+    );
+
+    let outbound = agent_message("manager", "worker", "outbound body");
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&outbound)),
+        format!(
+            "{} Message to @worker (implementation):\noutbound body",
+            renderer.submitted_prompt_symbol
+        )
+    );
+}
+
+/// A qualified remote sender never becomes the selected local endpoint merely
+/// because both agents have the same bare routing id.
+#[test]
+fn selected_inbound_message_matches_endpoints_with_session_scope() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.displayed_agent_id = Some("same".to_owned());
+    let inbound = received_agent_message("same", Some("remote-session"), "same", "remote body");
+
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&inbound)),
+        format!(
+            "{} Message from remote-session/@same:\nremote body",
+            renderer.submitted_prompt_symbol
+        )
+    );
+}
+
+/// The no-selection overview must retain both independently named routing
+/// endpoints because no current agent supplies implicit context.
+#[test]
+fn overview_messages_show_both_endpoint_task_labels() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.remember_agent_display_name("worker", "implementation");
+    renderer.remember_agent_display_name("manager", "coordination");
+    renderer.displayed_agent_id = None;
+    let message = agent_message("worker", "manager", "preserved body");
+
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&message)),
+        format!(
+            "{} Message from @worker (implementation) to @manager (coordination):\npreserved body",
+            renderer.submitted_prompt_symbol
+        )
+    );
+}
+
+/// Structured work-status reports for every reportable state must render their
+/// semantic phase and task instead of the empty compatibility message body.
+#[test]
+fn watch_work_status_renders_all_reportable_states() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.remember_agent_display_name("worker", "implementation");
+    renderer.show_messages = path_tau_config_settings::ShowMessages::None;
+    for (phase, label) in [
+        (tau_proto::AgentWorkStatusPhase::Working, "working"),
+        (tau_proto::AgentWorkStatusPhase::Done, "done"),
+        (tau_proto::AgentWorkStatusPhase::Blocked, "blocked"),
+    ] {
+        let event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse(format!("status-{label}"))
+                .expect("test identifier must satisfy its grammar"),
+            sender_id: agent_id("worker"),
+            sender_session_id: None,
+            recipient_id: agent_id("manager"),
+            kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+                session_id: "session-1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
+                subscription_id: "subscription-1".to_owned(),
+                status_epoch: 1,
+                phase,
+                title: Some(format!("{label} task")),
+                initial: false,
+            }),
+            watch_long_wait: None,
+            message: "must not render".to_owned(),
+        });
+
+        assert_eq!(
+            block_text(&renderer.render_agent_message_block(&event)),
+            format!(
+                "{} Status update from @worker (implementation): {label} ({label} task)",
+                renderer.submitted_prompt_symbol
+            )
+        );
+    }
+}
+
+/// Work-status titles visibly escape bidi controls before entering the trusted
+/// one-line status frame.
+#[test]
+fn watch_work_status_visibly_escapes_structural_unicode() {
+    let renderer = renderer_for_agent_id_tests();
+    let event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("status-bidi")
+            .expect("test identifier must satisfy its grammar"),
+        sender_id: agent_id("worker"),
+        sender_session_id: None,
+        recipient_id: agent_id("manager"),
+        kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+        watch_turn_state: None,
+        watch_provider_status: None,
+        watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            subscription_id: "subscription-1".to_owned(),
+            status_epoch: 1,
+            phase: tau_proto::AgentWorkStatusPhase::Blocked,
+            title: Some("blocked \u{202e} task".to_owned()),
+            initial: false,
+        }),
+        watch_long_wait: None,
+        message: "must not render".to_owned(),
+    });
+
+    let text = block_text(&renderer.render_agent_message_block(&event));
+    assert!(text.contains(r"blocked \u{202E} task"));
+    assert!(!text.contains('\u{202e}'));
+    assert!(!text.contains("must not render"));
 }
 
 /// A resumed different session must not inherit a same-spelled agent's local

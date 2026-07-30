@@ -4860,6 +4860,11 @@ impl EventRenderer {
         use_local_names: bool,
     ) -> tau_cli_term::StyledBlock {
         if let Some(summary) =
+            self.watch_work_status_summary_with_local_names(event, use_local_names)
+        {
+            return self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, summary);
+        }
+        if let Some(summary) =
             self.watch_turn_state_summary_with_local_names(event, use_local_names)
         {
             return self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, summary);
@@ -4935,7 +4940,7 @@ impl EventRenderer {
         event: &Event,
         use_local_names: bool,
     ) -> Vec<(String, bool)> {
-        let (prefix, first, separator, second) = match event {
+        let (sender, recipient, kind, local_sender_id, local_recipient_id) = match event {
             Event::AgentMessageSent(message) => {
                 let sender =
                     self.message_agent_display_label(message.sender_id.as_str(), use_local_names);
@@ -4952,15 +4957,18 @@ impl EventRenderer {
                     tau_proto::AgentMessageRecipient::User => None,
                 };
                 let recipient = (recipient, recipient_identity);
-                match message.kind {
-                    tau_proto::AgentMessageKind::WatchResponse => {
-                        ("Response from ", sender, " to ", recipient)
-                    }
-                    tau_proto::AgentMessageKind::WatchPrompt => {
-                        ("Prompt to ", sender, " observed by ", recipient)
-                    }
-                    _ => ("Message from ", sender, " to ", recipient),
-                }
+                let local_recipient_id = match &message.recipient {
+                    tau_proto::AgentMessageRecipient::Agent { agent_id } => Some(agent_id.as_str()),
+                    tau_proto::AgentMessageRecipient::ExternalAgent { .. }
+                    | tau_proto::AgentMessageRecipient::User => None,
+                };
+                (
+                    sender,
+                    recipient,
+                    message.kind,
+                    Some(message.sender_id.as_str()),
+                    local_recipient_id,
+                )
             }
             Event::AgentMessageReceived(message) => {
                 let sender = self.agent_message_received_sender_label(message, use_local_names);
@@ -4972,22 +4980,43 @@ impl EventRenderer {
                 let recipient = self
                     .message_agent_display_label(message.recipient_id.as_str(), use_local_names);
                 let recipient = (recipient, Some(format!("@{}", message.recipient_id)));
-                match message.kind {
-                    tau_proto::AgentMessageKind::WatchResponse => {
-                        ("Response from ", sender, " to ", recipient)
-                    }
-                    tau_proto::AgentMessageKind::WatchPrompt => {
-                        ("Prompt to ", sender, " observed by ", recipient)
-                    }
-                    _ => ("Message from ", sender, " to ", recipient),
-                }
+                (
+                    sender,
+                    recipient,
+                    message.kind,
+                    message
+                        .sender_session_id
+                        .is_none()
+                        .then_some(message.sender_id.as_str()),
+                    Some(message.recipient_id.as_str()),
+                )
             }
             _ => unreachable!("only agent message events are rendered here"),
         };
+        let (prefix, first, separator, second) = if kind == tau_proto::AgentMessageKind::WatchPrompt
+        {
+            ("Prompt to ", sender, " observed by ", Some(recipient))
+        } else if self
+            .displayed_agent_id
+            .as_deref()
+            .is_some_and(|displayed| Some(displayed) == local_sender_id)
+        {
+            ("Message to ", recipient, "", None)
+        } else if self
+            .displayed_agent_id
+            .as_deref()
+            .is_some_and(|displayed| Some(displayed) == local_recipient_id)
+        {
+            ("Message from ", sender, "", None)
+        } else {
+            ("Message from ", sender, " to ", Some(recipient))
+        };
         let mut parts = vec![(prefix.to_owned(), false)];
         Self::push_agent_message_endpoint(&mut parts, first);
-        parts.push((separator.to_owned(), false));
-        Self::push_agent_message_endpoint(&mut parts, second);
+        if let Some(second) = second {
+            parts.push((separator.to_owned(), false));
+            Self::push_agent_message_endpoint(&mut parts, second);
+        }
         parts
     }
 
@@ -5038,6 +5067,33 @@ impl EventRenderer {
             };
             format!("{watched} · {transition}")
         })
+    }
+
+    /// Renders a structured watched-agent work report as purpose-built content,
+    /// never as an ordinary message with an empty compatibility body.
+    fn watch_work_status_summary_with_local_names(
+        &self,
+        event: &Event,
+        use_local_names: bool,
+    ) -> Option<String> {
+        let Event::AgentMessageReceived(message) = event else {
+            return None;
+        };
+        let status = message.watch_work_status.as_ref()?;
+        let phase = match status.phase {
+            tau_proto::AgentWorkStatusPhase::Unreported => "unreported",
+            tau_proto::AgentWorkStatusPhase::Working => "working",
+            tau_proto::AgentWorkStatusPhase::Done => "done",
+            tau_proto::AgentWorkStatusPhase::Blocked => "blocked",
+            tau_proto::AgentWorkStatusPhase::Unknown => "unknown",
+        };
+        let sender = self.agent_message_received_sender_label(message, use_local_names);
+        let title = status
+            .title
+            .as_deref()
+            .map(tau_proto::visible_escape_metadata)
+            .unwrap_or_else(|| "no reported task".to_owned());
+        Some(format!("Status update from {sender}: {phase} ({title})"))
     }
 
     #[cfg(test)]
