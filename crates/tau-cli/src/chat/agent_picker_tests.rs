@@ -29,6 +29,8 @@ fn auto_entry(runtime_state: tau_proto::AgentRuntimeState) -> tau_proto::Session
 fn picker_orchestration_revalidates_with_initiating_category() {
     let running = auto_entry(tau_proto::AgentRuntimeState::Running);
     let idle = auto_entry(tau_proto::AgentRuntimeState::Idle);
+    let mut other = running.clone();
+    other.agent_id = tau_proto::AgentId::parse("other").expect("valid other agent id");
     let pick_auto = |rows: &str| {
         assert!(rows.contains("auto\tlive\trunning\tactive_auto\t"));
         assert!(
@@ -39,11 +41,11 @@ fn picker_orchestration_revalidates_with_initiating_category() {
     };
 
     let active = resolve_agent_picker(
-        vec![running.clone()],
+        vec![running.clone(), other.clone()],
         crate::list_agents::AgentPickerFilter::Active,
         |_| Some(tau_proto::EstimatedApiCost::default()),
         pick_auto,
-        || Some(vec![idle.clone()]),
+        || Some(vec![idle.clone(), other.clone()]),
         || true,
         |agent_id| agent_id == "auto",
     );
@@ -53,11 +55,11 @@ fn picker_orchestration_revalidates_with_initiating_category() {
     );
 
     let all = resolve_agent_picker(
-        vec![running],
+        vec![running, other.clone()],
         crate::list_agents::AgentPickerFilter::All,
         |_| Some(tau_proto::EstimatedApiCost::default()),
         pick_auto,
-        || Some(vec![idle]),
+        || Some(vec![idle, other]),
         || true,
         |agent_id| agent_id == "auto",
     );
@@ -67,6 +69,43 @@ fn picker_orchestration_revalidates_with_initiating_category() {
             tau_proto::AgentId::parse("auto").expect("valid selected agent id")
         )
     );
+}
+
+/// A sole eligible row is selected directly without invoking the external
+/// picker, while still passing through fresh-snapshot revalidation.
+#[test]
+fn picker_selects_single_row_without_launching_external_picker() {
+    let running = auto_entry(tau_proto::AgentRuntimeState::Running);
+    let mut ineligible = auto_entry(tau_proto::AgentRuntimeState::Idle);
+    ineligible.agent_id =
+        tau_proto::AgentId::parse("ineligible").expect("valid ineligible agent id");
+    let picker_launched = std::cell::Cell::new(false);
+    let refresh_called = std::cell::Cell::new(false);
+
+    let result = resolve_agent_picker(
+        vec![running.clone(), ineligible],
+        crate::list_agents::AgentPickerFilter::Active,
+        |_| None,
+        |_| {
+            picker_launched.set(true);
+            Ok(None)
+        },
+        || {
+            refresh_called.set(true);
+            Some(vec![running])
+        },
+        || true,
+        |agent_id| agent_id == "auto",
+    );
+
+    assert_eq!(
+        result,
+        AgentPickerResolution::Select(
+            tau_proto::AgentId::parse("auto").expect("valid selected agent id")
+        )
+    );
+    assert!(!picker_launched.get());
+    assert!(refresh_called.get());
 }
 
 /// A timed-out current-harness roster request must surface its error before the

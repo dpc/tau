@@ -4046,10 +4046,14 @@ fn resolve_agent_picker(
         return AgentPickerResolution::Notice("no agents available".to_owned());
     }
     let rows = crate::list_agents::format_picker_rows(&visible, cost_for_agent);
-    let selected = match pick(&rows) {
-        Ok(Some(row)) => row,
-        Ok(None) => return AgentPickerResolution::NoChange,
-        Err(error) => return AgentPickerResolution::Notice(error),
+    let selected = if visible.len() == 1 {
+        rows.trim_end_matches('\n').to_owned()
+    } else {
+        match pick(&rows) {
+            Ok(Some(row)) => row,
+            Ok(None) => return AgentPickerResolution::NoChange,
+            Err(error) => return AgentPickerResolution::Notice(error),
+        }
     };
     let agent_id = match crate::list_agents::selected_agent_id(&selected) {
         Ok(agent_id) => agent_id,
