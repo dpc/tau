@@ -1,4 +1,4 @@
-use super::{AgentPickerResolution, resolve_agent_picker};
+use super::{AgentPickerResolution, resolve_agent_picker, with_agent_roster};
 
 fn auto_entry(runtime_state: tau_proto::AgentRuntimeState) -> tau_proto::SessionAgentListEntry {
     tau_proto::SessionAgentListEntry {
@@ -67,4 +67,24 @@ fn picker_orchestration_revalidates_with_initiating_category() {
             tau_proto::AgentId::parse("auto").expect("valid selected agent id")
         )
     );
+}
+
+/// A timed-out current-harness roster request must surface its error before the
+/// picker can launch, preserving the roster RPC as the sole initial deadline.
+#[test]
+fn picker_does_not_launch_after_current_roster_timeout() {
+    let picker_launched = std::cell::Cell::new(false);
+    let result = with_agent_roster(
+        || Err("agent roster request timed out after 10s".to_owned()),
+        |_| {
+            picker_launched.set(true);
+            AgentPickerResolution::NoChange
+        },
+    );
+
+    assert_eq!(
+        result,
+        AgentPickerResolution::Notice("agent roster request timed out after 10s".to_owned())
+    );
+    assert!(!picker_launched.get());
 }

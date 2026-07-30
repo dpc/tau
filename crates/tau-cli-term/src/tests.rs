@@ -953,7 +953,9 @@ printf 'agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\
     let selected = run_agent_fzf_command_with_ownership(
         program.as_os_str(),
         "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle\tdisplay\n",
+        AGENT_PICKER_TIMEOUT,
         ProcessOwnership::ProcessGroup,
+        || Ok(()),
     )
     .expect("fake fzf succeeds");
 
@@ -975,7 +977,9 @@ fn agent_fzf_command_treats_cancel_statuses_as_cancel() {
         let selected = run_agent_fzf_command_with_ownership(
             program.as_os_str(),
             "agent-1\tlive\n",
+            AGENT_PICKER_TIMEOUT,
             ProcessOwnership::ProcessGroup,
+            || Ok(()),
         )
         .expect("cancel is not an error");
         assert_eq!(selected, None);
@@ -995,7 +999,9 @@ fn agent_fzf_command_reports_missing_program_and_failure_status() {
         run_agent_fzf_command_with_ownership(
             missing.as_os_str(),
             "agent-1\tlive\n",
+            AGENT_PICKER_TIMEOUT,
             ProcessOwnership::ProcessGroup,
+            || Ok(()),
         )
         .is_err()
     );
@@ -1004,8 +1010,90 @@ fn agent_fzf_command_reports_missing_program_and_failure_status() {
     let error = run_agent_fzf_command_with_ownership(
         failed.as_os_str(),
         "agent-1\tlive\n",
+        AGENT_PICKER_TIMEOUT,
         ProcessOwnership::ProcessGroup,
+        || Ok(()),
     )
     .expect_err("status 2 is an error");
     assert!(error.contains("status 2"));
+}
+
+/// The production picker wiring must retain the documented interactive bound
+/// rather than regressing to the prompt command's one-hour allowance.
+#[test]
+fn agent_picker_production_timeout_is_five_minutes() {
+    assert_eq!(AGENT_PICKER_TIMEOUT, std::time::Duration::from_secs(300));
+}
+
+/// A nonterminating picker must return promptly, kill descendants in its owned
+/// process group, and invoke terminal resume with an actionable picker error.
+#[cfg(target_os = "linux")]
+#[test]
+fn agent_picker_timeout_resumes_terminal_and_kills_descendants() {
+    let _guard = AGENT_FZF_TEST_LOCK.lock().expect("agent fzf test lock");
+    let pid_dir = tempfile::tempdir().expect("descendant pid directory");
+    let pending_pid_file = pid_dir.path().join("descendant.pid.pending");
+    let pid_file = pid_dir.path().join("descendant.pid");
+    let program = fake_fzf(&format!(
+        "sleep 30 &\necho $! > '{}'\nmv '{}' '{}'\nwait",
+        pending_pid_file.display(),
+        pending_pid_file.display(),
+        pid_file.display()
+    ));
+    let (term, _handle, _input_tx) = new_test_term(vec![]);
+    let terminal_paused = std::rc::Rc::new(std::cell::Cell::new(false));
+    let pause_state = terminal_paused.clone();
+    let resume_state = terminal_paused.clone();
+    let started = std::time::Instant::now();
+
+    let error = term
+        .pick_agent_row_with_command_and_terminal(
+            program.as_os_str(),
+            "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle\n",
+            std::time::Duration::from_millis(100),
+            ProcessOwnership::ProcessGroup,
+            AgentPickerHooks {
+                pause: move || {
+                    assert!(!pause_state.replace(true), "terminal paused twice");
+                    Ok(())
+                },
+                resume: move || {
+                    assert!(resume_state.replace(false), "terminal was not paused");
+                    Ok(())
+                },
+                after_spawn: || {
+                    let readiness_deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while !pid_file.exists() {
+                        if readiness_deadline <= std::time::Instant::now() {
+                            return Err("fake fzf did not publish descendant pid".to_owned());
+                        }
+                        std::thread::yield_now();
+                    }
+                    Ok(())
+                },
+            },
+        )
+        .expect_err("nonterminating picker times out");
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert!(error.contains("fzf failed: command exceeded"));
+    assert!(!terminal_paused.get(), "picker left terminal paused");
+    let descendant_pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("read descendant pid")
+        .trim()
+        .parse()
+        .expect("parse descendant pid");
+    match std::fs::read_to_string(format!("/proc/{descendant_pid}/stat")) {
+        Ok(stat) => assert_eq!(
+            stat.split_whitespace().nth(2),
+            Some("Z"),
+            "picker descendant remained runnable after process-group cleanup"
+        ),
+        Err(error) => assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "could not inspect picker descendant cleanup"
+        ),
+    }
 }

@@ -92,7 +92,7 @@ pub(crate) fn run_with_bounded_stdout(
 }
 
 /// Runs a bounded command after allowing a test fixture to observe its spawn.
-fn run_with_bounded_stdout_after_spawn(
+pub(crate) fn run_with_bounded_stdout_after_spawn(
     command: &mut std::process::Command,
     stdin_input: Option<&[u8]>,
     stdout_limit: usize,

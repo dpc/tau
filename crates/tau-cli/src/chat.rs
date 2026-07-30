@@ -3797,33 +3797,33 @@ impl<'a> TerminalInputSession<'a> {
 
     fn pick_agent(&mut self, filter: crate::list_agents::AgentPickerFilter) {
         let session_id = self.session_id.clone();
-        let agents = match crate::list_agents::request_at_socket(
-            &self.ctx.harness_socket_path,
-            &session_id,
-            tau_proto::SessionAgentListScope::Current,
-        ) {
-            Ok(agents) => agents,
-            Err(error) => {
-                self.output.system_info(&format!("agent-picker: {error}"));
-                return;
-            }
-        };
         let costs = self.ctx.agent_estimated_api_costs.snapshot();
-        let resolution = resolve_agent_picker(
-            agents,
-            filter,
-            |agent_id| costs.get(agent_id).copied(),
-            |rows| self.term.pick_agent_row_with_fzf(rows),
+        let resolution = with_agent_roster(
             || {
                 crate::list_agents::request_at_socket(
                     &self.ctx.harness_socket_path,
                     &session_id,
                     tau_proto::SessionAgentListScope::Current,
                 )
-                .ok()
             },
-            || self.session_id == &session_id,
-            |agent_id| self.ctx.routing.agent_is_known(agent_id),
+            |agents| {
+                resolve_agent_picker(
+                    agents,
+                    filter,
+                    |agent_id| costs.get(agent_id).copied(),
+                    |rows| self.term.pick_agent_row_with_fzf(rows),
+                    || {
+                        crate::list_agents::request_at_socket(
+                            &self.ctx.harness_socket_path,
+                            &session_id,
+                            tau_proto::SessionAgentListScope::Current,
+                        )
+                        .ok()
+                    },
+                    || self.session_id == &session_id,
+                    |agent_id| self.ctx.routing.agent_is_known(agent_id),
+                )
+            },
         );
         match resolution {
             AgentPickerResolution::NoChange => {}
@@ -4018,6 +4018,17 @@ enum AgentPickerResolution {
     Notice(String),
     /// Switch to this freshly revalidated agent.
     Select(tau_proto::AgentId),
+}
+
+/// Requests the current roster before allowing picker projection or execution.
+fn with_agent_roster<E: std::fmt::Display>(
+    request: impl FnOnce() -> Result<Vec<tau_proto::SessionAgentListEntry>, E>,
+    continue_with: impl FnOnce(Vec<tau_proto::SessionAgentListEntry>) -> AgentPickerResolution,
+) -> AgentPickerResolution {
+    match request() {
+        Ok(agents) => continue_with(agents),
+        Err(error) => AgentPickerResolution::Notice(error.to_string()),
+    }
 }
 
 /// Runs picker projection, selection, and fresh-snapshot revalidation.

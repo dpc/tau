@@ -19,7 +19,10 @@ mod tests;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use bounded_command::{ProcessOwnership, run_with_bounded_stdout, run_with_inherited_stdio};
+use bounded_command::{
+    ProcessOwnership, run_with_bounded_stdout, run_with_bounded_stdout_after_spawn,
+    run_with_inherited_stdio,
+};
 pub use completion::{
     ArgCompleter, CommandCompletion, CommandName, CompletionData, CompletionItem, CompletionRule,
     CompletionRules,
@@ -44,7 +47,7 @@ const COMPLETION_COMMAND_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
 const COMPLETION_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const PROMPT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 const AGENT_PICKER_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
-const AGENT_PICKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const AGENT_PICKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 // Keep the first ten fields synchronized with docs/list-agents.md#output. The
 // final three source fields are picker-only cost/work status; the presentation
 // field is removed after fzf returns the complete input row.
@@ -130,28 +133,41 @@ struct AgentPickerColumn {
 }
 
 /// Re-acquires raw terminal state on every external-command exit path.
-struct ExternalResumeGuard<'a> {
-    /// Terminal whose external pause remains armed.
-    term: &'a tau_cli_term_raw::Term,
+struct ExternalResumeGuard<F: FnMut() -> io::Result<()>> {
+    /// Resume operation for the terminal whose external pause remains armed.
+    resume: F,
     /// Cleared only after an explicit successful-or-reported resume attempt.
     armed: bool,
 }
 
-impl<'a> ExternalResumeGuard<'a> {
-    fn new(term: &'a tau_cli_term_raw::Term) -> Self {
-        Self { term, armed: true }
+/// Injectable terminal lifecycle and child-readiness operations for one picker.
+struct AgentPickerHooks<P, R, A> {
+    /// Releases terminal ownership before spawning the picker.
+    pause: P,
+    /// Restores terminal ownership after the picker finishes.
+    resume: R,
+    /// Observes child readiness before the command deadline begins.
+    after_spawn: A,
+}
+
+impl<F: FnMut() -> io::Result<()>> ExternalResumeGuard<F> {
+    fn new(resume: F) -> Self {
+        Self {
+            resume,
+            armed: true,
+        }
     }
 
     fn finish(mut self) -> io::Result<()> {
         self.armed = false;
-        self.term.resume_after_external()
+        (self.resume)()
     }
 }
 
-impl Drop for ExternalResumeGuard<'_> {
+impl<F: FnMut() -> io::Result<()>> Drop for ExternalResumeGuard<F> {
     fn drop(&mut self) {
         if self.armed
-            && let Err(error) = self.term.resume_after_external()
+            && let Err(error) = (self.resume)()
         {
             tracing::warn!(
                 target: "tau_cli::input",
@@ -362,17 +378,67 @@ impl HighTerm {
     /// mode.
     ///
     /// `rows` must be headerless TSV with the stable agent id in field one.
-    /// Cancellation and an empty input return `Ok(None)`.
+    /// Cancellation and an empty input return `Ok(None)`. The external `fzf`
+    /// interaction uses a five-minute command timeout. Tau attempts to restore
+    /// terminal input afterward; a restoration failure supersedes the picker
+    /// error.
     pub fn pick_agent_row_with_fzf(&self, rows: &str) -> Result<Option<String>, String> {
+        self.pick_agent_row_with_command(
+            std::ffi::OsStr::new("fzf"),
+            rows,
+            AGENT_PICKER_TIMEOUT,
+            ProcessOwnership::ForegroundProcessGroup,
+        )
+    }
+
+    /// Runs an injected picker with explicit execution bounds and ownership.
+    fn pick_agent_row_with_command(
+        &self,
+        program: &std::ffi::OsStr,
+        rows: &str,
+        timeout: std::time::Duration,
+        ownership: ProcessOwnership,
+    ) -> Result<Option<String>, String> {
+        self.pick_agent_row_with_command_and_terminal(
+            program,
+            rows,
+            timeout,
+            ownership,
+            AgentPickerHooks {
+                pause: || self.term.pause_for_external(),
+                resume: || self.term.resume_after_external(),
+                after_spawn: || Ok(()),
+            },
+        )
+    }
+
+    /// Runs an injected picker between explicit terminal pause/resume
+    /// operations.
+    fn pick_agent_row_with_command_and_terminal(
+        &self,
+        program: &std::ffi::OsStr,
+        rows: &str,
+        timeout: std::time::Duration,
+        ownership: ProcessOwnership,
+        hooks: AgentPickerHooks<
+            impl FnOnce() -> io::Result<()>,
+            impl FnMut() -> io::Result<()>,
+            impl FnOnce() -> Result<(), String>,
+        >,
+    ) -> Result<Option<String>, String> {
         if rows.is_empty() {
             return Ok(None);
         }
         let picker_rows = format_agent_picker_rows(rows, self.handle.size().0)?;
-        self.term
-            .pause_for_external()
-            .map_err(|error| format!("could not release terminal: {error}"))?;
-        let guard = ExternalResumeGuard::new(&self.term);
-        let selection = run_agent_fzf_command(std::ffi::OsStr::new("fzf"), &picker_rows);
+        (hooks.pause)().map_err(|error| format!("could not release terminal: {error}"))?;
+        let guard = ExternalResumeGuard::new(hooks.resume);
+        let selection = run_agent_fzf_command_with_ownership(
+            program,
+            &picker_rows,
+            timeout,
+            ownership,
+            hooks.after_spawn,
+        );
         guard
             .finish()
             .map_err(|error| format!("could not resume terminal after agent picker: {error}"))?;
@@ -699,27 +765,27 @@ pub fn canonical_literal_colon_prompt(line: &str) -> Option<String> {
         .map(|suffix| format!("{}:{suffix}", &line[..leading_len]))
 }
 
-fn run_agent_fzf_command(program: &std::ffi::OsStr, rows: &str) -> Result<Option<String>, String> {
-    run_agent_fzf_command_with_ownership(program, rows, ProcessOwnership::ForegroundProcessGroup)
-}
-
 fn run_agent_fzf_command_with_ownership(
     program: &std::ffi::OsStr,
     rows: &str,
+    timeout: std::time::Duration,
     ownership: ProcessOwnership,
+    after_spawn: impl FnOnce() -> Result<(), String>,
 ) -> Result<Option<String>, String> {
     let mut command = std::process::Command::new(program);
     command
         .args(AGENT_PICKER_FZF_ARGS)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    let output = run_with_bounded_stdout(
+    let output = run_with_bounded_stdout_after_spawn(
         &mut command,
         Some(rows.as_bytes()),
         AGENT_PICKER_OUTPUT_LIMIT_BYTES,
-        AGENT_PICKER_TIMEOUT,
+        timeout,
         ownership,
-    )?;
+        after_spawn,
+    )
+    .map_err(|error| format!("fzf failed: {error}"))?;
     match output.status.code() {
         Some(1 | 130) => Ok(None),
         _ if !output.status.success() => Err(format!(
@@ -871,7 +937,7 @@ fn run_completion_command(
     };
     term.pause_for_external()
         .map_err(|e| format!("could not release terminal: {e}"))?;
-    let _guard = ExternalResumeGuard::new(term);
+    let _guard = ExternalResumeGuard::new(|| term.resume_after_external());
     let mut command_builder = std::process::Command::new(program);
     command_builder
         .args(args)
@@ -1135,7 +1201,7 @@ fn run_prompt_shell_action(
     term.pause_for_external()
         .map_err(|e| format!("could not release terminal: {e}"))?;
     // RAII so a spawn error / panic still restores raw mode.
-    let _guard = ExternalResumeGuard::new(term);
+    let _guard = ExternalResumeGuard::new(|| term.resume_after_external());
 
     let mut command_builder = prompt_shell_command_builder(
         command,
