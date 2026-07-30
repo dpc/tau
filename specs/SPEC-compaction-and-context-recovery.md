@@ -76,9 +76,17 @@ acknowledgement. Self requests start only from the complete tool-round
 continuation gate, preserving tool-call/result adjacency. Cross-agent requests
 may start for idle or explicitly blocked loaded targets and never queue behind
 busy or dispatch-uncertain work. The target-scoped standalone transaction is
-the provider-work authority; its terminal event produces exactly one
-background completion for the original call before any self continuation
-checkpoint.
+the provider-work authority. A self request's accepted placeholder never starts
+ordinary inference. Its durable terminal produces one compact-specific internal
+continuation containing bounded status and request, call, and transaction
+correlation; this consumes the background terminal, suppresses generic completion
+delivery, and makes the original call unavailable to `wait`. Success continues
+from the replacement window. Failure or cancellation attempts the same
+error-bearing continuation and otherwise leaves the transaction durably blocked
+and visible. Replay delivers a committed but undelivered terminal once and never
+resends ambiguous compactor work or repeats committed delivery. An explicit
+recovery creates a successor outcome and delivery rather than rewriting history.
+Cross-agent `agent_compact` remains asynchronous and waitable.
 The model-callable path accepts work only when the exact captured
 provider-qualified model supports standalone compaction and its route exists.
 It has no inline fallback. Provider terminal errors, including context-window

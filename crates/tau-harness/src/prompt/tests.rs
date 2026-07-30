@@ -1317,6 +1317,7 @@ fn non_human_and_injected_user_text_remain_unwrapped() {
 fn human_ui_steer_projects_complete_expanded_skill_prompt() {
     let expanded = "<skill name=\"example\" location=\"/tmp/雪\">\nbody & more\n</skill>\n\nargs";
     let event = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: true,
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         agent_id: crate::parse_agent_id("main"),

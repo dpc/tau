@@ -1977,6 +1977,7 @@ fn timer_wakeup_prompt_steered_renders_visible_marker() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("engineer_abc12345"),
@@ -2089,6 +2090,7 @@ fn context_size_alert_prompt_steered_renders_internal_history_marker() {
     };
     renderer.handle(&visible_prompt("before steered alert"));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: true,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("engineer_abc12345"),
@@ -2444,6 +2446,7 @@ fn queued_prompt_elides_at_layout_without_changing_authoritative_text() {
     assert!(!queued.contains("middle line retained"));
 
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         text: text.into(),
@@ -8728,6 +8731,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
     );
 
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         text: "folded queued prompt".into(),
@@ -8785,6 +8789,7 @@ fn internal_prompt_events_are_hidden() {
         message_class: tau_proto::PromptMessageClass::Internal,
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: false,
         submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         text: "[tau-internal] Tool call `steered` is complete.".into(),

@@ -2189,6 +2189,56 @@ fn manual_compaction_pre_start_failure_is_exactly_once() {
     );
 }
 
+/// Typed self-compaction delivery must match one durable terminal and cannot
+/// commit twice after replay.
+#[test]
+fn self_compaction_terminal_delivery_is_correlated_and_exactly_once() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let mut request = manual_request("cr-delivery");
+    request.caller_agent_id = request.target_agent_id.clone();
+    request.initiating_tool_name = tau_proto::ManualCompactionTool::Compact;
+    request.visible_tool_name = ToolName::new("compact");
+    request.resume_inference = true;
+    tree.validate_event(&Event::AgentManualCompactionRequested(request.clone()))
+        .expect("request");
+    tree.apply_event(&Event::AgentManualCompactionRequested(request.clone()));
+    let failed = tau_proto::AgentManualCompactionRequestFailed {
+        request_id: request.request_id.clone(),
+        target_agent_id: request.target_agent_id.clone(),
+        reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
+    };
+    tree.validate_event(&Event::AgentManualCompactionRequestFailed(failed.clone()))
+        .expect("failure");
+    tree.apply_event(&Event::AgentManualCompactionRequestFailed(failed));
+    let terminal = tau_proto::SelfCompactionTerminal {
+        request_id: request.request_id.clone(),
+        tool_call_id: request.initiating_tool_call_id,
+        transaction_id: None,
+        outcome: tau_proto::SelfCompactionTerminalOutcome::RequestFailed {
+            reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
+        },
+    };
+    let delivery = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        self_compaction_terminal: Some(terminal.clone()),
+        agent_id: agent_id(),
+        inference_activation: true,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        text: "bounded terminal".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        internal_kind: None,
+        ctx_id: None,
+    });
+    tree.validate_event(&delivery).expect("matching delivery");
+    tree.apply_event(&delivery);
+    assert_eq!(
+        tree.self_compaction_delivery(&request.request_id),
+        Some(&terminal)
+    );
+    assert!(
+        validation_error(&tree, delivery).contains("duplicate self-compaction terminal delivery")
+    );
+}
+
 /// Standalone compaction provider prompts must not advance the target-owned
 /// ordinary-inference generation used by the manual compaction rate guard.
 #[test]
@@ -2435,6 +2485,7 @@ fn manual_completion_notification_lookup_is_branch_specific() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     let input = |text: &str| {
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            self_compaction_terminal: None,
             agent_id: agent_id(),
             text: text.to_owned(),
             message_class: tau_proto::PromptMessageClass::Internal,

@@ -579,6 +579,9 @@ fn protected_prompt_fields_were_modified(original: &Event, replacement: &Event) 
                 || original.submission_source != replacement.submission_source
                 || original.message_class != replacement.message_class
                 || original.internal_kind != replacement.internal_kind
+                || original.self_compaction_terminal != replacement.self_compaction_terminal
+                || (original.self_compaction_terminal.is_some()
+                    && original.text != replacement.text)
                 || (original.internal_kind == Some(tau_proto::InternalPromptKind::ContextSizeAlert)
                     && original.text != replacement.text)
         }

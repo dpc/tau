@@ -1254,6 +1254,7 @@ fn representative_events() -> Vec<Event> {
             text: "queued".to_owned(),
         }),
         Event::AgentPromptSteered(AgentPromptSteered {
+            self_compaction_terminal: None,
             inference_activation: false,
             submission_source: PromptSubmissionSource::HarnessInternal,
             agent_id: agent_id("engineer_abcd1234"),
@@ -3049,6 +3050,7 @@ fn canonical_inference_activation_defaults_and_round_trips() {
     );
 
     let active_steered = AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: true,
         submission_source: PromptSubmissionSource::HarnessInternal,
         agent_id: AgentId::parse("agent-1").expect("agent id"),
@@ -4658,6 +4660,7 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
     assert_eq!(queued.message_class, PromptMessageClass::User);
 
     let internal = serde_json::to_value(AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: false,
         submission_source: PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("worker"),
@@ -4685,6 +4688,7 @@ fn steered_prompt_requires_submission_source() {
     );
 
     let steered = AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: true,
         submission_source: PromptSubmissionSource::HumanUi,
         agent_id: agent_id("worker"),
@@ -4729,6 +4733,7 @@ fn context_size_alert_internal_kind_round_trips_on_durable_prompts() {
     );
 
     let steered = AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: true,
         submission_source: PromptSubmissionSource::HarnessInternal,
         agent_id: agent_id("worker"),

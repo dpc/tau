@@ -175,11 +175,14 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 - **`agent.prompt_steered`** — A previously queued prompt folded into an
   in-flight continuation as a steering user message rather than a fresh turn.
   Its immutable harness-owned `inference_activation` marker is true for
-  checkpoint-governed work; missing/default-false values are passive or legacy
-  and cannot independently wake replay. It carries the same optional
-  `internal_kind=context_size_alert` delivery tag as `agent.prompt_submitted`
-  and requires the same harness-stamped `submission_source`; old steered records
-  without that field are unsupported.
+   checkpoint-governed work; missing/default-false values are passive or legacy
+   and cannot independently wake replay. It carries the same optional
+   `internal_kind=context_size_alert` delivery tag as `agent.prompt_submitted`
+   and requires the same harness-stamped `submission_source`. The optional typed
+   `self_compaction_terminal` is immutable one-shot delivery authority for self
+   `compact`; it contains closed status plus request, call, and optional
+   transaction correlation, and duplicate delivery is invalid. Old steered
+   records without `submission_source` are unsupported.
 - **`agent.user_message_injected`** — Synthetic transcript context inserted by
   the harness (for example shell output) and folded
   like user input. It uses the same immutable harness-owned, default-false

@@ -2601,7 +2601,9 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
     let (parked, _) = intercepted_payload(&interceptor);
     assert!(matches!(
         parked,
-        Event::AgentPromptSteered(tau_proto::AgentPromptSteered { ref text, .. })
+        Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            ref text, ..
+        })
             if text == "first steer after compaction"
     ));
     assert_eq!(
@@ -2634,7 +2636,9 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
     .expect("release first steer");
     assert!(matches!(
         h.pending_intercept.as_ref().map(|pending| &pending.event),
-        Some(Event::AgentPromptSteered(tau_proto::AgentPromptSteered { text, .. }))
+        Some(Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            text, ..
+        }))
             if text == "final steer after compaction"
     ));
     assert_eq!(prompt_created_count(&h), 1);
@@ -2795,6 +2799,7 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
         &cid,
         None,
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            self_compaction_terminal: None,
             inference_activation: true,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: agent_id.clone(),
@@ -2922,6 +2927,7 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
         &cid,
         None,
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            self_compaction_terminal: None,
             inference_activation: true,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: agent_id.clone(),
@@ -3047,6 +3053,7 @@ fn completion_batch_purge_is_scoped_by_agent_and_transaction() {
             cid,
             None,
             Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                self_compaction_terminal: None,
                 inference_activation: true,
                 submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                 agent_id,
@@ -3457,6 +3464,7 @@ fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
             (
                 tau_proto::EventName::AGENT_PROMPT_STEERED,
                 Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                    self_compaction_terminal: None,
                     inference_activation,
                     submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                     agent_id,
@@ -3530,6 +3538,7 @@ fn interception_rejects_steered_submission_source_forgery() {
     )
     .expect("intercept registration");
     let original = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+        self_compaction_terminal: None,
         inference_activation: true,
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -3583,6 +3592,7 @@ fn interception_preserves_context_alert_tag_and_text() {
         (
             tau_proto::EventName::AGENT_PROMPT_STEERED,
             Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                self_compaction_terminal: None,
                 inference_activation: true,
                 submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                 agent_id,

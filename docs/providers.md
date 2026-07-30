@@ -432,9 +432,12 @@ Provider retries carry closed structured categories, saturating attempt counts, 
 
 The enabled-by-default `compact` tool and disabled-by-default `agent_compact`
 tool require the exact selected model and live route to advertise standalone
-compaction. They never fall back to legacy inline compaction. Acceptance is
-asynchronous; the original tool call receives a `tool.background_result` or
-`tool.background_error`, which may be consumed through `wait`.
+compaction. They never fall back to legacy inline compaction. Self `compact`
+internally uses an asynchronous transaction, but suspends ordinary inference
+until it directly delivers and consumes one correlated terminal; that call is
+not subsequently waitable. Cross-agent `agent_compact` remains asynchronous and
+its original call receives a `tool.background_result` or
+`tool.background_error` consumable through `wait`.
 ## Manual delayed retries
 
 Use `:retry` to run the selected agent's currently delayed provider retry now.

@@ -4211,10 +4211,12 @@ pub struct AgentCompacted {
     pub replacement_window: Vec<ContextItem>,
 }
 
-/// A previously queued user prompt that the harness folded into the
-/// in-flight turn as a steering message — appended to the next
-/// `AgentPromptCreated` for this agent alongside tool results, rather
-/// than waiting for the agent to return to `Idle` and kicking off a fresh turn.
+/// A previously queued user or harness-internal prompt folded into an in-flight
+/// continuation.
+///
+/// The prompt is appended to the next `AgentPromptCreated` alongside tool
+/// results rather than waiting for the agent to return to `Idle`. Typed
+/// internal deliveries may additionally carry immutable control correlation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptSteered {
     /// Agent whose in-flight turn received the prompt.
@@ -4231,12 +4233,48 @@ pub struct AgentPromptSteered {
     /// Whether this prompt text is user-authored or internal control text.
     #[serde(default)]
     pub message_class: PromptMessageClass,
+    /// Typed one-shot self-compaction delivery authority, when this internal
+    /// prompt resumes a model after its own `compact` call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_compaction_terminal: Option<SelfCompactionTerminal>,
     /// Harness-owned subtype for internal prompts with visible presentation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_kind: Option<InternalPromptKind>,
     /// Echo of the original queued prompt correlation id, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_id: Option<String>,
+}
+
+/// Closed terminal outcome delivered directly after a self-compaction request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum SelfCompactionTerminalOutcome {
+    /// A replacement context window committed.
+    Compacted,
+    /// A started standalone transaction failed.
+    Failed {
+        /// Safe bounded transaction failure category.
+        reason: StandaloneCompactionFailureReason,
+    },
+    /// An accepted request failed before transaction start.
+    RequestFailed {
+        /// Safe bounded pre-start failure category.
+        reason: ManualCompactionRequestFailureReason,
+    },
+}
+
+/// Durable typed correlation for one model-visible self-compaction terminal.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SelfCompactionTerminal {
+    /// Accepted request whose terminal is delivered.
+    pub request_id: CompactionRequestId,
+    /// Original self-`compact` tool call.
+    pub tool_call_id: ToolCallId,
+    /// Started transaction, absent only for a pre-start request failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<CompactionTransactionId>,
+    /// Closed bounded terminal outcome.
+    pub outcome: SelfCompactionTerminalOutcome,
 }
 
 /// A synthetic user message injected into an agent transcript by the harness

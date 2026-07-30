@@ -458,6 +458,8 @@ pub(crate) struct PendingPrompt {
     pub(crate) activation_observation: Option<tau_proto::ObservationId>,
     /// Correlation retained until this accepted initial prompt materializes.
     pub(crate) initial_prompt_correlation: Option<InitialPromptCorrelation>,
+    /// Typed durable authority when this prompt delivers self compaction.
+    pub(crate) self_compaction_terminal: Option<tau_proto::SelfCompactionTerminal>,
 }
 
 /// Correlation for an accepted initial prompt before provider materialization.
@@ -505,6 +507,7 @@ impl PendingPrompt {
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
             initial_prompt_correlation: None,
+            self_compaction_terminal: None,
         }
     }
 
@@ -534,6 +537,7 @@ impl PendingPrompt {
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
             initial_prompt_correlation: None,
+            self_compaction_terminal: None,
         }
     }
 
@@ -555,6 +559,7 @@ impl PendingPrompt {
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
             initial_prompt_correlation: None,
+            self_compaction_terminal: None,
         }
     }
 
@@ -570,6 +575,7 @@ impl PendingPrompt {
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
             initial_prompt_correlation: None,
+            self_compaction_terminal: None,
         }
     }
 
@@ -591,12 +597,23 @@ impl PendingPrompt {
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
             initial_prompt_correlation: None,
+            self_compaction_terminal: None,
         }
     }
 
     /// Attach a caller correlation id to this exact queued prompt.
     pub(crate) fn with_ctx_id(mut self, ctx_id: Option<String>) -> Self {
         self.ctx_id = ctx_id;
+        self
+    }
+
+    /// Attach the typed one-shot self-compaction delivery carried by this
+    /// internal prompt.
+    pub(crate) fn with_self_compaction_terminal(
+        mut self,
+        terminal: tau_proto::SelfCompactionTerminal,
+    ) -> Self {
+        self.self_compaction_terminal = Some(terminal);
         self
     }
 
@@ -624,6 +641,12 @@ impl PendingPrompt {
     #[must_use]
     pub(crate) fn is_context_size_alert(&self) -> bool {
         self.source == PendingPromptSource::ContextSizeAlert
+    }
+
+    /// Whether this prompt directly delivers a terminal self-compaction
+    /// outcome and therefore survives cancellation cleanup.
+    pub(crate) fn is_self_compaction_terminal(&self) -> bool {
+        self.self_compaction_terminal.is_some()
     }
 
     /// Durable internal-prompt subtype stamped when this prompt is delivered.

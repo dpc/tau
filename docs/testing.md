@@ -553,3 +553,15 @@ preprocessing, submission, cancellation, teardown, and no-replay behavior.
 provider terminals, live-only interactive subscription, and output routing.
 Deterministic process tests own end-to-end daemon/provider completion and
 failure behavior.
+
+
+## Self-compaction terminal crash coverage
+
+Treat self-compaction acceptance, transaction outcome, background terminal,
+typed prompt delivery, wait consumption, inference checkpoint, and provider
+terminal as separate crash cuts. Deterministic harness tests must reopen before
+and after each durable boundary, then reopen a second time to prove one typed
+delivery, exact bounded correlation, no generic completion, consumed wait state,
+and no replayed checkpoint. Cover success, started failure/cancellation,
+pre-start failure, and explicit successor recovery independently; retain
+cross-agent `agent_compact` as the asynchronous waitable control case.

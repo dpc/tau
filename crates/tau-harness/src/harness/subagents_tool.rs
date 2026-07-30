@@ -30,8 +30,8 @@ use wait_tracker::{
 use crate::error::HarnessError;
 use crate::event::{ExternalMessageToolCompletedCommand, HarnessCommand, HarnessEvent};
 use crate::harness::{
-    AgentMessageRecipientStatus, AgentToolCall, Harness, PendingExternalAgentMessageAuth,
-    TerminalSettlement,
+    AgentMessageRecipientStatus, AgentToolCall, BackgroundCompletionPromptMode, Harness,
+    PendingExternalAgentMessageAuth, TerminalSettlement,
 };
 
 /// Maximum overdue long-wait occurrences published in one scheduler cycle.
@@ -432,6 +432,25 @@ impl Harness {
             .record_background_error(error, owner, terminal);
         self.synchronize_work_waits();
         self.publish_wait_replies(replies);
+    }
+
+    /// Consume a terminal that a harness-owned control continuation delivered
+    /// directly instead of retaining it for `wait`.
+    pub(crate) fn consume_wait_background_completion(&mut self, call_id: &ToolCallId) {
+        self.subagents.wait_tracker.consume_completed_call(call_id);
+        self.synchronize_work_waits();
+    }
+
+    /// Report retained completion state for deterministic harness regressions.
+    #[cfg(test)]
+    pub(crate) fn wait_completion_is_retained_for_test(
+        &self,
+        owner: &AgentId,
+        call_id: &ToolCallId,
+    ) -> bool {
+        self.subagents
+            .wait_tracker
+            .completed_call_is_owned_by(call_id, owner)
     }
 
     /// Retire every wait-tracker entry owned by an unloading agent.
@@ -2422,6 +2441,19 @@ impl Harness {
     }
 
     pub(crate) fn finish_prebuilt_internal_tool_result(&mut self, result: ToolResult) {
+        self.finish_prebuilt_internal_tool_result_with_mode(
+            result,
+            BackgroundCompletionPromptMode::QueueAndAdvance,
+        );
+    }
+
+    /// Finish an internal result while selecting its background continuation
+    /// policy.
+    pub(crate) fn finish_prebuilt_internal_tool_result_with_mode(
+        &mut self,
+        result: ToolResult,
+        completion_prompt_mode: BackgroundCompletionPromptMode,
+    ) {
         let call_id = result.call_id.clone();
         let Some(owner_cid) = self
             .tool_agents
@@ -2432,7 +2464,11 @@ impl Harness {
             return;
         };
         if self.tool_turn.is_backgrounded(&call_id) {
-            self.handle_background_tool_result(crate::harness::harness_connection_id(), result);
+            self.handle_background_tool_result_inner(
+                crate::harness::harness_connection_id(),
+                result,
+                completion_prompt_mode,
+            );
         } else {
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);
@@ -2441,6 +2477,19 @@ impl Harness {
     }
 
     pub(crate) fn finish_prebuilt_internal_tool_error(&mut self, error: ToolError) {
+        self.finish_prebuilt_internal_tool_error_with_mode(
+            error,
+            BackgroundCompletionPromptMode::QueueAndAdvance,
+        );
+    }
+
+    /// Finish an internal error while selecting its background continuation
+    /// policy.
+    pub(crate) fn finish_prebuilt_internal_tool_error_with_mode(
+        &mut self,
+        error: ToolError,
+        completion_prompt_mode: BackgroundCompletionPromptMode,
+    ) {
         let call_id = error.call_id.clone();
         let Some(owner_cid) = self
             .tool_agents
@@ -2451,7 +2500,12 @@ impl Harness {
             return;
         };
         if self.tool_turn.is_backgrounded(&call_id) {
-            self.handle_background_tool_error(Some(crate::harness::harness_connection_id()), error);
+            self.handle_background_tool_error_inner(
+                Some(crate::harness::harness_connection_id()),
+                error,
+                completion_prompt_mode,
+                tau_proto::ToolTerminalCause::ToolError,
+            );
         } else {
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);

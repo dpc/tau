@@ -7,7 +7,8 @@ use crate::harness::{
     agent_message_activation_class, background_completion_prompt,
     extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
-    restore_notice_prompt_for_elapsed, unavailable_tool_error_message, working_status_reminder,
+    restore_notice_prompt_for_elapsed, self_compaction_terminal_prompt,
+    unavailable_tool_error_message, working_status_reminder,
 };
 
 /// Still-Working steering uses the concise generic wording approved for status
@@ -18,6 +19,48 @@ fn working_status_reminder_uses_approved_wording() {
         working_status_reminder("STATUS-WATCH-4D8B"),
         "Your `status` is set to `working` on \"STATUS-WATCH-4D8B\". Set it to `done` or `blocked` to finish or call `wait` when waiting for external events."
     );
+}
+
+/// Self-compaction envelopes expose only closed bounded status and exact
+/// durable correlation for every terminal class.
+#[test]
+fn self_compaction_terminal_envelopes_are_literal_and_bounded() {
+    let request_id = tau_proto::CompactionRequestId::parse("cr-envelope").expect("request");
+    let call_id = ToolCallId::from("call-envelope");
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-envelope").expect("transaction");
+    let cases = [
+        (
+            tau_proto::SelfCompactionTerminalOutcome::Compacted,
+            Some(transaction_id.clone()),
+            "[tau-internal] Self compact terminal: {\"status\":\"compacted\",\"request_id\":\"cr-envelope\",\"tool_call_id\":\"call-envelope\",\"transaction_id\":\"ct-envelope\"}",
+        ),
+        (
+            tau_proto::SelfCompactionTerminalOutcome::Failed {
+                reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            },
+            Some(transaction_id),
+            "[tau-internal] Self compact terminal: {\"status\":\"provider_error\",\"request_id\":\"cr-envelope\",\"tool_call_id\":\"call-envelope\",\"transaction_id\":\"ct-envelope\"}",
+        ),
+        (
+            tau_proto::SelfCompactionTerminalOutcome::RequestFailed {
+                reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
+            },
+            None,
+            "[tau-internal] Self compact terminal: {\"status\":\"compaction_cancelled\",\"request_id\":\"cr-envelope\",\"tool_call_id\":\"call-envelope\",\"transaction_id\":null}",
+        ),
+    ];
+    for (outcome, transaction_id, expected) in cases {
+        assert_eq!(
+            self_compaction_terminal_prompt(&tau_proto::SelfCompactionTerminal {
+                request_id: request_id.clone(),
+                tool_call_id: call_id.clone(),
+                transaction_id,
+                outcome,
+            }),
+            expected
+        );
+    }
 }
 
 fn test_session_id(value: impl Into<String>) -> tau_proto::SessionId {
@@ -118,7 +161,6 @@ fn prompt_activation_observation_is_allocated_once_and_skips_passive_notices() {
             .count(),
         1
     );
-
     let mut passive = PendingPrompt::passive_background_completion("passive".into());
     harness.ensure_prompt_activation_observed(&cid, &mut passive);
     assert!(passive.activation_observation.is_none());
@@ -2230,6 +2272,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                 "worker_steered",
                 None,
                 Event::AgentPromptSteered(AgentPromptSteered {
+                    self_compaction_terminal: None,
                     inference_activation: false,
                     submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                     agent_id: tau_proto::AgentId::parse("worker_steered").expect("agent id"),
@@ -10351,6 +10394,7 @@ fn resume_dispatches_true_activation_without_first_checkpoint() {
         (
             "steered activation",
             Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                self_compaction_terminal: None,
                 inference_activation: true,
                 submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
                 agent_id,
@@ -10408,6 +10452,7 @@ fn resume_does_not_dispatch_false_canonical_facts() {
             message_class: tau_proto::PromptMessageClass::Internal,
         }),
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            self_compaction_terminal: None,
             inference_activation: false,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id,
@@ -17202,12 +17247,13 @@ fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live(
 }
 
 /// Cancelling an accepted self request before its safe boundary records one
-/// durable pre-start cancellation and one passive background error without
-/// checkpointing or waking inference.
+/// durable pre-start cancellation, consumes its background error, and resumes
+/// once with direct bounded error correlation.
 #[test]
-fn manual_self_compaction_pre_start_cancel_is_passive() {
+fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
     let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("harness");
     h.provider_model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
@@ -17248,6 +17294,13 @@ fn manual_self_compaction_pre_start_cancel_is_passive() {
         arguments: CborValue::Map(Vec::new()),
     };
     h.request_agent_tool_compaction(&cid, &call, ToolName::new("compact"), None);
+    let request_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentManualCompactionRequested(requested) => Some(requested.request_id),
+            _ => None,
+        })
+        .expect("request correlation");
     h.cancel_remaining_tool_calls(
         &cid,
         vec![call.id.clone()],
@@ -17280,7 +17333,405 @@ fn manual_self_compaction_pre_start_cancel_is_passive() {
         event,
         Event::AgentInferenceDispatchStarted(_)
     )));
-    h.shutdown().expect("shutdown");
+    let _interceptor = connect_test_tool(&mut h, "pre-start-delivery-interceptor");
+    h.handle_extension_event(
+        "pre-start-delivery-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STEERED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register delivery interceptor");
+    h.finish_prebuilt_internal_tool_result(ToolResult {
+        call_id: "call-cancel-sibling".into(),
+        tool_name: ToolName::new("sibling"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("done".to_owned()),
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            self_compaction_terminal: Some(tau_proto::SelfCompactionTerminal {
+                outcome: tau_proto::SelfCompactionTerminalOutcome::RequestFailed {
+                    reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
+                },
+                ..
+            }),
+            ..
+        }))
+    ));
+    let public_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    drop(h);
+    wait_for_session_unlock(&state, "s1");
+    let resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let resumed_cid = resumed
+        .runtime_agent_id_for_target_agent(Some(&public_id))
+        .expect("resumed agent");
+    assert!(!resumed.wait_completion_is_retained_for_test(&resumed_cid, &call.id));
+    let assert_restored = |h: &Harness| {
+        let records = h.agent_store.agent_events(&public_id).expect("records");
+        let terminals = records
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::AgentPromptSteered(steered) => steered.self_compaction_terminal.as_ref(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            terminals.as_slice(),
+            [tau_proto::SelfCompactionTerminal {
+                request_id: delivered_request,
+                tool_call_id,
+                transaction_id: None,
+                outcome: tau_proto::SelfCompactionTerminalOutcome::RequestFailed {
+                    reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
+                },
+            }] if delivered_request == &request_id && tool_call_id == &call.id
+        ));
+        assert!(!records.iter().any(|record| matches!(
+            &record.event,
+            Event::AgentPromptSteered(steered)
+                if steered.text == background_completion_prompt(&call.id)
+        )));
+    };
+    assert_restored(&resumed);
+    drop(resumed);
+    wait_for_session_unlock(&state, "s1");
+    let reopened =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("second resume");
+    assert_restored(&reopened);
+    let reopened_cid = reopened
+        .runtime_agent_id_for_target_agent(Some(&public_id))
+        .expect("reopened agent");
+    assert!(!reopened.wait_completion_is_retained_for_test(&reopened_cid, &call.id));
+}
+
+/// A started self-compaction failure directly resumes with its typed bounded
+/// error and consumes the original wait result.
+#[test]
+fn manual_self_compaction_failure_delivers_error_once() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id = ToolCallId::from("call-failed-self-compact");
+    seed_assistant_tool_round(&mut h, &cid, &[(call_id.as_str(), "compact")]);
+    h.tool_agents.insert(call_id.clone(), cid.clone());
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("compact"),
+            internal_name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
+    h.tool_turn
+        .record_unqueued_in_flight(cid.clone(), call_id.clone());
+    h.prompt_tool_call_prompts
+        .insert(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
+    h.request_agent_tool_compaction(
+        &cid,
+        &AgentToolCall {
+            call_ref: None,
+            id: call_id.clone(),
+            name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        },
+        ToolName::new("compact"),
+        None,
+    );
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("started self compaction");
+    let transaction_id = started.transaction_id.clone();
+    let _interceptor = connect_test_tool(&mut h, "failed-self-checkpoint-interceptor");
+    h.handle_extension_event(
+        "failed-self-checkpoint-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register checkpoint interceptor");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: started.agent_id,
+            transaction_id: transaction_id.clone(),
+            cut: started.cut,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: started.resume_through,
+        }),
+    );
+    let deliveries = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptSteered(steered) => steered.self_compaction_terminal,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        deliveries.as_slice(),
+        [tau_proto::SelfCompactionTerminal {
+            tool_call_id,
+            transaction_id: Some(delivered_transaction),
+            outcome: tau_proto::SelfCompactionTerminalOutcome::Failed {
+                reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            },
+            ..
+        }] if tool_call_id == &call_id && delivered_transaction == &transaction_id
+    ));
+    assert!(!h.wait_completion_is_retained_for_test(&cid, &call_id));
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::AgentInferenceDispatchStarted(started))
+            if started.transaction_id.is_none()
+    ));
+    let public_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    drop(h);
+    wait_for_session_unlock(&state, "s1");
+    let resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let records = resumed
+        .agent_store
+        .agent_events(&public_id)
+        .expect("restored records");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentPromptSteered(steered)
+                    if steered.self_compaction_terminal.is_some()
+            ))
+            .count(),
+        1
+    );
+    let resumed_cid = resumed
+        .runtime_agent_id_for_target_agent(Some(&public_id))
+        .expect("resumed agent");
+    assert!(!resumed.wait_completion_is_retained_for_test(&resumed_cid, &call_id));
+    drop(resumed);
+    wait_for_session_unlock(&state, "s1");
+    let reopened =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("second resume");
+    let reopened_cid = reopened
+        .runtime_agent_id_for_target_agent(Some(&public_id))
+        .expect("reopened agent");
+    assert!(!reopened.wait_completion_is_retained_for_test(&reopened_cid, &call_id));
+}
+
+/// Cold recovery from a committed started failure that crashed before typed
+/// delivery reconstructs the actual failure once and resumes it.
+#[test]
+fn manual_self_compaction_cold_failure_before_delivery() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id = ToolCallId::from("call-cold-failed-self-compact");
+    seed_assistant_tool_round(&mut h, &cid, &[(call_id.as_str(), "compact")]);
+    h.tool_agents.insert(call_id.clone(), cid.clone());
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("compact"),
+            internal_name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
+    h.tool_turn
+        .record_unqueued_in_flight(cid.clone(), call_id.clone());
+    h.prompt_tool_call_prompts
+        .insert(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
+    h.request_agent_tool_compaction(
+        &cid,
+        &AgentToolCall {
+            call_ref: None,
+            id: call_id.clone(),
+            name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        },
+        ToolName::new("compact"),
+        None,
+    );
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("started self compaction");
+    let transaction_id = started.transaction_id.clone();
+    let _interceptor = connect_test_tool(&mut h, "failed-self-delivery-interceptor");
+    h.handle_extension_event(
+        "failed-self-delivery-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STEERED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register delivery interceptor");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: started.agent_id,
+            transaction_id: transaction_id.clone(),
+            cut: started.cut,
+            reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            resume_through: started.resume_through,
+        }),
+    );
+    assert!(matches!(
+        h.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::AgentPromptSteered(steered))
+            if steered.self_compaction_terminal.is_some()
+    ));
+    let public_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    drop(h);
+    wait_for_session_unlock(&state, "s1");
+    let resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let records = resumed
+        .agent_store
+        .agent_events(&public_id)
+        .expect("records");
+    let terminals = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentPromptSteered(steered) => steered.self_compaction_terminal.as_ref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        terminals.as_slice(),
+        [tau_proto::SelfCompactionTerminal {
+            tool_call_id,
+            transaction_id: Some(delivered_transaction),
+            outcome: tau_proto::SelfCompactionTerminalOutcome::Failed {
+                reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            },
+            ..
+        }] if tool_call_id == &call_id && delivered_transaction == &transaction_id
+    ));
+    assert!(!records.iter().any(|record| matches!(
+        &record.event,
+        Event::AgentPromptSteered(steered)
+            if steered.text == background_completion_prompt(&call_id)
+    )));
+    let resumed_cid = resumed
+        .runtime_agent_id_for_target_agent(Some(&public_id))
+        .expect("resumed agent");
+    assert!(!resumed.wait_completion_is_retained_for_test(&resumed_cid, &call_id));
+}
+
+/// Live self-compaction success resumes from the replacement window with one
+/// typed terminal and no retained wait result or generic notice.
+#[test]
+fn manual_self_compaction_success_delivers_directly() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id = ToolCallId::from("call-success-self-compact");
+    seed_assistant_tool_round(&mut h, &cid, &[(call_id.as_str(), "compact")]);
+    h.tool_agents.insert(call_id.clone(), cid.clone());
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("compact"),
+            internal_name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
+    h.tool_turn
+        .record_unqueued_in_flight(cid.clone(), call_id.clone());
+    h.prompt_tool_call_prompts
+        .insert(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
+    h.request_agent_tool_compaction(
+        &cid,
+        &AgentToolCall {
+            call_ref: None,
+            id: call_id.clone(),
+            name: ToolName::new("compact"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        },
+        ToolName::new("compact"),
+        None,
+    );
+    let compact_prompt = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_text_response(
+        &compact_prompt.agent_prompt_id,
+        compact_prompt.agent_id,
+        "compacted summary",
+    ))
+    .expect("accept compaction");
+    let events = event_log_events(&h);
+    let deliveries = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptSteered(steered) => steered.self_compaction_terminal.as_ref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        deliveries.as_slice(),
+        [tau_proto::SelfCompactionTerminal {
+            tool_call_id,
+            outcome: tau_proto::SelfCompactionTerminalOutcome::Compacted,
+            ..
+        }] if tool_call_id == &call_id
+    ));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::AgentPromptSteered(steered)
+            if steered.text == background_completion_prompt(&call_id)
+    )));
+    assert!(!h.wait_completion_is_retained_for_test(&cid, &call_id));
+    let inference = read_nth_prompt_created(&h, 1);
+    assert_eq!(inference.operation, tau_proto::PromptOperation::Inference);
+    assert!(
+        serde_json::to_string(&inference.context)
+            .expect("context")
+            .contains("compacted summary")
+    );
 }
 
 /// Cold recovery from compact-success-before-background-terminal reconstructs
@@ -17334,6 +17785,12 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
         })
         .expect("started");
     let transaction_id = started.transaction_id.clone();
+    let request_id = match &started.trigger {
+        tau_proto::StandaloneCompactionTrigger::ManualAgentTool { request_id, .. } => {
+            request_id.clone()
+        }
+        _ => panic!("manual tool start"),
+    };
     let expected_model = started.model.clone();
     let expected_cut = started.cut;
     let suffix_end = h
@@ -17393,7 +17850,12 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
             )
         })
         .expect("checkpoint repaired");
-    let notification_text = background_completion_prompt(&ToolCallId::from("call-replay-compact"));
+    let notification_text = self_compaction_terminal_prompt(&tau_proto::SelfCompactionTerminal {
+        request_id: request_id.clone(),
+        tool_call_id: ToolCallId::from("call-replay-compact"),
+        transaction_id: Some(transaction_id.clone()),
+        outcome: tau_proto::SelfCompactionTerminalOutcome::Compacted,
+    });
     let notification = events
         .iter()
         .position(|event| {
@@ -17450,6 +17912,19 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
             .count(),
         1
     );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::AgentPromptSteered(steered)
+            if steered.text
+                == background_completion_prompt(&ToolCallId::from("call-replay-compact"))
+    )));
+    let resumed_cid = resumed
+        .runtime_agent_id_for_target_agent(Some(checkpoint_event.agent_id.as_str()))
+        .expect("resumed caller");
+    assert!(!resumed.wait_completion_is_retained_for_test(
+        &resumed_cid,
+        &ToolCallId::from("call-replay-compact")
+    ));
 }
 
 /// Cold recovery from a retained manual self-compaction success whose caller
@@ -17472,7 +17947,12 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
     let tool_name = ToolName::new("compact");
     let model: tau_proto::ModelId = "test/model".into();
     let originating_text = "compact the retained prefix".to_owned();
-    let notification_text = background_completion_prompt(&call_id);
+    let notification_text = self_compaction_terminal_prompt(&tau_proto::SelfCompactionTerminal {
+        request_id: request_id.clone(),
+        tool_call_id: call_id.clone(),
+        transaction_id: Some(transaction_id.clone()),
+        outcome: tau_proto::SelfCompactionTerminalOutcome::Compacted,
+    });
     let is_correlation = |event: &Event| match event {
         Event::AgentPromptSubmitted(event) => {
             event.agent_id == agent_id && event.text == originating_text
@@ -17858,8 +18338,8 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         .expect("first reopened records");
     assert_eq!(
         first_records.len(),
-        seeded_record_count + 6,
-        "recovery records refreshed initialization, activation observation, and resumed outer turn"
+        seeded_record_count + 5,
+        "recovery records refreshed initialization and resumed the compact terminal outer turn"
     );
     assert_eq!(
         first_records
@@ -32147,6 +32627,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             message_class: tau_proto::PromptMessageClass::Internal,
         }),
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            self_compaction_terminal: None,
             inference_activation: true,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: crate::parse_agent_id("forged-agent"),
@@ -32210,6 +32691,7 @@ fn inbound_canonical_activation_forgery_is_ignored() {
             message_class: tau_proto::PromptMessageClass::Internal,
         }),
         Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            self_compaction_terminal: None,
             inference_activation: true,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id,

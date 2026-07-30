@@ -1200,6 +1200,7 @@ mod tests {
         )
         .expect("schedule");
         let steered = AgentPromptSteered {
+            self_compaction_terminal: None,
             inference_activation: false,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             agent_id: agent.clone(),

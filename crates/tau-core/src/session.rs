@@ -366,6 +366,8 @@ pub struct AgentTree {
         HashMap<tau_proto::CompactionRequestId, ManualCompactionRequestFold>,
     /// Durable request insertion order for deterministic recovery.
     manual_compaction_request_order: Vec<tau_proto::CompactionRequestId>,
+    /// Typed self-compaction deliveries keyed by accepted request.
+    self_compaction_deliveries: HashMap<tau_proto::CompactionRequestId, SelfCompactionDelivery>,
     /// All durable inference checkpoints keyed by their provider prompt id.
     inference_dispatches: HashMap<tau_proto::AgentPromptId, InferenceDispatchFold>,
     /// Durable inference checkpoint insertion order.
@@ -416,6 +418,15 @@ struct ManualCompactionRequestFold {
     transaction_id: Option<tau_proto::CompactionTransactionId>,
     /// Terminal pre-start failure, if starting became impossible.
     failed: Option<tau_proto::AgentManualCompactionRequestFailed>,
+}
+
+/// Folded authority for one committed self-compaction terminal delivery.
+#[derive(Clone, Debug, PartialEq)]
+struct SelfCompactionDelivery {
+    /// Typed request, call, transaction, and outcome correlation.
+    terminal: tau_proto::SelfCompactionTerminal,
+    /// Exact transcript node whose activation the continuation must cover.
+    node_id: NodeId,
 }
 
 /// Durable state of an accepted model-requested compaction.
@@ -586,6 +597,36 @@ impl AgentTree {
                 Some(ManualCompactionRecovery::Waiting(request.requested.clone()))
             })
             .collect()
+    }
+
+    /// Return the typed terminal already delivered for an accepted
+    /// self-compaction request.
+    #[must_use]
+    pub fn self_compaction_delivery(
+        &self,
+        request_id: &tau_proto::CompactionRequestId,
+    ) -> Option<&tau_proto::SelfCompactionTerminal> {
+        self.self_compaction_deliveries
+            .get(request_id)
+            .map(|delivery| &delivery.terminal)
+    }
+
+    /// Return whether a typed self-compaction terminal activation still lacks
+    /// an ordinary inference checkpoint covering its exact transcript node.
+    #[must_use]
+    pub fn self_compaction_delivery_needs_checkpoint(
+        &self,
+        request_id: &tau_proto::CompactionRequestId,
+    ) -> bool {
+        let Some(delivery) = self.self_compaction_deliveries.get(request_id) else {
+            return false;
+        };
+        !self.inference_dispatches.values().any(|dispatch| {
+            self.is_ancestor_head(
+                tau_proto::AgentHead::Node(delivery.node_id),
+                dispatch.checkpoint.through,
+            )
+        })
     }
 
     /// Returns whether the branch contains the complete tool-results node for a
@@ -1131,6 +1172,7 @@ impl AgentTree {
             compaction_transaction_order: Vec::new(),
             manual_compaction_requests: HashMap::new(),
             manual_compaction_request_order: Vec::new(),
+            self_compaction_deliveries: HashMap::new(),
             inference_dispatches: HashMap::new(),
             inference_dispatch_order: Vec::new(),
         };
@@ -1274,7 +1316,19 @@ impl AgentTree {
         if self.apply_side_state_event(event) {
             return None;
         }
-        self.apply_transcript_event(parent.resolve(self.head), event, durable_event_seq)
+        let node = self.apply_transcript_event(parent.resolve(self.head), event, durable_event_seq);
+        if let (Some(node_id), Event::AgentPromptSteered(steered)) = (node, event)
+            && let Some(terminal) = &steered.self_compaction_terminal
+        {
+            self.self_compaction_deliveries.insert(
+                terminal.request_id.clone(),
+                SelfCompactionDelivery {
+                    terminal: terminal.clone(),
+                    node_id,
+                },
+            );
+        }
+        node
     }
 
     fn apply_compaction_control_event(&mut self, event: &Event) {
@@ -2025,7 +2079,9 @@ impl AgentTree {
             Event::AgentUserMessageInjected(injected) if injected.agent_id == self.agent_id => {
                 Some(Ok(()))
             }
-            Event::AgentPromptSteered(steered) if steered.agent_id == self.agent_id => Some(Ok(())),
+            Event::AgentPromptSteered(steered) if steered.agent_id == self.agent_id => {
+                Some(self.validate_self_compaction_delivery(steered))
+            }
             Event::AgentCompactionTriggered(triggered) if triggered.agent_id == self.agent_id => {
                 Some(Ok(()))
             }
@@ -2390,6 +2446,70 @@ impl AgentTree {
         if requested.target_generation != self.ordinary_inference_generation {
             return Err(AgentEventValidationError::new(
                 "manual compaction request has a stale target generation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_self_compaction_delivery(
+        &self,
+        steered: &tau_proto::AgentPromptSteered,
+    ) -> Result<(), AgentEventValidationError> {
+        let Some(terminal) = &steered.self_compaction_terminal else {
+            return Ok(());
+        };
+        if self
+            .self_compaction_deliveries
+            .contains_key(&terminal.request_id)
+        {
+            return Err(AgentEventValidationError::new(
+                "duplicate self-compaction terminal delivery",
+            ));
+        }
+        let Some(request) = self.manual_compaction_requests.get(&terminal.request_id) else {
+            return Err(AgentEventValidationError::new(
+                "self-compaction delivery references unknown request",
+            ));
+        };
+        if !request.requested.resume_inference
+            || request.requested.caller_agent_id != request.requested.target_agent_id
+            || request.requested.initiating_tool_call_id != terminal.tool_call_id
+            || !steered.inference_activation
+            || !steered.message_class.is_internal()
+        {
+            return Err(AgentEventValidationError::new(
+                "self-compaction delivery correlation does not match request",
+            ));
+        }
+        let matches_outcome = match (&terminal.outcome, &request.failed, &request.transaction_id) {
+            (
+                tau_proto::SelfCompactionTerminalOutcome::RequestFailed { reason },
+                Some(failed),
+                None,
+            ) => terminal.transaction_id.is_none() && *reason == failed.reason,
+            (_, _, Some(transaction_id))
+                if terminal.transaction_id.as_ref() == Some(transaction_id) =>
+            {
+                self.compaction_transactions
+                    .get(transaction_id)
+                    .and_then(|transaction| transaction.outcome.as_ref())
+                    .is_some_and(|outcome| match (&terminal.outcome, outcome) {
+                        (
+                            tau_proto::SelfCompactionTerminalOutcome::Compacted,
+                            CompactionTransactionOutcome::Succeeded(_),
+                        ) => true,
+                        (
+                            tau_proto::SelfCompactionTerminalOutcome::Failed { reason },
+                            CompactionTransactionOutcome::Failed(failed),
+                        ) => *reason == failed.reason,
+                        _ => false,
+                    })
+            }
+            _ => false,
+        };
+        if !matches_outcome {
+            return Err(AgentEventValidationError::new(
+                "self-compaction delivery does not match durable terminal outcome",
             ));
         }
         Ok(())

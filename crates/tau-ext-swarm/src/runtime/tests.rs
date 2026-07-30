@@ -454,6 +454,7 @@ fn canonical_prompt_loopback_requires_exact_identity() {
     fold_canonical_prompt(
         &state,
         &Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            self_compaction_terminal: None,
             agent_id: tau_proto::AgentId::parse("agent").expect("agent ID"),
             inference_activation: false,
             submission_source: tau_proto::PromptSubmissionSource::default(),

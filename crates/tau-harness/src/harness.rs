@@ -353,6 +353,41 @@ pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
     )
 }
 
+/// Render the bounded typed self-compaction terminal as an internal model
+/// envelope. The typed value remains attached to the durable steer event as
+/// replay and duplicate-delivery authority.
+pub(crate) fn self_compaction_terminal_prompt(
+    terminal: &tau_proto::SelfCompactionTerminal,
+) -> String {
+    let transaction_id = terminal
+        .transaction_id
+        .as_ref()
+        .map_or("null".to_owned(), |id| format!("\"{id}\""));
+    let status = match terminal.outcome {
+        tau_proto::SelfCompactionTerminalOutcome::Compacted => "compacted",
+        tau_proto::SelfCompactionTerminalOutcome::Failed { reason } => {
+            standalone_compaction_failure_message(reason)
+        }
+        tau_proto::SelfCompactionTerminalOutcome::RequestFailed { reason } => {
+            manual_request_failure_message(reason)
+        }
+    };
+    format!(
+        "{} Self compact terminal: {{\"status\":\"{status}\",\"request_id\":\"{}\",\"tool_call_id\":\"{}\",\"transaction_id\":{transaction_id}}}",
+        crate::INTERNAL_MARKER,
+        terminal.request_id,
+        terminal.tool_call_id.as_str(),
+    )
+}
+
+/// Build one typed activating prompt from its closed terminal correlation.
+fn self_compaction_terminal_pending_prompt(
+    terminal: tau_proto::SelfCompactionTerminal,
+) -> PendingPrompt {
+    PendingPrompt::activating_background_completion(self_compaction_terminal_prompt(&terminal))
+        .with_self_compaction_terminal(terminal)
+}
+
 /// Result of waiting for the next runtime-loop event.
 enum RuntimeEventWait {
     /// A harness event is ready to be logged and dispatched.
@@ -2827,9 +2862,8 @@ pub(crate) enum BackgroundCompletionPromptMode {
     /// Queue a passive completion notice that is folded only into the next real
     /// user prompt.
     QueuePassive,
-    // Cancellation/teardown after a background placeholder still needs a
-    // durable background error and wait completion, but must not prompt the
-    // model about work from a canceled/removed branch.
+    /// Publish the durable terminal without a generic completion prompt.
+    /// Dedicated control flows may deliver and consume it separately.
     DoNotQueue,
 }
 
@@ -7085,13 +7119,44 @@ impl Harness {
                 .accepted_manual_compaction_tools
                 .remove(&failed.request_id)
         {
-            let passive = pending.request.resume_inference;
-            self.finish_manual_compaction_tool_with_error(
-                pending.request.initiating_tool_call_id,
-                pending.visible_tool_name,
-                manual_request_failure_message(failed.reason),
-                passive,
-            );
+            if pending.request.resume_inference {
+                let call_id = pending.request.initiating_tool_call_id.clone();
+                let prompt =
+                    self_compaction_terminal_pending_prompt(tau_proto::SelfCompactionTerminal {
+                        request_id: pending.request.request_id.clone(),
+                        tool_call_id: call_id.clone(),
+                        transaction_id: None,
+                        outcome: tau_proto::SelfCompactionTerminalOutcome::RequestFailed {
+                            reason: failed.reason,
+                        },
+                    });
+                self.finish_prebuilt_internal_tool_error_with_mode(
+                    ToolError {
+                        call_id: call_id.clone(),
+                        tool_name: pending.visible_tool_name,
+                        tool_type: tau_proto::ToolType::Function,
+                        message: manual_request_failure_message(failed.reason).to_owned(),
+                        details: None,
+                        display: None,
+                        originator: PromptOriginator::User,
+                    },
+                    BackgroundCompletionPromptMode::DoNotQueue,
+                );
+                self.consume_wait_background_completion(&call_id);
+                if let Some(cid) = self.runtime_agent_id_for_target_agent(Some(
+                    pending.request.caller_agent_id.as_str(),
+                )) && let Some(agent) = self.agents.get_mut(&cid)
+                {
+                    agent.pending_prompts.push_back(prompt);
+                }
+            } else {
+                self.finish_manual_compaction_tool_with_error(
+                    pending.request.initiating_tool_call_id,
+                    pending.visible_tool_name,
+                    manual_request_failure_message(failed.reason),
+                    false,
+                );
+            }
         }
         if let Event::AgentStandaloneCompactionFailed(failed) = event {
             if let Some(pending) = self
@@ -7099,12 +7164,46 @@ impl Harness {
                 .remove(&failed.transaction_id)
             {
                 let self_request = pending.caller_agent_id == pending.target_agent_id;
-                self.finish_manual_compaction_tool_with_error(
-                    pending.call_id,
-                    pending.tool_name,
-                    standalone_compaction_failure_message(failed.reason),
-                    self_request,
-                );
+                if self_request {
+                    let prompt = self_compaction_terminal_pending_prompt(
+                        tau_proto::SelfCompactionTerminal {
+                            request_id: pending.request_id.clone(),
+                            tool_call_id: pending.call_id.clone(),
+                            transaction_id: Some(failed.transaction_id.clone()),
+                            outcome: tau_proto::SelfCompactionTerminalOutcome::Failed {
+                                reason: failed.reason,
+                            },
+                        },
+                    );
+                    let call_id = pending.call_id.clone();
+                    self.finish_prebuilt_internal_tool_error_with_mode(
+                        ToolError {
+                            call_id: pending.call_id,
+                            tool_name: pending.tool_name,
+                            tool_type: tau_proto::ToolType::Function,
+                            message: standalone_compaction_failure_message(failed.reason)
+                                .to_owned(),
+                            details: None,
+                            display: None,
+                            originator: PromptOriginator::User,
+                        },
+                        BackgroundCompletionPromptMode::DoNotQueue,
+                    );
+                    self.consume_wait_background_completion(&call_id);
+                    if let Some(cid) = self
+                        .runtime_agent_id_for_target_agent(Some(pending.caller_agent_id.as_str()))
+                        && let Some(agent) = self.agents.get_mut(&cid)
+                    {
+                        agent.pending_prompts.push_back(prompt);
+                    }
+                } else {
+                    self.finish_manual_compaction_tool_with_error(
+                        pending.call_id,
+                        pending.tool_name,
+                        standalone_compaction_failure_message(failed.reason),
+                        false,
+                    );
+                }
             }
             let key = (failed.agent_id.clone(), failed.transaction_id.clone());
             self.suppressed_compaction_dispatches.remove(&key);
@@ -7159,6 +7258,19 @@ impl Harness {
             } else {
                 self.set_agent_turn_state(&cid, AgentTurnState::Idle);
             }
+            let has_terminal_continuation = self.agents.get(&cid).is_some_and(|agent| {
+                agent
+                    .pending_prompts
+                    .iter()
+                    .any(PendingPrompt::is_self_compaction_terminal)
+            });
+            if has_terminal_continuation {
+                self.fold_pending_prompts_as_steered(&cid);
+                if let Some(agent) = self.agents.get_mut(&cid) {
+                    agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+                }
+                self.dispatch_prompt_after_publish_idle(&cid);
+            }
             self.try_advance_queue();
         }
         if let Event::AgentCompacted(compacted) = event
@@ -7171,33 +7283,59 @@ impl Harness {
             && let Some(transaction_id) = compacted.transaction_id.as_ref()
             && let Some(pending) = self.pending_manual_compaction_tools.remove(transaction_id)
         {
-            self.finish_prebuilt_internal_tool_result(ToolResult {
-                call_id: pending.call_id,
-                tool_name: pending.tool_name,
-                tool_type: tau_proto::ToolType::Function,
-                result: tau_proto::CborValue::Map(vec![
-                    (
-                        tau_proto::CborValue::Text("request_id".into()),
-                        tau_proto::CborValue::Text(pending.request_id.to_string()),
-                    ),
-                    (
-                        tau_proto::CborValue::Text("status".into()),
-                        tau_proto::CborValue::Text("compacted".into()),
-                    ),
-                    (
-                        tau_proto::CborValue::Text("target_agent_id".into()),
-                        tau_proto::CborValue::Text(pending.target_agent_id.to_string()),
-                    ),
-                    (
-                        tau_proto::CborValue::Text("transaction_id".into()),
-                        tau_proto::CborValue::Text(transaction_id.to_string()),
-                    ),
-                ]),
-                provider_content: Vec::new(),
-                kind: ToolResultKind::Final,
-                display: None,
-                originator: PromptOriginator::User,
+            let self_request = pending.caller_agent_id == pending.target_agent_id;
+            let call_id = pending.call_id.clone();
+            let direct_prompt = self_request.then(|| {
+                self_compaction_terminal_pending_prompt(tau_proto::SelfCompactionTerminal {
+                    request_id: pending.request_id.clone(),
+                    tool_call_id: pending.call_id.clone(),
+                    transaction_id: Some(transaction_id.clone()),
+                    outcome: tau_proto::SelfCompactionTerminalOutcome::Compacted,
+                })
             });
+            self.finish_prebuilt_internal_tool_result_with_mode(
+                ToolResult {
+                    call_id: pending.call_id,
+                    tool_name: pending.tool_name,
+                    tool_type: tau_proto::ToolType::Function,
+                    result: tau_proto::CborValue::Map(vec![
+                        (
+                            tau_proto::CborValue::Text("request_id".into()),
+                            tau_proto::CborValue::Text(pending.request_id.to_string()),
+                        ),
+                        (
+                            tau_proto::CborValue::Text("status".into()),
+                            tau_proto::CborValue::Text("compacted".into()),
+                        ),
+                        (
+                            tau_proto::CborValue::Text("target_agent_id".into()),
+                            tau_proto::CborValue::Text(pending.target_agent_id.to_string()),
+                        ),
+                        (
+                            tau_proto::CborValue::Text("transaction_id".into()),
+                            tau_proto::CborValue::Text(transaction_id.to_string()),
+                        ),
+                    ]),
+                    provider_content: Vec::new(),
+                    kind: ToolResultKind::Final,
+                    display: None,
+                    originator: PromptOriginator::User,
+                },
+                if self_request {
+                    BackgroundCompletionPromptMode::DoNotQueue
+                } else {
+                    BackgroundCompletionPromptMode::QueueAndAdvance
+                },
+            );
+            if let Some(prompt) = direct_prompt {
+                self.consume_wait_background_completion(&call_id);
+                if let Some(cid) =
+                    self.runtime_agent_id_for_target_agent(Some(pending.caller_agent_id.as_str()))
+                    && let Some(agent) = self.agents.get_mut(&cid)
+                {
+                    agent.pending_prompts.push_back(prompt);
+                }
+            }
         }
         if let Event::AgentCompacted(compacted) = event
             && let Some(transaction_id) = compacted.transaction_id.as_ref()
@@ -15190,12 +15328,22 @@ impl Harness {
             // User cancellation discards stale queued work, but keeps passive
             // background notices so the next user prompt can observe terminal
             // background cancellation events.
-            conv.pending_prompts
-                .retain(PendingPrompt::is_passive_background_completion);
+            conv.pending_prompts.retain(|prompt| {
+                prompt.is_passive_background_completion() || prompt.is_self_compaction_terminal()
+            });
             conv.in_flight_prompt = None;
         }
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
         self.emit_info("cancelled current turn");
+        if self.agents.get(cid).is_some_and(|agent| {
+            agent
+                .pending_prompts
+                .iter()
+                .any(PendingPrompt::is_self_compaction_terminal)
+        }) {
+            self.fold_pending_prompts_as_steered(cid);
+            self.dispatch_prompt_after_publish_idle(cid);
+        }
         self.try_advance_queue();
     }
 
@@ -20924,6 +21072,8 @@ impl Harness {
         self.catch_up_subscribers_after_session_init();
         if matches!(reason, tau_proto::SessionStartReason::Resume) {
             self.repair_restored_session_tool_state(&session_id);
+            self.consume_restored_self_compaction_deliveries();
+            self.release_restored_self_compaction_failure_continuations();
         }
         self.reconcile_pending_context_recoveries(true);
         self.resume_restored_compaction_checkpoints(RestoredCheckpointAuthority::DiscoveryComplete);
@@ -20931,6 +21081,75 @@ impl Harness {
         self.turn_state = TurnState::Idle;
         self.try_advance_queue();
         Ok(())
+    }
+
+    /// Reapply durable self-compaction consumption after generic restored tool
+    /// state has seeded the run-local wait tracker.
+    fn consume_restored_self_compaction_deliveries(&mut self) {
+        let delivered = self
+            .agents
+            .values()
+            .filter_map(|agent| agent.agent_id.as_deref())
+            .filter_map(|agent_id| self.agent_store.agent(agent_id))
+            .flat_map(tau_core::AgentTree::manual_compaction_recoveries)
+            .filter_map(|recovery| match recovery {
+                tau_core::ManualCompactionRecovery::Waiting(_) => None,
+                tau_core::ManualCompactionRecovery::Started { requested, .. }
+                | tau_core::ManualCompactionRecovery::Failed { requested, .. } => self
+                    .agent_store
+                    .agent(requested.caller_agent_id.as_str())
+                    .and_then(|tree| {
+                        tree.self_compaction_delivery(&requested.request_id)
+                            .map(|_| requested.initiating_tool_call_id)
+                    }),
+            })
+            .collect::<Vec<_>>();
+        for call_id in delivered {
+            self.consume_wait_background_completion(&call_id);
+        }
+    }
+
+    /// Release a restored run-local block only when a typed failed terminal has
+    /// already committed an inference activation that still lacks a checkpoint.
+    fn release_restored_self_compaction_failure_continuations(&mut self) {
+        let releasable = self
+            .agents
+            .iter()
+            .filter_map(|(cid, agent)| {
+                let agent_id = agent.agent_id.as_deref()?;
+                let tree = self.agent_store.agent(agent_id)?;
+                let typed_failure = tree.manual_compaction_recoveries().into_iter().any(
+                    |recovery| match recovery {
+                        tau_core::ManualCompactionRecovery::Started {
+                            requested,
+                            outcome: Some(outcome),
+                            ..
+                        } => {
+                            matches!(
+                                outcome.as_ref(),
+                                tau_core::ManualCompactionOutcome::Failed(_)
+                            ) && tree
+                                .self_compaction_delivery_needs_checkpoint(&requested.request_id)
+                        }
+                        tau_core::ManualCompactionRecovery::Failed { requested, .. } => {
+                            tree.self_compaction_delivery_needs_checkpoint(&requested.request_id)
+                        }
+                        _ => false,
+                    },
+                );
+                (typed_failure
+                    && matches!(
+                        agent.activation_dispatch,
+                        crate::agent::ActivationDispatchState::Blocked { .. }
+                    ))
+                .then_some(cid.clone())
+            })
+            .collect::<Vec<_>>();
+        for cid in releasable {
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+            }
+        }
     }
 
     fn request_prompt_prewarm(&mut self, session_id: &SessionId) {
@@ -21584,10 +21803,7 @@ impl Harness {
                                 outcome.as_ref(),
                                 tau_core::ManualCompactionOutcome::Succeeded(_)
                             )
-                            && !self.manual_completion_notification_persisted_at(
-                                &requested,
-                                head,
-                            )
+                            && !self.self_compaction_terminal_delivered(&requested)
                     )
                 });
             if let Some(conv) = self.agents.get_mut(&cid) {
@@ -21928,18 +22144,49 @@ impl Harness {
                     )) else {
                         continue;
                     };
-                    if !self.manual_tool_background_completion_exists(
+                    let completed = self.manual_tool_background_completion_exists(
                         &caller_cid,
                         &requested.initiating_tool_call_id,
-                    ) {
+                    );
+                    if !completed {
                         self.restore_manual_tool_runtime(&caller_cid, &requested);
-                        let passive = requested.resume_inference;
-                        self.finish_manual_compaction_tool_with_error(
-                            requested.initiating_tool_call_id,
-                            requested.visible_tool_name,
-                            manual_request_failure_message(failed.reason),
-                            passive,
+                        self.finish_prebuilt_internal_tool_error_with_mode(
+                            ToolError {
+                                call_id: requested.initiating_tool_call_id.clone(),
+                                tool_name: requested.visible_tool_name.clone(),
+                                tool_type: tau_proto::ToolType::Function,
+                                message: manual_request_failure_message(failed.reason).to_owned(),
+                                details: None,
+                                display: None,
+                                originator: PromptOriginator::User,
+                            },
+                            if requested.resume_inference {
+                                BackgroundCompletionPromptMode::DoNotQueue
+                            } else {
+                                BackgroundCompletionPromptMode::QueueAndAdvance
+                            },
                         );
+                    }
+                    if requested.resume_inference
+                        && !self.self_compaction_terminal_delivered(&requested)
+                    {
+                        self.consume_wait_background_completion(&requested.initiating_tool_call_id);
+                        if let Some(agent) = self.agents.get_mut(&caller_cid) {
+                            agent
+                                .pending_prompts
+                                .push_back(self_compaction_terminal_pending_prompt(
+                                tau_proto::SelfCompactionTerminal {
+                                    request_id: requested.request_id.clone(),
+                                    tool_call_id: requested.initiating_tool_call_id.clone(),
+                                    transaction_id: None,
+                                    outcome:
+                                        tau_proto::SelfCompactionTerminalOutcome::RequestFailed {
+                                            reason: failed.reason,
+                                        },
+                                },
+                            ));
+                        }
+                        self.fold_pending_prompts_as_steered(&caller_cid);
                     }
                     continue;
                 }
@@ -21958,25 +22205,50 @@ impl Harness {
             ) {
                 self.pending_manual_compaction_tools
                     .remove(&started.transaction_id);
-                if request.resume_inference
-                    && !self.manual_completion_notification_persisted(&request)
-                {
-                    self.queue_background_completion_prompt_without_advancing(
-                        &caller_cid,
-                        &request.initiating_tool_call_id,
-                    );
+                if request.resume_inference && !self.self_compaction_terminal_delivered(&request) {
+                    self.consume_wait_background_completion(&request.initiating_tool_call_id);
+                    let terminal = match outcome.as_deref() {
+                        Some(tau_core::ManualCompactionOutcome::Succeeded(_)) => {
+                            tau_proto::SelfCompactionTerminal {
+                                request_id: request.request_id.clone(),
+                                tool_call_id: request.initiating_tool_call_id.clone(),
+                                transaction_id: Some(started.transaction_id.clone()),
+                                outcome: tau_proto::SelfCompactionTerminalOutcome::Compacted,
+                            }
+                        }
+                        Some(tau_core::ManualCompactionOutcome::Failed(failed)) => {
+                            tau_proto::SelfCompactionTerminal {
+                                request_id: request.request_id.clone(),
+                                tool_call_id: request.initiating_tool_call_id.clone(),
+                                transaction_id: Some(started.transaction_id.clone()),
+                                outcome: tau_proto::SelfCompactionTerminalOutcome::Failed {
+                                    reason: failed.reason,
+                                },
+                            }
+                        }
+                        None => continue,
+                    };
+                    if let Some(agent) = self.agents.get_mut(&caller_cid) {
+                        agent
+                            .pending_prompts
+                            .push_back(self_compaction_terminal_pending_prompt(terminal));
+                    }
                     self.fold_pending_prompts_as_steered(&caller_cid);
-                    self.stage_restored_manual_checkpoint(&target_cid, &started);
+                    if matches!(
+                        outcome.as_deref(),
+                        Some(tau_core::ManualCompactionOutcome::Succeeded(_))
+                    ) {
+                        self.stage_restored_manual_checkpoint(&target_cid, &started);
+                    }
                 }
                 continue;
             }
             self.restore_manual_tool_runtime(&caller_cid, &request);
             match outcome.map(|outcome| *outcome) {
                 Some(tau_core::ManualCompactionOutcome::Succeeded(_)) => {
-                    self.handle_background_tool_result_without_advancing(
-                        crate::harness::harness_connection_id(),
+                    self.finish_prebuilt_internal_tool_result_with_mode(
                         ToolResult {
-                            call_id: request.initiating_tool_call_id,
+                            call_id: request.initiating_tool_call_id.clone(),
                             tool_name: request.visible_tool_name.clone(),
                             tool_type: tau_proto::ToolType::Function,
                             result: tau_proto::CborValue::Map(vec![
@@ -22002,26 +22274,72 @@ impl Harness {
                             display: None,
                             originator: PromptOriginator::User,
                         },
+                        if request.resume_inference {
+                            BackgroundCompletionPromptMode::DoNotQueue
+                        } else {
+                            BackgroundCompletionPromptMode::QueueOnly
+                        },
                     );
                     self.pending_manual_compaction_tools
                         .remove(&started.transaction_id);
                     if request.resume_inference {
+                        self.consume_wait_background_completion(&request.initiating_tool_call_id);
+                        if let Some(agent) = self.agents.get_mut(&target_cid) {
+                            agent.pending_prompts.push_back(
+                                self_compaction_terminal_pending_prompt(
+                                    tau_proto::SelfCompactionTerminal {
+                                        request_id: request.request_id.clone(),
+                                        tool_call_id: request.initiating_tool_call_id.clone(),
+                                        transaction_id: Some(started.transaction_id.clone()),
+                                        outcome:
+                                            tau_proto::SelfCompactionTerminalOutcome::Compacted,
+                                    },
+                                ),
+                            );
+                        }
                         self.fold_pending_prompts_as_steered(&target_cid);
                         self.stage_restored_manual_checkpoint(&target_cid, &started);
                     }
                 }
                 Some(tau_core::ManualCompactionOutcome::Failed(failed)) => {
-                    self.finish_prebuilt_internal_tool_error(ToolError {
-                        call_id: request.initiating_tool_call_id,
-                        tool_name: request.visible_tool_name.clone(),
-                        tool_type: tau_proto::ToolType::Function,
-                        message: standalone_compaction_failure_message(failed.reason).to_owned(),
-                        details: None,
-                        display: None,
-                        originator: PromptOriginator::User,
-                    });
+                    let call_id = request.initiating_tool_call_id.clone();
+                    self.finish_prebuilt_internal_tool_error_with_mode(
+                        ToolError {
+                            call_id: call_id.clone(),
+                            tool_name: request.visible_tool_name.clone(),
+                            tool_type: tau_proto::ToolType::Function,
+                            message: standalone_compaction_failure_message(failed.reason)
+                                .to_owned(),
+                            details: None,
+                            display: None,
+                            originator: PromptOriginator::User,
+                        },
+                        if request.resume_inference {
+                            BackgroundCompletionPromptMode::DoNotQueue
+                        } else {
+                            BackgroundCompletionPromptMode::QueueAndAdvance
+                        },
+                    );
                     self.pending_manual_compaction_tools
                         .remove(&started.transaction_id);
+                    if request.resume_inference {
+                        self.consume_wait_background_completion(&call_id);
+                        if let Some(agent) = self.agents.get_mut(&caller_cid) {
+                            agent.pending_prompts.push_back(
+                                self_compaction_terminal_pending_prompt(
+                                    tau_proto::SelfCompactionTerminal {
+                                        request_id: request.request_id.clone(),
+                                        tool_call_id: call_id.clone(),
+                                        transaction_id: Some(started.transaction_id.clone()),
+                                        outcome: tau_proto::SelfCompactionTerminalOutcome::Failed {
+                                            reason: failed.reason,
+                                        },
+                                    },
+                                ),
+                            );
+                        }
+                        self.fold_pending_prompts_as_steered(&caller_cid);
+                    }
                 }
                 None => {}
             }
@@ -22067,26 +22385,13 @@ impl Harness {
             .any(|state| state.placeholder.call_id == *call_id && state.completion.is_some())
     }
 
-    fn manual_completion_notification_persisted(
+    fn self_compaction_terminal_delivered(
         &self,
         request: &tau_proto::AgentManualCompactionRequested,
     ) -> bool {
-        let caller_head = self
-            .runtime_agent_id_for_target_agent(Some(request.caller_agent_id.as_str()))
-            .and_then(|cid| self.agents.get(&cid))
-            .and_then(|agent| agent.head);
-        self.manual_completion_notification_persisted_at(request, caller_head)
-    }
-
-    fn manual_completion_notification_persisted_at(
-        &self,
-        request: &tau_proto::AgentManualCompactionRequested,
-        caller_head: Option<tau_proto::NodeId>,
-    ) -> bool {
-        let text = background_completion_prompt(&request.initiating_tool_call_id);
         self.agent_store
             .agent(request.caller_agent_id.as_str())
-            .is_some_and(|tree| tree.has_user_input_text_on_branch(caller_head, &text))
+            .is_some_and(|tree| tree.self_compaction_delivery(&request.request_id).is_some())
     }
 
     /// Stages an exact manual-compaction continuation for the common
@@ -26364,22 +26669,18 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         result: ToolResult,
     ) {
-        self.handle_background_tool_result_inner(source_id, result, true);
-    }
-
-    fn handle_background_tool_result_without_advancing(
-        &mut self,
-        source_id: &tau_proto::ConnectionId,
-        result: ToolResult,
-    ) {
-        self.handle_background_tool_result_inner(source_id, result, false);
+        self.handle_background_tool_result_inner(
+            source_id,
+            result,
+            BackgroundCompletionPromptMode::QueueAndAdvance,
+        );
     }
 
     fn handle_background_tool_result_inner(
         &mut self,
         source_id: &tau_proto::ConnectionId,
         mut result: ToolResult,
-        advance_queue: bool,
+        completion_prompt_mode: BackgroundCompletionPromptMode,
     ) {
         let peer_internal = self.peer_internal_tool_agents.contains_key(&result.call_id);
         let Some(cid) = self
@@ -26415,14 +26716,8 @@ impl Harness {
             return;
         }
         self.observe_tool_terminal(&cid, &call_id, tau_proto::ToolTerminalCause::Completed);
-        self.pending_background_completion_modes.insert(
-            call_id,
-            if advance_queue {
-                BackgroundCompletionPromptMode::QueueAndAdvance
-            } else {
-                BackgroundCompletionPromptMode::QueueOnly
-            },
-        );
+        self.pending_background_completion_modes
+            .insert(call_id, completion_prompt_mode);
         self.publish_for_agent_from(
             &cid,
             Some(source_id),
@@ -26962,6 +27257,7 @@ impl Harness {
                 agent_id: crate::parse_agent_id(&agent_id),
                 text: prompt.text,
                 message_class: prompt.message_class,
+                self_compaction_terminal: prompt.self_compaction_terminal,
                 internal_kind,
                 ctx_id: prompt.ctx_id,
             });

@@ -699,6 +699,15 @@ impl WaitTracker {
         self.call_is_owned_by(call_id, owner) && self.is_completed(call_id)
     }
 
+    /// Consume one completed call after an owning control flow delivered its
+    /// terminal payload without a model-declared wait.
+    pub(super) fn consume_completed_call(&mut self, call_id: &ToolCallId) {
+        self.remove_completed(call_id);
+        if self.is_completed(call_id) {
+            self.record_terminal_state(call_id.clone(), WaitCallState::Consumed);
+        }
+    }
+
     fn start_any_wait(&mut self, owner: AgentId, wait: WaitRequest) -> WaitStart {
         if self.any_waiters.contains_key(&owner) {
             let reply = wait_error_reply(
