@@ -312,8 +312,16 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
         PrewarmOutcome::Installed
     ));
     let mut abort = NeverAbort;
+    let mut correlation = attempt_failure::AttemptCaptureCorrelation::new(LogicalAttempt::new(1));
 
-    let error = match runtime.stream("ap-ws-context", &config, &request, &mut abort, &mut |_| {}) {
+    let error = match runtime.stream(
+        "ap-ws-context",
+        &config,
+        &request,
+        &mut correlation,
+        &mut abort,
+        &mut |_| {},
+    ) {
         Ok(_) => panic!("context rejection must terminate"),
         Err(error) => error,
     };
@@ -651,7 +659,10 @@ fn retryable_websocket_exhaustion_does_not_fallback_to_http_sse() {
             }
         },
     );
-    let AttemptOutcome::Retry { decision, progress } = outcome else {
+    let AttemptOutcome::Retry {
+        decision, progress, ..
+    } = outcome
+    else {
         panic!("retryable WS failure should surface after budget exhaustion");
     };
     assert_eq!(

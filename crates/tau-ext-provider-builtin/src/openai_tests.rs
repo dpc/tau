@@ -634,6 +634,7 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::UsageWindow)
                         .with_retry_after(Some(Duration::from_secs(86_400))),
+                    live_detail: None,
                 },
             )
             .expect("park old-profile prompt");
@@ -767,6 +768,7 @@ fn stale_old_identity_retry_cannot_park_new_profile_work() {
                 WorkerMessage::Retry {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::UsageWindow),
+                    live_detail: None,
                 },
             )
             .expect("return stale shared evidence");
@@ -2056,6 +2058,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
                 WorkerMessage::Retry {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::Transport),
+                    live_detail: None,
                 },
             )
             .expect("return retry outcome");
@@ -2191,6 +2194,7 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
                 WorkerMessage::Retry {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::Transport),
+                    live_detail: None,
                 },
             )
             .expect("park first attempt");
@@ -2306,6 +2310,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                 WorkerMessage::Retry {
                     job: execution.job,
                     decision,
+                    live_detail: None,
                 },
             )
             .expect("install generated usage-window cooldown");
@@ -2750,6 +2755,7 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
                 job: execution.job,
                 decision: RetryDecision::new(RetryClass::UsageWindow)
                     .with_retry_after(Some(Duration::from_secs(86_400))),
+                live_detail: None,
             },
         )
         .expect("park usage failure");
@@ -2864,6 +2870,7 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
             WorkerMessage::Retry {
                 job: execution.job,
                 decision: RetryDecision::new(RetryClass::Transport),
+                live_detail: None,
             },
         )
         .expect("park attempt");
@@ -2981,6 +2988,7 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
                 WorkerMessage::Retry {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::Transport),
+                    live_detail: None,
                 },
             )
             .expect("return retry");
@@ -3228,6 +3236,7 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::Account)
                         .with_retry_after(Some(Duration::from_secs(86_400))),
+                    live_detail: None,
                 },
             )
             .expect("park limited prompt");
@@ -3393,6 +3402,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
             WorkerMessage::Retry {
                 job: execution.job,
                 decision: RetryDecision::new(RetryClass::Transport),
+                live_detail: None,
             },
         )
         .expect("schedule profile reload");
@@ -3487,6 +3497,7 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
                 WorkerMessage::Retry {
                     job: execution.job,
                     decision: RetryDecision::new(RetryClass::Transport),
+                    live_detail: None,
                 },
             )
             .expect("schedule retry after partial output");
@@ -3691,6 +3702,7 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
                 WorkerMessage::Retry {
                     job: execution.job,
                     decision: RetryDecision::new(class),
+                    live_detail: None,
                 },
             )
             .expect("schedule family retry");
@@ -3834,6 +3846,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                         job: execution.job,
                         decision: RetryDecision::new(RetryClass::UsageWindow)
                             .with_retry_after(Some(Duration::from_secs(86_400))),
+                        live_detail: None,
                     },
                 )
                 .expect("park delayed prompt");
@@ -4248,8 +4261,8 @@ fn real_repetition_failure_finishes_once_without_scheduler_retry() {
     )));
 }
 
-/// Retry statuses are one-per-attempt, bounded, provider-content-free, and the
-/// final terminal event closes the transient status lifecycle.
+/// Retry statuses are one-per-attempt, bounded, and may carry only the
+/// provider layer's already-redacted live detail.
 #[test]
 fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
     let input = BlockingInput::default();
@@ -4260,6 +4273,12 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let executor_attempts = Arc::clone(&attempts);
     let secret = "provider-secret-body\n\u{1b}[31m account=acct-123";
+    let live_detail = tau_provider_codex::test_redacted_provider_detail(
+        "provider overloaded safely provider-secret-body\n\u{1b}[31m account=acct-123",
+        "provider-secret-body",
+        Some("acct-123"),
+    )
+    .expect("production Codex redaction");
     let executor: PromptExecutor = Arc::new(move |execution| {
         let attempt = executor_attempts.fetch_add(1, Ordering::SeqCst);
         if attempt < 2 {
@@ -4273,6 +4292,7 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
                     } else {
                         RetryClass::Unknown
                     }),
+                    live_detail: Some(live_detail.clone()),
                 },
             )
             .expect("schedule status fixture retry");
@@ -4346,6 +4366,7 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
         assert!(!status.text.contains("provider-secret-body"));
         assert!(!status.text.chars().any(char::is_control));
         assert!(status.text.contains("cancel the prompt to stop"));
+        assert!(status.text.contains("provider overloaded safely"));
     }
     assert!(matches!(
         frames.last().and_then(input_event),
@@ -4526,6 +4547,7 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
             WorkerMessage::Retry {
                 job: execution.job,
                 decision: RetryDecision::new(RetryClass::Transport),
+                live_detail: None,
             },
         )
         .expect("return late retry");

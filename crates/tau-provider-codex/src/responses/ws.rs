@@ -96,6 +96,16 @@ struct EnvelopeTimeouts {
     absolute: Option<Duration>,
 }
 
+/// Optional recording, evidence, and deadline policy for one envelope run.
+struct EnvelopeExecution<'a> {
+    /// VCR stream receiving accepted provider frames.
+    recording_stream: Option<&'a mut ProviderRawEventStream>,
+    /// Parser work allowed for failure evidence.
+    evidence_mode: crate::attempt_failure::ProviderEvidenceMode,
+    /// Idle and absolute response deadlines.
+    timeouts: EnvelopeTimeouts,
+}
+
 /// Applies the WebSocket-only rate-limit side channel before delegating
 /// ordinary Responses events to the transport-neutral event parser.
 fn apply_ws_raw_json_event(
@@ -130,16 +140,19 @@ enum WsCommand {
 enum InboundEvent {
     /// One parsed `response.*` event and its upstream text frame.
     Event { text: Utf8Bytes },
-    /// Server sent a `Close` frame (or the stream ended cleanly
-    /// without one). The string is the close-frame reason for
-    /// logging.
-    Closed,
+    /// Server sent a `Close` frame or the stream ended cleanly without one.
+    /// Carries only the semantic termination fact used by bounded diagnostics.
+    Closed {
+        /// Semantic close/EOF fact.
+        termination: crate::attempt_failure::WsTermination,
+    },
+    /// One rejected provider frame whose length drives both accounting and
+    /// persistent diagnostics.
+    FrameFailure(crate::attempt_failure::FrameFailure),
     /// Transport / protocol error mid-stream.
     Error {
-        /// Fixed local protocol/transport diagnostic.
-        detail: String,
-        /// Raw provider frame bytes rejected before semantic parsing.
-        response_bytes: usize,
+        /// Closed locally generated failure kind.
+        kind: crate::attempt_failure::TransportFailureKind,
     },
     /// Harness cancellation state changed; the sync turn loop should re-check
     /// its abort source immediately.
@@ -309,6 +322,7 @@ impl WsConn {
         config: &ResponsesConfig,
         agent_prompt_id: &str,
         request: &PromptPayload<'_>,
+        correlation: Option<crate::attempt_failure::DispatchCorrelation>,
         recording_stream: Option<&mut ProviderRawEventStream>,
         abort: &mut impl TurnAbort,
         on_dispatched: &mut impl FnMut(Instant),
@@ -338,12 +352,24 @@ impl WsConn {
             config,
             request,
             tau_proto::ProviderBackendTransport::Websocket,
+            correlation,
             &envelope,
         );
-        let mut state = self.run_envelope(
+        let mut state = self.run_envelope_with_timeouts(
             agent_prompt_id,
             envelope,
-            recording_stream,
+            EnvelopeExecution {
+                recording_stream,
+                evidence_mode: if request.debug_provider_requests {
+                    crate::attempt_failure::ProviderEvidenceMode::Persistent
+                } else {
+                    crate::attempt_failure::ProviderEvidenceMode::LiveOnly
+                },
+                timeouts: EnvelopeTimeouts {
+                    idle: TURN_EVENT_TIMEOUT,
+                    absolute: None,
+                },
+            },
             abort,
             on_dispatched,
             on_update,
@@ -406,12 +432,15 @@ impl WsConn {
         let state = self.run_envelope_with_timeouts(
             "<prewarm>",
             envelope,
-            None,
-            abort,
-            EnvelopeTimeouts {
-                idle: response_timeout,
-                absolute: Some(response_timeout),
+            EnvelopeExecution {
+                recording_stream: None,
+                evidence_mode: crate::attempt_failure::ProviderEvidenceMode::LiveOnly,
+                timeouts: EnvelopeTimeouts {
+                    idle: response_timeout,
+                    absolute: Some(response_timeout),
+                },
             },
+            abort,
             &mut |_| {},
             &mut |_| {},
         )?;
@@ -426,40 +455,12 @@ impl WsConn {
         Ok(state)
     }
 
-    fn run_envelope(
-        &mut self,
-        agent_prompt_id: &str,
-        envelope: super::WsResponseCreate,
-        recording_stream: Option<&mut ProviderRawEventStream>,
-        abort: &mut impl TurnAbort,
-        on_dispatched: &mut impl FnMut(Instant),
-        on_update: &mut impl FnMut(&StreamState),
-    ) -> Result<StreamState, LlmError> {
-        self.run_envelope_with_timeouts(
-            agent_prompt_id,
-            envelope,
-            recording_stream,
-            abort,
-            EnvelopeTimeouts {
-                idle: TURN_EVENT_TIMEOUT,
-                absolute: None,
-            },
-            on_dispatched,
-            on_update,
-        )
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "transport lifecycle callbacks remain separate typed boundaries"
-    )]
     fn run_envelope_with_timeouts(
         &mut self,
         agent_prompt_id: &str,
         envelope: super::WsResponseCreate,
-        mut recording_stream: Option<&mut ProviderRawEventStream>,
+        mut execution: EnvelopeExecution<'_>,
         abort: &mut impl TurnAbort,
-        timeouts: EnvelopeTimeouts,
         on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<StreamState, LlmError> {
@@ -470,9 +471,18 @@ impl WsConn {
         on_dispatched(Instant::now());
         self.outbound_tx
             .send(WsCommand::SendText(text))
-            .map_err(|_| LlmError::HttpStatus(0, "stream error: ws writer task gone".to_owned()))?;
+            .map_err(|_| {
+                LlmError::HttpStatus(0, "stream error: ws writer task gone".to_owned()).observed(
+                    crate::attempt_failure::AttemptFailureEvidence::transport(
+                        crate::attempt_failure::TransportPhase::Send,
+                        true,
+                        crate::attempt_failure::TransportFailureKind::Send,
+                    ),
+                )
+            })?;
 
         let mut state = StreamState::new();
+        state.provider_evidence_mode = execution.evidence_mode;
         state.carry_transport_response_bytes(std::mem::take(&mut self.carried_response_bytes));
         let turn_started_at = Instant::now();
         let mut last_event_at = Instant::now();
@@ -486,7 +496,8 @@ impl WsConn {
             if abort.is_aborted() {
                 return Err(LlmError::Canceled);
             }
-            if timeouts
+            if execution
+                .timeouts
                 .absolute
                 .is_some_and(|timeout| timeout <= turn_started_at.elapsed())
             {
@@ -495,17 +506,22 @@ impl WsConn {
                     "websocket prewarm response timeout".to_owned(),
                 ));
             }
-            let remaining = timeouts.idle.saturating_sub(last_event_at.elapsed()).min(
-                timeouts
-                    .absolute
-                    .map(|timeout| timeout.saturating_sub(turn_started_at.elapsed()))
-                    .unwrap_or(Duration::MAX),
-            );
+            let remaining = execution
+                .timeouts
+                .idle
+                .saturating_sub(last_event_at.elapsed())
+                .min(
+                    execution
+                        .timeouts
+                        .absolute
+                        .map(|timeout| timeout.saturating_sub(turn_started_at.elapsed()))
+                        .unwrap_or(Duration::MAX),
+                );
             let wait = remaining.min(Duration::from_secs(1));
             let event = match self.inbound_rx.recv_timeout(wait) {
                 Ok(event) => event,
                 Err(std_mpsc::RecvTimeoutError::Timeout)
-                    if last_event_at.elapsed() < timeouts.idle =>
+                    if last_event_at.elapsed() < execution.timeouts.idle =>
                 {
                     // Provider-owned response liveness is deadline-driven, not
                     // upstream-event-driven. Wake the outer sampled emitter
@@ -519,15 +535,29 @@ impl WsConn {
                         agent_prompt_id,
                         turn_started_at,
                         last_event_at,
-                        timeouts.idle,
+                        execution.timeouts.idle,
                         &state,
                         None,
+                    )
+                    .observed(
+                        crate::attempt_failure::AttemptFailureEvidence::transport(
+                            crate::attempt_failure::TransportPhase::ResponseStream,
+                            true,
+                            crate::attempt_failure::TransportFailureKind::IdleTimeout,
+                        ),
                     ));
                 }
                 Err(std_mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(LlmError::HttpStatus(
                         0,
                         "stream error: ws reader task gone".to_owned(),
+                    )
+                    .observed(
+                        crate::attempt_failure::AttemptFailureEvidence::transport(
+                            crate::attempt_failure::TransportPhase::ResponseStream,
+                            true,
+                            crate::attempt_failure::TransportFailureKind::Read,
+                        ),
                     ));
                 }
             };
@@ -538,26 +568,48 @@ impl WsConn {
                     last_event_at = now;
                     state.record_transport_response_bytes(text.len());
                     on_update(&state);
-                    if let Some(stream) = recording_stream.as_deref_mut() {
+                    if let Some(stream) = execution.recording_stream.as_deref_mut() {
                         record_provider_raw_event_after(stream, delta, text.to_string())?;
                     }
                     if apply_ws_raw_json_event(&mut state, text.as_ref(), on_update)? {
                         return Ok(state);
                     }
                 }
-                InboundEvent::Closed => {
+                InboundEvent::Closed { termination } => {
+                    let evidence = crate::attempt_failure::AttemptFailureEvidence::transport(
+                        crate::attempt_failure::TransportPhase::ResponseStream,
+                        true,
+                        crate::attempt_failure::TransportFailureKind::WebSocketTermination(
+                            termination.clone(),
+                        ),
+                    );
+                    return Err(LlmError::WsClosed(termination).observed(evidence));
+                }
+                InboundEvent::FrameFailure(frame) => {
+                    state.record_transport_response_bytes(frame.response_bytes());
+                    on_update(&state);
+                    let evidence = crate::attempt_failure::AttemptFailureEvidence::transport(
+                        crate::attempt_failure::TransportPhase::ResponseStream,
+                        true,
+                        crate::attempt_failure::TransportFailureKind::Frame(frame),
+                    );
                     return Err(LlmError::HttpStatus(
                         0,
-                        "stream error: ws closed mid-stream".to_owned(),
-                    ));
+                        "stream error: websocket transport failed".to_owned(),
+                    )
+                    .observed(evidence));
                 }
-                InboundEvent::Error {
-                    detail,
-                    response_bytes,
-                } => {
-                    state.record_transport_response_bytes(response_bytes);
-                    on_update(&state);
-                    return Err(LlmError::HttpStatus(0, format!("stream error: {detail}")));
+                InboundEvent::Error { kind } => {
+                    let evidence = crate::attempt_failure::AttemptFailureEvidence::transport(
+                        crate::attempt_failure::TransportPhase::ResponseStream,
+                        true,
+                        kind,
+                    );
+                    return Err(LlmError::HttpStatus(
+                        0,
+                        "stream error: websocket transport failed".to_owned(),
+                    )
+                    .observed(evidence));
                 }
                 InboundEvent::AbortWake => continue,
             }
@@ -704,6 +756,11 @@ fn map_connect_wait_error(
         ConnectWaitError::Canceled => LlmError::Canceled,
         ConnectWaitError::Timeout => {
             LlmError::Outbound(network.deadline_error(target, tau_provider::OutboundPhase::Connect))
+                .observed(crate::attempt_failure::AttemptFailureEvidence::transport(
+                    crate::attempt_failure::TransportPhase::PreUpgrade,
+                    false,
+                    crate::attempt_failure::TransportFailureKind::Outbound,
+                ))
         }
         ConnectWaitError::Connect(error) => map_ws_connect_error(error),
     }
@@ -858,27 +915,38 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
                     Err(_) => {
                         let response_bytes = text.len();
                         (
-                            InboundEvent::Error {
-                                detail: "malformed JSON text frame".to_owned(),
+                            InboundEvent::FrameFailure(crate::attempt_failure::FrameFailure::new(
+                                crate::attempt_failure::FrameFailureKind::MalformedText,
                                 response_bytes,
-                            },
+                            )),
                             true,
                         )
                     }
                 }
             }
-            Ok(Message::Close(_)) => {
+            Ok(Message::Close(frame)) => {
                 tracing::info!(
                     target: crate::LOG_TARGET,
                     "ws server closed connection; it will be reopened on the next turn",
                 );
-                (InboundEvent::Closed, true)
+                (
+                    InboundEvent::Closed {
+                        termination: crate::attempt_failure::WsTermination::CloseFrame {
+                            code: frame.as_ref().map(|frame| u16::from(frame.code)),
+                            reason: frame
+                                .as_ref()
+                                .map(|frame| frame.reason.to_string())
+                                .filter(|reason| !reason.is_empty()),
+                        },
+                    },
+                    true,
+                )
             }
             Ok(Message::Binary(bytes)) => (
-                InboundEvent::Error {
-                    detail: "unexpected binary frame".to_owned(),
-                    response_bytes: bytes.len(),
-                },
+                InboundEvent::FrameFailure(crate::attempt_failure::FrameFailure::new(
+                    crate::attempt_failure::FrameFailureKind::Binary,
+                    bytes.len(),
+                )),
                 true,
             ),
             Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {
@@ -889,13 +957,12 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
             Err(e) => {
                 tracing::warn!(
                     target: crate::LOG_TARGET,
-                    error = %e,
                     "ws read failed — connection will be reopened on next turn",
                 );
+                let _ = e;
                 (
                     InboundEvent::Error {
-                        detail: format!("{e}"),
-                        response_bytes: 0,
+                        kind: crate::attempt_failure::TransportFailureKind::Read,
                     },
                     true,
                 )
@@ -913,7 +980,9 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
     // Stream ended without a close frame (clean EOF). Surface it as
     // a `Closed` so the next `run_turn` call returns a retryable
     // error rather than hanging on `blocking_recv`.
-    let _ = tx.send(InboundEvent::Closed);
+    let _ = tx.send(InboundEvent::Closed {
+        termination: crate::attempt_failure::WsTermination::CleanEof,
+    });
 }
 
 /// Writer task. Drains outbound commands and emits periodic client
@@ -940,10 +1009,9 @@ async fn write_loop(
         tokio::select! {
             cmd = rx.recv() => match cmd {
                 Some(WsCommand::SendText(text)) => {
-                    if let Err(e) = sink.send(Message::Text(text.into())).await {
+                    if sink.send(Message::Text(text.into())).await.is_err() {
                         let _ = inbound_tx.send(InboundEvent::Error {
-                            detail: format!("ws send failed: {e}"),
-                            response_bytes: 0,
+                            kind: crate::attempt_failure::TransportFailureKind::Send,
                         });
                         return;
                     }
@@ -973,15 +1041,13 @@ async fn write_loop(
                             "ws keepalive ping sent",
                         );
                     }
-                    Err(e) => {
+                    Err(_) => {
                         tracing::warn!(
                             target: crate::LOG_TARGET,
-                            error = %e,
                             "ws keepalive ping failed — writer task exiting, next turn will reopen",
                         );
                         let _ = inbound_tx.send(InboundEvent::Error {
-                            detail: format!("ws keepalive failed: {e}"),
-                            response_bytes: 0,
+                            kind: crate::attempt_failure::TransportFailureKind::Keepalive,
                         });
                         return;
                     }
@@ -1038,21 +1104,41 @@ fn map_ws_connect_error(e: tungstenite::Error) -> LlmError {
             .and_then(|value| {
                 tau_provider::retry_policy::parse_retry_after(value, std::time::SystemTime::now())
             });
+        let request_id = ["x-request-id", "request-id", "openai-request-id"]
+            .into_iter()
+            .find_map(|name| response.headers().get(name))
+            .and_then(|value| value.to_str().ok());
         return match retry_after {
             Some(delay) => LlmError::HttpStatusRetryAfter(code, body, delay),
             None => LlmError::HttpStatus(code, body),
-        };
+        }
+        .observed(crate::attempt_failure::AttemptFailureEvidence::upgrade(
+            request_id,
+            crate::attempt_failure::TransportFailureKind::Upgrade,
+        ));
     }
     if let tungstenite::Error::Io(error) = &e
         && let Some(outbound) = error
             .get_ref()
             .and_then(|source| source.downcast_ref::<tau_provider::OutboundError>())
     {
-        return LlmError::Outbound(outbound.clone());
+        return LlmError::Outbound(outbound.clone()).observed(
+            crate::attempt_failure::AttemptFailureEvidence::transport(
+                crate::attempt_failure::TransportPhase::PreUpgrade,
+                false,
+                crate::attempt_failure::TransportFailureKind::Outbound,
+            ),
+        );
     }
     // Network / TLS / protocol — treat as retryable transport.
     let _ = e;
-    LlmError::HttpStatus(0, "stream error: websocket connection failed".to_owned())
+    LlmError::HttpStatus(0, "stream error: websocket connection failed".to_owned()).observed(
+        crate::attempt_failure::AttemptFailureEvidence::transport(
+            crate::attempt_failure::TransportPhase::PreUpgrade,
+            false,
+            crate::attempt_failure::TransportFailureKind::Upgrade,
+        ),
+    )
 }
 
 #[cfg(test)]

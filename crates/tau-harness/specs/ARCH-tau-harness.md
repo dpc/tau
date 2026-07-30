@@ -162,9 +162,15 @@ CBOR journals never use its queue or lock; they use a separate lifecycle-owned
 coalesced sync worker under
 [SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 Startup separately runs one best-effort, time-based cleanup of expired session
-`events.jsonl` files and exact legacy/compressed provider request/response
+`events.jsonl` files and exact legacy/compressed provider request/response or
+failed-attempt diagnostic
 captures, defaulting to fourteen days while excluding current or locked
 sessions, symlinks, unrelated diagnostics, and all canonical journals.
+
+Live provider retry updates may carry bounded provider detail, but the
+non-authoritative `events.jsonl` projection replaces it with only retry
+category, attempt, delay, and retrying status. Watcher and agent-message
+projections continue to derive solely from the closed retry fields.
 
 Configured Provider execution uses the same generic commit boundary. Five `_reported`
 observations commit before exact generation and prompt/retry correlation; the harness

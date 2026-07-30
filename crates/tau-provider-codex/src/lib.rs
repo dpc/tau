@@ -30,11 +30,13 @@ const CHATGPT_MODELS: &[&str] = &[
     "gpt-5.3-codex",
 ];
 
+mod attempt_failure;
 pub(crate) mod common;
 pub mod oauth;
 pub(crate) mod quota;
 pub(crate) mod responses;
 
+pub use attempt_failure::{LogicalAttempt, RedactedProviderDetail};
 pub use common::{ProviderTokenCounts, StreamDeltaEmitter, StreamState};
 pub use quota::{
     FullQuotaSnapshot, QuotaWindowObservation, RollingQuotaObservation, UsageFetchError,
@@ -61,6 +63,22 @@ pub fn test_debug_capture() -> CodexDebugCapture {
     CodexDebugCapture {
         terminal_event: None,
     }
+}
+
+/// Run synthetic provider prose through the production Codex redaction boundary
+/// for cross-crate privacy tests.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn test_redacted_provider_detail(
+    message: &str,
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Option<RedactedProviderDetail> {
+    attempt_failure::AttemptFailureEvidence::provider(&serde_json::json!({
+        "type": "error",
+        "message": message,
+    }))
+    .live_detail(access_token, account_id)
 }
 
 /// Appends synthetic assistant text for cross-crate streaming tests.
@@ -291,7 +309,8 @@ impl CodexError {
     /// Returns repetition evidence for the dedicated terminal projection.
     #[must_use]
     pub fn repetition(&self) -> Option<&tau_provider::StreamRepetition> {
-        match &self.0 {
+        match self.0.root_error() {
+            common::LlmError::Observed { .. } => None,
             common::LlmError::RepetitionDetected(repetition) => Some(repetition),
             _ => None,
         }
@@ -307,7 +326,8 @@ impl CodexError {
 
 impl std::fmt::Display for CodexError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.0 {
+        match self.0.root_error() {
+            common::LlmError::Observed { .. } => formatter.write_str("provider request failed"),
             common::LlmError::Outbound(error) => error.fmt(formatter),
             common::LlmError::HttpStatus(status, _) => {
                 write!(formatter, "provider request failed with HTTP {status}")
@@ -318,6 +338,7 @@ impl std::fmt::Display for CodexError {
             common::LlmError::StreamError { .. } => {
                 formatter.write_str("provider WebSocket stream failed")
             }
+            common::LlmError::WsClosed(_) => formatter.write_str("provider WebSocket closed"),
             common::LlmError::Canceled => formatter.write_str("request canceled"),
             common::LlmError::ReloadableConfig(_) => {
                 formatter.write_str("provider configuration must be reloaded")
@@ -359,6 +380,8 @@ pub enum AttemptOutcome {
         decision: tau_provider::retry_policy::RetryDecision,
         /// Whether tentative semantic output must be cleared.
         progress: SemanticProgress,
+        /// Bounded, redacted provider detail suitable only for live status.
+        live_detail: Option<RedactedProviderDetail>,
     },
     /// Trusted local cancellation ended the attempt.
     Canceled {
@@ -534,6 +557,7 @@ impl CodexRuntime {
         agent_prompt_id: &str,
         config: &responses::ResponsesConfig,
         request: &Prompt<'_>,
+        correlation: &mut attempt_failure::AttemptCaptureCorrelation,
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(StreamUpdate<'_>),
     ) -> Result<StreamDispatchResult, common::LlmError> {
@@ -544,6 +568,7 @@ impl CodexRuntime {
             config,
             agent_prompt_id,
             request,
+            Some(correlation),
             abort,
             on_update,
         ) {
@@ -595,17 +620,44 @@ impl CodexRuntime {
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(StreamUpdate<'_>),
     ) -> AttemptOutcome {
+        self.run_attempt_numbered(
+            agent_prompt_id,
+            LogicalAttempt::new(1),
+            config,
+            request,
+            abort,
+            on_update,
+        )
+    }
+
+    /// Execute one numbered finite attempt and submit its private failure
+    /// diagnostic without changing provider execution.
+    pub fn run_attempt_numbered(
+        &self,
+        agent_prompt_id: &str,
+        logical_attempt: LogicalAttempt,
+        config: &ResolvedConfig,
+        request: &Prompt<'_>,
+        abort: &mut impl TurnAbort,
+        on_update: &mut impl FnMut(StreamUpdate<'_>),
+    ) -> AttemptOutcome {
+        let mut correlation = attempt_failure::AttemptCaptureCorrelation::new(logical_attempt);
+        let response_bytes = std::cell::Cell::new(0_u64);
         let mut progress = SemanticProgress::None;
         let result = self.stream(
             agent_prompt_id,
             config.wire(),
             request,
+            &mut correlation,
             abort,
             &mut |update| {
                 if let StreamUpdate::Response(state) = update
                     && state.has_semantic_progress()
                 {
                     progress = SemanticProgress::Parsed;
+                }
+                if let StreamUpdate::Response(state) = update {
+                    response_bytes.set(response_bytes.get().max(state.response_bytes_received()));
                 }
                 on_update(update);
             },
@@ -622,7 +674,30 @@ impl CodexRuntime {
             Ok(result) => AttemptOutcome::Finished(Box::new(result)),
             Err(common::LlmError::Canceled) => AttemptOutcome::Canceled { progress },
             Err(error) => match error.retry_decision() {
-                Some(decision) => AttemptOutcome::Retry { decision, progress },
+                Some(decision) => {
+                    let live_detail = error.evidence().and_then(|evidence| {
+                        evidence.live_detail(
+                            config.wire().api_key.as_str(),
+                            config.wire().account_id.as_deref(),
+                        )
+                    });
+                    attempt_failure::submit_capture(attempt_failure::CaptureInput {
+                        agent_prompt_id,
+                        request,
+                        decision: &decision,
+                        progress,
+                        correlation: correlation.snapshot(),
+                        response_bytes_received: response_bytes.get(),
+                        evidence: error.evidence(),
+                        access_token: config.wire().api_key.as_str(),
+                        account_id: config.wire().account_id.as_deref(),
+                    });
+                    AttemptOutcome::Retry {
+                        decision,
+                        progress,
+                        live_detail,
+                    }
+                }
                 None => AttemptOutcome::Terminal {
                     error: CodexError(error),
                     progress,

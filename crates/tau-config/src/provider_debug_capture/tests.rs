@@ -11,6 +11,7 @@ fn filename_round_trips_every_supported_class_and_format() {
         ProviderDebugCaptureClass::HttpSseResponse,
         ProviderDebugCaptureClass::WebsocketResponse,
         ProviderDebugCaptureClass::UnknownResponse,
+        ProviderDebugCaptureClass::ResponsesAttemptFailure,
     ] {
         for format in [
             ProviderDebugCaptureFormat::LegacyJson,

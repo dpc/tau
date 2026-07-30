@@ -14,6 +14,49 @@ use test_ca::TestCa;
 use test_server::{ServerScript, TestWsServer};
 
 use super::*;
+
+fn outbound_error(result: Result<WsConn, LlmError>) -> tau_provider::OutboundError {
+    let error = match result {
+        Ok(_) => panic!("expected outbound failure"),
+        Err(error) => error,
+    };
+    match error.root_error() {
+        LlmError::Outbound(error) => error.clone(),
+        other => panic!("expected typed outbound error, got {other:?}"),
+    }
+}
+
+fn http_status_zero<T>(result: Result<T, LlmError>) -> String {
+    let error = match result {
+        Ok(_) => panic!("expected HTTP-status-zero failure"),
+        Err(error) => error,
+    };
+    match error.root_error() {
+        LlmError::HttpStatus(0, body) => body.clone(),
+        other => panic!("expected HTTP-status-zero failure, got {other:?}"),
+    }
+}
+
+/// Regression: only the first approved upgrade request-ID header crosses the
+/// raw HTTP boundary into opaque failure evidence.
+#[test]
+fn upgrade_error_extracts_allowlisted_request_id_precedence() {
+    let response = tungstenite::http::Response::builder()
+        .status(503)
+        .header("openai-request-id", "req-third")
+        .header("request-id", "req-second")
+        .header("x-request-id", "req-first")
+        .header("x-secret-header", "must-not-cross")
+        .body(Some(Vec::new()))
+        .expect("upgrade response");
+    let error = map_ws_connect_error(tungstenite::Error::Http(Box::new(response)));
+    assert_eq!(
+        error
+            .evidence()
+            .and_then(crate::attempt_failure::AttemptFailureEvidence::transport_request_id),
+        Some("req-first")
+    );
+}
 use crate::responses::ResponsesMode;
 use crate::{NeverAbort, TurnAbortWaker};
 
@@ -87,6 +130,7 @@ fn warm_anchor_emits_ceiling_except_for_compaction() {
                 &config,
                 "ap-cache-ceiling",
                 &fixture.payload(),
+                None,
                 None,
                 &mut NeverAbort,
                 &mut |_| {},
@@ -268,11 +312,12 @@ fn websocket_upgrade_rejects_unsolicited_proxy_extension() {
     let mut config = test_responses_config();
     config.base_url = "http://unresolvable.invalid/backend-api".to_owned();
     let mut abort = NeverAbort;
-    let Err(LlmError::Outbound(error)) =
-        WsConn::connect(&config, "thread-extension", &network, &mut abort)
-    else {
-        panic!("expected typed proxy protocol error");
-    };
+    let error = outbound_error(WsConn::connect(
+        &config,
+        "thread-extension",
+        &network,
+        &mut abort,
+    ));
     assert_eq!(error.route(), tau_provider::OutboundRouteKind::Proxy);
     assert_eq!(error.phase(), tau_provider::OutboundPhase::Request);
     assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Protocol);
@@ -310,11 +355,12 @@ fn websocket_upgrade_rejects_unsolicited_target_extension() {
     let mut config = test_responses_config();
     config.base_url = format!("http://{address}/backend-api");
     let mut abort = NeverAbort;
-    let Err(LlmError::Outbound(error)) =
-        WsConn::connect(&config, "thread-extension", &network, &mut abort)
-    else {
-        panic!("expected typed target protocol error");
-    };
+    let error = outbound_error(WsConn::connect(
+        &config,
+        "thread-extension",
+        &network,
+        &mut abort,
+    ));
     assert_eq!(error.route(), tau_provider::OutboundRouteKind::Direct);
     assert_eq!(error.phase(), tau_provider::OutboundPhase::Request);
     assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Protocol);
@@ -352,11 +398,12 @@ fn websocket_upgrade_rejects_unsolicited_target_subprotocol() {
     let mut config = test_responses_config();
     config.base_url = format!("http://{address}/backend-api");
     let mut abort = NeverAbort;
-    let Err(LlmError::Outbound(error)) =
-        WsConn::connect(&config, "thread-subprotocol", &network, &mut abort)
-    else {
-        panic!("expected typed target protocol error");
-    };
+    let error = outbound_error(WsConn::connect(
+        &config,
+        "thread-subprotocol",
+        &network,
+        &mut abort,
+    ));
     assert_eq!(error.route(), tau_provider::OutboundRouteKind::Direct);
     assert_eq!(error.phase(), tau_provider::OutboundPhase::Request);
     assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Protocol);
@@ -552,11 +599,12 @@ fn wss_proxy_tls_failure_has_no_direct_fallback() {
     let mut config = test_responses_config();
     config.base_url = target.base_url();
     let mut abort = NeverAbort;
-    let Err(LlmError::Outbound(error)) =
-        WsConn::connect(&config, "thread-proxy-tls", &network, &mut abort)
-    else {
-        panic!("expected typed HTTPS proxy TLS failure");
-    };
+    let error = outbound_error(WsConn::connect(
+        &config,
+        "thread-proxy-tls",
+        &network,
+        &mut abort,
+    ));
     assert_eq!(error.route(), tau_provider::OutboundRouteKind::Proxy);
     assert_eq!(error.phase(), tau_provider::OutboundPhase::Proxy);
     assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Transport);
@@ -597,11 +645,12 @@ fn wss_connect_rejection_is_generic_and_has_no_direct_fallback() {
     let mut config = test_responses_config();
     config.base_url = target.base_url();
     let mut abort = NeverAbort;
-    let Err(LlmError::Outbound(error)) =
-        WsConn::connect(&config, "thread-connect-reject", &network, &mut abort)
-    else {
-        panic!("expected hidden CONNECT rejection");
-    };
+    let error = outbound_error(WsConn::connect(
+        &config,
+        "thread-connect-reject",
+        &network,
+        &mut abort,
+    ));
     assert_eq!(error.route(), tau_provider::OutboundRouteKind::Proxy);
     assert_eq!(error.phase(), tau_provider::OutboundPhase::Proxy);
     assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Transport);
@@ -649,11 +698,12 @@ fn wss_target_tls_failure_has_no_direct_fallback() {
     let mut config = test_responses_config();
     config.base_url = target.base_url();
     let mut abort = NeverAbort;
-    let Err(LlmError::Outbound(error)) =
-        WsConn::connect(&config, "thread-target-tls", &network, &mut abort)
-    else {
-        panic!("expected tunneled target TLS failure");
-    };
+    let error = outbound_error(WsConn::connect(
+        &config,
+        "thread-target-tls",
+        &network,
+        &mut abort,
+    ));
     assert_eq!(error.route(), tau_provider::OutboundRouteKind::Proxy);
     assert_eq!(error.phase(), tau_provider::OutboundPhase::Proxy);
     assert_eq!(error.kind(), tau_provider::OutboundErrorKind::Transport);
@@ -779,9 +829,18 @@ fn ws_connect_wait_is_bounded() {
         &network,
         "wss://target.example/codex/responses",
     );
-    let LlmError::Outbound(outbound) = &error else {
+    let LlmError::Outbound(outbound) = error.root_error() else {
         panic!("expected typed deadline");
     };
+    assert!(matches!(
+        error.evidence(),
+        Some(crate::attempt_failure::AttemptFailureEvidence::Transport {
+            phase: crate::attempt_failure::TransportPhase::PreUpgrade,
+            established: false,
+            kind: crate::attempt_failure::TransportFailureKind::Outbound,
+            ..
+        })
+    ));
     assert_eq!(outbound.route(), tau_provider::OutboundRouteKind::Direct);
     assert_eq!(outbound.phase(), tau_provider::OutboundPhase::Connect);
     assert_eq!(outbound.kind(), tau_provider::OutboundErrorKind::Deadline);
@@ -969,6 +1028,7 @@ fn localhost_ws_round_trip_lowers_and_parses_production_frames() {
             "ap-local-round-trip",
             &request,
             None,
+            None,
             &mut abort,
             &mut |_| {},
             &mut |_| {},
@@ -1054,6 +1114,7 @@ fn localhost_ws_silent_turn_returns_typed_cancellation() {
                 "ap-local-cancel",
                 &request,
                 None,
+                None,
                 &mut abort,
                 &mut |_| {},
                 &mut |_| {},
@@ -1106,19 +1167,20 @@ fn localhost_ws_silent_turn_returns_typed_idle_timeout() {
     let result = conn.run_envelope_with_timeouts(
         "ap-local-timeout",
         envelope,
-        None,
-        &mut abort,
-        EnvelopeTimeouts {
-            idle: Duration::from_millis(20),
-            absolute: None,
+        EnvelopeExecution {
+            recording_stream: None,
+            evidence_mode: crate::attempt_failure::ProviderEvidenceMode::LiveOnly,
+            timeouts: EnvelopeTimeouts {
+                idle: Duration::from_millis(20),
+                absolute: None,
+            },
         },
+        &mut abort,
         &mut |_| {},
         &mut |_| {},
     );
     server.wait_for_request();
-    let Err(LlmError::HttpStatus(0, body)) = result else {
-        panic!("expected typed provider-frame idle timeout");
-    };
+    let body = http_status_zero(result);
     assert!(body.contains("provider stream idle timeout"), "{body}");
     assert!(body.contains("transport=Websocket"), "{body}");
     assert!(body.contains("agent_prompt_id=ap-local-timeout"), "{body}");
@@ -1157,6 +1219,7 @@ fn ws_turn_abort_waker_returns_typed_cancellation_promptly() {
                 &config,
                 "ap-ws-abort",
                 &request,
+                None,
                 None,
                 &mut abort,
                 &mut |_| {},
@@ -1206,19 +1269,20 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
     let result = conn.run_envelope_with_timeouts(
         "ap-stalled-ws",
         envelope,
-        None,
-        &mut abort,
-        EnvelopeTimeouts {
-            idle: Duration::from_millis(50),
-            absolute: None,
+        EnvelopeExecution {
+            recording_stream: None,
+            evidence_mode: crate::attempt_failure::ProviderEvidenceMode::LiveOnly,
+            timeouts: EnvelopeTimeouts {
+                idle: Duration::from_millis(50),
+                absolute: None,
+            },
         },
+        &mut abort,
         &mut |_| {},
         &mut |_| {},
     );
 
-    let Err(LlmError::HttpStatus(0, body)) = result else {
-        panic!("expected timeout stream error");
-    };
+    let body = http_status_zero(result);
     assert!(body.contains("provider stream idle timeout"), "{body}");
     assert!(body.contains("transport=Websocket"), "{body}");
     assert!(body.contains("agent_prompt_id=ap-stalled-ws"), "{body}");
@@ -1249,12 +1313,15 @@ fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
     let result = conn.run_envelope_with_timeouts(
         "<prewarm>",
         envelope,
-        None,
-        &mut abort,
-        EnvelopeTimeouts {
-            idle: Duration::from_secs(1),
-            absolute: Some(Duration::ZERO),
+        EnvelopeExecution {
+            recording_stream: None,
+            evidence_mode: crate::attempt_failure::ProviderEvidenceMode::LiveOnly,
+            timeouts: EnvelopeTimeouts {
+                idle: Duration::from_secs(1),
+                absolute: Some(Duration::ZERO),
+            },
         },
+        &mut abort,
         &mut |_| {},
         &mut |_| {},
     );
@@ -1276,16 +1343,19 @@ fn malformed_text_frame_counts_bytes_before_protocol_error() {
     let request = fixture.payload();
     let malformed = "{not-json";
     inbound_tx
-        .send(InboundEvent::Error {
-            detail: "malformed JSON text frame".to_owned(),
-            response_bytes: malformed.len(),
-        })
+        .send(InboundEvent::FrameFailure(
+            crate::attempt_failure::FrameFailure::new(
+                crate::attempt_failure::FrameFailureKind::MalformedText,
+                malformed.len(),
+            ),
+        ))
         .expect("queue malformed frame");
     let mut observed_bytes = 0;
     let error = match conn.run_turn(
         &config,
         "ap-malformed",
         &request,
+        None,
         None,
         &mut NeverAbort,
         &mut |_| {},
@@ -1294,7 +1364,7 @@ fn malformed_text_frame_counts_bytes_before_protocol_error() {
         Ok(_) => panic!("malformed frame must retire socket"),
         Err(error) => error,
     };
-    assert!(matches!(error, LlmError::HttpStatus(0, _)));
+    assert!(matches!(error.root_error(), LlmError::HttpStatus(0, _)));
     assert_eq!(observed_bytes, malformed.len() as u64);
 }
 
@@ -1328,6 +1398,7 @@ fn ws_turn_surfaces_nameless_default_quota_in_both_modes() {
             &config,
             "ap-ws-quota",
             &request,
+            None,
             None,
             &mut abort,
             &mut |_| {},

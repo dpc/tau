@@ -31,8 +31,10 @@ follows
 ## Provider and credential boundary
 
 External provider responses are untrusted prompt-surface data. Streamed text,
-reasoning, tool arguments, and custom-tool input must not be copied into status,
-notices, traces, or final transcript rendering. Public response stats are
+reasoning, tool arguments, and custom-tool input must not be copied into
+notices, traces, or final transcript rendering. Codex retry status may carry
+only its opaque, single-line, bounded `RedactedProviderDetail`; the extension
+cannot construct one from raw error display. Public response stats are
 content-free, prompt-local transport metadata; the extension owns their sampling
 and the harness validates and broadcasts them under
 [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
@@ -44,6 +46,13 @@ The provider boundary cannot authorize transcript mutation or compaction.
 Built-in providers may classify a context-window failure, but the harness clears
 provider-supplied recovery claims and independently derives recovery eligibility
 from its prompt, model, operation, policy, and branch state.
+
+Each `ChatGptPromptExecutionContext` owns the one-based logical attempt
+ordinal. A new APID begins at one; a manual retry preserves the prompt-local
+failure count. Transparent WebSocket repair increments only the per-attempt
+wire-dispatch index. The extension does not add provider detail to
+`ProviderRetryStatus`, watcher state, agent messages, durable terminal facts, or
+restore journals.
 
 Profile files, OAuth tokens, and API keys are local secrets. They must not enter
 model-visible output, notices, traces, debug logs, or fixtures. Debug captures

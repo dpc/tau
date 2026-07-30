@@ -148,8 +148,23 @@ fn production_writer_compresses_json_and_requires_existing_session() {
         zstd::stream::decode_all(std::fs::File::open(path).expect("capture")).expect("decode zstd");
     assert_eq!(decoded, json);
 
+    let failure_json = br#"{"capture_kind":"provider_attempt_failure"}"#;
+    let failure = job(
+        &session,
+        "2-prompt-responses-attempt-failure.json.zst",
+        failure_json,
+    );
+    write_capture(&failure).expect("write attempt failure");
+    let failure_path =
+        session.join("debug/provider-requests/2-prompt-responses-attempt-failure.json.zst");
+    let decoded = zstd::stream::decode_all(
+        std::fs::File::open(failure_path).expect("attempt-failure capture"),
+    )
+    .expect("decode attempt-failure zstd");
+    assert_eq!(decoded, failure_json);
+
     let missing = temp.path().join("missing");
-    assert!(write_capture(&job(&missing, "2-prompt-http-sse-request.json.zst", json)).is_err());
+    assert!(write_capture(&job(&missing, "3-prompt-http-sse-request.json.zst", json)).is_err());
     assert!(!missing.exists());
 }
 

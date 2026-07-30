@@ -1790,7 +1790,7 @@ where
         {
             let now = self.retry_clock.now();
             let due = cooldown_due_for_job(cooldown.not_before, &job);
-            emit_retry_status(&job, cooldown.class, due, now, handle)?;
+            emit_retry_status(&job, cooldown.class, due, now, None, handle)?;
             self.retry_scheduler
                 .as_ref()
                 .expect("retry scheduler starts with the runtime waker")
@@ -1906,7 +1906,11 @@ where
                 Ok(WorkerMessage::PrewarmDone { key, generation }) => {
                     self.prewarm_supervisor.complete(&key, generation);
                 }
-                Ok(WorkerMessage::Retry { mut job, decision }) => {
+                Ok(WorkerMessage::Retry {
+                    mut job,
+                    decision,
+                    live_detail,
+                }) => {
                     if self.input_closed
                         || job.cancel_generation != self.cancel_generation
                         || self.cancellation.is_canceled(&job.agent_prompt_id)
@@ -1965,7 +1969,16 @@ where
                                 generation,
                             );
                     }
-                    emit_retry_status(&job, decision.class, due, now, handle)?;
+                    emit_retry_status(
+                        &job,
+                        decision.class,
+                        due,
+                        now,
+                        live_detail
+                            .as_ref()
+                            .map(tau_provider_codex::RedactedProviderDetail::as_str),
+                        handle,
+                    )?;
                     self.retry_scheduler
                         .as_ref()
                         .expect("retry scheduler starts with the runtime waker")
@@ -2174,7 +2187,7 @@ where
             };
             let now = self.retry_clock.now();
             let due = cooldown_due_for_job(cooldown.not_before, &job);
-            emit_retry_status(&job, cooldown.class, due, now, handle)?;
+            emit_retry_status(&job, cooldown.class, due, now, None, handle)?;
             self.retry_scheduler
                 .as_ref()
                 .expect("retry scheduler starts with the runtime waker")
@@ -3126,6 +3139,8 @@ enum WorkerMessage {
         job: PromptJob,
         /// Structured cadence and hint decision.
         decision: RetryDecision,
+        /// Bounded, redacted provider detail for ordinary live status only.
+        live_detail: Option<tau_provider_codex::RedactedProviderDetail>,
     },
     /// A delayed logical prompt whose retry deadline has arrived.
     RetryDue(PromptJob),
@@ -3512,6 +3527,9 @@ fn production_prompt_executor() -> PromptExecutor {
             let prompt_context = ChatGptPromptExecutionContext {
                 debug_provider_requests: execution.job.debug_provider_requests,
                 runtime: &execution.codex_runtime,
+                logical_attempt: tau_provider_codex::LogicalAttempt::new(
+                    execution.job.retry_state.attempts.saturating_add(1),
+                ),
             };
             handle_prompt_backend(
                 &agent_prompt_id,
@@ -3524,13 +3542,14 @@ fn production_prompt_executor() -> PromptExecutor {
             )
         };
         match result {
-            Ok(Some(decision)) => {
+            Ok(Some(retry)) => {
                 let _ = send_worker_message(
                     &execution.output_tx,
                     &execution.output_waker,
                     WorkerMessage::Retry {
                         job: execution.job,
-                        decision,
+                        decision: retry.decision,
+                        live_detail: retry.live_detail,
                     },
                 );
             }
@@ -3639,15 +3658,17 @@ fn emit_retry_status(
     class: RetryClass,
     due: Instant,
     now: Instant,
+    live_detail: Option<&str>,
     handle: &ClientHandle,
 ) -> ClientResult<()> {
     let delay = due.checked_duration_since(now).unwrap_or(Duration::ZERO);
     let delay_text = tau_proto::format_approximate_duration_secs(delay.as_secs());
+    let reason = live_detail
+        .map(|detail| format!("{}: {detail}", class.public_reason()))
+        .unwrap_or_else(|| class.public_reason().to_owned());
     let text = format!(
         "{}; next attempt in about {} (attempt {}). Tau will keep trying; cancel the prompt to stop.",
-        class.public_reason(),
-        delay_text,
-        job.retry_state.attempts,
+        reason, delay_text, job.retry_state.attempts,
     );
     handle.send(HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
@@ -4298,12 +4319,15 @@ fn handle_prompt_backend<R, W: Write>(
     retry_ctx: &mut R,
     context: ChatGptPromptExecutionContext<'_>,
     on_quota: &mut impl FnMut(&tau_provider_codex::RollingQuotaObservation),
-) -> Result<Option<RetryDecision>, Box<dyn Error>>
+) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
 where
     R: TurnAbort,
 {
     match backend {
-        PromptBackend::Unavailable => Ok(Some(RetryDecision::new(RetryClass::Auth))),
+        PromptBackend::Unavailable => Ok(Some(PromptAttemptRetry {
+            decision: RetryDecision::new(RetryClass::Auth),
+            live_detail: None,
+        })),
         PromptBackend::Responses(config) => handle_prompt(
             agent_prompt_id,
             config,
@@ -4371,7 +4395,10 @@ where
                             writer,
                         )?;
                     }
-                    Ok(Some(decision))
+                    Ok(Some(PromptAttemptRetry {
+                        decision,
+                        live_detail: None,
+                    }))
                 }
                 ChatCompletionsAttemptOutcome::Canceled { progress } => {
                     if progress == tau_provider_chat_completions::SemanticProgress::Parsed {
@@ -4422,6 +4449,16 @@ struct ChatGptPromptExecutionContext<'a> {
     debug_provider_requests: bool,
     /// Shared ChatGPT transport runtime and WebSocket pool.
     runtime: &'a CodexRuntime,
+    /// One-based finite-attempt ordinal owned by this prompt execution.
+    logical_attempt: tau_provider_codex::LogicalAttempt,
+}
+
+/// Retry evidence returned by one finite provider attempt.
+struct PromptAttemptRetry {
+    /// Closed scheduler decision.
+    decision: RetryDecision,
+    /// Bounded provider detail for ordinary live status only.
+    live_detail: Option<tau_provider_codex::RedactedProviderDetail>,
 }
 
 fn handle_compact_prompt<R, W: Write>(
@@ -4432,7 +4469,7 @@ fn handle_compact_prompt<R, W: Write>(
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     execution: ChatGptPromptExecutionContext<'_>,
-) -> Result<Option<RetryDecision>, Box<dyn Error>>
+) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
 where
     R: TurnAbort,
 {
@@ -4471,7 +4508,10 @@ where
             writer.flush()?;
             Ok(None)
         }
-        CompactOutcome::Retry(decision) => Ok(Some(decision)),
+        CompactOutcome::Retry(decision) => Ok(Some(PromptAttemptRetry {
+            decision,
+            live_detail: None,
+        })),
         CompactOutcome::Canceled => {
             finish_canceled(agent_prompt_id, prompt, writer)?;
             Ok(None)
@@ -4500,7 +4540,7 @@ fn handle_prompt<R, W: Write>(
     retry_ctx: &mut R,
     execution: ChatGptPromptExecutionContext<'_>,
     on_quota: &mut impl FnMut(&tau_provider_codex::RollingQuotaObservation),
-) -> Result<Option<RetryDecision>, Box<dyn Error>>
+) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
 where
     R: TurnAbort,
 {
@@ -4554,10 +4594,14 @@ where
             );
         }
     };
-    let outcome =
-        execution
-            .runtime
-            .run_attempt(agent_prompt_id, config, &request, retry_ctx, &mut on_update);
+    let outcome = execution.runtime.run_attempt_numbered(
+        agent_prompt_id,
+        execution.logical_attempt,
+        config,
+        &request,
+        retry_ctx,
+        &mut on_update,
+    );
     if let CodexAttemptOutcome::Finished(dispatch) = &outcome {
         response_update_emitter.emit_terminal_flush(
             agent_prompt_id,
@@ -4627,7 +4671,11 @@ where
                 writer,
             )?
         }
-        CodexAttemptOutcome::Retry { decision, progress } => {
+        CodexAttemptOutcome::Retry {
+            decision,
+            progress,
+            live_detail,
+        } => {
             if progress == CodexSemanticProgress::Parsed {
                 emit_chat_completions_partial_clear(
                     agent_prompt_id,
@@ -4636,7 +4684,10 @@ where
                     writer,
                 )?;
             }
-            return Ok(Some(decision));
+            return Ok(Some(PromptAttemptRetry {
+                decision,
+                live_detail,
+            }));
         }
         CodexAttemptOutcome::Terminal { error, progress } => {
             if progress == CodexSemanticProgress::Parsed {

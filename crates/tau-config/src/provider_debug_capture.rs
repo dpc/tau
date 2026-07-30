@@ -16,6 +16,8 @@ pub enum ProviderDebugCaptureClass {
     WebsocketResponse,
     /// Response metadata whose transport descriptor is unavailable.
     UnknownResponse,
+    /// Bounded, redacted metadata for one failed finite Responses attempt.
+    ResponsesAttemptFailure,
 }
 
 impl ProviderDebugCaptureClass {
@@ -27,6 +29,7 @@ impl ProviderDebugCaptureClass {
             Self::HttpSseResponse => "http-sse-response",
             Self::WebsocketResponse => "websocket-response",
             Self::UnknownResponse => "unknown-response",
+            Self::ResponsesAttemptFailure => "responses-attempt-failure",
         }
     }
 }
@@ -93,6 +96,7 @@ impl ProviderDebugCaptureFilename {
             ProviderDebugCaptureClass::HttpSseResponse,
             ProviderDebugCaptureClass::WebsocketResponse,
             ProviderDebugCaptureClass::UnknownResponse,
+            ProviderDebugCaptureClass::ResponsesAttemptFailure,
         ]
         .into_iter()
         .find_map(|class| {

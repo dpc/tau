@@ -236,6 +236,7 @@ fn chat_completions_event_snapshot(
             ChatGptPromptExecutionContext {
                 debug_provider_requests: false,
                 runtime: &runtime,
+                logical_attempt: tau_provider_codex::LogicalAttempt::new(1),
             },
             &mut |_| {},
         )

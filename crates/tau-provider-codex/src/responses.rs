@@ -298,6 +298,7 @@ pub(super) fn maybe_debug_submit_provider_request(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
     transport: tau_proto::ProviderBackendTransport,
+    correlation: Option<crate::attempt_failure::DispatchCorrelation>,
     body: &impl Serialize,
 ) {
     if !request.debug_provider_requests {
@@ -308,6 +309,7 @@ pub(super) fn maybe_debug_submit_provider_request(
         config,
         request,
         transport,
+        correlation,
         body,
         tau_provider::debug_capture_writer::submit_provider_debug_capture,
     ) {
@@ -325,6 +327,7 @@ fn serialize_and_submit_provider_request_with(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
     transport: tau_proto::ProviderBackendTransport,
+    correlation: Option<crate::attempt_failure::DispatchCorrelation>,
     body: &impl Serialize,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) -> serde_json::Result<()> {
@@ -334,7 +337,7 @@ fn serialize_and_submit_provider_request_with(
     let transport_label = provider_backend_transport_label(transport);
     let mut body = serde_json::to_value(body)?;
     redact_image_data_urls(&mut body);
-    let metadata = serde_json::json!({
+    let mut metadata = serde_json::json!({
         "session_id": request.session_id,
         "agent_prompt_id": agent_prompt_id,
         "transport": transport_label,
@@ -345,6 +348,10 @@ fn serialize_and_submit_provider_request_with(
         "tool_choice": request.tool_choice,
         "body": body,
     });
+    if let Some(correlation) = correlation {
+        metadata["logical_attempt"] = correlation.logical_attempt().into();
+        metadata["wire_dispatch_index"] = correlation.wire_dispatch_index().into();
+    }
     let Ok(agent_prompt_id) = tau_proto::AgentPromptId::parse(agent_prompt_id) else {
         tracing::warn!(
             target: crate::LOG_TARGET,
@@ -450,6 +457,7 @@ fn send_compact_request_inner(
         config,
         request,
         tau_proto::ProviderBackendTransport::HttpSse,
+        None,
         &body,
     );
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
@@ -902,9 +910,12 @@ fn apply_event_with_raw_item(
             apply_terminal_event(state, event);
             Ok(true)
         }
-        "response.incomplete" => Err(response_incomplete_error(event)),
-        "response.failed" => Err(response_failed_error(event)),
-        "error" => Err(stream_error_event(event)),
+        "response.incomplete" => Err(response_incomplete_error(
+            event,
+            state.provider_evidence_mode,
+        )),
+        "response.failed" => Err(response_failed_error(event, state.provider_evidence_mode)),
+        "error" => Err(stream_error_event(event, state.provider_evidence_mode)),
         _ => Ok(false),
     }
 }
@@ -1373,7 +1384,10 @@ fn terminal_usage_u64(event: &serde_json::Value, name: &str) -> Option<u64> {
         .or_else(|| event["usage"][name].as_u64())
 }
 
-fn response_incomplete_error(event: &serde_json::Value) -> LlmError {
+fn response_incomplete_error(
+    event: &serde_json::Value,
+    mode: crate::attempt_failure::ProviderEvidenceMode,
+) -> LlmError {
     let reason = event
         .get("response")
         .and_then(|r| r["incomplete_details"]["reason"].as_str())
@@ -1384,9 +1398,13 @@ fn response_incomplete_error(event: &serde_json::Value) -> LlmError {
         code: None,
         retry_after: None,
     }
+    .observed(crate::attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
 }
 
-fn response_failed_error(event: &serde_json::Value) -> LlmError {
+fn response_failed_error(
+    event: &serde_json::Value,
+    mode: crate::attempt_failure::ProviderEvidenceMode,
+) -> LlmError {
     let error = event
         .get("response")
         .and_then(|response| response.get("error"));
@@ -1409,16 +1427,21 @@ fn response_failed_error(event: &serde_json::Value) -> LlmError {
         return LlmError::ProviderFailure(
             tau_proto::ProviderFailureKind::ContextWindowExceeded,
             body,
-        );
+        )
+        .observed(crate::attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode));
     }
     LlmError::StreamError {
         body,
         code,
         retry_after: None,
     }
+    .observed(crate::attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
 }
 
-fn stream_error_event(event: &serde_json::Value) -> LlmError {
+fn stream_error_event(
+    event: &serde_json::Value,
+    mode: crate::attempt_failure::ProviderEvidenceMode,
+) -> LlmError {
     let detail = event["error"]["message"]
         .as_str()
         .or_else(|| event["message"].as_str())
@@ -1447,7 +1470,8 @@ fn stream_error_event(event: &serde_json::Value) -> LlmError {
         return LlmError::ProviderFailure(
             tau_proto::ProviderFailureKind::ContextWindowExceeded,
             body,
-        );
+        )
+        .observed(crate::attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode));
     }
     let reset_hint = canonical_event_reset_hint(event, std::time::SystemTime::now());
     LlmError::StreamError {
@@ -1455,6 +1479,7 @@ fn stream_error_event(event: &serde_json::Value) -> LlmError {
         code: error_code,
         retry_after: reset_hint,
     }
+    .observed(crate::attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
 }
 
 fn canonical_event_reset_hint(

@@ -439,6 +439,9 @@ fn build_request_includes_prompt_cache_key_when_supported() {
 /// request metadata through the shared capture boundary.
 #[test]
 fn debug_request_producer_submits_typed_compressed_capture_job() {
+    let mut correlation =
+        crate::attempt_failure::AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(7));
+    let dispatch = correlation.next_dispatch();
     let config = chain_test_config();
     let session_id = tau_proto::SessionId::parse("session-test").expect("session id");
     let agent_id = tau_proto::AgentId::parse("agent-test").expect("agent id");
@@ -463,6 +466,7 @@ fn debug_request_producer_submits_typed_compressed_capture_job() {
         &config,
         &request,
         tau_proto::ProviderBackendTransport::Websocket,
+        Some(dispatch),
         &body,
         |capture| submitted = Some(capture),
     )
@@ -478,7 +482,26 @@ fn debug_request_producer_submits_typed_compressed_capture_job() {
     let metadata: serde_json::Value = serde_json::from_slice(capture.json()).expect("capture JSON");
     assert_eq!(metadata["backend"], "responses");
     assert_eq!(metadata["transport"], "websocket");
+    assert_eq!(metadata["logical_attempt"], 7);
+    assert_eq!(metadata["wire_dispatch_index"], 1);
     assert_eq!(metadata["body"], body);
+
+    let mut standalone = None;
+    serialize_and_submit_provider_request_with(
+        "prompt-test",
+        &config,
+        &request,
+        tau_proto::ProviderBackendTransport::HttpSse,
+        None,
+        &body,
+        |capture| standalone = Some(capture),
+    )
+    .expect("serialize standalone capture");
+    let standalone: serde_json::Value =
+        serde_json::from_slice(standalone.expect("standalone capture").json())
+            .expect("standalone JSON");
+    assert!(standalone.get("logical_attempt").is_none());
+    assert!(standalone.get("wire_dispatch_index").is_none());
 }
 
 #[test]
@@ -4028,9 +4051,9 @@ fn apply_event_failed_returns_error() {
         },
     });
     let result = apply_event(&mut state, &ev, &mut on_update);
-    match result {
-        Err(LlmError::StreamError { body, code, .. }) => {
-            assert_eq!(code, None);
+    match result.expect_err("provider error").root_error() {
+        LlmError::StreamError { body, code, .. } => {
+            assert_eq!(*code, None);
             assert!(body.contains("response failed"));
             assert!(body.contains("model overloaded"));
         }
@@ -4053,8 +4076,8 @@ fn apply_event_error_top_level_code_is_propagated() {
         "message": "Rate limit reached",
     });
     let result = apply_event(&mut state, &ev, &mut on_update);
-    match result {
-        Err(LlmError::StreamError { body, code, .. }) => {
+    match result.expect_err("provider error").root_error() {
+        LlmError::StreamError { body, code, .. } => {
             assert_eq!(code.as_deref(), Some("rate_limit_exceeded"));
             assert!(body.contains("Rate limit reached"));
             assert!(
@@ -4062,7 +4085,7 @@ fn apply_event_error_top_level_code_is_propagated() {
                 "missing (type=...) suffix in {body:?}",
             );
             assert!(
-                crate::common::is_account_limit_body(&body),
+                crate::common::is_account_limit_body(body),
                 "is_account_limit_body must classify this body as a cap"
             );
         }
@@ -4085,8 +4108,8 @@ fn apply_event_error_nested_code_is_propagated() {
         },
     });
     let result = apply_event(&mut state, &ev, &mut on_update);
-    match result {
-        Err(LlmError::StreamError { body, code, .. }) => {
+    match result.expect_err("provider error").root_error() {
+        LlmError::StreamError { body, code, .. } => {
             assert_eq!(code.as_deref(), Some("usage_limit_reached"));
             assert!(body.contains("usage limit has been reached"));
             assert!(
@@ -4112,8 +4135,8 @@ fn apply_event_error_nested_type_fallback_is_propagated() {
         },
     });
     let result = apply_event(&mut state, &ev, &mut on_update);
-    match result {
-        Err(LlmError::StreamError { body, code, .. }) => {
+    match result.expect_err("provider error").root_error() {
+        LlmError::StreamError { body, code, .. } => {
             assert_eq!(code.as_deref(), Some("quota_exceeded"));
             assert!(
                 body.contains("(type=quota_exceeded)"),
@@ -4136,9 +4159,9 @@ fn apply_event_error_without_code_omits_suffix() {
         "message": "something broke",
     });
     let result = apply_event(&mut state, &ev, &mut on_update);
-    match result {
-        Err(LlmError::StreamError { body, code, .. }) => {
-            assert_eq!(code, None);
+    match result.expect_err("provider error").root_error() {
+        LlmError::StreamError { body, code, .. } => {
+            assert_eq!(*code, None);
             assert!(body.contains("something broke"));
             assert!(!body.contains("(type="), "unexpected suffix in {body:?}");
         }
@@ -4357,7 +4380,10 @@ fn response_failed_context_rejection_is_typed_terminal() {
             }
         }
     });
-    let error = response_failed_error(&event);
+    let error = response_failed_error(
+        &event,
+        crate::attempt_failure::ProviderEvidenceMode::Persistent,
+    );
     assert_eq!(error.retry_decision(), None);
     assert_eq!(
         error.failure_kind(),

@@ -79,3 +79,13 @@ are synthetic, structurally allowlisted, bounded, and require exact terminal
 and frame consumption through replay-only production loading with no live
 fallback. Fixture publication or replay/capture changes require independent
 privacy review.
+
+Failed finite Responses attempts also write a schema-v1
+`responses-attempt-failure` sidecar when provider capture is enabled. The
+sidecar omits request bodies, headers, endpoints, credentials, model output,
+provider prose, close-reason prose, raw JSON values, and raw library errors. It
+retains bounded structural shape, validated provider codes and identifiers,
+and message/reason lengths, so it remains potentially credential-bearing and
+must receive the same private handling as full provider captures. Ordinary live
+retry status may contain separately bounded, single-line, known-secret-scrubbed
+provider detail and is therefore also potentially sensitive.

@@ -722,6 +722,7 @@ pub fn run_turn_through_pool(
             config,
             agent_prompt_id,
             request,
+            None,
             recording_stream.as_mut(),
             &mut abort,
             &mut |_| {},
@@ -787,6 +788,7 @@ pub fn run_turn_through_pool(
         config,
         agent_prompt_id,
         request,
+        None,
         recording_stream.as_mut(),
         &mut abort,
         &mut |_| {},
@@ -823,9 +825,11 @@ pub fn run_turn_through_shared_pool(
     config: &ResponsesConfig,
     agent_prompt_id: &str,
     request: &crate::common::PromptPayload<'_>,
+    correlation: Option<&mut crate::attempt_failure::AttemptCaptureCorrelation>,
     abort: &mut impl TurnAbort,
     on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
 ) -> Result<crate::common::StreamState, WsTurnError> {
+    let mut correlation = correlation;
     let record_config = match prepare_vcr_turn(config, agent_prompt_id, request, &mut |state| {
         on_update(crate::StreamUpdate::Response(state))
     })? {
@@ -845,7 +849,7 @@ pub fn run_turn_through_shared_pool(
             request,
             record_config: record_config.as_ref(),
         };
-        match turn_context.run_cached(conn, session_id, abort, on_update)? {
+        match turn_context.run_cached(conn, session_id, &mut correlation, abort, on_update)? {
             CachedSharedTurn::Completed(state) => return Ok(*state),
             CachedSharedTurn::RetryFresh {
                 response_bytes,
@@ -859,7 +863,14 @@ pub fn run_turn_through_shared_pool(
                     request,
                     record_config: record_config.as_ref(),
                 }
-                .run_fresh(response_bytes, stale_chain, false, abort, on_update);
+                .run_fresh(
+                    response_bytes,
+                    stale_chain,
+                    false,
+                    &mut correlation,
+                    abort,
+                    on_update,
+                );
             }
         }
     }
@@ -872,7 +883,7 @@ pub fn run_turn_through_shared_pool(
         request,
         record_config: record_config.as_ref(),
     }
-    .run_fresh(0, false, true, abort, on_update)
+    .run_fresh(0, false, true, &mut correlation, abort, on_update)
 }
 
 impl<'a, 'request> SharedTurnContext<'a, 'request> {
@@ -880,6 +891,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         self,
         mut conn: WsConn,
         session_id: &str,
+        correlation: &mut Option<&mut crate::attempt_failure::AttemptCaptureCorrelation>,
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
     ) -> Result<CachedSharedTurn, WsTurnError> {
@@ -892,10 +904,14 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         let mut response_bytes = 0;
         let mut semantic_progress = false;
         let updates = std::cell::RefCell::new(on_update);
+        let dispatch = correlation
+            .as_deref_mut()
+            .map(crate::attempt_failure::AttemptCaptureCorrelation::next_dispatch);
         match conn.run_turn(
             self.config,
             self.agent_prompt_id,
             self.request,
+            dispatch,
             stream.as_mut(),
             abort,
             &mut |at| updates.borrow_mut()(crate::StreamUpdate::Dispatched(at)),
@@ -944,12 +960,16 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         carried_response_bytes: u64,
         stale_chain: bool,
         emit_dispatched: bool,
+        correlation: &mut Option<&mut crate::attempt_failure::AttemptCaptureCorrelation>,
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
     ) -> Result<crate::common::StreamState, WsTurnError> {
         if abort.is_aborted() {
             self.pool.abandon(&self.key)?;
             return Err(WsTurnError::Canceled);
+        }
+        if !emit_dispatched && let Some(correlation) = correlation.as_deref_mut() {
+            correlation.mark_repair_used();
         }
         on_update(crate::StreamUpdate::Connecting);
         let mut conn = self.pool.connect_reserved_fresh(
@@ -961,6 +981,9 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             },
         )?;
         self.pool.record_fresh_open()?;
+        let dispatch = correlation
+            .as_deref_mut()
+            .map(crate::attempt_failure::AttemptCaptureCorrelation::next_dispatch);
         conn.carry_response_bytes(carried_response_bytes);
         let mut stream = recording_stream(self.record_config);
         let mut response_bytes = carried_response_bytes;
@@ -970,6 +993,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             self.config,
             self.agent_prompt_id,
             self.request,
+            dispatch,
             stream.as_mut(),
             abort,
             &mut |at| {
@@ -998,6 +1022,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
                     response_bytes,
                     stale_chain || is_stale_chain_error(&err),
                     false,
+                    correlation,
                     abort,
                     updates.into_inner(),
                 )
@@ -1270,6 +1295,9 @@ pub fn run_prewarm_through_shared_pool(
 /// classifier as a typed Transport retry without extending this attempt by a
 /// second idle window.
 fn is_recoverable_ws_error(err: &LlmError) -> bool {
+    if matches!(err.root_error(), LlmError::WsClosed(_)) {
+        return true;
+    }
     if err.failure_kind().is_some() {
         return false;
     }
@@ -1282,7 +1310,7 @@ fn is_recoverable_ws_error(err: &LlmError) -> bool {
             ]
             .contains(&code);
     }
-    let body = match err {
+    let body = match err.root_error() {
         LlmError::HttpStatus(0, body) => body,
         _ => return false,
     };

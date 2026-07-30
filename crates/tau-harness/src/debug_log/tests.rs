@@ -689,6 +689,85 @@ fn transient_from_connection_events_are_not_logged_twice() {
     );
 }
 
+/// Provider-controlled live retry detail must never cross into either
+/// non-authoritative debug-log projection.
+#[test]
+fn retry_debug_projection_excludes_provider_detail_canary() {
+    let secret = "PROVIDER_SECRET_CANARY";
+    let event = Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: AgentPromptId::parse("sp-0").expect("prompt id"),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: Some(tau_proto::ProviderResponseStatusUpdate {
+            text: format!("retrying: {secret}"),
+            clear_response: true,
+            retry: Some(tau_proto::ProviderRetryStatus {
+                category: tau_proto::ProviderRetryCategory::Overload,
+                attempt: 2,
+                next_retry_delay_secs: 13,
+            }),
+        }),
+        response_stats: None,
+        originator: PromptOriginator::User,
+    });
+    let Event::ProviderResponseUpdated(updated) = &event else {
+        unreachable!();
+    };
+    let reported = debug_event_json(&Event::ProviderResponseUpdatedReported(updated.clone()));
+    assert_eq!(reported["event"], "provider.response_updated_reported");
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut log = DebugEventLog::open(td.path()).expect("open debug log");
+    log.log_published_event(None, &event, UnixMicros::now())
+        .expect("write published retry");
+    log.log_harness_event(&HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("provider"),
+        HarnessInputMessage::emit_with_persist(event.clone(), true),
+    ))
+    .expect("write inbound retry");
+    log.log_harness_event(&HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("interceptor"),
+        HarnessInputMessage::InterceptReply(tau_proto::InterceptReply {
+            action: tau_proto::InterceptAction::Pass(Some(Box::new(event))),
+        }),
+    ))
+    .expect("write intercepted retry");
+    let lines = read_lines(log.path());
+    // Transient response updates remain absent at the raw inbound boundary even
+    // when a malformed peer asks to persist one; only the content-free published
+    // and interceptor projections are logged.
+    assert_eq!(lines.len(), 2);
+    let expected = serde_json::json!({
+        "event": "provider.response_updated",
+        "payload": {
+            "agent_prompt_id": "sp-0",
+            "agent_id": "main",
+            "status": {
+                "text": "retrying",
+                "clear_response": true,
+                "retry": {
+                    "category": "overload",
+                    "attempt": 2,
+                    "next_retry_delay_secs": 13,
+                },
+            },
+            "originator": {"kind": "user"},
+        },
+    });
+    let projected = [
+        &lines[0]["event"],
+        &lines[1]["event"]["payload"]["action"]["value"],
+    ];
+    for projection in projected {
+        assert_eq!(projection, &expected);
+    }
+    for line in &lines {
+        let encoded = line.to_string();
+        assert!(!encoded.contains(secret));
+        assert!(!encoded.contains("retrying:"));
+    }
+}
+
 /// Dedicated UI debug-stat requests stay out of debug JSONL just as the
 /// superseded transient request event did.
 #[test]

@@ -614,6 +614,27 @@ fn append_line(io: &mut impl LineIo, line: &[u8]) -> Result<LineAppendTiming, Li
 fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_json::Value {
     match message {
         tau_proto::HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ProviderResponseUpdated(updated)
+                    | Event::ProviderResponseUpdatedReported(updated)
+                    if updated.status.as_ref().and_then(|status| status.retry.as_ref()).is_some()
+            ) =>
+        {
+            let (Event::ProviderResponseUpdated(updated)
+            | Event::ProviderResponseUpdatedReported(updated)) = emit.event.as_ref()
+            else {
+                unreachable!();
+            };
+            serde_json::json!({
+                "message": "emit",
+                "payload": {
+                    "event": provider_retry_debug_projection(emit.event.name(), updated),
+                    "persist": emit.persist,
+                },
+            })
+        }
+        tau_proto::HarnessInputMessage::Emit(emit)
             if matches!(emit.event.as_ref(), Event::AgentPromptCreated(_)) =>
         {
             let Event::AgentPromptCreated(prompt) = emit.event.as_ref() else {
@@ -628,6 +649,25 @@ fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_j
             })
         }
         tau_proto::HarnessInputMessage::InterceptReply(reply) => {
+            if let tau_proto::InterceptAction::Pass(Some(event)) = &reply.action
+                && let Event::ProviderResponseUpdated(updated)
+                | Event::ProviderResponseUpdatedReported(updated) = event.as_ref()
+                && updated
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.retry.as_ref())
+                    .is_some()
+            {
+                return serde_json::json!({
+                    "message": "intercept_reply",
+                    "payload": {
+                        "action": {
+                            "kind": "pass",
+                            "value": provider_retry_debug_projection(event.name(), updated),
+                        },
+                    },
+                });
+            }
             if let tau_proto::InterceptAction::Pass(Some(event)) = &reply.action
                 && let Event::AgentPromptCreated(prompt) = event.as_ref()
             {
@@ -671,9 +711,46 @@ fn debug_event_json(event: &Event) -> serde_json::Value {
     if let Event::AgentPromptCreated(prompt) = event {
         return prompt_created_debug_summary(prompt);
     }
+    if let Event::ProviderResponseUpdated(updated) | Event::ProviderResponseUpdatedReported(updated) =
+        event
+        && updated
+            .status
+            .as_ref()
+            .and_then(|status| status.retry.as_ref())
+            .is_some()
+    {
+        return provider_retry_debug_projection(event.name(), updated);
+    }
     let mut redacted = event.clone();
     redact_event_binary_content(&mut redacted);
     serde_json::to_value(redacted).unwrap_or_default()
+}
+
+fn provider_retry_debug_projection(
+    event_name: tau_proto::EventName,
+    updated: &tau_proto::ProviderResponseUpdated,
+) -> serde_json::Value {
+    let status = updated
+        .status
+        .as_ref()
+        .expect("caller selected a retry update");
+    let retry = status
+        .retry
+        .as_ref()
+        .expect("caller selected a retry update");
+    serde_json::json!({
+        "event": event_name,
+        "payload": {
+            "agent_prompt_id": updated.agent_prompt_id,
+            "agent_id": updated.agent_id,
+            "status": {
+                "text": "retrying",
+                "clear_response": status.clear_response,
+                "retry": retry,
+            },
+            "originator": updated.originator,
+        },
+    })
 }
 
 fn prompt_created_debug_summary(prompt: &tau_proto::AgentPromptCreated) -> serde_json::Value {

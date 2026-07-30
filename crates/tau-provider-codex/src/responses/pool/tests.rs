@@ -1782,6 +1782,7 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
         &config,
         "sp-shared-1",
         &req1,
+        None,
         &mut abort,
         &mut on_update,
     )
@@ -1811,6 +1812,7 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
         &config,
         "sp-shared-2",
         &req2,
+        None,
         &mut abort,
         &mut on_update,
     )
@@ -2463,6 +2465,7 @@ fn run_shared_turn_with_abort(
         config,
         agent_prompt_id,
         &request,
+        None,
         abort,
         &mut on_update,
     )

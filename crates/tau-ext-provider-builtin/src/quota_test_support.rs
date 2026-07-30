@@ -53,6 +53,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
                 WorkerMessage::Retry {
                     job: execution.job,
                     decision,
+                    live_detail: None,
                 },
             )
             .expect("park fixture probe");

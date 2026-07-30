@@ -77,6 +77,13 @@ impl PromptPayload<'_> {
 /// Transport / protocol error returned from any LLM backend stream.
 #[derive(Debug)]
 pub enum LlmError {
+    /// Error paired with bounded evidence captured at its observation boundary.
+    Observed {
+        /// Existing typed provider error used for retry and terminal policy.
+        source: Box<LlmError>,
+        /// Opaque bounded parser/transport observation used by diagnostics.
+        evidence: Box<crate::attempt_failure::AttemptFailureEvidence>,
+    },
     /// Shared outbound policy or route failure with a redacted projection.
     Outbound(tau_provider::OutboundError),
     HttpStatus(u16, String),
@@ -93,6 +100,9 @@ pub enum LlmError {
         /// Trusted reset hint parsed from structured response fields.
         retry_after: Option<Duration>,
     },
+    /// WebSocket close metadata retained without exposing raw reason text to
+    /// captures.
+    WsClosed(crate::attempt_failure::WsTermination),
     /// Prompt cancellation observed from Tau's trusted local abort source.
     Canceled,
     /// Mutable URL, credential, or account configuration could not build a
@@ -114,10 +124,12 @@ pub enum LlmError {
 impl std::fmt::Display for LlmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Observed { source, .. } => source.fmt(f),
             Self::Outbound(error) => error.fmt(f),
             Self::HttpStatus(code, body) => write!(f, "HTTP {code}: {body}"),
             Self::HttpStatusRetryAfter(code, body, _) => write!(f, "HTTP {code}: {body}"),
             Self::StreamError { body, .. } => write!(f, "HTTP 0: {body}"),
+            Self::WsClosed(termination) => write!(f, "WebSocket closed ({termination:?})"),
             Self::Canceled => write!(f, "cancelled by harness"),
             Self::ReloadableConfig(error) => write!(f, "local request construction: {error}"),
             Self::InvalidResponse(error) => write!(f, "invalid provider response: {error}"),
@@ -136,6 +148,7 @@ impl std::fmt::Display for LlmError {
 impl std::error::Error for LlmError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Observed { source, .. } => Some(source),
             Self::Outbound(error) => Some(error),
             Self::Io(e) => Some(e),
             Self::Json(e) => Some(e),
@@ -148,12 +161,39 @@ impl std::error::Error for LlmError {
             | Self::ReloadableConfig(_)
             | Self::HttpStatus(_, _)
             | Self::HttpStatusRetryAfter(_, _, _)
-            | Self::StreamError { .. } => None,
+            | Self::StreamError { .. }
+            | Self::WsClosed(_) => None,
         }
     }
 }
 
 impl LlmError {
+    /// Attach opaque evidence without changing the underlying policy error.
+    pub(crate) fn observed(self, evidence: crate::attempt_failure::AttemptFailureEvidence) -> Self {
+        Self::Observed {
+            source: Box::new(self),
+            evidence: Box::new(evidence),
+        }
+    }
+
+    #[must_use]
+    /// Borrow the nearest parser/transport evidence, when one was observed.
+    pub(crate) fn evidence(&self) -> Option<&crate::attempt_failure::AttemptFailureEvidence> {
+        match self {
+            Self::Observed { evidence, .. } => Some(evidence),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    /// Borrow the underlying policy error for compatibility classification.
+    pub(crate) fn root_error(&self) -> &Self {
+        match self {
+            Self::Observed { source, .. } => source.root_error(),
+            _ => self,
+        }
+    }
+
     /// Classify whether and how the logical prompt should be retried.
     ///
     /// Unknown remote failures deliberately retry. Only errors with positive
@@ -161,8 +201,10 @@ impl LlmError {
     #[must_use]
     pub fn retry_decision(&self) -> Option<RetryDecision> {
         match self {
+            Self::Observed { source, .. } => source.retry_decision(),
             Self::Outbound(error) => Some(RetryDecision::new(outbound_retry_class(error.kind()))),
             Self::Io(_) => Some(RetryDecision::new(RetryClass::Transport)),
+            Self::WsClosed(_) => Some(RetryDecision::new(RetryClass::Transport)),
             Self::Json(_) => Some(RetryDecision::new(RetryClass::Unknown)),
             Self::Vcr(_)
             | Self::RepetitionDetected(_)
@@ -201,6 +243,7 @@ impl LlmError {
     #[must_use]
     pub fn failure_kind(&self) -> Option<ProviderFailureKind> {
         match self {
+            Self::Observed { source, .. } => source.failure_kind(),
             Self::WsUpgradeRequired => Some(ProviderFailureKind::RequestRejected),
             Self::ProviderFailure(kind, _) => Some(*kind),
             Self::HttpStatus(status, body) | Self::HttpStatusRetryAfter(status, body, _) => {
@@ -221,6 +264,7 @@ impl LlmError {
     #[must_use]
     pub(crate) fn stream_error_code(&self) -> Option<&str> {
         match self {
+            Self::Observed { source, .. } => source.stream_error_code(),
             Self::StreamError { code, .. } => code.as_deref(),
             _ => None,
         }
@@ -435,6 +479,8 @@ pub struct StreamState {
     repetition_guard: StreamRepetitionGuard,
     /// Latest supported WebSocket account-quota observation for this turn.
     pub(crate) quota_observation: Option<crate::quota::RollingQuotaObservation>,
+    /// Parser evidence work permitted for this response.
+    pub(crate) provider_evidence_mode: crate::attempt_failure::ProviderEvidenceMode,
 }
 
 /// Provider token counters accumulated by one completed response.
@@ -616,6 +662,7 @@ impl StreamState {
             stale_chain_fallback: false,
             repetition_guard: StreamRepetitionGuard::new(),
             quota_observation: None,
+            provider_evidence_mode: crate::attempt_failure::ProviderEvidenceMode::LiveOnly,
         }
     }
 

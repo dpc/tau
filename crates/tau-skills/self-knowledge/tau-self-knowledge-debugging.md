@@ -30,7 +30,7 @@ Tau follows the XDG directories:
   - `meta.json` — session metadata such as creation time and last-touched time.
   - `lock` — flock used while the daemon has the session loaded for writing.
   - `events.jsonl` — best-effort debug runtime event log. It is an ordered subsequence of attempted observations, not authoritative replay state; a missing row does not prove an event was absent.
-  - `debug/provider-requests/*-{request,response}.json.zst` — zstd-compressed exact upstream provider request bodies plus parsed response captures written best-effort by provider extensions only when the harness reports the current session as durable and the durable session directory already exists, keyed by timestamp, `agent_prompt_id`, and transport. Tau does not intentionally serialize auth headers or API-key configuration, but these records contain full prompt/tool/model content and provider-controlled responses/errors or configured request fields can reflect credentials. Treat every capture as potentially credential-bearing. Use `zstdcat` or `zstd -dc` before `jq`; legacy uncompressed `.json` captures may remain until retention cleanup. Queue overload, write failure, or process exit can omit a capture or leave a truncated final stream, so decompression failure is not authoritative evidence about provider activity.
+  - `debug/provider-requests/*.json.zst` — zstd-compressed provider request, successful-response, and `responses-attempt-failure` captures written best-effort only for a current durable session whose directory already exists. Request/response records can contain full prompt, tool, model, and provider-controlled content. Failure records omit prose and raw values but retain bounded shape, lengths, and validated provider IDs/codes. Treat every class as private and potentially credential-bearing. Use `zstdcat` or `zstd -dc` before `jq`; legacy uncompressed `.json` captures may remain until retention cleanup. Queue overload, write failure, or process exit can omit a capture or leave a truncated final stream, so decompression failure is not authoritative evidence about provider activity.
   - `logs/tau-harness.log` — harness daemon stderr/tracing for the session.
   - `logs/<extension>.log` — stderr for each spawned extension.
 - Agents: `~/.local/state/tau/agents/<agent_id>/`
@@ -101,7 +101,7 @@ submissions.
 3. Cross-check with `logs/tau-harness.log` and extension logs for errors or panics.
 4. Check session/agent `events.cbor` only when the bug involves replay or persisted semantic contents.
 5. Check runtime daemon files under `${XDG_RUNTIME_DIR}/tau/` when the bug involves attach/resume, wrong project daemon selection, or socket connection failures.
-6. For provider/cache-shape bugs, inspect `debug/provider-requests/` for the exact request body Tau sent upstream and the response capture it parsed afterward.
+6. For provider/cache-shape bugs, inspect `debug/provider-requests/` for the exact request body, successful response, or bounded failed-attempt record. Match Responses inference requests and failures with `agent_prompt_id`, `logical_attempt`, and `wire_dispatch_index`; a transparent repair increments the dispatch index inside one attempt. Unary compaction requests omit inference correlation.
 
 Helpful commands:
 
@@ -120,6 +120,8 @@ ls -lah ~/.local/state/tau/sessions/<session_id>/debug/provider-requests
 # Responses-backend request/response fields.
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-*-request.json.zst | jq 'select(.backend == "responses") | .body.previous_response_id, .body.input'
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-*-response.json.zst | jq 'select(.backend.kind == "responses" or .backend == "responses") | .provider_response_id, .usage, .provider_response_finished.output_items, .provider_terminal_event'
+# Failed Responses attempt: content-free class/transport facts and bounded shape.
+zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-responses-attempt-failure.json.zst | jq '{logical_attempt, wire_dispatch_index, classification, wire, provider, transport, truncation}'
 
 # Chat Completions request, successful-response, and HTTP-error fields.
 zstdcat ~/.local/state/tau/sessions/<session_id>/debug/provider-requests/*-sp-6-*-request.json.zst | jq 'select(.backend == "chat_completions") | .body.messages'
@@ -175,7 +177,7 @@ Red flags found in past sessions:
 - Internal extension prompts, especially `std-notifications` idle summaries, can create normal `ui.prompt_submitted` / `agent.prompt_created` / `provider.prompt_submitted` sequences with originator `{kind: "extension"}`. If they resend full history, cache continuity may collapse and waste many uncached tokens for tiny outputs. Check lines around `agent.start_request`, `ui.prompt_submitted`, and the following `provider.response_finished`.
 - `harness.context_usage_changed` currently follows all `provider.response_finished` events, including extension-originated prompts. Treat context/token stats carefully if side-channel prompts are present.
 - Large tool outputs in `agent.prompt_created` messages can dominate context: repeated large `read` slices, cargo/check output, clippy output, or colorized `jj diff`. Grep for `┄total <n>┄` markers in `events.jsonl` to find compacted large payloads.
-- For exact, uncompacted provider payloads, check `debug/provider-requests/*-{request,response}.json.zst` with `zstdcat`; legacy `.json` captures are also readable directly. Request files are especially useful for cache misses involving `previous_response_id`, multi-tool-call suffixes, tool-use/tool-result ordering, or mismatches between `agent.prompt_created` and the serialized upstream `body.input`; response files show Tau's parsed `provider.response_finished` shape plus the raw terminal provider event (`response.completed` / `response.done`) when available.
+- For exact, uncompacted provider payloads, check request/response captures with `zstdcat`; legacy `.json` captures are also readable directly. Request files are especially useful for cache misses involving `previous_response_id`, multi-tool-call suffixes, tool-use/tool-result ordering, or mismatches between `agent.prompt_created` and serialized `body.input`; response files show Tau's parsed `provider.response_finished` shape plus the raw terminal provider event when available. Failed-attempt files are deliberately not exact payloads: they contain only bounded/redacted operational evidence.
 - Repeated `provider.response_updated` streaming events are numerous and not useful for aggregate token accounting. Prefer `provider.response_finished`.
 
 Quick checks for side-channel waste:

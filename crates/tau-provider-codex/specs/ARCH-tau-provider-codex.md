@@ -193,13 +193,38 @@ I/O; overload, worker startup/write failure, and process exit may omit captures
 but cannot fail or wait for provider/UI work. The process-lifetime sender has no
 shutdown, drain, or join API.
 
+One failed finite Responses attempt submits one private schema-v1
+`responses-attempt-failure` capture. The attempt ordinal is one-based per
+`AgentPromptId`. Each attempt starts with zero dispatches. The pool assigns wire
+index 1, then 2 after transparent repair, only immediately before it dispatches
+an actual request envelope. `repair_used` records the independent repair fact,
+including a replacement-upgrade failure that never dispatches a second envelope.
+Request captures from that finite inference path carry the same
+`logical_attempt` and exact `wire_dispatch_index`. Unary compaction captures
+omit these fields rather than fabricating inference correlation.
+
+The parser and transport boundaries construct opaque failure evidence before
+the error reaches retry policy. Persistent records retain only closed
+classification/transport facts, validated codes and IDs, message/reason
+presence and lengths, and a bounded structural event shape. They never retain
+provider prose, close reasons, raw values, headers, endpoints, proxy/account
+data, request/model output, credentials, or raw library errors. This projection
+is bounded and redacted but remains a private, potentially credential-bearing
+artifact. Submission and fourteen-day diagnostic retention reuse the shared
+best-effort writer; omission never changes provider execution.
+
 ## Streaming status boundary
 
 ChatGPT/Codex output implements
 [SPEC-tau-provider-codex-streaming-replay](SPEC-tau-provider-codex-streaming-replay.md)
 under the workspace
 [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
-Provider-authored text and tool payloads never become status or response-stat metadata.
+Provider-authored text and tool payloads never become response-stat metadata.
+Retry status may contain only the Codex-owned `RedactedProviderDetail`: a
+single-line, bounded, known-secret/token-shape-scrubbed projection. It remains
+potentially sensitive and is visible to the live UI. The `events.jsonl`,
+watcher, and agent-message projections replace it with closed retry category,
+attempt, and delay fields and never receive this detail.
 
 ## Transient reply hints
 

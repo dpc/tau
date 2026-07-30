@@ -71,6 +71,12 @@ canonical decimal microsecond timestamp, validated `AgentPromptId`, one valid
 transport/direction class, and exact legacy `.json` or current `.json.zst`
 extension.
 
+The recognized current classes include
+`responses-attempt-failure.json.zst`. It uses the same eligibility, path
+validation, compression, best-effort failure behavior, and
+`diagnostic_retention_days` cleanup as request/response captures; it has no
+separate retention knob.
+
 `tool_policy.rules` is a keyed layered map. Rule names may contain dots (for
 example `builtin.chatgpt-shell`), so dotted CLI overrides cannot naturally refer
 to such rule keys; use whole-map override values for those rules unless an
