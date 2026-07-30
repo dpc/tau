@@ -11,6 +11,60 @@ fn facts_budget(max_record_bytes: u64, remaining_bytes: u64) -> AgentCreationFac
     }
 }
 
+/// A store-wide memory-only policy keeps unexpected agent activity replayable
+/// without consulting or creating its supplied durable root.
+#[test]
+fn memory_only_store_never_touches_durable_root() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = temp.path().join("state/agents");
+    let seeded_agent_dir = agents_dir.join("seeded-agent");
+    fs::create_dir_all(&seeded_agent_dir).expect("seed durable agent root");
+    let seeded_journal = seeded_agent_dir.join("events.cbor");
+    fs::write(&seeded_journal, b"seeded durable bytes").expect("seed durable journal");
+    let mut store = AgentStore::open_memory_only(&agents_dir);
+    let agent_id = AgentId::parse("agent-1").expect("agent id");
+    assert!(!store.agent_id_is_reserved(agent_id.as_str()));
+    assert!(!store.agent_id_is_reserved("seeded-agent"));
+    assert!(
+        store
+            .lock_and_recover_agent("seeded-agent")
+            .expect("memory-only recovery is process-local")
+            .is_none()
+    );
+
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("creation appends in memory");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            display_name_event(&agent_id, "preview"),
+        )
+        .expect("projection appends in memory");
+    store
+        .record_agent_meta(agent_id.as_str())
+        .expect("metadata remains in memory");
+
+    assert_eq!(
+        store
+            .agent_events(agent_id.as_str())
+            .expect("memory replay")
+            .len(),
+        2
+    );
+    assert_eq!(
+        store.agent(&agent_id).and_then(AgentTree::display_name),
+        Some("preview")
+    );
+    assert_eq!(
+        fs::read(&seeded_journal).expect("seed remains readable"),
+        b"seeded durable bytes"
+    );
+    assert!(!seeded_agent_dir.join("lock").exists());
+    assert!(!agents_dir.join(agent_id.as_str()).exists());
+}
+
 /// Ensures the writer rejects a record length that the matching loader would
 /// reject, before opening or mutating the journal.
 #[test]

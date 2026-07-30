@@ -193,6 +193,15 @@ Future event kinds that carry agent prompts, provider output, tool payloads, or
 extension-observed content must update the durable debug-log suppression rules
 and regression tests before they are emitted for ephemeral agents.
 
+The `tau dev print-prompt`, `print-tools`, and `print-system-prompt` commands
+instead launch a fresh harness in a harness-wide memory-only storage mode.
+They preserve configured-extension startup and the ordinary render protocol,
+but they do not create or mutate harness-managed session, agent, diagnostic,
+extension, cache, or retention state. Their owned runtime socket and discovery
+metadata may exist only until the preview child is reaped. Configured
+extensions remain trusted same-user executables; direct operating-system side
+effects are outside this storage guarantee.
+
 Protocol-I/O debug counters are diagnostic metadata. They may reveal configured
 extension names, message/event names, activity rates, frame counts, and encoded
 byte sizes even when the requesting UI did not subscribe to the underlying

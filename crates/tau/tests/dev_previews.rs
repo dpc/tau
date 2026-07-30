@@ -1,19 +1,26 @@
 use std::ffi as path_std_ffi;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
 fn preview(home: &TempDir, environment: Option<&str>, args: &[&str]) -> Output {
-    let work = home.path().join("work");
-    let runtime = home.path().join(".runtime");
+    preview_at(home.path(), environment, args)
+}
+
+fn preview_at(home: &Path, environment: Option<&str>, args: &[&str]) -> Output {
+    let work = home.join("work");
+    let runtime = home.join(".runtime");
     std::fs::create_dir_all(&work).expect("create preview cwd");
     std::fs::create_dir_all(&runtime).expect("create preview runtime");
     let mut command = Command::new(env!("CARGO_BIN_EXE_tau"));
     command
         .current_dir(work)
-        .env("HOME", home.path())
-        .env("XDG_CONFIG_HOME", home.path().join(".config"))
-        .env("XDG_STATE_HOME", home.path().join(".state"))
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", home.join(".state"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_DATA_HOME", home.join(".data"))
         .env("XDG_RUNTIME_DIR", runtime)
         .env_remove("TAU_ENABLE_EXTENSIONS")
         .args(args);
@@ -23,24 +30,111 @@ fn preview(home: &TempDir, environment: Option<&str>, args: &[&str]) -> Output {
     command.output().expect("run tau preview")
 }
 
-/// Short-lived prompt and tool render daemons must complete their owned
-/// shutdown path and leave no runtime discovery metadata or socket behind.
-#[test]
-fn previews_remove_owned_daemon_runtime_pairs() {
-    let home = TempDir::new().expect("temporary home");
+fn persistent_tree_snapshot(home: &Path) -> Vec<(String, Vec<u8>)> {
+    fn visit(base: &Path, path: &Path, entries: &mut Vec<(String, Vec<u8>)>) {
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return;
+        };
+        let relative = path
+            .strip_prefix(base)
+            .expect("snapshot path below base")
+            .to_string_lossy()
+            .into_owned();
+        if metadata.is_dir() {
+            entries.push((
+                format!("d:{relative}:{:?}", metadata.permissions()),
+                Vec::new(),
+            ));
+            let mut children = std::fs::read_dir(path)
+                .expect("read snapshot directory")
+                .map(|entry| entry.expect("snapshot entry").path())
+                .collect::<Vec<_>>();
+            children.sort();
+            for child in children {
+                visit(base, &child, entries);
+            }
+        } else {
+            entries.push((
+                format!("f:{relative}:{:?}", metadata.permissions()),
+                std::fs::read(path).expect("read snapshot file"),
+            ));
+        }
+    }
 
-    for command in ["print-prompt", "print-tools"] {
+    let mut entries = Vec::new();
+    for root in [".config", ".state", ".cache", ".data", "work"] {
+        visit(home, &home.join(root), &mut entries);
+    }
+    entries
+}
+
+fn assert_no_runtime_pairs(home: &Path) {
+    let harnesses = home.join(".runtime/tau/harnesses");
+    assert_eq!(
+        std::fs::read_dir(harnesses)
+            .expect("harness runtime directory")
+            .count(),
+        0,
+        "preview must not leave a lifecycle pair"
+    );
+}
+
+/// All render previews preserve the entire seeded persistent tree on success,
+/// handled post-spawn failure, and mixed concurrent execution.
+#[test]
+fn previews_are_memory_only_across_success_failure_and_concurrency() {
+    let home = TempDir::new().expect("temporary home");
+    std::fs::create_dir_all(home.path().join(".state/tau/agents/seed")).expect("seed state");
+    std::fs::write(
+        home.path().join(".state/tau/agents/seed/events.cbor"),
+        b"durable sentinel",
+    )
+    .expect("write sentinel");
+    std::fs::create_dir_all(home.path().join(".cache/tau/ext/seed")).expect("seed cache");
+    std::fs::write(
+        home.path().join(".cache/tau/ext/seed/value"),
+        b"cache sentinel",
+    )
+    .expect("write cache sentinel");
+    std::fs::create_dir_all(home.path().join(".config")).expect("config root");
+    std::fs::create_dir_all(home.path().join(".data")).expect("data root");
+    std::fs::create_dir_all(home.path().join("work")).expect("work root");
+    let before = persistent_tree_snapshot(home.path());
+
+    for command in ["print-prompt", "print-tools", "print-system-prompt"] {
         let output = preview(&home, None, &["--role", "engineer", "dev", command]);
         assert!(output.status.success(), "{:?}", output.stderr);
-        let harnesses = home.path().join(".runtime/tau/harnesses");
-        assert_eq!(
-            std::fs::read_dir(harnesses)
-                .expect("harness runtime directory")
-                .count(),
-            0,
-            "{command} must not leave a lifecycle pair"
-        );
+        assert_eq!(persistent_tree_snapshot(home.path()), before);
+        assert_no_runtime_pairs(home.path());
     }
+
+    let failure = preview(
+        &home,
+        None,
+        &["--role", "missing-role", "dev", "print-tools"],
+    );
+    assert!(!failure.status.success());
+    assert_eq!(persistent_tree_snapshot(home.path()), before);
+    assert_no_runtime_pairs(home.path());
+
+    let mut threads = Vec::new();
+    for index in 0..8 {
+        let home = home.path().to_path_buf();
+        threads.push(std::thread::spawn(move || {
+            let command = if index % 2 == 0 {
+                "print-prompt"
+            } else {
+                "print-tools"
+            };
+            preview_at(&home, None, &["--role", "engineer", "dev", command])
+        }));
+    }
+    for thread in threads {
+        let output = thread.join().expect("preview thread");
+        assert!(output.status.success(), "{:?}", output.stderr);
+    }
+    assert_eq!(persistent_tree_snapshot(home.path()), before);
+    assert_no_runtime_pairs(home.path());
 }
 
 /// Prompt previews omit a conditionally empty shell fragment regardless of how

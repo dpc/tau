@@ -4,6 +4,12 @@ Architectural or externally meaningful functional changes to this
 harness-extension contract are subject to
 [GATE-persistence-and-extension-interface-change-approval](../../../specs/GATE-persistence-and-extension-interface-change-approval.md).
 
+## Record justification
+
+The extension lifecycle contract spans configuration, process supervision,
+protocol routing, declaration staging, collision checks, and harness startup,
+so no single implementation artifact can own it coherently.
+
 ## Daemon listener and accept forwarding
 
 Daemon IPC sockets are bound or socket-activated before the harness event loop
@@ -17,6 +23,13 @@ dropped, preserving socket cleanup ownership while avoiding sleep polling and
 path-based shutdown races.
 
 ## Extension boundary
+
+Memory-only harnesses preserve the same Hello, Configure, declaration, Ready,
+collision, and required/optional failure lifecycle. Configure carries
+`state_dir = None`, and the harness delegates no Session, User, or Cache
+extension-data storage. Extensions remain trusted same-user executables and
+unsandboxed; direct filesystem, network, or external-service side effects are
+outside the harness-managed storage contract.
 
 One supervised extension instance publishes at most one `extension.exited`
 lifecycle fact. A disconnect handled before harness shutdown owns that fact;

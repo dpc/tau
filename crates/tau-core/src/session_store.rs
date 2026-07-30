@@ -3,8 +3,9 @@
 //! Durable sessions are append-only event containers. Their folded view tracks
 //! membership while retaining unrouteable message facts in the same journal.
 //! Ephemeral sessions keep both records and the folded membership view in
-//! memory only. Agent transcripts live in [`crate::AgentStore`] under the
-//! global agents directory in both modes.
+//! memory only. Session-ephemeral harnesses retain durable agent transcripts;
+//! memory-only harnesses pair this store with a process-local
+//! [`crate::AgentStore`].
 
 use std::collections as path_std_collections;
 

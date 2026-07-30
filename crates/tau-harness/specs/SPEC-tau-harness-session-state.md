@@ -56,6 +56,16 @@ normal persistence. User/cache extension data, provider state, credentials,
 configuration files, and runtime sockets are also outside the session-ephemeral
 boundary.
 
+Memory-only harness mode is a separate immutable policy. It always starts a
+fresh session and uses process-local session and agent stores; it never resumes,
+recovers, repairs, migrates, locks, indexes, or cleans durable state. Session
+and agent events retain their ordinary in-process folding, ordering, and replay
+behavior, while journals, metadata, checkpoints, debug JSONL, provider
+captures, logs, extension storage, and retention mutations remain disabled.
+The owned runtime socket and metadata pair are the only harness-managed files
+permitted during the process lifetime and are removed after every handled exit
+once the child is reaped.
+
 Agents can separately be staged as ephemeral from the TUI (`:new` then
 `:ephemeral on`). That policy is per agent: the harness marks the agent id before
 the first semantic write, stores its transcript and metadata in the live
@@ -164,6 +174,9 @@ on the host.
 In ephemeral session mode, `ExtensionDataScope::Session` is rejected before any
 session data root is created. `User` and `Cache` scopes remain durable because
 they are extension-owned non-session storage.
+
+In memory-only harness mode, Session, User, and Cache extension-data requests
+all return Permission before resolving or creating any root.
 
 Per-agent metadata is durable, extension-visible, and interceptable coordination
 state rather than a secret store; key ownership is conventional and writers

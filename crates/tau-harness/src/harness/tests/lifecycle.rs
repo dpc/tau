@@ -1470,6 +1470,48 @@ fn configure_includes_extension_state_dir_and_creates_it() {
     assert!(expected.is_dir(), "{} should exist", expected.display());
 }
 
+/// Memory-only lifecycle still completes Hello/Configure while delegating no
+/// persistent extension state path.
+#[test]
+fn memory_only_configure_omits_extension_state_dir() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness_with_start_reason_and_storage_mode(
+        &sp,
+        tau_proto::SessionStartReason::Initial,
+        crate::HarnessStorageMode::MemoryOnly,
+    )
+    .expect("memory-only harness");
+    let sink = connect_handshaking_tool(&mut h, "std-email");
+    h.extensions
+        .entries
+        .get_mut("std-email")
+        .expect("extension")
+        .state = ExtensionState::Spawning;
+
+    h.handle_extension_event(
+        "std-email",
+        TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: crate::test_extension_name("tau-ext-pim"),
+            client_kind: tau_proto::ClientKind::Tool,
+            capabilities: Default::default(),
+        })),
+    )
+    .expect("hello");
+
+    let frames = sink.lock().expect("sink");
+    let configure = frames
+        .iter()
+        .find_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Configure(configure) => Some(configure),
+            _ => None,
+        })
+        .expect("configure sent");
+    assert_eq!(configure.state_dir, None);
+    assert!(!sp.exists());
+}
+
 #[test]
 fn configure_includes_only_resolved_extension_secrets() {
     // The lifecycle handshake is the authorization boundary for extension

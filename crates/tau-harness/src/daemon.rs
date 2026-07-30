@@ -56,6 +56,52 @@ impl SessionLaunchStatus {
 /// Environment flag set by the CLI when the harness should avoid durable
 /// session membership, metadata, debug, and per-session stderr logs.
 pub const EPHEMERAL_ENV: &str = "TAU_EPHEMERAL";
+/// Selects harness-wide process-local storage for owned preview daemons.
+pub const MEMORY_ONLY_ENV: &str = "TAU_MEMORY_ONLY";
+
+/// Immutable harness-wide storage capability policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HarnessStorageMode {
+    /// Preserve all ordinary harness-managed storage.
+    #[default]
+    Durable,
+    /// Keep session-owned artifacts in memory while retaining durable agents.
+    SessionEphemeral,
+    /// Keep semantic stores process-local and make delegated storage
+    /// unavailable.
+    MemoryOnly,
+}
+
+impl HarnessStorageMode {
+    /// Returns the narrow session-store persistence policy.
+    #[must_use]
+    pub(crate) const fn session_persistence(self) -> tau_core::SessionPersistenceMode {
+        match self {
+            Self::Durable => tau_core::SessionPersistenceMode::Durable,
+            Self::SessionEphemeral | Self::MemoryOnly => {
+                tau_core::SessionPersistenceMode::Ephemeral
+            }
+        }
+    }
+
+    /// Returns true when session-owned artifacts are durable.
+    #[must_use]
+    pub const fn is_durable(self) -> bool {
+        matches!(self, Self::Durable)
+    }
+
+    /// Returns true when session-owned artifacts stay process-local.
+    #[must_use]
+    pub const fn is_ephemeral(self) -> bool {
+        !self.is_durable()
+    }
+
+    /// Returns true when all harness-managed storage is process-local.
+    #[must_use]
+    pub const fn is_memory_only(self) -> bool {
+        matches!(self, Self::MemoryOnly)
+    }
+}
 
 impl From<SessionLaunchStatus> for tau_proto::SessionDirStatus {
     fn from(status: SessionLaunchStatus) -> Self {
@@ -108,15 +154,13 @@ pub struct ServeOptions {
     /// Pre-resolved entrypoints validate the set but reject the environment
     /// bypass because their caller already owns configuration resolution.
     pub allowed_extensions: Option<BTreeSet<tau_proto::ExtensionName>>,
-    /// Persistence policy for session membership, metadata, debug event logs,
-    /// per-session harness/extension stderr logs, and session-scoped extension
-    /// data for this harness process.
+    /// Immutable storage policy for this harness process.
     ///
-    /// Agent transcripts, provider state, credentials, user/cache extension
-    /// data, runtime sockets, and configuration state keep their normal
-    /// persistence behavior.
-    #[builder(default = tau_core::SessionPersistenceMode::Durable)]
-    pub session_persistence: tau_core::SessionPersistenceMode,
+    /// Session-ephemeral mode suppresses only session-owned artifacts.
+    /// Memory-only mode additionally suppresses agent, diagnostic, retention,
+    /// and delegated extension storage while retaining lifecycle runtime files.
+    #[builder(default)]
+    pub storage_mode: HarnessStorageMode,
 }
 
 impl Default for ServeOptions {
@@ -128,13 +172,13 @@ impl Default for ServeOptions {
             dirs: None,
             ignore_startup_environment: false,
             allowed_extensions: None,
-            session_persistence: tau_core::SessionPersistenceMode::Durable,
+            storage_mode: HarnessStorageMode::Durable,
         }
     }
 }
 
 fn validate_serve_options(options: &ServeOptions) -> Result<(), HarnessError> {
-    if options.session_persistence.is_ephemeral()
+    if options.storage_mode.is_ephemeral()
         && matches!(options.session_status, SessionLaunchStatus::Resumed)
     {
         return Err(HarnessError::Participant(
@@ -515,7 +559,7 @@ pub fn run_embedded_message_with_options(
             dirs,
             session_id,
             tau_proto::SessionStartReason::Initial,
-            tau_core::SessionPersistenceMode::Durable,
+            HarnessStorageMode::Durable,
         )
     } else {
         Harness::from_config(
@@ -524,7 +568,7 @@ pub fn run_embedded_message_with_options(
             dirs,
             session_id,
             tau_proto::SessionStartReason::Initial,
-            tau_core::SessionPersistenceMode::Durable,
+            HarnessStorageMode::Durable,
         )
     }?;
     let mut outcome = match harness.send_user_message(session_id, message, None) {
@@ -586,7 +630,7 @@ pub fn run_embedded_message_with_echo(
         echo_tools(),
         session_id,
         tau_proto::SessionStartReason::Initial,
-        tau_core::SessionPersistenceMode::Durable,
+        HarnessStorageMode::Durable,
     )?;
     disable_echo_tool_context_gate_for_tests(&mut harness);
     harness.enable_echo_tool_for_tests();
@@ -626,7 +670,7 @@ pub fn run_embedded_message_with_test_provider(
         echo_tools(),
         session_id,
         tau_proto::SessionStartReason::Initial,
-        tau_core::SessionPersistenceMode::Durable,
+        HarnessStorageMode::Durable,
     )?;
     disable_echo_tool_context_gate_for_tests(&mut harness);
     harness.enable_echo_tool_for_tests();
@@ -734,7 +778,7 @@ pub fn run_daemon_with_internal_tools(
         eager_session_id,
         HarnessSessionLaunch {
             reason: session_start_reason(options.session_status),
-            session_persistence: options.session_persistence,
+            storage_mode: options.storage_mode,
         },
         HarnessStartupInputs {
             initial_client: None,
@@ -787,7 +831,7 @@ pub fn run_daemon_with_echo(
         echo_tools(),
         eager_session_id,
         session_start_reason(options.session_status),
-        options.session_persistence,
+        options.storage_mode,
     )?;
     disable_echo_tool_context_gate_for_tests(&mut harness);
     harness.enable_echo_tool_for_tests();
@@ -821,7 +865,7 @@ pub fn run_daemon_with_config(
         dirs,
         eager_session_id,
         session_start_reason(options.session_status),
-        options.session_persistence,
+        options.storage_mode,
     )?;
 
     let tx = harness.tx.clone();
@@ -1362,7 +1406,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
             eager_session_id,
             HarnessSessionLaunch {
                 reason: session_start_reason(options.session_status),
-                session_persistence: options.session_persistence,
+                storage_mode: options.storage_mode,
             },
             HarnessStartupInputs {
                 initial_client,
@@ -1542,10 +1586,12 @@ fn run_component_with_internal_tools_and_initial_client(
             Ok("resumed") => path_crate_daemon::SessionLaunchStatus::Resumed,
             _ => path_crate_daemon::SessionLaunchStatus::New,
         };
-        let session_persistence = if std::env::var_os(EPHEMERAL_ENV).is_some() {
-            tau_core::SessionPersistenceMode::Ephemeral
+        let storage_mode = if std::env::var_os(MEMORY_ONLY_ENV).is_some() {
+            HarnessStorageMode::MemoryOnly
+        } else if std::env::var_os(EPHEMERAL_ENV).is_some() {
+            HarnessStorageMode::SessionEphemeral
         } else {
-            tau_core::SessionPersistenceMode::Durable
+            HarnessStorageMode::Durable
         };
         let runtime_instance_id =
             launch.runtime_instance_id(std::env::var_os(runtime_dir::HARNESS_INSTANCE_ID_ENV))?;
@@ -1559,7 +1605,7 @@ fn run_component_with_internal_tools_and_initial_client(
             ServeOptions {
                 exit_on_disconnect: true,
                 session_status,
-                session_persistence,
+                storage_mode,
                 ..Default::default()
             },
             internal_tool_handlers,

@@ -266,7 +266,7 @@ pub(super) fn strict_compaction_provider_harness_with_start_reason(
         Vec::new(),
         "s1",
         start_reason,
-        tau_core::SessionPersistenceMode::Durable,
+        crate::HarnessStorageMode::Durable,
     )?;
     h.agent_id_rng = super::super::deterministic_agent_id_rng();
     h.enable_echo_tool_for_tests();

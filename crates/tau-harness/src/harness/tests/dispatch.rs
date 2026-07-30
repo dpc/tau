@@ -2414,7 +2414,7 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
         crate::harness::TestProviderHarnessStartup {
             session_id: "s1",
             reason: tau_proto::SessionStartReason::Resume,
-            persistence: tau_core::SessionPersistenceMode::Durable,
+            storage_mode: crate::HarnessStorageMode::Durable,
             internal_tool_handlers: vec![std::sync::Arc::new(PromptObserver(observed.clone()))],
         },
     )
@@ -13162,11 +13162,11 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
     drop(store);
 
     {
-        let mut h = quiet_provider_harness_for_with_start_reason_and_persistence(
+        let mut h = quiet_provider_harness_for_with_start_reason_and_storage_mode(
             "s2",
             &state,
             tau_proto::SessionStartReason::Initial,
-            tau_core::SessionPersistenceMode::Durable,
+            crate::HarnessStorageMode::Durable,
         )
         .expect("start warm harness");
         assert!(

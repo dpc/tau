@@ -51,6 +51,9 @@ creation boundary. `agent.started.ephemeral` and
 extensions. These markers describe Tau's local semantic stores only: protocol
 consumers must not assume providers, tools, durable recipient agents, or
 extensions forget data merely because an agent is ephemeral.
+Harness-wide memory-only mode also sets both markers for every agent because
+its transcript and session membership are process-local even when the creation
+request did not independently request per-agent ephemerality.
 
 ## Validated identifiers
 

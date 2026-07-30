@@ -36,7 +36,10 @@ use tau_proto::{
 
 use crate::action_commands::ActionCommandState;
 use crate::agent_navigation::AgentNavigation;
-use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
+use crate::daemon::{
+    DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon,
+    storage_mode_from_ephemeral,
+};
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, UiIoStats};
 use crate::prompt_history::PromptHistoryStore;
 use crate::tool_render::ui_dir_block;
@@ -809,7 +812,10 @@ pub(crate) fn run_chat(
     let daemon_output = if attach {
         None
     } else {
-        Some(daemon_output_for_session(session_id.as_str(), ephemeral)?)
+        Some(daemon_output_for_session(
+            session_id.as_str(),
+            storage_mode_from_ephemeral(ephemeral),
+        )?)
     };
     let mut daemon = resolve_daemon(
         attach,
@@ -818,7 +824,7 @@ pub(crate) fn run_chat(
         daemon_output,
         startup_role,
         cli_overrides,
-        ephemeral,
+        storage_mode_from_ephemeral(ephemeral),
     )?;
     let harness_socket_path = daemon.socket_path();
     let ui_io_meter = UiIoMeter::with_diagnostics();

@@ -386,6 +386,8 @@ pub struct AgentAppendOutcome {
 #[derive(Debug)]
 pub struct AgentStore {
     agents_dir: PathBuf,
+    /// Default persistence for agents without a per-agent ephemeral override.
+    default_persistence: AgentPersistenceMode,
     /// Failure-atomic append and per-journal poison state.
     framed_appends: FramedAppendState,
     /// Store-root boundary re-covered after the first successful branch lock.
@@ -465,6 +467,7 @@ impl AgentStore {
         framed_appends.note_created_directories(created_directories);
         Ok(Self {
             agents_dir: agents_dir.clone(),
+            default_persistence: AgentPersistenceMode::Durable,
             framed_appends,
             pending_root_boundary: Some(agents_dir.clone()),
             agents: HashMap::new(),
@@ -478,12 +481,36 @@ impl AgentStore {
         })
     }
 
+    /// Opens a process-local agent store without reading or creating
+    /// `agents_dir`.
+    pub fn open_memory_only(agents_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            agents_dir: agents_dir.into(),
+            default_persistence: AgentPersistenceMode::Ephemeral,
+            framed_appends: FramedAppendState::default(),
+            pending_root_boundary: None,
+            agents: HashMap::new(),
+            created_agents: HashSet::new(),
+            ephemeral_agents: HashSet::new(),
+            ephemeral_events: HashMap::new(),
+            ephemeral_meta: HashMap::new(),
+            summaries: HashMap::new(),
+            dirty_checkpoints: HashSet::new(),
+            locks: HashMap::new(),
+        }
+    }
+
+    /// Returns whether `agent_id` must use the process-local replay stream.
+    fn agent_is_memory_only(&self, agent_id: &AgentId) -> bool {
+        self.default_persistence.is_ephemeral() || self.ephemeral_agents.contains(agent_id)
+    }
+
     fn load_agent_if_needed(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = parse_agent_id_for_store(agent_id)?;
         if self.agents.contains_key(&aid) {
             return Ok(());
         }
-        if self.ephemeral_agents.contains(&aid) {
+        if self.agent_is_memory_only(&aid) {
             return Ok(());
         }
         let events_path = self.agent_dir(agent_id).join("events.cbor");
@@ -595,6 +622,9 @@ impl AgentStore {
         if self.ephemeral_agents.contains(&aid) {
             return true;
         }
+        if self.default_persistence.is_ephemeral() {
+            return false;
+        }
         self.agent_dir(agent_id).exists()
     }
 
@@ -623,6 +653,9 @@ impl AgentStore {
         if let Some(events) = self.ephemeral_events.get(agent_id) {
             return records_begin_with_creation(agent_id, events);
         }
+        if self.default_persistence.is_ephemeral() {
+            return false;
+        }
         let path = self.agent_dir(agent_id.as_str()).join("events.cbor");
         let Ok(events) = load_agent_events(&path) else {
             return false;
@@ -646,7 +679,7 @@ impl AgentStore {
     pub fn mark_agent_ephemeral(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = parse_agent_id_for_store(agent_id)?;
         let agent_dir = self.agent_dir(agent_id);
-        if agent_dir.exists() {
+        if self.default_persistence.is_durable() && agent_dir.exists() {
             return Err(AgentStoreError::PersistenceConflict {
                 agent_id: aid,
                 path: agent_dir,
@@ -662,7 +695,7 @@ impl AgentStore {
         let Ok(agent_id) = AgentId::parse(agent_id) else {
             return AgentPersistenceMode::Durable;
         };
-        if self.ephemeral_agents.contains(&agent_id) {
+        if self.agent_is_memory_only(&agent_id) {
             AgentPersistenceMode::Ephemeral
         } else {
             AgentPersistenceMode::Durable
@@ -687,7 +720,7 @@ impl AgentStore {
             max_record_bytes,
             remaining_bytes,
         } = budget;
-        if self.ephemeral_agents.contains(agent_id) {
+        if self.agent_is_memory_only(agent_id) {
             let Some(record) = self
                 .ephemeral_events
                 .get(agent_id)
@@ -1207,7 +1240,7 @@ impl AgentStore {
                 agent_id: agent_id.to_owned(),
                 source,
             })?;
-        if self.ephemeral_agents.contains(&parsed_agent_id) {
+        if self.agent_is_memory_only(&parsed_agent_id) {
             let events = self
                 .ephemeral_events
                 .get(&parsed_agent_id)
@@ -1254,6 +1287,9 @@ impl AgentStore {
         agent_id: &str,
     ) -> Result<Option<&AgentTree>, AgentStoreError> {
         let parsed = parse_agent_id_for_store(agent_id)?;
+        if self.default_persistence.is_ephemeral() {
+            return Ok(self.agents.get(&parsed));
+        }
         let path = self.agent_dir(agent_id).join("events.cbor");
         if !path.exists() {
             return Ok(None);
@@ -1291,7 +1327,7 @@ impl AgentStore {
     pub fn agent_meta(&self, agent_id: &str) -> io::Result<Option<AgentMeta>> {
         let parsed_agent_id = AgentId::parse(agent_id)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        if self.ephemeral_agents.contains(&parsed_agent_id) {
+        if self.agent_is_memory_only(&parsed_agent_id) {
             return Ok(self.ephemeral_meta.get(&parsed_agent_id).cloned());
         }
         let path = self.agent_dir(parsed_agent_id.as_str()).join("meta.json");
@@ -1321,7 +1357,7 @@ impl AgentStore {
     /// their checkpoint can only be created from journal facts.
     pub fn record_agent_meta(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = parse_agent_id_for_store(agent_id)?;
-        if self.ephemeral_agents.contains(&aid) {
+        if self.agent_is_memory_only(&aid) {
             initialize_ephemeral_meta(
                 self.ephemeral_meta.entry(aid).or_default(),
                 unix_now(),
@@ -1337,7 +1373,7 @@ impl AgentStore {
     /// Appends the content-free fact that a human interacted with an agent.
     pub fn record_agent_user_interaction(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = parse_agent_id_for_store(agent_id)?;
-        if self.ephemeral_agents.contains(&aid) {
+        if self.agent_is_memory_only(&aid) {
             let now = unix_now();
             let meta = self.ephemeral_meta.entry(aid).or_default();
             initialize_ephemeral_meta(meta, now, false);

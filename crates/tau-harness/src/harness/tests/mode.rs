@@ -79,7 +79,7 @@ fn ephemeral_daemon_suppresses_session_artifacts_but_keeps_agents() {
                 "s1",
                 ServeOptions {
                     max_clients: Some(1),
-                    session_persistence: tau_core::SessionPersistenceMode::Ephemeral,
+                    storage_mode: crate::HarnessStorageMode::SessionEphemeral,
                     ..Default::default()
                 },
             )
@@ -174,6 +174,47 @@ fn ephemeral_harness_rejects_session_scoped_extension_data() {
     );
 }
 
+/// Memory-only mode rejects every delegated extension-data scope before path
+/// resolution and leaves the complete supplied state tree absent.
+#[test]
+fn memory_only_harness_rejects_all_extension_data_without_state_roots() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let h = quiet_provider_harness_with_start_reason_and_storage_mode(
+        &sp,
+        tau_proto::SessionStartReason::Initial,
+        crate::HarnessStorageMode::MemoryOnly,
+    )
+    .expect("memory-only harness");
+    let provider_connection = h
+        .extension_connection_id("provider")
+        .expect("provider connection")
+        .to_owned();
+
+    for scope in [
+        tau_proto::ExtensionDataScope::Session,
+        tau_proto::ExtensionDataScope::User,
+        tau_proto::ExtensionDataScope::Cache,
+    ] {
+        let error = h
+            .run_extension_data_request(
+                &crate::test_connection_id(&provider_connection),
+                scope,
+                tau_proto::ExtensionDataRequestOp::WriteFile {
+                    path: tau_proto::ExtensionDataPath::from("notes.txt"),
+                    contents: b"must remain memory-only".to_vec(),
+                },
+            )
+            .expect_err("all persistent extension data should be unavailable");
+        assert_eq!(error.kind, tau_proto::ExtensionDataErrorKind::Permission);
+    }
+
+    assert!(
+        !sp.exists(),
+        "memory-only construction and denied extension data must not create state roots"
+    );
+}
+
 /// Keeps the harness API aligned with the CLI: an ephemeral launch must start a
 /// fresh runtime-only session instead of claiming to resume durable session
 /// state that it deliberately does not load or update.
@@ -181,10 +222,10 @@ fn ephemeral_harness_rejects_session_scoped_extension_data() {
 fn ephemeral_harness_rejects_resume_launch() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
-    let error = match quiet_provider_harness_with_start_reason_and_persistence(
+    let error = match quiet_provider_harness_with_start_reason_and_storage_mode(
         &sp,
         tau_proto::SessionStartReason::Resume,
-        tau_core::SessionPersistenceMode::Ephemeral,
+        crate::HarnessStorageMode::SessionEphemeral,
     ) {
         Ok(mut harness) => {
             let _ = harness.shutdown();

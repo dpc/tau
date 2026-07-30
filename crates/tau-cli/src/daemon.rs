@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tau_cli_picker::{PickerError, PickerItem, pick};
-use tau_harness::{SessionLaunchStatus, runtime_dir};
+use tau_harness::{HarnessStorageMode, SessionLaunchStatus, runtime_dir};
 
 use crate::{CliError, mint_short_id};
 
@@ -34,6 +34,7 @@ pub(crate) enum DaemonHandle {
         child: Option<std::process::Child>,
         harness_path: PathBuf,
         initial_ui: Option<InitialUiStdio>,
+        cleanup_runtime_pair_after_reap: bool,
     },
     Attached {
         harness_path: PathBuf,
@@ -82,7 +83,10 @@ impl DaemonHandle {
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
         if let Self::Owned {
-            child, initial_ui, ..
+            child,
+            harness_path,
+            initial_ui,
+            cleanup_runtime_pair_after_reap,
         } = self
             && let Some(mut child) = child.take()
         {
@@ -91,6 +95,12 @@ impl Drop for DaemonHandle {
                 initial_ui.take(),
                 OWNED_DAEMON_GRACEFUL_EXIT_TIMEOUT,
             );
+            // The child owns normal cleanup. The parent repeats removal only
+            // after reap so every handled forced-exit path closes its exact pair.
+            if *cleanup_runtime_pair_after_reap {
+                let _ = std::fs::remove_file(runtime_dir::socket_path(harness_path));
+                let _ = std::fs::remove_file(runtime_dir::metadata_path(harness_path));
+            }
         }
         // Attached, or Owned-after-leak: do nothing. The daemon keeps
         // running so other UIs can still use it, or this same UI can
@@ -252,11 +262,20 @@ pub(crate) struct DaemonOutput {
     pub(crate) stderr: Stdio,
 }
 
+/// Maps the public session-only ephemeral flag without changing its semantics.
+pub(crate) const fn storage_mode_from_ephemeral(ephemeral: bool) -> HarnessStorageMode {
+    if ephemeral {
+        HarnessStorageMode::SessionEphemeral
+    } else {
+        HarnessStorageMode::Durable
+    }
+}
+
 pub(crate) fn daemon_output_for_session(
     session_id: &str,
-    ephemeral: bool,
+    storage_mode: HarnessStorageMode,
 ) -> Result<DaemonOutput, CliError> {
-    if ephemeral {
+    if !matches!(storage_mode, HarnessStorageMode::Durable) {
         return Ok(DaemonOutput {
             stderr: Stdio::null(),
         });
@@ -294,7 +313,7 @@ pub(crate) fn resolve_daemon(
     daemon_output: Option<DaemonOutput>,
     startup_role: Option<&str>,
     cli_overrides: DaemonCliOverrides<'_>,
-    ephemeral: bool,
+    storage_mode: HarnessStorageMode,
 ) -> Result<DaemonHandle, CliError> {
     tracing::debug!(target: "tau_cli::startup", attach, session_id, "resolving harness daemon");
     let project_root = std::env::current_dir()?;
@@ -311,7 +330,7 @@ pub(crate) fn resolve_daemon(
         daemon_output.expect("daemon output for spawned harness"),
         startup_role,
         cli_overrides,
-        ephemeral,
+        storage_mode,
     )
 }
 
@@ -326,7 +345,7 @@ fn start_daemon(
     output: DaemonOutput,
     startup_role: Option<&str>,
     cli_overrides: DaemonCliOverrides<'_>,
-    ephemeral: bool,
+    storage_mode: HarnessStorageMode,
 ) -> Result<DaemonHandle, CliError> {
     let tau_binary = std::env::current_exe()?;
     tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
@@ -340,7 +359,7 @@ fn start_daemon(
         stdin: Stdio::piped(),
         startup_role,
         cli_overrides,
-        ephemeral,
+        storage_mode,
     });
     let runtime_instance_id = configure_runtime_instance(&mut command);
     let spawn_result = command.spawn();
@@ -361,6 +380,7 @@ fn start_daemon(
         child: Some(child),
         harness_path,
         initial_ui: Some(InitialUiStdio { stdin, stdout }),
+        cleanup_runtime_pair_after_reap: matches!(storage_mode, HarnessStorageMode::MemoryOnly),
     })
 }
 
@@ -380,7 +400,7 @@ struct DaemonCommandSpec<'a> {
     stdin: Stdio,
     startup_role: Option<&'a str>,
     cli_overrides: DaemonCliOverrides<'a>,
-    ephemeral: bool,
+    storage_mode: HarnessStorageMode,
 }
 
 /// Build the `tau component harness` command, reserving stdio for the initial
@@ -420,10 +440,19 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
     if let Some(role) = spec.startup_role.filter(|role| !role.is_empty()) {
         cmd.env(tau_harness::STARTUP_ROLE_ENV, role);
     }
-    if spec.ephemeral {
-        cmd.env(tau_harness::EPHEMERAL_ENV, "1");
-    } else {
-        cmd.env_remove(tau_harness::EPHEMERAL_ENV);
+    match spec.storage_mode {
+        HarnessStorageMode::Durable => {
+            cmd.env_remove(tau_harness::EPHEMERAL_ENV);
+            cmd.env_remove(tau_harness::MEMORY_ONLY_ENV);
+        }
+        HarnessStorageMode::SessionEphemeral => {
+            cmd.env(tau_harness::EPHEMERAL_ENV, "1");
+            cmd.env_remove(tau_harness::MEMORY_ONLY_ENV);
+        }
+        HarnessStorageMode::MemoryOnly => {
+            cmd.env_remove(tau_harness::EPHEMERAL_ENV);
+            cmd.env(tau_harness::MEMORY_ONLY_ENV, "1");
+        }
     }
     if !spec.cli_overrides.role.is_empty() {
         cmd.env(

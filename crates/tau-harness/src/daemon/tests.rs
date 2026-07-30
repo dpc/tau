@@ -368,7 +368,7 @@ fn post_accept_startup_error_is_sent_through_normal_writer() {
         echo_tools(),
         "s1",
         tau_proto::SessionStartReason::Initial,
-        tau_core::SessionPersistenceMode::Durable,
+        crate::HarnessStorageMode::Durable,
     )
     .expect("harness");
     let (server_end, ui_end) = UnixStream::pair().expect("stream pair");
@@ -415,7 +415,7 @@ fn create_agent_rejection_isolated_to_requester_socket() {
         echo_tools(),
         "s1",
         tau_proto::SessionStartReason::Initial,
-        tau_core::SessionPersistenceMode::Durable,
+        crate::HarnessStorageMode::Durable,
     )
     .expect("harness");
     let (requester_server, requester_client) = UnixStream::pair().expect("requester pair");

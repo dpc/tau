@@ -100,6 +100,15 @@ distributed WAL, or cross-journal transaction. See
 
 ## Agent journals and summary checkpoints
 
+The three `tau dev print-*` render previews use an immutable memory-only
+harness policy: they may read render inputs but do not create, inspect, repair,
+or mutate harness-managed session, agent, diagnostic, retention, or delegated
+extension storage. Only their unique runtime socket and discovery metadata may
+exist while the owned daemon runs; handled exits remove that pair after child
+reap. Configured extensions remain trusted same-user executables and
+unsandboxed, so their direct operating-system side effects are outside this
+guarantee.
+
 Per-agent `events.cbor` journals are authoritative durable identity and
 transcript state. Their `meta.json` files are content-minimized, atomically
 replaced derived checkpoints, not routing authority. Checkpoints bind an exact

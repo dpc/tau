@@ -1,5 +1,13 @@
 # ARCH-tau-harness: tau-harness architecture
 
+Harness storage policy is immutable for one process. Durable mode owns normal
+session, agent, diagnostic, retention, and extension storage;
+session-ephemeral mode suppresses only session-owned artifacts; memory-only
+mode replaces both semantic stores with process-local stores and disables every
+harness-managed persistent capability while preserving the ordinary event and
+extension lifecycle. Only the unique runtime discovery pair may exist while a
+memory-only daemon runs.
+
 The external-message, provider-model, provider-quota, provider-execution,
 tool-lifecycle, tool-request, tool-progress, terminal-tool-outcome, user-shell-report, prompt-fragment,
 session-discovery, per-agent-context, internal-prompt-request, start-agent-request,

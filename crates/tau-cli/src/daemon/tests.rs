@@ -26,6 +26,7 @@ fn owned_daemon_drop_allows_disconnect_cleanup() {
         child: Some(child),
         harness_path: temp.path().join("unused"),
         initial_ui: Some(initial_ui),
+        cleanup_runtime_pair_after_reap: false,
     };
     let connected_transport = handle
         .take_initial_ui_stdio()
@@ -85,7 +86,7 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
             extension_environment: None,
             harness_config: std::slice::from_ref(&override_),
         },
-        ephemeral: false,
+        storage_mode: HarnessStorageMode::Durable,
     });
     assert!(with_override.get_envs().any(|(key, value)| {
         key == tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV && value.is_some()
@@ -105,7 +106,7 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
             extension_environment: None,
             harness_config: &[],
         },
-        ephemeral: false,
+        storage_mode: HarnessStorageMode::Durable,
     });
     assert!(without_override.get_envs().any(|(key, value)| {
         key == tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV && value.is_none()
@@ -130,7 +131,7 @@ fn daemon_command_clears_empty_extension_transport() {
             extension_environment: None,
             harness_config: &[],
         },
-        ephemeral: false,
+        storage_mode: HarnessStorageMode::Durable,
     });
     assert!(command.get_envs().any(|(key, value)| {
         key == tau_harness::EXTENSION_CLI_OVERRIDES_ENV && value.is_none()
@@ -166,7 +167,7 @@ fn daemon_command_forwards_public_extension_environment_separately() {
             extension_environment: Some(&names),
             harness_config: &[],
         },
-        ephemeral: false,
+        storage_mode: HarnessStorageMode::Durable,
     });
 
     assert!(command.get_envs().any(|(key, value)| {
@@ -200,7 +201,7 @@ fn daemon_command_clears_socket_activation_env() {
             extension_environment: None,
             harness_config: &[],
         },
-        ephemeral: false,
+        storage_mode: HarnessStorageMode::Durable,
     });
 
     for expected_key in [
@@ -236,7 +237,7 @@ fn daemon_command_and_parent_path_share_runtime_instance_id() {
             extension_environment: None,
             harness_config: &[],
         },
-        ephemeral: false,
+        storage_mode: HarnessStorageMode::Durable,
     });
 
     let instance_id = configure_runtime_instance(&mut command);
@@ -252,11 +253,10 @@ fn daemon_command_and_parent_path_share_runtime_instance_id() {
     );
 }
 
-/// Guards both sides of the ephemeral child-process environment contract: an
-/// ephemeral launch opts the harness child in, while a normal launch explicitly
-/// clears any inherited marker.
+/// Every storage mode sets only its matching child-process environment marker
+/// and explicitly clears markers inherited from the parent.
 #[test]
-fn daemon_command_sets_ephemeral_env_only_when_requested() {
+fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
     let command = build_daemon_command(DaemonCommandSpec {
         tau_binary: Path::new("tau"),
         session_id: "session-1",
@@ -271,12 +271,17 @@ fn daemon_command_sets_ephemeral_env_only_when_requested() {
             extension_environment: None,
             harness_config: &[],
         },
-        ephemeral: true,
+        storage_mode: HarnessStorageMode::SessionEphemeral,
     });
 
     assert!(command.get_envs().any(|(key, value)| {
         key == tau_harness::EPHEMERAL_ENV && value.and_then(|v| v.to_str()) == Some("1")
     }));
+    assert!(
+        command
+            .get_envs()
+            .any(|(key, value)| key == tau_harness::MEMORY_ONLY_ENV && value.is_none())
+    );
 
     let command = build_daemon_command(DaemonCommandSpec {
         tau_binary: Path::new("tau"),
@@ -292,13 +297,43 @@ fn daemon_command_sets_ephemeral_env_only_when_requested() {
             extension_environment: None,
             harness_config: &[],
         },
-        ephemeral: false,
+        storage_mode: HarnessStorageMode::Durable,
     });
 
     assert!(
         command
             .get_envs()
             .any(|(key, value)| { key == tau_harness::EPHEMERAL_ENV && value.is_none() })
+    );
+    assert!(
+        command
+            .get_envs()
+            .any(|(key, value)| key == tau_harness::MEMORY_ONLY_ENV && value.is_none())
+    );
+
+    let command = build_daemon_command(DaemonCommandSpec {
+        tau_binary: Path::new("tau"),
+        session_id: "session-1",
+        session_status: SessionLaunchStatus::New,
+        stdout: Stdio::null(),
+        stderr: Stdio::null(),
+        stdin: Stdio::null(),
+        startup_role: None,
+        cli_overrides: DaemonCliOverrides {
+            role: &[],
+            extension: &[],
+            extension_environment: None,
+            harness_config: &[],
+        },
+        storage_mode: HarnessStorageMode::MemoryOnly,
+    });
+    assert!(command.get_envs().any(|(key, value)| {
+        key == tau_harness::MEMORY_ONLY_ENV && value.and_then(|v| v.to_str()) == Some("1")
+    }));
+    assert!(
+        command
+            .get_envs()
+            .any(|(key, value)| key == tau_harness::EPHEMERAL_ENV && value.is_none())
     );
 }
 
@@ -318,7 +353,7 @@ fn daemon_command_uses_initial_ui_stdio() {
             extension_environment: None,
             harness_config: &[],
         },
-        ephemeral: false,
+        storage_mode: HarnessStorageMode::Durable,
     });
 
     let args = command

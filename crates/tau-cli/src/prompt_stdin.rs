@@ -13,7 +13,10 @@ use tau_proto::{
     ProviderResponseUpdated, UiCreateAgentOutcome,
 };
 
-use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
+use crate::daemon::{
+    DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon,
+    storage_mode_from_ephemeral,
+};
 use crate::ui_prompt::{
     CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, create_user_agent_prompt,
 };
@@ -41,7 +44,10 @@ pub(crate) fn run_prompt_stdin(
     let daemon_output = if attach {
         None
     } else {
-        Some(daemon_output_for_session(session_id.as_str(), ephemeral)?)
+        Some(daemon_output_for_session(
+            session_id.as_str(),
+            storage_mode_from_ephemeral(ephemeral),
+        )?)
     };
     let mut daemon = resolve_daemon(
         attach,
@@ -50,7 +56,7 @@ pub(crate) fn run_prompt_stdin(
         daemon_output,
         startup_role,
         cli_overrides,
-        ephemeral,
+        storage_mode_from_ephemeral(ephemeral),
     )?;
     let (reader, mut writer) = connect_prompt_stdin_client(&mut daemon)?;
     let messages = spawn_prompt_stdin_reader(reader);
