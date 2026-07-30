@@ -96,14 +96,15 @@ and replay boundaries, and typed `SessionStore`/`AgentStore` reads are
 authoritative for membership and transcript prefix/suffix integrity.
 
 The same target also owns one live dual-PTY attach baseline. The owning exact
-public CLI creates the daemon, a second exact public CLI explicitly attaches to
-that session before activity, and only the owner submits one closed text action.
-Normalized VT row classes compare stable semantic elements and partial order
-rather than terminal bytes. Replay-aware socket delivery, exact fake-provider
-consumption, bounded synchronization, process-group teardown, and absence of
-runtime discovery artifacts remain separate authorities. This baseline records
-current attach projection only; it does not fix ordering, shell, tool, provider,
-multi-agent, or local-presentation behavior.
+public CLI creates the daemon, completes one closed text action, and then a
+second exact public CLI explicitly attaches to that session. Normalized VT row
+classes compare stable semantic elements and partial order rather than terminal
+bytes. A late replay-aware socket observer proves canonical delivery order
+remains unchanged while the attached UI presents current state before
+transcript. Exact fake-provider consumption, bounded synchronization,
+process-group teardown, and absence of runtime discovery artifacts remain
+separate authorities. This baseline does not cover shell, tool, provider,
+multi-agent, or other local-presentation behavior.
 
 S8 adds a separate topology under that same target. A test-only headless daemon
 first completes the production `agent_start` main/worker flow with exact

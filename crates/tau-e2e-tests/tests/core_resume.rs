@@ -149,11 +149,11 @@ fn prompt_stdin_accepted_provider_failure_exits_without_stdout()
     Ok(())
 }
 
-/// Proves a second exact public CLI attached by explicit session before any
-/// activity receives the same semantic single-turn projection as the owning
-/// CLI, while attachment itself spends no provider action.
+/// Proves a second exact public CLI attached after one complete turn presents
+/// current state before catch-up transcript while protocol catch-up keeps its
+/// historical-first delivery order and attachment spends no provider action.
 #[test]
-fn two_public_ptys_share_one_live_turn_with_semantic_parity()
+fn late_attached_public_pty_stages_current_state_before_completed_turn()
 -> Result<(), Box<dyn std::error::Error>> {
     let nonce = format!("{:x}", std::process::id());
     let prompt = format!("attach-parity-prompt-{nonce}");
@@ -189,23 +189,6 @@ fn two_public_ptys_share_one_live_turn_with_semantic_parity()
     wait_for_dummy_role_selection(&mut observer, deadline)?;
     original.wait_ready_to_start_role(DUMMY_ROLE, deadline)?;
 
-    let attached = PtyProcess::spawn(
-        fixture.attach_command(session_id.as_str()),
-        false,
-        Some(PtyArtifacts::new(
-            fixture.artifact_path("attach-second.raw.bounded"),
-            fixture.artifact_path("attach-second.normalized.txt"),
-        )),
-    )?;
-    attached.wait_ready_to_start_role(DUMMY_ROLE, deadline)?;
-    if fixture
-        .trace()?
-        .lines()
-        .any(|line| line.contains(" matched "))
-    {
-        return Err("attaching the second UI consumed a provider action".into());
-    }
-
     original.send_line(&prompt)?;
     let loaded = observer.recv_until(deadline, |observed| {
         !observed.replay
@@ -237,6 +220,34 @@ fn two_public_ptys_share_one_live_turn_with_semantic_parity()
             )
     })?;
     original.wait_for(&response, deadline)?;
+    let mut catch_up_observer = SideObserver::connect(
+        &socket,
+        &session_id,
+        fixture.artifact_path("attach-catch-up-observer.json"),
+        deadline,
+    )?;
+    catch_up_observer.recv_until(deadline, |observed| {
+        matches!(
+            &observed.event,
+            Event::SessionReplayComplete(complete) if complete.session_id == session_id
+        )
+    })?;
+    assert_protocol_catch_up_order(
+        &catch_up_observer.events,
+        &session_id,
+        &prompt,
+        &response,
+        &agent_id,
+    )?;
+
+    let attached = PtyProcess::spawn(
+        fixture.attach_command(session_id.as_str()),
+        false,
+        Some(PtyArtifacts::new(
+            fixture.artifact_path("attach-second.raw.bounded"),
+            fixture.artifact_path("attach-second.normalized.txt"),
+        )),
+    )?;
     attached.wait_for(&response, deadline)?;
     let original_frame = original.wait_ready_for(agent_id.as_str(), deadline)?;
     let attached_frame = attached.wait_ready_for(agent_id.as_str(), deadline)?;
@@ -256,6 +267,11 @@ fn two_public_ptys_share_one_live_turn_with_semantic_parity()
         "attach-observer.json",
         &serde_json::to_vec_pretty(&observer.events)?,
     )?;
+    fixture.write_artifact(
+        "attach-catch-up-observer.json",
+        &serde_json::to_vec_pretty(&catch_up_observer.events)?,
+    )?;
+    drop(catch_up_observer);
     drop(observer);
     attached.finish()?;
     original.finish()?;
@@ -438,17 +454,94 @@ fn assert_attach_semantics(
     let initialized = find(&format!("initialized {}", agent_id.as_str()))?;
     let answered = find(response)?;
     let editable = find(&format!("Write a message to {}...", agent_id.as_str()))?;
-    find(&format!("@{}", agent_id.as_str()))?;
+    let status = find(&format!("@{}", agent_id.as_str()))?;
     if !(session < submitted
         && extension < submitted
         && initialized <= submitted
         && submitted < answered
-        && answered < editable)
+        && answered < editable
+        && editable <= status)
     {
         return Err(format!(
             "semantic row order violated: session={session}, extension={extension}, \
              initialized={initialized}, submitted={submitted}, answered={answered}, \
-             editable={editable}\n{frame}"
+              editable={editable}, status={status}\n{frame}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Confirms the harness keeps its canonical catch-up order; only the attached
+/// CLI may move visible transcript behind the later current-state snapshots.
+fn assert_protocol_catch_up_order(
+    events: &[ObservedEvent],
+    session_id: &SessionId,
+    prompt: &str,
+    response: &str,
+    agent_id: &AgentId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let prompt = events.iter().position(|observed| {
+        observed.replay
+            && matches!(
+                &observed.event,
+                Event::AgentPromptSubmitted(submitted) if submitted.text == prompt
+            )
+    });
+    let response = events.iter().position(|observed| {
+        observed.replay && provider_finished_contains(&observed.event, response)
+    });
+    let session = events.iter().position(|observed| {
+        observed.replay
+            && matches!(
+                &observed.event,
+                Event::SessionStarted(started) if &started.session_id == session_id
+            )
+    });
+    let complete = events.iter().position(|observed| {
+        !observed.replay
+            && matches!(
+                &observed.event,
+                Event::SessionReplayComplete(value) if &value.session_id == session_id
+            )
+    });
+    let extension = events.iter().position(|observed| {
+        observed.replay
+            && matches!(
+                &observed.event,
+                Event::ExtensionReady(ready)
+                    if ready.extension_name.as_str() == "e2e-fake-provider"
+            )
+    });
+    let initialized = events.iter().position(|observed| {
+        observed.replay
+            && matches!(
+                &observed.event,
+                Event::HarnessAgentContextInitialized(value)
+                    if &value.agent_id == agent_id
+            )
+    });
+    let (
+        Some(prompt),
+        Some(response),
+        Some(session),
+        Some(extension),
+        Some(initialized),
+        Some(complete),
+    ) = (prompt, response, session, extension, initialized, complete)
+    else {
+        return Err("catch-up observer missed transcript, state, or replay boundary".into());
+    };
+    if !(session < prompt
+        && prompt < response
+        && response < extension
+        && extension < initialized
+        && initialized < complete)
+    {
+        return Err(format!(
+            "protocol catch-up order changed: prompt={prompt}, response={response}, \
+             session={session}, extension={extension}, initialized={initialized}, \
+             complete={complete}"
         )
         .into());
     }

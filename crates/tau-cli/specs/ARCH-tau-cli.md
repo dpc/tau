@@ -150,6 +150,21 @@ reservations, local watermark capture, and the scheduler's nonblocking channel
 selection. Input routing mirrors selection before enqueue, and renderer queue
 pressure never blocks the input thread's direct harness uplink.
 
+During initial cold attach, the UI retains the replay marker through socket
+decoding and stages visible replayed prompt/response transcript rows until the
+non-replay `session.replay_complete` boundary. Replay-marked current-state rows
+continue directly to the renderer, so session, extension, context, and agent
+initialization state appears before historical conversation without changing
+wire delivery or shared catch-up semantics. Staging uses the same 1,024-item /
+64-MiB limits as renderer admission. Encountering tool-bearing history flushes
+retained plain history in relative order and disables further staging because
+tool reconstruction has cross-event ordering dependencies. If an oversized
+plain catch-up reaches a limit after some state has already rendered, the UI
+similarly flushes retained history in its original relative order and stops
+staging rather than claiming to restore the already-overtaken global wire order
+or growing memory without bound. Traffic after the boundary passes through
+directly.
+
 External-editor prompt trailers are prompt-surface text. They may quote
 assistant responses and prior prompt text to help compose the next prompt, but
 the terminal UI must scope response context to the currently visible/no-agent

@@ -10,6 +10,7 @@ use crate::{list_agents as path_crate_list_agents, theme as path_crate_theme};
 
 #[cfg(test)]
 mod agent_picker_tests;
+mod cold_attach_stager;
 #[cfg(test)]
 mod event_message_tests;
 #[cfg(test)]
@@ -26,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use cold_attach_stager::{ColdAttachStager, renderer_event_from_delivery};
 use renderer_scheduler::{LocalRendererSender, RendererCommandScheduler};
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
@@ -760,16 +762,6 @@ pub(crate) fn retarget_prompt_draft_snapshot(
     queue_prompt_draft_snapshot(handle, session_id, target_agent_id, text);
 }
 
-/// Convert one delivery into renderer input while suppressing replayed
-/// terminal-output side effects.
-fn renderer_event_from_delivery(delivery: tau_proto::EventDelivery) -> Option<(Event, UnixMicros)> {
-    let (event, replay, recorded_at) = delivery.into_parts();
-    if replay && matches!(event, Event::Osc1337SetUserVar(_) | Event::TermBell(_)) {
-        return None;
-    }
-    Some((event, recorded_at.unwrap_or_else(UnixMicros::now)))
-}
-
 fn encode_binding_action(action: &CliBindingAction) -> String {
     let Some(command) = action.command.as_deref().filter(|c| !c.is_empty()) else {
         return action.action.clone();
@@ -780,6 +772,53 @@ fn encode_binding_action(action: &CliBindingAction) -> String {
         if action.trim { "trim" } else { "raw" },
         command,
     )
+}
+
+/// Enqueues one decoded delivery while preserving its decode correlation.
+fn enqueue_remote_delivery(
+    delivery: cold_attach_stager::RendererDelivery,
+    remote_tx: &mpsc::SyncSender<RendererCmd>,
+    renderer_byte_budget: &RendererByteBudget,
+    queued_remote_items: &path_std_sync_atomic::AtomicUsize,
+    renderer_arbiter: &Mutex<()>,
+    remote_admitted: &path_std_sync_atomic::AtomicU64,
+) -> bool {
+    let delivery_id = delivery.delivery_id;
+    let queue_bytes = delivery.queue_bytes;
+    let cmd = RendererCmd::Remote {
+        event: Box::new(delivery.event),
+        recorded_at: delivery.recorded_at,
+        delivery_id,
+        queue_bytes,
+        enqueued_at: Instant::now(),
+    };
+    let enqueue_started = Instant::now();
+    tracing::trace!(
+        target: "tau_cli::frontend_progress",
+        delivery_id,
+        frame_bytes = queue_bytes,
+        "renderer event admission started"
+    );
+    renderer_byte_budget.acquire(queue_bytes);
+    let queued_items = queued_remote_items.fetch_add(1, Ordering::AcqRel) + 1;
+    {
+        let _guard = renderer_arbiter.lock().expect(MUTEX_POISONED);
+        remote_admitted.fetch_add(1, Ordering::AcqRel);
+    }
+    if remote_tx.send(cmd).is_err() {
+        renderer_byte_budget.release(queue_bytes);
+        queued_remote_items.fetch_sub(1, Ordering::AcqRel);
+        return false;
+    }
+    tracing::trace!(
+        target: "tau_cli::frontend_progress",
+        delivery_id,
+        enqueue_wait_us = enqueue_started.elapsed().as_micros(),
+        queue_items = queued_items,
+        queue_bytes = *renderer_byte_budget.used.lock().expect(MUTEX_POISONED),
+        "renderer event enqueued"
+    );
+    true
 }
 
 pub(crate) fn run_chat(
@@ -880,6 +919,11 @@ pub(crate) fn run_chat(
     let local_disconnect_started = Arc::new(AtomicBool::new(false));
     let socket_local_disconnect_started = local_disconnect_started.clone();
     let socket_reader = std::thread::spawn(move || {
+        let mut cold_attach_stager = if attach {
+            ColdAttachStager::staging()
+        } else {
+            ColdAttachStager::pass_through()
+        };
         let next_delivery_id = path_std_cell::Cell::new(1_u64);
         let allocate_delivery_id = || {
             let delivery_id = next_delivery_id.get();
@@ -929,6 +973,21 @@ pub(crate) fn run_chat(
                 );
             }
         };
+        let drain_staging = |stager: &mut ColdAttachStager| {
+            stager
+                .finish_before_disconnect()
+                .into_iter()
+                .all(|delivery| {
+                    enqueue_remote_delivery(
+                        delivery,
+                        &remote_tx,
+                        &socket_renderer_byte_budget,
+                        &socket_queued_remote_items,
+                        &socket_renderer_arbiter,
+                        &socket_remote_admitted,
+                    )
+                })
+        };
         let mut reader = socket_reader_input;
         loop {
             let delivery_id = allocate_delivery_id();
@@ -952,22 +1011,20 @@ pub(crate) fn run_chat(
                         "socket frame read and decoded"
                     );
                     socket_ui_io_meter.record_downlink_frame_bytes(&message, frame_bytes);
-                    let cmd = match message {
+                    let deliveries = match message {
                         HarnessOutputMessage::Deliver(delivery) => {
-                            let Some((event, recorded_at)) = renderer_event_from_delivery(delivery)
+                            let Some(delivery) =
+                                renderer_event_from_delivery(delivery, queue_bytes, delivery_id)
                             else {
                                 continue;
                             };
-                            RendererCmd::Remote {
-                                event: Box::new(event),
-                                recorded_at,
-                                delivery_id,
-                                queue_bytes,
-                                enqueued_at: Instant::now(),
-                            }
+                            cold_attach_stager.admit(delivery)
                         }
                         HarnessOutputMessage::Disconnect(d) => {
                             if socket_local_disconnect_started.load(Ordering::Acquire) {
+                                return;
+                            }
+                            if !drain_staging(&mut cold_attach_stager) {
                                 return;
                             }
                             notify_disconnect(d.reason, delivery_id, queue_bytes);
@@ -975,39 +1032,24 @@ pub(crate) fn run_chat(
                         }
                         _ => continue,
                     };
-                    let enqueue_started = Instant::now();
-                    tracing::trace!(
-                        target: "tau_cli::frontend_progress",
-                        delivery_id,
-                        frame_bytes = queue_bytes,
-                        "renderer event admission started"
-                    );
-                    socket_renderer_byte_budget.acquire(queue_bytes);
-                    let queued_items =
-                        socket_queued_remote_items.fetch_add(1, Ordering::AcqRel) + 1;
-                    {
-                        let _guard = socket_renderer_arbiter.lock().expect(MUTEX_POISONED);
-                        socket_remote_admitted.fetch_add(1, Ordering::AcqRel);
+                    for delivery in deliveries {
+                        if !enqueue_remote_delivery(
+                            delivery,
+                            &remote_tx,
+                            &socket_renderer_byte_budget,
+                            &socket_queued_remote_items,
+                            &socket_renderer_arbiter,
+                            &socket_remote_admitted,
+                        ) {
+                            return;
+                        }
                     }
-                    if remote_tx.send(cmd).is_err() {
-                        socket_renderer_byte_budget.release(queue_bytes);
-                        socket_queued_remote_items.fetch_sub(1, Ordering::AcqRel);
-                        return;
-                    }
-                    tracing::trace!(
-                        target: "tau_cli::frontend_progress",
-                        delivery_id,
-                        enqueue_wait_us = enqueue_started.elapsed().as_micros(),
-                        queue_items = queued_items,
-                        queue_bytes = *socket_renderer_byte_budget
-                            .used
-                            .lock()
-                            .expect(MUTEX_POISONED),
-                        "renderer event enqueued"
-                    );
                 }
                 Ok(None) => {
                     if !socket_local_disconnect_started.load(Ordering::Acquire) {
+                        if !drain_staging(&mut cold_attach_stager) {
+                            return;
+                        }
                         notify_disconnect(
                             Some("harness connection closed".to_owned()),
                             delivery_id,
@@ -1019,6 +1061,9 @@ pub(crate) fn run_chat(
                 Err(error) => {
                     if !socket_local_disconnect_started.load(Ordering::Acquire) {
                         tracing::warn!(target: "tau_cli::ui", %error, "socket reader exiting");
+                        if !drain_staging(&mut cold_attach_stager) {
+                            return;
+                        }
                         notify_disconnect(
                             Some(format!("harness connection error: {error}")),
                             delivery_id,
