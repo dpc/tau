@@ -243,6 +243,7 @@ fn current_session_result_is_authoritative_ui_only_and_directed() {
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name("claim-external"),
                 client_kind: tau_proto::ClientKind::External,
+                expected_session_id: None,
                 capabilities: Default::default(),
             }),
         )

@@ -24,6 +24,12 @@ inheritable entries are copied to child agents when an explicit or derived
 parent is known. Tests should assert durable stores, not only runtime delivery,
 when changing durable facts.
 
+Cold resume acquires the selected session's existing lock without creating a
+directory or lock file, then revalidates valid persisted metadata while the lock
+remains held. A target deleted after CLI selection therefore fails startup
+instead of being recreated as an empty session. New-session startup retains the
+separate creating lock path.
+
 Agent stores also fold the latest `agent.initialization_context_set` as
 replaceable side state. It carries frozen effective skills and the optional
 rendered AGENTS.md bootstrap block but creates no transcript node and does not

@@ -298,6 +298,7 @@ pub(super) fn connect_ui(socket: &Path) -> Result<SocketPeer, Box<dyn std::error
         client_name: tau_proto::ExtensionName::parse("tau-e2e-daemon")
             .expect("test extension name must satisfy the identifier grammar"),
         client_kind: ClientKind::Ui,
+        expected_session_id: None,
         capabilities: Default::default(),
     }))?;
     let selectors = [

@@ -660,6 +660,7 @@ fn connect_probe_peer(
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name,
             client_kind,
+            expected_session_id: None,
             capabilities: Vec::new(),
         }))
         .ok()?;

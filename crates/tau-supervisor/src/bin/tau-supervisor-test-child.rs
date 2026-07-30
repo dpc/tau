@@ -100,6 +100,7 @@ fn write_startup_messages(writer: &mut PeerOutputWriter<impl Write>) -> Result<(
         protocol_version: PROTOCOL_VERSION,
         client_name: tau_proto::ExtensionName::parse("test-child")?,
         client_kind: ClientKind::Tool,
+        expected_session_id: None,
         capabilities: Default::default(),
     }))?;
     writer.write_message(&HarnessInputMessage::Subscribe(Subscribe {

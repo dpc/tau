@@ -2671,6 +2671,7 @@ where
         client_name: tau_proto::ExtensionName::parse("tau-echo-provider")
             .expect("built-in echo provider name must satisfy the extension identifier grammar"),
         client_kind: ClientKind::Provider,
+        expected_session_id: None,
         capabilities: Default::default(),
     }))?;
     // Live-only test provider: prompt and cancel events are work requests.
@@ -3464,7 +3465,11 @@ impl Harness {
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
         let mut store = store;
-        let _ = store.lock_and_load_session(eager_session_id)?;
+        if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
+            let _ = store.lock_and_load_existing_session(eager_session_id)?;
+        } else {
+            let _ = store.lock_and_load_session(eager_session_id)?;
+        }
         if storage_mode.is_durable() {
             crate::session_cleanup::spawn_session_cleanup(
                 sessions_dir.clone(),
@@ -3922,7 +3927,13 @@ impl Harness {
     }
 
     fn assemble_startup_harness(mut parts: StartupHarnessParts) -> Result<Self, HarnessError> {
-        let _ = parts.store.lock_and_load_session(&parts.eager_session_id)?;
+        if matches!(parts.launch.reason, tau_proto::SessionStartReason::Resume) {
+            let _ = parts
+                .store
+                .lock_and_load_existing_session(&parts.eager_session_id)?;
+        } else {
+            let _ = parts.store.lock_and_load_session(&parts.eager_session_id)?;
+        }
         let (tx, rx) = mpsc::channel();
         let bus = EventBus::new();
         let custom_prompts = parts
@@ -9052,7 +9063,7 @@ impl Harness {
         match origin {
             Some(ConnectionOrigin::Socket) => {
                 // `:detach` → stay alive even after this UI leaves; a later
-                // `tau --attach` can pick up right here.
+                // `tau attach SESSION` can pick up right here.
                 if self.is_authorized_ui_detach_request(&connection_id, &message) {
                     *exit_on_disconnect = false;
                 }
@@ -13853,6 +13864,42 @@ impl Harness {
                         }),
                     );
                     return Ok(false);
+                }
+                if hello.client_kind != ClientKind::Ui && hello.expected_session_id.is_some() {
+                    let _ = self.bus.send_to(
+                        client_id,
+                        None,
+                        HarnessOutputMessage::Disconnect(Disconnect {
+                            reason: Some(
+                                "only UI clients may declare an expected session".to_owned(),
+                            ),
+                        }),
+                    );
+                    return Ok(false);
+                }
+                if let Some(expected_session_id) = hello.expected_session_id {
+                    if expected_session_id != self.current_session_id {
+                        let _ = self.bus.send_to(
+                            client_id,
+                            None,
+                            HarnessOutputMessage::Disconnect(Disconnect {
+                                reason: Some(format!(
+                                    "session target mismatch: requested `{expected_session_id}`, \
+                                     but the connected harness is serving `{}`; retry `tau attach \
+                                     {expected_session_id}`",
+                                    self.current_session_id
+                                )),
+                            }),
+                        );
+                        return Ok(false);
+                    }
+                    self.bus.send_to(
+                        client_id,
+                        None,
+                        HarnessOutputMessage::UiSessionAccepted(tau_proto::UiSessionAccepted {
+                            session_id: self.current_session_id.clone(),
+                        }),
+                    )?;
                 }
                 if hello.client_kind == ClientKind::External
                     && hello.client_name.as_str() == EXTERNAL_AGENT_MESSAGE_CLIENT_NAME

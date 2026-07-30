@@ -323,6 +323,7 @@ pub(crate) fn write_hello<State>(
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: builder.name.clone(),
         client_kind: builder.kind.clone(),
+        expected_session_id: None,
         capabilities: builder.peer_capabilities.clone(),
     }))
 }
@@ -368,6 +369,7 @@ pub(crate) fn dispatch_message<State>(
             Ok(DispatchOutcome::Disconnect(disconnect))
         }
         tau_proto::HarnessOutputMessage::AgentPromptCreatedResult(_)
+        | tau_proto::HarnessOutputMessage::UiSessionAccepted(_)
         | tau_proto::HarnessOutputMessage::RenderedSystemPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedToolDefinitionsResult(_)

@@ -98,6 +98,7 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
         client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)
             .expect("callback client name must satisfy the identifier grammar"),
         client_kind: tau_proto::ClientKind::External,
+        expected_session_id: None,
         capabilities: Default::default(),
     }))?;
     peer.send(&HarnessInputMessage::ExternalAgentMessage(request))?;

@@ -841,9 +841,11 @@ pub(crate) fn run_chat(
         &crate::ui_client::hello_message(
             tau_proto::ExtensionName::parse("tau-chat")
                 .expect("chat UI name must satisfy the extension identifier grammar"),
+            Some(session_id),
         ),
     )?;
-    tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent hello");
+    verify_ui_session_admission(&mut read_stream, session_id)?;
+    tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "verified UI session admission");
     send_handshake_frame(
         &writer,
         &mut read_stream,
@@ -1342,6 +1344,41 @@ pub(crate) fn run_chat(
     tracing::info!(target: "tau_cli::ui", reason, "terminal UI exiting");
 
     Ok(())
+}
+
+/// Waits for the harness to confirm that UI admission bound the requested
+/// session before the terminal renderer starts.
+fn verify_ui_session_admission(
+    read_stream: &mut Box<dyn Read + Send>,
+    expected_session_id: &tau_proto::SessionId,
+) -> Result<(), CliError> {
+    let mut reader = PeerInputReader::new(BufReader::new(read_stream));
+    match reader.read_message() {
+        Ok(Some(HarnessOutputMessage::UiSessionAccepted(accepted)))
+            if accepted.session_id == *expected_session_id =>
+        {
+            Ok(())
+        }
+        Ok(Some(HarnessOutputMessage::UiSessionAccepted(accepted))) => {
+            Err(CliError::DaemonExited(format!(
+                "session target mismatch: requested `{expected_session_id}`, but the connected \
+                 harness admitted `{}`",
+                accepted.session_id
+            )))
+        }
+        Ok(Some(HarnessOutputMessage::Disconnect(disconnect))) => {
+            Err(CliError::DaemonExited(disconnect.reason.unwrap_or_else(
+                || "harness rejected UI session admission".to_owned(),
+            )))
+        }
+        Ok(Some(other)) => Err(CliError::DaemonExited(format!(
+            "harness sent {other:?} before UI session admission"
+        ))),
+        Ok(None) => Err(CliError::DaemonExited(
+            "harness closed before confirming UI session admission".to_owned(),
+        )),
+        Err(error) => Err(CliError::Io(io::Error::other(error))),
+    }
 }
 
 /// How the input loop ended. Controls daemon disposition on exit.

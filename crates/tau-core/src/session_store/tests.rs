@@ -4,6 +4,57 @@ use tau_proto::{
 };
 
 use super::*;
+
+/// Resume admission must fail without recreating any path when the selected
+/// persisted session disappeared before its writer lock was acquired.
+#[test]
+fn lock_existing_session_rejects_deleted_target_without_recreation() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    {
+        let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
+        store
+            .record_session_meta("session-1")
+            .expect("session metadata is created");
+    }
+    let session_dir = temp.path().join("session-1");
+    std::fs::remove_dir_all(&session_dir).expect("selected session is deleted");
+
+    let mut store = SessionStore::open_lazy(temp.path()).expect("store reopens");
+    let error = store
+        .lock_and_load_existing_session("session-1")
+        .expect_err("deleted session must fail");
+
+    assert!(matches!(
+        error,
+        SessionStoreError::SessionNotFound { ref session_id }
+            if session_id.as_str() == "session-1"
+    ));
+    assert!(!session_dir.exists());
+}
+
+/// Resume admission must retain the existing session lock so a cooperative
+/// second process cannot acquire the target during later startup work.
+#[test]
+fn lock_existing_session_retains_exclusive_lock() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    {
+        let mut store = SessionStore::open_lazy(temp.path()).expect("store opens");
+        store
+            .record_session_meta("session-1")
+            .expect("session metadata is created");
+    }
+
+    let mut resumed = SessionStore::open_lazy(temp.path()).expect("resume store opens");
+    resumed
+        .lock_and_load_existing_session("session-1")
+        .expect("persisted session locks");
+    let mut competing = SessionStore::open_lazy(temp.path()).expect("competing store opens");
+    let error = competing
+        .lock_and_load_existing_session("session-1")
+        .expect_err("retained lock excludes a competing resume");
+
+    assert!(matches!(error, SessionStoreError::Locked { .. }));
+}
 use crate::journal_sync::SyncTargetKind;
 use crate::record_log::AppendFault;
 

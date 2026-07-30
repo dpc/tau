@@ -197,6 +197,12 @@ root. Runtime discovery uses both fields to establish live identity without
 trusting adjacent metadata. See
 [SPEC-tau-proto-session-events](SPEC-tau-proto-session-events.md).
 
+An interactive UI may bind `Hello.expected_session_id` to its selected target.
+The harness admits the connection only when that value equals its current
+session and replies with `ui_session_accepted` before accepting later UI
+traffic. A mismatch receives an actionable disconnect instead, preventing a
+stale or replaced runtime socket from silently attaching the UI elsewhere.
+
 `get_session_agent_list` is a separate UI-only, requester-directed RPC for the
 harness's exact current session. Its bounded result contains membership
 lifecycle, persistence, runtime/navigation classification for live rows, and

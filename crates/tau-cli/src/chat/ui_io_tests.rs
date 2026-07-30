@@ -815,6 +815,7 @@ fn handshake_write_error_reads_pending_startup_disconnect() {
         &crate::ui_client::hello_message(
             tau_proto::ExtensionName::parse("tau-chat")
                 .expect("chat UI name must satisfy the extension identifier grammar"),
+            None,
         ),
     )
     .expect_err("handshake should fail");

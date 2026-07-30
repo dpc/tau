@@ -73,6 +73,7 @@ fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
             client_name: tau_proto::ExtensionName::parse("denied-client")
                 .expect("test identifier must satisfy its grammar"),
             client_kind: ClientKind::Ui,
+            expected_session_id: None,
             capabilities: Default::default(),
         }))
         .expect("hello should send");

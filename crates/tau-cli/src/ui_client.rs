@@ -153,11 +153,15 @@ pub(crate) fn connect_ui_writer(
     Ok(writer)
 }
 
-pub(crate) fn hello_message(client_name: tau_proto::ExtensionName) -> HarnessInputMessage {
+pub(crate) fn hello_message(
+    client_name: tau_proto::ExtensionName,
+    expected_session_id: Option<&tau_proto::SessionId>,
+) -> HarnessInputMessage {
     HarnessInputMessage::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name,
         client_kind: ClientKind::Ui,
+        expected_session_id: expected_session_id.cloned(),
         capabilities: Default::default(),
     })
 }
@@ -287,7 +291,7 @@ pub(crate) fn send_hello(
 ) -> io::Result<()> {
     let client_name = tau_proto::ExtensionName::parse(client_name.as_ref().to_owned())
         .map_err(io::Error::other)?;
-    send_message(writer, &hello_message(client_name))
+    send_message(writer, &hello_message(client_name, None))
 }
 
 pub(crate) fn subscribe(

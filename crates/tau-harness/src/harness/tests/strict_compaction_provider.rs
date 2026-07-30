@@ -135,6 +135,7 @@ fn write_startup(
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("tau-strict-compaction-provider"),
             client_kind: tau_proto::ClientKind::Provider,
+            expected_session_id: None,
             capabilities: Default::default(),
         },
     )))?;

@@ -549,7 +549,8 @@ fn handle_harness_message(
         | HarnessOutputMessage::ExtensionDataResult(_)
         | HarnessOutputMessage::ExternalAgentMessageResult(_)
         | HarnessOutputMessage::ExternalAgentMessageAuthResult(_)
-        | HarnessOutputMessage::PeerSessionProbeResult(_) => false,
+        | HarnessOutputMessage::PeerSessionProbeResult(_)
+        | HarnessOutputMessage::UiSessionAccepted(_) => false,
     }
 }
 

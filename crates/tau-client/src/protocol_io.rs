@@ -365,6 +365,7 @@ pub fn output_message_key(message: &HarnessOutputMessage) -> String {
         HarnessOutputMessage::Deliver(delivery) => delivery.event().name().to_string(),
         HarnessOutputMessage::Disconnect(_) => "message.disconnect".to_owned(),
         HarnessOutputMessage::Configure(_) => "message.configure".to_owned(),
+        HarnessOutputMessage::UiSessionAccepted(_) => "message.ui_session_accepted".to_owned(),
         HarnessOutputMessage::InterceptRequest(_) => "message.intercept_request".to_owned(),
         HarnessOutputMessage::AgentPromptCreatedResult(_) => {
             "message.agent_prompt_created_result".to_owned()

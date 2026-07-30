@@ -1989,6 +1989,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             protocol_version: PROTOCOL_VERSION,
             client_name: test_extension_name("provider"),
             client_kind: ClientKind::Provider,
+            expected_session_id: None,
             capabilities: Default::default(),
         }),
         HarnessInputMessage::Subscribe(Subscribe {
@@ -3632,6 +3633,7 @@ fn directional_message_wire_form_uses_flat_message_tag() {
         protocol_version: PROTOCOL_VERSION,
         client_name: test_extension_name("provider"),
         client_kind: ClientKind::Provider,
+        expected_session_id: None,
         capabilities: Default::default(),
     });
     let input_json = serde_json::to_value(&input).expect("serialize input");

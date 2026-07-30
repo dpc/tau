@@ -2650,6 +2650,7 @@ fn authenticate_external_agent_message_sender(
         )
         .map_err(|error| format!("invalid external-message client name: {error}"))?,
         client_kind: tau_proto::ClientKind::External,
+        expected_session_id: None,
         capabilities: Default::default(),
     }))
     .map_err(|err| format!("failed to send external auth hello: {err}"))?;
@@ -2735,6 +2736,7 @@ fn send_external_agent_message_request(
         )
         .map_err(|error| format!("invalid external-message client name: {error}"))?,
         client_kind: tau_proto::ClientKind::External,
+        expected_session_id: None,
         capabilities: Default::default(),
     }))
     .map_err(|err| format!("failed to send external message hello: {err}"))?;

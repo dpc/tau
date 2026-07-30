@@ -636,6 +636,7 @@ fn tree_request_is_silently_denied_for_other_client_origins() {
                 crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
             ),
             client_kind: tau_proto::ClientKind::External,
+            expected_session_id: None,
             capabilities: Default::default(),
         }),
     )
@@ -857,6 +858,7 @@ fn detach_request_is_silently_denied_for_other_client_origins() {
                 crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
             ),
             client_kind: tau_proto::ClientKind::External,
+            expected_session_id: None,
             capabilities: Default::default(),
         }),
     )
@@ -1065,6 +1067,7 @@ fn debug_event_stats_request_reports_recorded_extension_input() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("std-shell"),
             client_kind: tau_proto::ClientKind::Tool,
+            expected_session_id: None,
             capabilities: Default::default(),
         })),
     )
@@ -1150,6 +1153,7 @@ fn debug_event_stats_request_rejects_dedicated_external_peer_without_leaking_cou
                 crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
             ),
             client_kind: tau_proto::ClientKind::External,
+            expected_session_id: None,
             capabilities: Default::default(),
         }),
     )
@@ -1451,6 +1455,7 @@ fn configure_includes_extension_state_dir_and_creates_it() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("tau-ext-pim"),
             client_kind: tau_proto::ClientKind::Tool,
+            expected_session_id: None,
             capabilities: Default::default(),
         })),
     )
@@ -1495,6 +1500,7 @@ fn memory_only_configure_omits_extension_state_dir() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("tau-ext-pim"),
             client_kind: tau_proto::ClientKind::Tool,
+            expected_session_id: None,
             capabilities: Default::default(),
         })),
     )
@@ -1541,6 +1547,7 @@ fn configure_includes_only_resolved_extension_secrets() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("tau-ext-pim"),
             client_kind: tau_proto::ClientKind::Tool,
+            expected_session_id: None,
             capabilities: Default::default(),
         })),
     )
@@ -2557,6 +2564,7 @@ fn two_prefixed_instances_coexist_and_disconnect_independently() {
                 protocol_version: tau_proto::PROTOCOL_VERSION,
                 client_name: crate::test_extension_name(connection_id),
                 client_kind: tau_proto::ClientKind::Tool,
+                expected_session_id: None,
                 capabilities: Default::default(),
             }),
         )
@@ -3010,6 +3018,7 @@ fn optional_mismatched_protocol_is_disabled_but_required_mismatch_is_fatal() {
             protocol_version: tau_proto::PROTOCOL_VERSION + 1,
             client_name: crate::test_extension_name(name),
             client_kind: tau_proto::ClientKind::Tool,
+            expected_session_id: None,
             capabilities: Default::default(),
         })
     };
@@ -5879,6 +5888,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
                     protocol_version: tau_proto::PROTOCOL_VERSION,
                     client_name: crate::test_extension_name("late-tool"),
                     client_kind: tau_proto::ClientKind::Tool,
+                    expected_session_id: None,
                     capabilities: Default::default(),
                 },
             )))
@@ -7304,6 +7314,7 @@ fn hello_protocol_version_mismatch_is_rejected() {
         protocol_version: tau_proto::PROTOCOL_VERSION + 1,
         client_name: crate::test_extension_name("future-client"),
         client_kind: tau_proto::ClientKind::Tool,
+        expected_session_id: None,
         capabilities: Default::default(),
     };
 
@@ -7334,6 +7345,7 @@ fn extension_hello_installs_declared_peer_capabilities() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("bridge"),
             client_kind: tau_proto::ClientKind::Tool,
+            expected_session_id: None,
             capabilities: vec![tau_proto::PeerCapability::MessageBridge],
         }),
     )
@@ -7419,6 +7431,7 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
                 protocol_version: tau_proto::PROTOCOL_VERSION + 1,
                 client_name: crate::test_extension_name("stale-ui"),
                 client_kind: tau_proto::ClientKind::Ui,
+                expected_session_id: None,
                 capabilities: Default::default(),
             })),
         )
@@ -7437,6 +7450,72 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
         )),
         "expected disconnect for stale UI, got: {events:?}"
     );
+}
+
+/// A UI that reaches a stale or replaced socket must be rejected before it can
+/// subscribe to a session other than the explicit attach target.
+#[test]
+fn client_hello_rejects_expected_session_mismatch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let events = connect_test_client(&mut h, "attach-ui", tau_proto::ClientKind::Ui);
+    let requested = tau_proto::SessionId::parse("different-session").expect("valid session id");
+
+    let keep = h
+        .handle_client_event(
+            "attach-ui",
+            TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+                protocol_version: tau_proto::PROTOCOL_VERSION,
+                client_name: crate::test_extension_name("attach-ui"),
+                client_kind: tau_proto::ClientKind::Ui,
+                expected_session_id: Some(requested.clone()),
+                capabilities: Default::default(),
+            })),
+        )
+        .expect("mismatched session is a client-local rejection");
+
+    assert!(!keep);
+    let events = events.lock().expect("events");
+    assert!(events.iter().any(|event| matches!(
+        &event.frame,
+        HarnessOutputMessage::Disconnect(disconnect)
+            if disconnect.reason.as_deref().is_some_and(|reason|
+                reason.contains(requested.as_str())
+                && reason.contains(h.current_session_id.as_str()))
+    )));
+}
+
+/// A matching expected session receives an explicit admission acknowledgement
+/// so the UI can verify binding before it starts rendering.
+#[test]
+fn client_hello_acknowledges_matching_expected_session() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let events = connect_test_client(&mut h, "attach-ui", tau_proto::ClientKind::Ui);
+    let expected = h.current_session_id.clone();
+
+    let keep = h
+        .handle_client_event(
+            "attach-ui",
+            TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+                protocol_version: tau_proto::PROTOCOL_VERSION,
+                client_name: crate::test_extension_name("attach-ui"),
+                client_kind: tau_proto::ClientKind::Ui,
+                expected_session_id: Some(expected.clone()),
+                capabilities: Default::default(),
+            })),
+        )
+        .expect("matching session is admitted");
+
+    assert!(keep);
+    let events = events.lock().expect("events");
+    assert!(events.iter().any(|event| matches!(
+        &event.frame,
+        HarnessOutputMessage::UiSessionAccepted(accepted)
+            if accepted.session_id == expected
+    )));
 }
 
 /// A peer request with an in-flight agent call ID must commit before rejection,

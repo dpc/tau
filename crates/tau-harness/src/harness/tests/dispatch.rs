@@ -30174,6 +30174,7 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("ordinary-ui"),
             client_kind: tau_proto::ClientKind::Ui,
+            expected_session_id: None,
             capabilities: Default::default(),
         }),
     )
@@ -30193,6 +30194,7 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
                 crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
             ),
             client_kind: tau_proto::ClientKind::External,
+            expected_session_id: None,
             capabilities: Default::default(),
         }),
     )
@@ -30238,6 +30240,7 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::test_extension_name(crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME),
         client_kind: tau_proto::ClientKind::External,
+        expected_session_id: None,
         capabilities: Default::default(),
     }))
     .expect("send external hello");
@@ -30380,6 +30383,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::test_extension_name(crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME),
         client_kind: tau_proto::ClientKind::External,
+        expected_session_id: None,
         capabilities: Default::default(),
     }))
     .expect("target hello");
@@ -30574,6 +30578,7 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
                 crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
             ),
             client_kind: tau_proto::ClientKind::External,
+            expected_session_id: None,
             capabilities: Default::default(),
         }),
     )

@@ -71,6 +71,7 @@ enum TestMessage {
     GetCurrentSession(tau_proto::GetCurrentSession),
     GetSessionAgentList(tau_proto::GetSessionAgentList),
     Configure(tau_proto::Configure),
+    UiSessionAccepted(tau_proto::UiSessionAccepted),
     InterceptRequest(tau_proto::InterceptRequest),
     LiveDelivery(EventDelivery),
     AgentPromptCreatedResult(Box<tau_proto::AgentPromptCreatedResult>),
@@ -109,6 +110,9 @@ impl TestProtocolItem {
         match message {
             HarnessOutputMessage::Configure(message) => {
                 Self::Message(TestMessage::Configure(message))
+            }
+            HarnessOutputMessage::UiSessionAccepted(message) => {
+                Self::Message(TestMessage::UiSessionAccepted(message))
             }
             HarnessOutputMessage::Disconnect(message) => {
                 Self::Message(TestMessage::Disconnect(message))
@@ -191,6 +195,7 @@ impl TestMessage {
             Self::GetCurrentSession(message) => HarnessInputMessage::GetCurrentSession(message),
             Self::GetSessionAgentList(message) => HarnessInputMessage::GetSessionAgentList(message),
             Self::Configure(_)
+            | Self::UiSessionAccepted(_)
             | Self::InterceptRequest(_)
             | Self::LiveDelivery(_)
             | Self::AgentPromptCreatedResult(_)
@@ -1177,6 +1182,7 @@ fn quiet_provider_harness_for_with_start_reason_and_storage_mode(
                     protocol_version: tau_proto::PROTOCOL_VERSION,
                     client_name: crate::test_extension_name("tau-quiet-provider"),
                     client_kind: tau_proto::ClientKind::Provider,
+                    expected_session_id: None,
                     capabilities: Default::default(),
                 },
             )))?;

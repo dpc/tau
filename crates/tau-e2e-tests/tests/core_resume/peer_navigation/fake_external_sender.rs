@@ -245,6 +245,7 @@ fn callback_hello() -> tau_proto::Hello {
         client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)
             .expect("callback client name must satisfy the identifier grammar"),
         client_kind: tau_proto::ClientKind::External,
+        expected_session_id: None,
         capabilities: Default::default(),
     }
 }

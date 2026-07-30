@@ -72,6 +72,7 @@ fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
                     client_name: tau_proto::ExtensionName::parse("client")
                         .expect("test identifier must satisfy its grammar"),
                     client_kind: ClientKind::Ui,
+                    expected_session_id: None,
                     capabilities: Default::default(),
                 }))
                 .expect("client hello should send");
@@ -93,6 +94,7 @@ fn later_attached_client_can_exchange_protocol_events_over_unix_socket() {
             client_name: tau_proto::ExtensionName::parse("client")
                 .expect("test identifier must satisfy its grammar"),
             client_kind: ClientKind::Ui,
+            expected_session_id: None,
             capabilities: Default::default(),
         })
     );

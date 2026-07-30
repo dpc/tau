@@ -126,6 +126,8 @@ pub enum SessionStoreError {
     },
     /// Another process holds the exclusive lock for this object.
     Locked { path: PathBuf, holder: String },
+    /// A requested persisted session does not exist.
+    SessionNotFound { session_id: SessionId },
     /// A session directory could not be converted to UTF-8.
     InvalidSessionDir { path: PathBuf },
     /// A session id is not safe to use as one store directory name.
@@ -188,6 +190,9 @@ impl fmt::Display for SessionStoreError {
                 path.display(),
                 holder.trim()
             ),
+            Self::SessionNotFound { session_id } => {
+                write!(f, "persisted session `{session_id}` no longer exists")
+            }
             Self::InvalidSessionDir { path } => write!(
                 f,
                 "invalid session directory name (non-utf8): {}",
@@ -224,6 +229,7 @@ impl Error for SessionStoreError {
             Self::Encode { source, .. } => Some(source),
             Self::RecordTooLarge { .. }
             | Self::Locked { .. }
+            | Self::SessionNotFound { .. }
             | Self::InvalidSessionDir { .. }
             | Self::InvalidSessionId { .. }
             | Self::InvalidEvent { .. }
@@ -540,6 +546,72 @@ impl SessionStore {
             self.framed_appends.note_directory_boundary_chain(&root);
         }
         self.framed_appends.note_directory_boundary(&session_dir);
+        file.set_len(0).map_err(|source| SessionStoreError::Write {
+            path: lock_path.clone(),
+            source,
+        })?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| SessionStoreError::Write {
+                path: lock_path.clone(),
+                source,
+            })?;
+        writeln!(&mut file, "pid={} start={}", std::process::id(), unix_now()).map_err(
+            |source| SessionStoreError::Write {
+                path: lock_path,
+                source,
+            },
+        )?;
+        self.locks.insert(sid, file);
+        Ok(true)
+    }
+
+    /// Acquires an existing session's writer lock without creating any session
+    /// path, then revalidates its persisted metadata while retaining the lock.
+    fn ensure_existing_locked(&mut self, session_id: &str) -> Result<bool, SessionStoreError> {
+        if self.mode.is_ephemeral() {
+            return Err(SessionStoreError::SessionNotFound {
+                session_id: validate_session_id(session_id)?,
+            });
+        }
+        let sid = validate_session_id(session_id)?;
+        if self.locks.contains_key(&sid) {
+            return Ok(false);
+        }
+        let session_dir = self.session_dir(&sid);
+        let lock_path = session_dir.join("lock");
+        let mut file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
+            Ok(file) => file,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                return Err(SessionStoreError::SessionNotFound { session_id: sid });
+            }
+            Err(source) => {
+                return Err(SessionStoreError::Open {
+                    path: lock_path,
+                    source,
+                });
+            }
+        };
+        if FileExt::try_lock_exclusive(&file).is_err() {
+            let mut holder = String::new();
+            let _ = file.read_to_string(&mut holder);
+            return Err(SessionStoreError::Locked {
+                path: lock_path,
+                holder,
+            });
+        }
+        let meta_path = session_dir.join("meta.json");
+        match read_meta(&meta_path) {
+            Ok(_) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                return Err(SessionStoreError::SessionNotFound { session_id: sid });
+            }
+            Err(source) => {
+                return Err(SessionStoreError::Read {
+                    path: meta_path,
+                    source,
+                });
+            }
+        }
         file.set_len(0).map_err(|source| SessionStoreError::Write {
             path: lock_path.clone(),
             source,
@@ -978,6 +1050,23 @@ impl SessionStore {
             self.load_session_if_needed(session_id.as_str())?;
         }
         Ok(self.sessions.get(&session_id))
+    }
+
+    /// Locks and loads an already-persisted session without creating a missing
+    /// session directory, lock, journal, or metadata sidecar.
+    ///
+    /// The existence check occurs after the exclusive lock is held, so
+    /// cooperative cleanup cannot delete the selected session between
+    /// revalidation and later startup writes.
+    pub fn lock_and_load_existing_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Option<&SessionMembership>, SessionStoreError> {
+        let session_id = validate_session_id(session_id)?;
+        if self.ensure_existing_locked(session_id.as_str())? {
+            self.sessions.remove(&session_id);
+        }
+        self.lock_and_load_session(session_id.as_str())
     }
 
     /// Returns one already-loaded session membership view.

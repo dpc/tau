@@ -45,6 +45,7 @@ fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegistrationDeclared
             protocol_version: PROTOCOL_VERSION,
             client_name: test_extension_name("test-child"),
             client_kind: ClientKind::Tool,
+            expected_session_id: None,
             capabilities: Default::default(),
         })
     );

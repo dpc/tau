@@ -36,12 +36,28 @@ pub enum PeerCapability {
 /// Announcement sent by a participant after connecting.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
+    /// Protocol version understood by the connecting peer.
     pub protocol_version: u32,
+    /// Stable name used to identify the connecting peer.
     pub client_name: ExtensionName,
+    /// Authority class requested by the connecting peer.
     pub client_kind: ClientKind,
+    /// Session a UI expects this connection to enter.
+    ///
+    /// The harness rejects a UI connection when this value does not match its
+    /// current session. Non-UI peers must omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_session_id: Option<SessionId>,
     /// Optional protocol authorities declared for this connection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<PeerCapability>,
+}
+
+/// Harness acknowledgement that binds an admitted UI connection to a session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiSessionAccepted {
+    /// Session identity verified during UI connection admission.
+    pub session_id: SessionId,
 }
 
 /// Subscription request describing which events a participant wants.
@@ -1104,6 +1120,7 @@ impl HarnessInputMessage {
 #[serde(tag = "message", content = "payload", rename_all = "snake_case")]
 pub enum HarnessOutputMessage {
     Configure(Configure),
+    UiSessionAccepted(UiSessionAccepted),
     Disconnect(Disconnect),
     Deliver(EventDelivery),
     InterceptRequest(InterceptRequest),

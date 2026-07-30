@@ -21,6 +21,7 @@ fn extension_reader_waits_for_initialized_ack() {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: crate::test_extension_name("test-extension"),
             client_kind: tau_proto::ClientKind::Tool,
+            expected_session_id: None,
             capabilities: Default::default(),
         }))
         .expect("write hello");
