@@ -8,10 +8,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
+use std::{fmt, io as path_std_io};
 
 use indexmap::IndexMap;
 use serde::de::Error as _;
@@ -593,7 +593,7 @@ impl CliState {
     fn save_inner(&self, dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("cli.json");
-        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let text = serde_json::to_string_pretty(self).map_err(path_std_io::Error::other)?;
         std::fs::write(path, text)
     }
 }
@@ -2099,7 +2099,7 @@ pub fn load_testing_settings(dirs: &TauDirs) -> Result<Option<TestingSettings>, 
     };
     let path = dir.join("testing.yaml");
     let Some(metadata) = std::fs::metadata(&path).map(Some).or_else(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
+        if err.kind() == path_std_io::ErrorKind::NotFound {
             Ok(None)
         } else {
             Err(SettingsError::Config(config::ConfigError::Message(
@@ -2639,7 +2639,7 @@ fn yaml_layer_paths(dir: Option<&Path>, name: &str) -> Result<Vec<PathBuf>, Sett
 
     let drop_dir = dir.join(format!("{name}.d"));
     let Some(metadata) = std::fs::metadata(&drop_dir).map(Some).or_else(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
+        if err.kind() == path_std_io::ErrorKind::NotFound {
             Ok(None)
         } else {
             Err(SettingsError::Config(config::ConfigError::Message(

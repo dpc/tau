@@ -1,5 +1,7 @@
 //! Focused tests for response-sampler timing state.
 
+use std::{io as path_std_io, time as path_std_time};
+
 use super::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
 
 /// Semantic timing is captured before cadence filtering and remains immutable
@@ -7,7 +9,7 @@ use super::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
 #[test]
 fn first_semantic_output_timing_precedes_batching_and_repeats() {
     let prompt = crate::openai_tests::prompt();
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     let mut sampler = ResponseSampler::new();
     sampler.mark_dispatched(start);
     sampler.observe_progress(start + RESPONSE_UPDATE_INTERVAL / 2, true);
@@ -44,7 +46,7 @@ fn first_semantic_output_timing_precedes_batching_and_repeats() {
 }
 
 fn decode_updates(bytes: &[u8]) -> Vec<tau_proto::ProviderResponseUpdated> {
-    let mut decoder = tau_proto::HarnessInputReader::new(std::io::BufReader::new(bytes));
+    let mut decoder = tau_proto::HarnessInputReader::new(path_std_io::BufReader::new(bytes));
     let mut updates = Vec::new();
     while let Some(message) = decoder.read_message().expect("decode provider update") {
         if let tau_proto::HarnessInputMessage::Emit(emit) = message

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync as path_std_sync;
 use std::sync::Condvar;
 use std::time::{Duration, Instant};
 
@@ -173,7 +174,7 @@ fn shutdown_does_not_join_blocked_sync() {
     let worker = JournalSyncWorker::with_backend(backend.clone());
     worker.mark_dirty(Path::new("/tmp/a/events.cbor"), 10, std::iter::empty());
     backend.wait_for(|state| state.blocked_entered);
-    let (sent, received) = std::sync::mpsc::channel();
+    let (sent, received) = path_std_sync::mpsc::channel();
 
     thread::spawn(move || {
         drop(worker);

@@ -4,6 +4,8 @@
 //! Component and local-execution boundaries are summarized in `ARCH-tau-cli`.
 //! Transcript presentation follows `SPEC-tau-cli-transcript-styling`.
 
+use tau_config::settings as path_tau_config_settings;
+
 pub mod cli;
 
 mod action_commands;
@@ -365,25 +367,25 @@ where
             break;
         }
         if arg == "--disable-roles-all" {
-            overrides.push(tau_config::settings::RoleCliOverride::DisableAll);
+            overrides.push(path_tau_config_settings::RoleCliOverride::DisableAll);
         } else if let Some(role) = arg.strip_prefix("--enable-role=") {
-            overrides.push(tau_config::settings::RoleCliOverride::Enable(
+            overrides.push(path_tau_config_settings::RoleCliOverride::Enable(
                 role.to_owned(),
             ));
         } else if arg == "--enable-role" {
             if let Some(role) = args.next() {
-                overrides.push(tau_config::settings::RoleCliOverride::Enable(
+                overrides.push(path_tau_config_settings::RoleCliOverride::Enable(
                     role.to_string_lossy().into_owned(),
                 ));
             }
         } else if let Some(role) = arg.strip_prefix("--disable-role=") {
-            overrides.push(tau_config::settings::RoleCliOverride::Disable(
+            overrides.push(path_tau_config_settings::RoleCliOverride::Disable(
                 role.to_owned(),
             ));
         } else if arg == "--disable-role"
             && let Some(role) = args.next()
         {
-            overrides.push(tau_config::settings::RoleCliOverride::Disable(
+            overrides.push(path_tau_config_settings::RoleCliOverride::Disable(
                 role.to_string_lossy().into_owned(),
             ));
         }
@@ -528,27 +530,27 @@ where
             break;
         }
         if arg == "--enable-extensions-all" {
-            overrides.push(tau_config::settings::ExtensionCliOverride::EnableAll);
+            overrides.push(path_tau_config_settings::ExtensionCliOverride::EnableAll);
         } else if arg == "--disable-extensions-all" {
-            overrides.push(tau_config::settings::ExtensionCliOverride::DisableAll);
+            overrides.push(path_tau_config_settings::ExtensionCliOverride::DisableAll);
         } else if let Some(extension) = arg.strip_prefix("--enable-extension=") {
-            overrides.push(tau_config::settings::ExtensionCliOverride::Enable(
+            overrides.push(path_tau_config_settings::ExtensionCliOverride::Enable(
                 extension.to_owned(),
             ));
         } else if arg == "--enable-extension" {
             if let Some(extension) = args.next() {
-                overrides.push(tau_config::settings::ExtensionCliOverride::Enable(
+                overrides.push(path_tau_config_settings::ExtensionCliOverride::Enable(
                     extension.to_string_lossy().into_owned(),
                 ));
             }
         } else if let Some(extension) = arg.strip_prefix("--disable-extension=") {
-            overrides.push(tau_config::settings::ExtensionCliOverride::Disable(
+            overrides.push(path_tau_config_settings::ExtensionCliOverride::Disable(
                 extension.to_owned(),
             ));
         } else if arg == "--disable-extension"
             && let Some(extension) = args.next()
         {
-            overrides.push(tau_config::settings::ExtensionCliOverride::Disable(
+            overrides.push(path_tau_config_settings::ExtensionCliOverride::Disable(
                 extension.to_string_lossy().into_owned(),
             ));
         }

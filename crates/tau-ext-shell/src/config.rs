@@ -1,5 +1,7 @@
 //! Per-session configuration for the shell/file extension.
 
+use std::path as path_std_path;
+
 #[cfg(test)]
 mod tests;
 use std::collections::BTreeMap;
@@ -161,7 +163,7 @@ impl ShellConfig {
         apply_command_isolation(&mut child_cmd);
         let read_only_warning = if read_only_cwd && enforce_ro_bind {
             let mount_cwd = cwd.map_or_else(std::env::current_dir, |cwd| {
-                let cwd = std::path::Path::new(cwd);
+                let cwd = path_std_path::Path::new(cwd);
                 if cwd.is_absolute() {
                     Ok(cwd.to_path_buf())
                 } else {

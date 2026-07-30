@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::io::Read;
 use std::time::{Duration, Instant, SystemTime};
+use std::{cell as path_std_cell, io as path_std_io};
 
 use serde::Serialize;
 use tau_proto::{
@@ -18,7 +19,11 @@ use tau_provider::retry_policy::{
     RetryClass, RetryDecision, classify_error_code, parse_json_error_code, parse_json_reset_hint,
     parse_retry_after,
 };
-use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
+use tau_provider::{
+    StreamRepetitionGuard, StreamRepetitionKey,
+    debug_capture_writer as path_tau_provider_debug_capture_writer,
+};
+use tokio::runtime as path_tokio_runtime;
 
 const LOG_TARGET: &str = "provider-chat-completions";
 /// Default Chat Completions output-token cap Tau sends when no
@@ -346,7 +351,7 @@ pub fn run_attempt(
 ) -> AttemptOutcome {
     let mut progress = SemanticProgress::None;
     let result = {
-        let on_attempt_update = std::cell::RefCell::new(on_update);
+        let on_attempt_update = path_std_cell::RefCell::new(on_update);
         let mut on_state_update = |state: &StreamState| {
             let snapshot = AttemptProgress { state };
             progress = snapshot.semantic_progress();
@@ -700,8 +705,8 @@ fn read_chat_stream_body(
                     return Ok(());
                 }
                 if last_event_at.elapsed() >= STREAM_IDLE_TIMEOUT {
-                    return Err(LlmError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
+                    return Err(LlmError::Io(path_std_io::Error::new(
+                        path_std_io::ErrorKind::TimedOut,
                         "provider stream idle timeout",
                     )));
                 }
@@ -713,8 +718,8 @@ fn read_chat_stream_body(
                 ) =>
             {
                 if last_event_at.elapsed() >= STREAM_IDLE_TIMEOUT {
-                    return Err(LlmError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
+                    return Err(LlmError::Io(path_std_io::Error::new(
+                        path_std_io::ErrorKind::TimedOut,
                         "provider stream idle timeout",
                     )));
                 }
@@ -733,15 +738,15 @@ fn process_stream_chunk(
 ) -> Result<(bool, bool), LlmError> {
     state.record_transport_response_bytes(bytes.len());
     if state.transport_response_bytes > MAX_RESPONSE_BYTES {
-        return Err(LlmError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+        return Err(LlmError::Io(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
             "provider response exceeds byte limit",
         )));
     }
     pending.extend_from_slice(bytes);
     if pending.len() > MAX_SSE_LINE_BYTES {
-        return Err(LlmError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+        return Err(LlmError::Io(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
             "provider SSE line exceeds limit",
         )));
     }
@@ -821,7 +826,7 @@ fn chat_completions_stream(
     let body = try_build_request(provider, model, prompt)?;
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
     maybe_debug_submit_provider_request(prompt, model, debug_provider_requests, &body);
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(LlmError::Io)?;
@@ -1148,7 +1153,7 @@ fn submit_debug_json_with(
         return Ok(());
     }
     submit(
-        tau_provider::debug_capture_writer::ProviderDebugCapture::new(
+        path_tau_provider_debug_capture_writer::ProviderDebugCapture::new(
             prompt.session_id.clone(),
             prompt.agent_prompt_id.clone(),
             class,
@@ -1201,7 +1206,7 @@ fn maybe_debug_submit_provider_request_with(
     let metadata = provider_request_debug_metadata(prompt, model, body);
     if let Err(error) = submit_debug_json_with(
         prompt,
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest,
+        path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest,
         debug_provider_requests,
         &metadata,
         submit,
@@ -1243,7 +1248,7 @@ fn maybe_debug_submit_provider_response_with(
     let metadata = provider_response_debug_metadata(prompt, model, state, raw_events);
     if let Err(error) = submit_debug_json_with(
         prompt,
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse,
+        path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse,
         debug_provider_requests,
         &metadata,
         submit,
@@ -1313,7 +1318,7 @@ fn maybe_debug_submit_provider_http_error_with(
     let metadata = provider_http_error_debug_metadata(prompt, model, status, body);
     if let Err(error) = submit_debug_json_with(
         prompt,
-        tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse,
+        path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse,
         debug_provider_requests,
         &metadata,
         submit,

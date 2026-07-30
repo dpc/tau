@@ -1,3 +1,4 @@
+use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixListener;
 use std::process::{Child, Command};
 
@@ -1057,7 +1058,7 @@ fn find_harness_for_session_fails_closed_for_symlinked_live_metadata() {
         UnixListener::bind(socket_path(&unresolved)).expect("unresolved socket");
     let target = temp.path().join("metadata-target");
     std::fs::write(&target, b"{}").expect("symlink target");
-    std::os::unix::fs::symlink(&target, metadata_path(&unresolved)).expect("symlink metadata");
+    path_std_os_unix::fs::symlink(&target, metadata_path(&unresolved)).expect("symlink metadata");
 
     assert!(matches!(
         find_harness_for_session("same-session"),
@@ -1154,7 +1155,7 @@ fn prepare_harness_paths_rejects_symlink_runtime_root() {
     let _guard = runtime_override(&temp);
     let real = temp.path().join("real");
     std::fs::create_dir_all(&real).expect("real runtime target");
-    std::os::unix::fs::symlink(&real, root_runtime_dir()).expect("runtime symlink");
+    path_std_os_unix::fs::symlink(&real, root_runtime_dir()).expect("runtime symlink");
     let project_root = temp.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
 

@@ -1,5 +1,7 @@
 //! Best-effort cleanup of old per-session state directories.
 
+use std::{ffi as path_std_ffi, thread as path_std_thread};
+
 #[cfg(test)]
 mod tests;
 use std::ffi::OsString;
@@ -24,7 +26,7 @@ pub(crate) fn spawn_session_cleanup(
         return;
     };
 
-    if let Err(error) = std::thread::Builder::new()
+    if let Err(error) = path_std_thread::Builder::new()
         .name("tau-session-cleanup".to_owned())
         .spawn(move || cleanup_old_sessions(sessions_dir, retention, protected_sessions))
     {
@@ -172,7 +174,7 @@ fn detached_sessions_dir(sessions_dir: &Path) -> PathBuf {
     name.push(
         sessions_dir
             .file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("sessions")),
+            .unwrap_or_else(|| path_std_ffi::OsStr::new("sessions")),
     );
     name.push(".cleanup");
     sessions_dir.with_file_name(name)

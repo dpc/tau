@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{io as path_std_io, thread};
 
 use nix::poll::{PollFd, PollFlags, poll};
 use nix::pty::{Winsize, openpty};
@@ -118,10 +118,10 @@ impl PtyProcess {
         unsafe {
             command.pre_exec(move || {
                 if nix::libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(path_std_io::Error::last_os_error());
                 }
                 if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(path_std_io::Error::last_os_error());
                 }
                 Ok(())
             });
@@ -163,7 +163,7 @@ impl PtyProcess {
         let writer = self
             .writer
             .as_mut()
-            .ok_or_else(|| std::io::Error::other("PTY writer closed"))?;
+            .ok_or_else(|| path_std_io::Error::other("PTY writer closed"))?;
         writer.write_all(line.as_bytes())?;
         writer.write_all(b"\r")?;
         writer.flush()
@@ -174,7 +174,7 @@ impl PtyProcess {
         let writer = self
             .writer
             .as_mut()
-            .ok_or_else(|| std::io::Error::other("PTY writer closed"))?;
+            .ok_or_else(|| path_std_io::Error::other("PTY writer closed"))?;
         writer.write_all(b"\n")?;
         writer.flush()
     }

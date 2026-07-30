@@ -1,3 +1,7 @@
+use std::{io as path_std_io, process as path_std_process, time as path_std_time};
+
+use base64::engine as path_base64_engine;
+
 use super::*;
 
 fn args(extra: (&str, CborValue)) -> CborValue {
@@ -95,7 +99,10 @@ fn grep_rejects_context_above_cap() {
 /// unbounded memory growth in the drain thread.
 #[test]
 fn grep_stderr_drain_caps_captured_bytes() {
-    let captured = read_limited_bytes(std::io::Cursor::new(vec![b'x'; MAX_OUTPUT_BYTES + 100]), 32);
+    let captured = read_limited_bytes(
+        path_std_io::Cursor::new(vec![b'x'; MAX_OUTPUT_BYTES + 100]),
+        32,
+    );
 
     assert_eq!(captured.len(), 32);
     assert!(captured.iter().all(|byte| *byte == b'x'));
@@ -132,13 +139,13 @@ fn grep_waiter_kills_running_child_on_cancel_request() {
     let child = Command::new("sh")
         .arg("-c")
         .arg("sleep 10")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(path_std_process::Stdio::null())
+        .stderr(path_std_process::Stdio::null())
         .spawn()
         .expect("spawn sleeping child");
     let (cancel_tx, cancel_rx) = mpsc::channel();
     let (_stop_tx, stop_rx) = mpsc::channel();
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
 
     cancel_tx.send(()).expect("send cancel");
     let (_status, cancelled) = wait_ripgrep(child, stop_rx, Some(cancel_rx)).expect("wait child");
@@ -154,12 +161,12 @@ fn grep_waiter_kills_running_child_on_match_limit_stop() {
     let child = Command::new("sh")
         .arg("-c")
         .arg("sleep 10")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(path_std_process::Stdio::null())
+        .stderr(path_std_process::Stdio::null())
         .spawn()
         .expect("spawn sleeping child");
     let (stop_tx, stop_rx) = mpsc::channel();
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
 
     stop_tx.send(()).expect("send stop");
     let (_status, cancelled) = wait_ripgrep(child, stop_rx, None).expect("wait child");
@@ -190,7 +197,7 @@ fn grep_escapes_control_characters_in_paths() {
 #[test]
 fn grep_renders_invalid_utf8_byte_paths() {
     let encoded = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
+        &path_base64_engine::general_purpose::STANDARD,
         b"bad\xffname.txt",
     );
     let json = serde_json::json!({

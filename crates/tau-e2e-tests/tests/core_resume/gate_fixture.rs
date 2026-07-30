@@ -1,6 +1,7 @@
 //! Private-root configuration and artifact ownership for the Gate 1 PTY test.
 
 use std::cell::Cell;
+use std::fs as path_std_fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -66,7 +67,7 @@ impl GateFixture {
         mode: FixtureMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let tempdir = TempDir::new()?;
-        std::fs::set_permissions(tempdir.path(), std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(tempdir.path(), path_std_fs::Permissions::from_mode(0o700))?;
         let root = tempdir.path();
         let home = root.join("home");
         let config_home = root.join("xdg-config");
@@ -85,7 +86,7 @@ impl GateFixture {
             &artifacts,
         ] {
             std::fs::create_dir_all(directory)?;
-            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::set_permissions(directory, path_std_fs::Permissions::from_mode(0o700))?;
         }
         let tau_bin = exact_tau_binary()?;
         let fake_provider_bin = fake_provider_bin.canonicalize()?;
@@ -310,7 +311,7 @@ impl GateFixture {
             .join("sessions")
             .join(session_id)
             .join("lock");
-        let lock = std::fs::OpenOptions::new()
+        let lock = path_std_fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&lock_path)?;

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
+use base64::engine as path_base64_engine;
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
     PromptContext, PromptOriginator, ProviderFailureKind, ProviderResponseCompactionStatus,
@@ -13,6 +14,8 @@ use tau_proto::{
 use tau_provider::retry_policy::{RetryClass, RetryDecision, classify_error_code};
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 use uuid::Uuid;
+
+use crate::attempt_failure as path_crate_attempt_failure;
 
 /// The parts of a prompt needed by an LLM backend client.
 pub struct PromptPayload<'a> {
@@ -662,7 +665,7 @@ impl StreamState {
             stale_chain_fallback: false,
             repetition_guard: StreamRepetitionGuard::new(),
             quota_observation: None,
-            provider_evidence_mode: crate::attempt_failure::ProviderEvidenceMode::LiveOnly,
+            provider_evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
         }
     }
 
@@ -1247,7 +1250,7 @@ pub fn cbor_to_json(v: &CborValue) -> serde_json::Value {
         CborValue::Float(f) => serde_json::json!(f),
         CborValue::Text(s) => serde_json::Value::String(s.clone()),
         CborValue::Bytes(bytes) => serde_json::Value::String(base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
+            &path_base64_engine::general_purpose::STANDARD,
             bytes,
         )),
         CborValue::Array(arr) => serde_json::Value::Array(arr.iter().map(cbor_to_json).collect()),

@@ -1,5 +1,6 @@
 //! Anonymous payload staging support for compact semantic projection.
 
+use std::io as path_std_io;
 use std::io::{Read as _, Seek as _, Write as _};
 
 use serde::Serialize;
@@ -33,7 +34,7 @@ impl PayloadStore {
     pub(super) fn append<T: Serialize>(&mut self, value: &T) -> Result<Endpoint, InspectError> {
         let mut bytes = Vec::new();
         ciborium::into_writer(value, &mut bytes).map_err(projection_error)?;
-        let offset = self.file.seek(std::io::SeekFrom::End(0))?;
+        let offset = self.file.seek(path_std_io::SeekFrom::End(0))?;
         self.file.write_all(&bytes)?;
         Ok(Endpoint {
             offset,
@@ -46,7 +47,8 @@ impl PayloadStore {
         &mut self,
         endpoint: Endpoint,
     ) -> Result<T, InspectError> {
-        self.file.seek(std::io::SeekFrom::Start(endpoint.offset))?;
+        self.file
+            .seek(path_std_io::SeekFrom::Start(endpoint.offset))?;
         let mut bytes = vec![0; endpoint.length as usize];
         self.file.read_exact(&mut bytes)?;
         ciborium::from_reader(bytes.as_slice()).map_err(projection_error)

@@ -1,16 +1,18 @@
+use std::{io as path_std_io, net as path_std_net, sync as path_std_sync};
+
 use super::*;
 
 /// The full account read uses the isolated `/wham/usage` endpoint and sends
 /// bearer/account headers while returning only normalized quota facts.
 #[test]
 fn full_fetch_uses_expected_endpoint_and_auth_headers() {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind usage server");
+    let listener = path_std_net::TcpListener::bind(("127.0.0.1", 0)).expect("bind usage server");
     let address = listener.local_addr().expect("usage server address");
-    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    let (request_tx, request_rx) = path_std_sync::mpsc::channel();
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept usage request");
         let mut request = vec![0_u8; 8192];
-        let read = std::io::Read::read(&mut stream, &mut request).expect("read usage request");
+        let read = path_std_io::Read::read(&mut stream, &mut request).expect("read usage request");
         request.truncate(read);
         request_tx
             .send(String::from_utf8(request).expect("HTTP request is UTF-8"))
@@ -20,7 +22,8 @@ fn full_fetch_uses_expected_endpoint_and_auth_headers() {
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         );
-        std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write usage response");
+        path_std_io::Write::write_all(&mut stream, response.as_bytes())
+            .expect("write usage response");
     });
     let snapshot = fetch_usage(
         &format!("http://{address}/backend-api/"),

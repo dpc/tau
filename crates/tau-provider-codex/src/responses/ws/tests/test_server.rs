@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
+use std::net as path_std_net;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use tungstenite::Message;
+use tungstenite::{Message, handshake as path_tungstenite_handshake};
 
 /// Finite behavior for one localhost WebSocket connection.
 pub(super) enum ServerScript {
@@ -110,7 +111,7 @@ impl Drop for TestWsServer {
     fn drop(&mut self) {
         if self.worker.is_some() {
             self.shutdown.store(true, Ordering::SeqCst);
-            let _ = std::net::TcpStream::connect(self.addr);
+            let _ = path_std_net::TcpStream::connect(self.addr);
         }
         self.join_worker();
     }
@@ -135,7 +136,7 @@ fn serve_one(
     let mut socket = tungstenite::accept_hdr(
         stream,
         #[allow(clippy::result_large_err)]
-        |request: &tungstenite::handshake::server::Request, response| {
+        |request: &path_tungstenite_handshake::server::Request, response| {
             headers = capture_headers(request.headers());
             Ok(response)
         },

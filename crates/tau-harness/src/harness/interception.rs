@@ -24,6 +24,8 @@ use tau_proto::{
     InterceptReply, InterceptRequest, InterceptionPriority,
 };
 
+use crate::{agent as path_crate_agent, extension as path_crate_extension};
+
 /// One harness-owned full prompt carried from compact-fact admission through
 /// its one-shot post-commit delivery.
 #[derive(Clone)]
@@ -959,7 +961,7 @@ impl Harness {
         let notify_watchers = match &completion {
             AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
                 .first()
-                .is_some_and(crate::agent::PendingPrompt::should_notify_watchers),
+                .is_some_and(path_crate_agent::PendingPrompt::should_notify_watchers),
             AgentPublishCompletion::WorkingFinal { .. } => false,
             AgentPublishCompletion::InitialPromptSubmission { .. } => false,
         };
@@ -1179,7 +1181,7 @@ impl Harness {
             self.emit_info(&format!(
                 "role `{role_name}` has no available model — use :role to pick a role, :model <provider>/<model> to pick an agent model, or enable a provider"
             ));
-            self.set_agent_turn_state(cid, crate::agent::AgentTurnState::Idle);
+            self.set_agent_turn_state(cid, path_crate_agent::AgentTurnState::Idle);
             return;
         };
         let activation_cut = self.earliest_activation_cut(
@@ -1204,8 +1206,8 @@ impl Harness {
                     .head
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
                 agent.activation_dispatch =
-                    crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-                        owner: crate::agent::InferenceCheckpointOwner::Inference,
+                    path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+                        owner: path_crate_agent::InferenceCheckpointOwner::Inference,
                         agent_prompt_id: prompt_id.clone(),
                         through,
                         dispatch: crate::agent::InferenceDispatchOwnership {
@@ -1474,7 +1476,7 @@ impl Harness {
         .is_some_and(|command_id| self.ephemeral_ui_shell_route_ids.contains(command_id));
         let extension = source.and_then(|source_id| self.extensions.entries.get(source_id));
         let activation_reservation = extension
-            .filter(|entry| entry.state != crate::extension::ExtensionState::Ready)
+            .filter(|entry| entry.state != path_crate_extension::ExtensionState::Ready)
             .and_then(|_| {
                 let declaration_family = match event {
                     Event::ProviderModelsDeclared(_) => ActivationDeclarationFamily::ProviderModels,

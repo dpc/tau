@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::io as path_std_io;
 use std::io::BufRead as _;
 
 use super::*;
@@ -1633,7 +1634,7 @@ fn bounded_gateway_response(
 /// Read one JSON-line response from a gateway socket test client.
 fn read_socket_json(stream: &mut UnixStream) -> serde_json::Value {
     let mut line = String::new();
-    std::io::BufReader::new(stream.try_clone().expect("clone socket client"))
+    path_std_io::BufReader::new(stream.try_clone().expect("clone socket client"))
         .read_line(&mut line)
         .expect("read socket response");
     serde_json::from_str(&line).expect("socket response JSON")

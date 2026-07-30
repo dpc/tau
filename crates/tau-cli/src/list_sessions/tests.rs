@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use super::*;
+use crate::cli as path_crate_cli;
 
 fn session(session_id: &str, project_root: impl Into<PathBuf>) -> RunningSession {
     RunningSession {
@@ -21,7 +22,7 @@ fn human_output_preserves_running_session_list_contract() {
             session("a_session", "/work/a"),
             session("a_session", "/work/duplicate"),
         ],
-        &crate::cli::SessionListArgs::default(),
+        &path_crate_cli::SessionListArgs::default(),
     )
     .expect("human output");
 

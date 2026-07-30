@@ -5,6 +5,11 @@
 //! Cross-session delivery and sender authentication follow
 //! `SPEC-tau-harness-peer-routing`.
 
+use std::sync as path_std_sync;
+use std::sync::{atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc};
+
+use crate::{harness as path_crate_harness, runtime_dir as path_crate_runtime_dir};
+
 mod wait_tracker;
 
 use std::collections::{HashMap, HashSet};
@@ -157,8 +162,8 @@ const INTER_SESSION_UNAVAILABLE: &str = "target session is unavailable for inter
 
 static PEER_IO_ADMISSION: LazyLock<Mutex<PeerIoAdmission>> =
     LazyLock::new(|| Mutex::new(PeerIoAdmission::default()));
-static ACTIVE_RUNTIME_LOOKUPS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static ACTIVE_RUNTIME_LOOKUPS: path_std_sync::atomic::AtomicUsize =
+    path_std_sync_atomic::AtomicUsize::new(0);
 
 #[derive(Default)]
 struct PeerIoAdmission {
@@ -868,7 +873,7 @@ impl Harness {
                 started,
                 reselect_attempted: false,
                 rate_admitted_at,
-                completion: crate::harness::PendingPeerReceiveCompletion::Local {
+                completion: path_crate_harness::PendingPeerReceiveCompletion::Local {
                     conversation_id: conversation_id.clone(),
                     call_id,
                     tool_name,
@@ -1384,7 +1389,7 @@ impl Harness {
             let decision = deliveries.record(
                 status.turn_generation,
                 &status.agent_prompt_id,
-                crate::harness::AgentWatchProviderDeliveryKind::from(&status.state),
+                path_crate_harness::AgentWatchProviderDeliveryKind::from(&status.state),
             );
             tracing::trace!(
                 target: "tau_harness::agent_watch",
@@ -1545,7 +1550,7 @@ impl Harness {
             message,
         };
         let tx = self.tx.clone();
-        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation = Arc::new(path_std_sync_atomic::AtomicBool::new(false));
         self.peer_io_cancellations
             .retain(|pending| pending.strong_count() > 0);
         self.peer_io_cancellations
@@ -1646,7 +1651,7 @@ impl Harness {
         };
         let tx = self.tx.clone();
         let session_generation = self.current_session_generation;
-        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation = Arc::new(path_std_sync_atomic::AtomicBool::new(false));
         let cancellations = self
             .inbound_peer_io_cancellations
             .entry(client_id.clone())
@@ -1750,7 +1755,7 @@ impl Harness {
                 started,
                 reselect_attempted: false,
                 rate_admitted_at,
-                completion: crate::harness::PendingPeerReceiveCompletion::Remote {
+                completion: path_crate_harness::PendingPeerReceiveCompletion::Remote {
                     client_id,
                     request_id: request.request_id,
                 },
@@ -2616,7 +2621,7 @@ fn random_external_message_capability(rng: &mut rand::rngs::StdRng) -> String {
 
 fn authenticate_external_agent_message_sender(
     request: &tau_proto::ExternalAgentMessageRequest,
-    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+    cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
     let deadline = Instant::now() + EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT;
     let harness_path =
@@ -2701,7 +2706,7 @@ fn authenticate_external_agent_message_sender(
 
 fn send_external_agent_message_request(
     request: tau_proto::ExternalAgentMessageRequest,
-    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+    cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
 ) -> Result<(AgentId, bool), String> {
     let deadline = Instant::now() + EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT;
     let harness_path =
@@ -2779,14 +2784,16 @@ fn send_external_agent_message_request(
 fn bounded_runtime_lookup(
     session_id: &str,
     deadline: Instant,
-    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+    cancelled: &Arc<path_std_sync::atomic::AtomicBool>,
 ) -> Result<Option<std::path::PathBuf>, crate::runtime_dir::FindHarnessForSessionError> {
     let Some(permit) = RuntimeLookupPermit::try_acquire() else {
-        return Err(crate::runtime_dir::FindHarnessForSessionError::Incomplete {
-            session_id: session_id.to_owned(),
-        });
+        return Err(
+            path_crate_runtime_dir::FindHarnessForSessionError::Incomplete {
+                session_id: session_id.to_owned(),
+            },
+        );
     };
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let (tx, rx) = path_std_sync::mpsc::sync_channel(1);
     let owned_session_id = session_id.to_owned();
     let worker_session_id = owned_session_id.clone();
     let worker_cancelled = Arc::clone(cancelled);
@@ -2801,22 +2808,28 @@ fn bounded_runtime_lookup(
     });
     loop {
         if cancelled.load(Ordering::Acquire) {
-            return Err(crate::runtime_dir::FindHarnessForSessionError::Incomplete {
-                session_id: owned_session_id,
-            });
+            return Err(
+                path_crate_runtime_dir::FindHarnessForSessionError::Incomplete {
+                    session_id: owned_session_id,
+                },
+            );
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return Err(crate::runtime_dir::FindHarnessForSessionError::Incomplete {
-                session_id: owned_session_id,
-            });
+            return Err(
+                path_crate_runtime_dir::FindHarnessForSessionError::Incomplete {
+                    session_id: owned_session_id,
+                },
+            );
         };
         match rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
             Ok(result) => return result,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(crate::runtime_dir::FindHarnessForSessionError::Incomplete {
-                    session_id: owned_session_id,
-                });
+            Err(path_std_sync_mpsc::RecvTimeoutError::Timeout) => {}
+            Err(path_std_sync_mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(
+                    path_crate_runtime_dir::FindHarnessForSessionError::Incomplete {
+                        session_id: owned_session_id,
+                    },
+                );
             }
         }
     }
@@ -2824,7 +2837,7 @@ fn bounded_runtime_lookup(
 
 fn check_peer_io_active(
     deadline: Instant,
-    cancelled: &std::sync::atomic::AtomicBool,
+    cancelled: &path_std_sync::atomic::AtomicBool,
 ) -> Result<(), String> {
     if cancelled.load(Ordering::Acquire) {
         return Err("peer message operation canceled".to_owned());

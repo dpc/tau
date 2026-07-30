@@ -1,3 +1,13 @@
+use std::sync::atomic as path_std_sync_atomic;
+use std::{
+    collections as path_std_collections, net as path_std_net, sync as path_std_sync,
+    time as path_std_time,
+};
+
+use tokio::sync as path_tokio_sync;
+
+use crate::{attempt_failure as path_crate_attempt_failure, common as path_crate_common};
+
 mod compatibility;
 
 use tau_proto::{
@@ -15,14 +25,14 @@ type AbortCallbacks = std::sync::Arc<std::sync::Mutex<Vec<AbortCallback>>>;
 /// Abort source that retains every compact cancellation callback for a test.
 struct CompactCapturingAbort {
     /// Shared cancellation flag returned by `is_aborted`.
-    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    aborted: std::sync::Arc<path_std_sync::atomic::AtomicBool>,
     /// Registered callbacks invoked by the test driver.
     wakers: AbortCallbacks,
 }
 
 impl crate::TurnAbort for CompactCapturingAbort {
     fn is_aborted(&mut self) -> bool {
-        self.aborted.load(std::sync::atomic::Ordering::SeqCst)
+        self.aborted.load(path_std_sync_atomic::Ordering::SeqCst)
     }
 
     fn register_waker(&mut self, waker: AbortCallback) -> Box<dyn crate::TurnAbortWaker> {
@@ -34,7 +44,7 @@ impl crate::TurnAbort for CompactCapturingAbort {
 /// Unwind-safe release ownership for the compact worker exit barrier.
 struct CompactExitRelease {
     /// Sender retained until explicit release or unwind.
-    sender: Option<std::sync::mpsc::SyncSender<()>>,
+    sender: Option<path_std_sync::mpsc::SyncSender<()>>,
 }
 
 impl CompactExitRelease {
@@ -440,7 +450,7 @@ fn build_request_includes_prompt_cache_key_when_supported() {
 #[test]
 fn debug_request_producer_submits_typed_compressed_capture_job() {
     let mut correlation =
-        crate::attempt_failure::AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(7));
+        path_crate_attempt_failure::AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(7));
     let dispatch = correlation.next_dispatch();
     let config = chain_test_config();
     let session_id = tau_proto::SessionId::parse("session-test").expect("session id");
@@ -1661,14 +1671,14 @@ fn compact_http_request_uses_mode_specific_transport_contract() {
     use std::io::{Read, Write};
 
     for mode in [ResponsesMode::Standard, ResponsesMode::LiteCompatibility] {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind capture server");
+        let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind capture server");
         let address = listener.local_addr().expect("capture address");
-        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let captured_server = std::sync::Arc::clone(&captured);
+        let captured = path_std_sync::Arc::new(path_std_sync::Mutex::new(String::new()));
+        let captured_server = path_std_sync::Arc::clone(&captured);
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept compact request");
             stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .set_read_timeout(Some(path_std_time::Duration::from_secs(2)))
                 .expect("read timeout");
             let mut request = Vec::new();
             let mut chunk = [0_u8; 4096];
@@ -1705,7 +1715,7 @@ fn compact_http_request_uses_mode_specific_transport_contract() {
             "thread-test",
             "{}",
             &crate::test_network_policy(),
-            &tokio::sync::Notify::new(),
+            &path_tokio_sync::Notify::new(),
         )
         .expect("compact response");
         assert_eq!(body, r#"{"output":[]}"#);
@@ -1730,14 +1740,14 @@ fn compact_http_request_uses_mode_specific_transport_contract() {
 fn compact_http_request_cancellation_closes_active_socket() {
     use std::io::Read;
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind compact server");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind compact server");
     let address = listener.local_addr().expect("compact address");
-    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
-    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    let (accepted_tx, accepted_rx) = path_std_sync::mpsc::channel();
+    let (closed_tx, closed_rx) = path_std_sync::mpsc::channel();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept compact request");
         stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .set_read_timeout(Some(path_std_time::Duration::from_secs(2)))
             .expect("read timeout");
         accepted_tx.send(()).expect("accepted receiver");
         let mut buffer = [0_u8; 4096];
@@ -1764,12 +1774,12 @@ fn compact_http_request_cancellation_closes_active_socket() {
         ..chain_test_config()
     };
     let network = tau_provider::OutboundNetworkPolicy::from_environment(
-        std::collections::BTreeMap::new(),
+        path_std_collections::BTreeMap::new(),
         None,
     );
-    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
-    let worker_cancel = std::sync::Arc::clone(&cancel);
-    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let cancel = path_std_sync::Arc::new(path_tokio_sync::Notify::new());
+    let worker_cancel = path_std_sync::Arc::clone(&cancel);
+    let (result_tx, result_rx) = path_std_sync::mpsc::channel();
     std::thread::scope(|scope| {
         scope.spawn(|| {
             result_tx
@@ -1783,7 +1793,7 @@ fn compact_http_request_cancellation_closes_active_socket() {
                 .expect("result receiver");
         });
         accepted_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+            .recv_timeout(path_std_time::Duration::from_secs(1))
             .expect("request reached server");
         cancel.notify_one();
         assert!(matches!(
@@ -1794,7 +1804,7 @@ fn compact_http_request_cancellation_closes_active_socket() {
         ));
     });
     closed_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
+        .recv_timeout(path_std_time::Duration::from_secs(1))
         .expect("canceled socket closed");
     server.join().expect("compact server");
 }
@@ -1806,13 +1816,13 @@ fn compact_cancellation_joins_worker_before_returning() {
     use std::io::Read;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind compact server");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind compact server");
     let address = listener.local_addr().expect("compact address");
-    let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
+    let (accepted_tx, accepted_rx) = path_std_sync::mpsc::sync_channel(1);
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept compact request");
         stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .set_read_timeout(Some(path_std_time::Duration::from_secs(2)))
             .expect("bounded server read");
         accepted_tx.send(()).expect("accepted receiver");
         let mut bytes = [0_u8; 4096];
@@ -1841,23 +1851,23 @@ fn compact_cancellation_joins_worker_before_returning() {
     };
     let request = basic_prompt_payload();
     let body = build_compact_request(&config, &request).expect("compact body");
-    let network = std::sync::Arc::new(tau_provider::OutboundNetworkPolicy::from_environment(
-        std::collections::BTreeMap::new(),
+    let network = path_std_sync::Arc::new(tau_provider::OutboundNetworkPolicy::from_environment(
+        path_std_collections::BTreeMap::new(),
         None,
     ));
-    let aborted = std::sync::Arc::new(AtomicBool::new(false));
-    let wakers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let aborted = path_std_sync::Arc::new(AtomicBool::new(false));
+    let wakers = path_std_sync::Arc::new(path_std_sync::Mutex::new(Vec::new()));
     let mut abort = CompactCapturingAbort {
-        aborted: std::sync::Arc::clone(&aborted),
-        wakers: std::sync::Arc::clone(&wakers),
+        aborted: path_std_sync::Arc::clone(&aborted),
+        wakers: path_std_sync::Arc::clone(&wakers),
     };
-    let (exit_reached_tx, exit_reached_rx) = std::sync::mpsc::sync_channel(1);
-    let (exit_release_tx, exit_release_rx) = std::sync::mpsc::sync_channel(1);
+    let (exit_reached_tx, exit_reached_rx) = path_std_sync::mpsc::sync_channel(1);
+    let (exit_release_tx, exit_release_rx) = path_std_sync::mpsc::sync_channel(1);
     let exit_gate = CompactWorkerExitGate {
         reached: exit_reached_tx,
         release: exit_release_rx,
     };
-    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let (result_tx, result_rx) = path_std_sync::mpsc::sync_channel(1);
 
     std::thread::scope(|scope| {
         let exit_release = CompactExitRelease {
@@ -1876,14 +1886,14 @@ fn compact_cancellation_joins_worker_before_returning() {
             result_tx.send(result).expect("result receiver");
         });
         accepted_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+            .recv_timeout(path_std_time::Duration::from_secs(1))
             .expect("compact request reached server");
         aborted.store(true, Ordering::SeqCst);
         for waker in wakers.lock().expect("abort wakers").clone() {
             waker();
         }
         exit_reached_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+            .recv_timeout(path_std_time::Duration::from_secs(1))
             .expect("compact worker reached exit gate");
         assert!(
             matches!(
@@ -2481,9 +2491,9 @@ fn compact_abort_rechecks_cancellation_after_waker_registration() {
         }
     }
 
-    let completion = std::sync::Arc::new((
-        std::sync::Mutex::new(CompactCompletion::default()),
-        std::sync::Condvar::new(),
+    let completion = path_std_sync::Arc::new((
+        path_std_sync::Mutex::new(CompactCompletion::default()),
+        path_std_sync::Condvar::new(),
     ));
     let mut abort = AbortDuringRegistration(false);
     assert!(matches!(
@@ -3420,7 +3430,7 @@ fn apply_event_captures_reasoning_only_on_output_item_done() {
 /// provider-visible key order and numeric spelling.
 #[test]
 fn apply_raw_json_event_preserves_reasoning_item_raw_json_for_replay() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let raw_reasoning = r#"{"type":"reasoning","z":1.2300,"a":1e+03,"id":"rs_raw","encrypted_content":"SEALED","summary":[]}"#;
     let raw_event = format!(
         r#"{{"type":"response.output_item.done","output_index":0,"item":{raw_reasoning}}}"#
@@ -3451,7 +3461,7 @@ fn apply_raw_json_event_preserves_reasoning_item_raw_json_for_replay() {
 /// preserve provider-owned envelope and content-part metadata.
 #[test]
 fn apply_raw_json_event_preserves_assistant_message_raw_json_for_replay() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let raw_message = r#"{"type":"message","id":"msg_raw","status":"completed","role":"assistant","phase":"commentary","content":[{"type":"output_text","id":"part_a","text":"hello","annotations":[{"type":"url_citation","url":"https://example.test"}]}],"future_message":true}"#;
     let raw_event =
         format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{raw_message}}}"#);
@@ -3477,7 +3487,7 @@ fn apply_raw_json_event_preserves_assistant_message_raw_json_for_replay() {
 /// even before they reach request replay.
 #[test]
 fn apply_raw_json_event_ignores_non_assistant_message_sidecar() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let raw_message = r#"{"type":"message","id":"msg_user","role":"user","content":[{"type":"output_text","text":"hello"}]}"#;
     let raw_event =
         format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{raw_message}}}"#);
@@ -3496,7 +3506,7 @@ fn apply_raw_json_event_ignores_non_assistant_message_sidecar() {
 /// side channel that can be lost.
 #[test]
 fn apply_event_captures_compaction_output_item_in_order() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut on_update = |_: &crate::common::StreamState| {};
 
     apply_event(
@@ -3551,7 +3561,7 @@ fn apply_event_captures_compaction_output_item_in_order() {
 /// replay rather than canonicalizing through `serde_json::Value` and CBOR.
 #[test]
 fn apply_raw_json_event_preserves_compaction_item_raw_json_for_replay() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let raw_compaction =
         r#"{"type":"compaction","z":1.2300,"a":1e+03,"summary":"old history","input_items":[]}"#;
     let raw_event = format!(
@@ -3579,7 +3589,7 @@ fn apply_raw_json_event_preserves_compaction_item_raw_json_for_replay() {
 /// and replay emits that provider-owned JSON before later indexed items.
 #[test]
 fn apply_raw_json_event_captures_unknown_output_item_in_provider_order() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let raw_unknown =
         r#"{"type":"future_provider_item","z":1.2300,"a":1e+03,"payload":{"keep":"raw"}}"#;
     let unknown_added = r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"future_provider_item","id":"pending"}}"#;
@@ -3694,7 +3704,7 @@ fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
 /// `on_update` once per delta.
 #[test]
 fn apply_event_text_delta_accumulates_and_notifies() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut updates: Vec<String> = Vec::new();
     let mut on_update = |state: &crate::common::StreamState| {
         updates.push(state.text.clone());
@@ -3717,8 +3727,8 @@ fn stream_delta_emitter_emits_only_new_assistant_and_reasoning_text() {
     // Streaming response updates are append deltas; this prevents large
     // responses from being copied and sent again on every provider chunk while
     // keeping the final output item accumulator complete.
-    let mut state = crate::common::StreamState::new();
-    let mut emitter = crate::common::StreamDeltaEmitter::default();
+    let mut state = path_crate_common::StreamState::new();
+    let mut emitter = path_crate_common::StreamDeltaEmitter::default();
 
     state.append_message_delta_at(0, "hel");
     state.append_reasoning_summary_delta_at(1, "plan");
@@ -3760,7 +3770,7 @@ fn stream_delta_emitter_emits_only_new_assistant_and_reasoning_text() {
 
 #[test]
 fn apply_event_preserves_incremental_output_item_order() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut on_update = |_: &crate::common::StreamState| {};
 
     apply_event(
@@ -3858,7 +3868,7 @@ fn apply_event_preserves_incremental_output_item_order() {
 /// order so commentary immediately before a tool call is not dropped.
 #[test]
 fn apply_event_output_item_done_hydrates_message_text_before_tool_call() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut updates: Vec<String> = Vec::new();
     let mut on_update = |state: &crate::common::StreamState| {
         if updates.last() != Some(&state.text) {
@@ -3924,7 +3934,7 @@ fn apply_event_output_item_done_hydrates_message_text_before_tool_call() {
 
 #[test]
 fn apply_event_completed_does_not_harvest_response_output() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut on_update = |_: &crate::common::StreamState| {};
 
     let done = apply_event(
@@ -3956,7 +3966,7 @@ fn apply_event_completed_does_not_harvest_response_output() {
 
 #[test]
 fn apply_event_completed_terminates_and_captures_response_id() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut on_update = |_: &crate::common::StreamState| {};
     let ev = serde_json::json!({
         "type": "response.completed",
@@ -3979,7 +3989,7 @@ fn apply_event_completed_terminates_and_captures_response_id() {
 
 #[test]
 fn apply_event_function_call_assembles_tool_call() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut on_update = |_: &crate::common::StreamState| {};
 
     apply_event(
@@ -4042,7 +4052,7 @@ fn apply_event_function_call_assembles_tool_call() {
 
 #[test]
 fn apply_event_failed_returns_error() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut on_update = |_: &crate::common::StreamState| {};
     let ev = serde_json::json!({
         "type": "response.failed",
@@ -4068,7 +4078,7 @@ fn apply_event_failed_returns_error() {
 /// hiccups.
 #[test]
 fn apply_event_error_top_level_code_is_propagated() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut on_update = |_: &crate::common::StreamState| {};
     let ev = serde_json::json!({
         "type": "error",
@@ -4098,7 +4108,7 @@ fn apply_event_error_top_level_code_is_propagated() {
 /// same suffix as the top-level form.
 #[test]
 fn apply_event_error_nested_code_is_propagated() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut on_update = |_: &crate::common::StreamState| {};
     let ev = serde_json::json!({
         "type": "error",
@@ -4125,7 +4135,7 @@ fn apply_event_error_nested_code_is_propagated() {
 /// captured provider events still classify correctly.
 #[test]
 fn apply_event_error_nested_type_fallback_is_propagated() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut on_update = |_: &crate::common::StreamState| {};
     let ev = serde_json::json!({
         "type": "error",
@@ -4152,7 +4162,7 @@ fn apply_event_error_nested_type_fallback_is_propagated() {
 /// can't safely classify), but we don't crash or drop the message.
 #[test]
 fn apply_event_error_without_code_omits_suffix() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let mut on_update = |_: &crate::common::StreamState| {};
     let ev = serde_json::json!({
         "type": "error",
@@ -4172,7 +4182,7 @@ fn apply_event_error_without_code_omits_suffix() {
 /// Reset metadata outside canonical error envelopes cannot park required work.
 #[test]
 fn stream_error_ignores_nested_echo_reset_hint() {
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let event = serde_json::json!({
         "type": "error",
         "code": "overloaded_error",
@@ -4187,7 +4197,7 @@ fn stream_error_ignores_nested_echo_reset_hint() {
 fn repeated_output_text_delta_aborts_before_appending_more_output() {
     // Ensures the Responses stream guard aborts tight exact assistant text loops
     // before the repeated suffix can be emitted as a normal update.
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.output_text.delta",
         "output_index": 0,
@@ -4205,7 +4215,7 @@ fn repeated_output_text_delta_aborts_before_appending_more_output() {
 fn repeated_tool_argument_delta_aborts_before_appending_more_arguments() {
     // Ensures tool-call argument streams use the same tight exact guard, because
     // argument loops can otherwise burn the provider output budget unseen.
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.function_call_arguments.delta",
         "output_index": 0,
@@ -4223,7 +4233,7 @@ fn repeated_tool_argument_delta_aborts_before_appending_more_arguments() {
 fn repeated_output_text_done_aborts_without_appending_snapshot() {
     // Done snapshots can carry all text without prior deltas; they must be guarded
     // before becoming assistant output.
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.output_text.done",
         "output_index": 0,
@@ -4241,7 +4251,7 @@ fn repeated_output_text_done_aborts_without_appending_snapshot() {
 fn non_repeating_output_text_done_is_accepted() {
     // Non-repeating final snapshots are normal Responses events and must not be
     // rejected just because they bypassed delta streaming.
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.output_text.done",
         "output_index": 0,
@@ -4256,7 +4266,7 @@ fn non_repeating_output_text_done_is_accepted() {
 fn repeated_function_arguments_done_aborts_without_appending_snapshot() {
     // Function argument done events can provide a full final argument string; the
     // guard must check it even when no argument deltas were sent.
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.function_call_arguments.done",
         "output_index": 0,
@@ -4274,7 +4284,7 @@ fn repeated_function_arguments_done_aborts_without_appending_snapshot() {
 fn repeated_custom_tool_input_done_aborts_without_appending_snapshot() {
     // Custom tool input done events share the same final-snapshot bypass risk as
     // function arguments.
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.custom_tool_call_input.done",
         "output_index": 0,
@@ -4292,7 +4302,7 @@ fn repeated_custom_tool_input_done_aborts_without_appending_snapshot() {
 fn repeated_output_item_done_message_aborts_without_appending_snapshot() {
     // Message output_item.done fallbacks are guarded in addition to the dedicated
     // output_text.done event.
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.output_item.done",
         "output_index": 0,
@@ -4314,7 +4324,7 @@ fn repeated_output_item_done_message_aborts_without_appending_snapshot() {
 fn repeated_output_item_done_tool_arguments_abort_without_appending_snapshot() {
     // Tool output_item.done fallbacks are guarded before final arguments are
     // accepted into the tool-call accumulator.
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.output_item.done",
         "output_index": 0,
@@ -4337,7 +4347,7 @@ fn repeated_output_item_done_tool_arguments_abort_without_appending_snapshot() {
 fn repeated_reasoning_summary_delta_aborts_before_appending() {
     // Reasoning summaries are visible stream components and need the same tight
     // exact-loop protection as assistant text.
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.reasoning_summary_text.delta",
         "output_index": 0,
@@ -4354,7 +4364,7 @@ fn repeated_reasoning_summary_delta_aborts_before_appending() {
 #[test]
 fn repeated_custom_tool_input_delta_aborts_before_appending() {
     // Custom tool input deltas are guarded independently from function arguments.
-    let mut state = crate::common::StreamState::new();
+    let mut state = path_crate_common::StreamState::new();
     let ev = serde_json::json!({
         "type": "response.custom_tool_call_input.delta",
         "output_index": 0,
@@ -4382,7 +4392,7 @@ fn response_failed_context_rejection_is_typed_terminal() {
     });
     let error = response_failed_error(
         &event,
-        crate::attempt_failure::ProviderEvidenceMode::Persistent,
+        path_crate_attempt_failure::ProviderEvidenceMode::Persistent,
     );
     assert_eq!(error.retry_decision(), None);
     assert_eq!(

@@ -1,3 +1,6 @@
+use std::collections as path_std_collections;
+use std::sync::atomic as path_std_sync_atomic;
+
 use super::*;
 fn routing_state(
     known: Arc<Mutex<Vec<String>>>,
@@ -24,7 +27,7 @@ fn routing_state(
         Arc::new(Mutex::new(None)),
         known,
         Arc::new(Mutex::new(navigation)),
-        Arc::new(Mutex::new(std::collections::HashSet::new())),
+        Arc::new(Mutex::new(path_std_collections::HashSet::new())),
     )
 }
 
@@ -84,7 +87,7 @@ fn agent_new_takes_no_agent_id_completion() {
     let completer = build_agent_arg_completer(
         routing_state(
             Arc::new(Mutex::new(vec!["worker".to_owned()])),
-            Arc::new(Mutex::new(std::collections::HashSet::from([
+            Arc::new(Mutex::new(path_std_collections::HashSet::from([
                 "worker".to_owned()
             ]))),
             Arc::new(Mutex::new(Default::default())),
@@ -100,10 +103,10 @@ fn agent_new_takes_no_agent_id_completion() {
 #[test]
 fn selected_agent_suspend_alias_dispatches_existing_suspend_flow() {
     let known = Arc::new(Mutex::new(vec!["worker".to_owned()]));
-    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "worker".to_owned()
     ])));
-    let suspended = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::new()));
     let routing = routing_state(known, live.clone(), suspended.clone());
     routing.set_selected_agent(Some("worker".to_owned()));
     let messages = Arc::new(Mutex::new(Vec::new()));
@@ -125,10 +128,10 @@ fn selected_agent_suspend_alias_dispatches_existing_suspend_flow() {
 #[test]
 fn selected_agent_resume_alias_dispatches_existing_resume_flow() {
     let known = Arc::new(Mutex::new(vec!["worker".to_owned()]));
-    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "worker".to_owned()
     ])));
-    let suspended = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "worker".to_owned()
     ])));
     let routing = routing_state(known, live.clone(), suspended.clone());
@@ -152,11 +155,11 @@ fn agent_mention_completer_offers_only_active_agents() {
     // Prompt-text `@agent` completion is for routing to active agents. It
     // must not suggest suspended agents even though `:agent resume` does.
     let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
-    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "helper".to_owned(),
         "worker".to_owned(),
     ])));
-    let suspended = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "helper".to_owned()
     ])));
     let completer = build_agent_mention_completer(routing_state(known, live, suspended));
@@ -218,11 +221,11 @@ fn agent_completer_filters_active_and_suspended_agents() {
     // tab completion stays focused on active choices, but remain available for
     // explicit resume.
     let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
-    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "helper".to_owned(),
         "worker".to_owned(),
     ])));
-    let suspended = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "helper".to_owned()
     ])));
     let completer = build_agent_arg_completer(
@@ -253,11 +256,11 @@ fn agent_completer_filters_active_and_suspended_agents() {
 #[test]
 fn agent_commands_accept_prefixed_references_in_canonical_effects() {
     let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
-    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "helper".to_owned(),
         "worker".to_owned(),
     ])));
-    let suspended = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "helper".to_owned()
     ])));
     let routing = routing_state(known, live, suspended);
@@ -317,7 +320,7 @@ fn agent_commands_accept_prefixed_references_in_canonical_effects() {
 fn agent_commands_reject_malformed_prefixed_references() {
     let routing = routing_state(
         Arc::new(Mutex::new(vec!["worker".to_owned()])),
-        Arc::new(Mutex::new(std::collections::HashSet::from([
+        Arc::new(Mutex::new(path_std_collections::HashSet::from([
             "worker".to_owned()
         ]))),
         Arc::new(Mutex::new(Default::default())),
@@ -340,14 +343,14 @@ fn agent_commands_reject_malformed_prefixed_references() {
 #[test]
 fn agent_cycle_dispatches_overview_and_agent_transitions() {
     let known = Arc::new(Mutex::new(vec!["alpha".to_owned(), "bravo".to_owned()]));
-    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "alpha".to_owned(),
         "bravo".to_owned(),
     ])));
-    let suspended = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::new()));
     let routing = routing_state(known, live, suspended);
     let (renderer_tx, renderer_rx) = LocalRendererSender::channel(
-        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         Arc::new(Mutex::new(())),
     );
 
@@ -392,10 +395,10 @@ fn agent_completer_uses_display_names_as_descriptions() {
         "worker".to_owned(),
         "Investigate worker".to_owned(),
     )])));
-    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "worker".to_owned()
     ])));
-    let suspended = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::new()));
     let completer = build_agent_arg_completer(routing_state(known, live, suspended), names);
 
     let completions = completer(&["switch", "worker"]);
@@ -409,7 +412,7 @@ fn agent_completer_uses_display_names_as_descriptions() {
 #[test]
 fn agent_completer_accepts_prefixed_needles_and_returns_canonical_ids() {
     let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
-    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+    let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
         "helper".to_owned(),
         "worker".to_owned(),
     ])));

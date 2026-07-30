@@ -1,3 +1,5 @@
+use crossterm::event as path_crossterm_event;
+
 #[cfg(test)]
 mod tests;
 
@@ -73,7 +75,7 @@ pub(crate) fn read_terminal_event() -> io::Result<PickerEvent> {
 
 fn terminal_event_to_picker_event(event: Event) -> Option<PickerEvent> {
     match event {
-        Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
+        Event::Key(key) if key.kind == path_crossterm_event::KeyEventKind::Press => {
             let logical = terminal_key_to_logical(key);
             Some(PickerEvent::Key(logical_to_action(logical)))
         }

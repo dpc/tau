@@ -4,6 +4,10 @@
 //! files in the current repository without teaching the terminal input layer
 //! about git or fuzzy-matching details.
 
+use std::{process as path_std_process, time as path_std_time};
+#[cfg(test)]
+use std::{sync as path_std_sync, sync::atomic as path_std_sync_atomic};
+
 #[cfg(test)]
 mod tests;
 
@@ -12,7 +16,7 @@ use std::sync::Mutex;
 
 const MAX_CANDIDATES: usize = 100;
 const GIT_STDOUT_LIMIT_BYTES: usize = 2 * 1024 * 1024;
-const NEGATIVE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+const NEGATIVE_CACHE_TTL: std::time::Duration = path_std_time::Duration::from_secs(5);
 
 #[derive(Clone)]
 struct GitFileCache {
@@ -23,8 +27,8 @@ struct GitFileCache {
 
 static CACHE: Mutex<Option<GitFileCache>> = Mutex::new(None);
 #[cfg(test)]
-static ENUMERATE_GIT_FILES_CALLS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static ENUMERATE_GIT_FILES_CALLS: path_std_sync::atomic::AtomicUsize =
+    path_std_sync_atomic::AtomicUsize::new(0);
 /// Returns the git repository root and tracked/unignored files for `cwd`.
 ///
 /// The file list is cached per current working directory so each keystroke in a
@@ -44,7 +48,7 @@ pub(crate) fn git_repo_files(cwd: &Path) -> Option<(PathBuf, Vec<String>)> {
         *cache = Some(GitFileCache {
             cwd: cwd.to_path_buf(),
             result: result.clone(),
-            cached_at: std::time::Instant::now(),
+            cached_at: path_std_time::Instant::now(),
         });
     }
     result
@@ -52,15 +56,15 @@ pub(crate) fn git_repo_files(cwd: &Path) -> Option<(PathBuf, Vec<String>)> {
 
 fn enumerate_git_files(cwd: &Path) -> Option<(PathBuf, Vec<String>)> {
     #[cfg(test)]
-    ENUMERATE_GIT_FILES_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let mut rev_parse = std::process::Command::new("git");
+    ENUMERATE_GIT_FILES_CALLS.fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
+    let mut rev_parse = path_std_process::Command::new("git");
     rev_parse
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", "--show-toplevel"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdin(path_std_process::Stdio::null())
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
     let output = crate::run_with_bounded_stdout(
         &mut rev_parse,
         None,
@@ -74,14 +78,14 @@ fn enumerate_git_files(cwd: &Path) -> Option<(PathBuf, Vec<String>)> {
     }
     let repo_root = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
 
-    let mut ls_files = std::process::Command::new("git");
+    let mut ls_files = path_std_process::Command::new("git");
     ls_files
         .arg("-C")
         .arg(&repo_root)
         .args(["ls-files", "--cached", "--others", "--exclude-standard"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdin(path_std_process::Stdio::null())
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
     let output = crate::run_with_bounded_stdout(
         &mut ls_files,
         None,

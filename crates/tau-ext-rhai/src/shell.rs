@@ -1,5 +1,7 @@
 //! Direct trusted host shell execution for Rhai scripts.
 
+use std::{io as path_std_io, os as path_std_os, process as path_std_process};
+
 #[cfg(test)]
 mod tests;
 
@@ -136,7 +138,7 @@ pub(crate) fn run_shell_command(
         unsafe {
             command_builder.pre_exec(|| {
                 if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(path_std_io::Error::last_os_error());
                 }
                 Ok(())
             });
@@ -225,7 +227,7 @@ pub(crate) fn run_shell_command(
     let status_code = process_outcome
         .status
         .as_ref()
-        .and_then(std::process::ExitStatus::code);
+        .and_then(path_std_process::ExitStatus::code);
     #[cfg(unix)]
     let signal = {
         use std::os::unix::process::ExitStatusExt;
@@ -239,7 +241,7 @@ pub(crate) fn run_shell_command(
     let success = process_outcome
         .status
         .as_ref()
-        .is_some_and(std::process::ExitStatus::success)
+        .is_some_and(path_std_process::ExitStatus::success)
         && !process_outcome.timed_out;
     let termination_reason = if process_outcome.canceled {
         "canceled"
@@ -529,7 +531,7 @@ impl CapturedPipe {
 #[cfg(unix)]
 fn read_pipe_capped<R>(mut pipe: R, stop: Arc<PipeStop>) -> std::thread::JoinHandle<CapturedPipe>
 where
-    R: Read + Send + 'static + std::os::fd::AsRawFd,
+    R: Read + Send + 'static + path_std_os::fd::AsRawFd,
 {
     set_nonblocking(&pipe);
     let pipe_fd = pipe.as_raw_fd();
@@ -546,7 +548,7 @@ where
             }
             match pipe.read(&mut buf) {
                 Ok(0) => break,
-                Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(ref error) if error.kind() == path_std_io::ErrorKind::WouldBlock => {
                     let timeout = post_stop_deadline
                         .map(|deadline| deadline.saturating_duration_since(Instant::now()))
                         .map(duration_to_poll_timeout_ms)
@@ -557,7 +559,7 @@ where
                     let wake_fd = post_stop_deadline.is_none().then(|| stop.wake_read.as_fd());
                     wait_for_pipe_readiness(pipe_fd, wake_fd, timeout);
                 }
-                Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(ref error) if error.kind() == path_std_io::ErrorKind::Interrupted => {}
                 Err(_) => break,
                 Ok(n) => {
                     captured.push_bytes(&buf[..n]);
@@ -627,7 +629,7 @@ fn wait_for_pipe_readiness(pipe_fd: RawFd, wake_fd: Option<BorrowedFd<'_>>, time
 }
 
 #[cfg(unix)]
-fn set_nonblocking<R: std::os::fd::AsRawFd>(pipe: &R) {
+fn set_nonblocking<R: path_std_os::fd::AsRawFd>(pipe: &R) {
     let fd = pipe.as_raw_fd();
     #[allow(unsafe_code)]
     // SAFETY: `fd` is a live pipe descriptor borrowed from `pipe`. `fcntl` does

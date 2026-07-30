@@ -1,4 +1,4 @@
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, fmt as path_tracing_subscriber_fmt};
 
 /// Environment variable controlling extension log filtering.
 ///
@@ -38,7 +38,7 @@ fn install_subscriber(default_filter: &str) {
         .with_ansi(false)
         .with_target(true)
         .with_level(true)
-        .with_timer(tracing_subscriber::fmt::time::SystemTime)
+        .with_timer(path_tracing_subscriber_fmt::time::SystemTime)
         .finish();
 
     if let Err(err) = tracing::subscriber::set_global_default(subscriber) {

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::sync::mpsc;
+use std::time as path_std_time;
 use std::time::Duration;
 
 use tau_harness::SessionLaunchStatus;
@@ -170,7 +171,7 @@ fn wait_for_create_agent_admission(
         messages,
         request_id,
         ctx_id,
-        std::time::Instant::now() + CREATE_AGENT_ADMISSION_TIMEOUT,
+        path_std_time::Instant::now() + CREATE_AGENT_ADMISSION_TIMEOUT,
     )
 }
 
@@ -182,7 +183,7 @@ fn wait_for_create_agent_admission_until(
 ) -> Result<CreateAgentAdmission, CliError> {
     let mut initial_prompt = None;
     loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(path_std_time::Instant::now());
         if remaining.is_zero() {
             return Err(CliError::PromptStdin(PromptStdinError::AdmissionTimeout {
                 timeout: CREATE_AGENT_ADMISSION_TIMEOUT,

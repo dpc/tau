@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use tau_provider::debug_capture_writer as path_tau_provider_debug_capture_writer;
 
 use super::redacted_detail::contains_token_shape;
 use super::{AttemptCaptureSnapshot, AttemptFailureEvidence, TransportFailureKind, WsTermination};
@@ -249,10 +250,10 @@ pub(super) fn submit_capture_with(
         Err(_) => return,
     };
     submit(
-        tau_provider::debug_capture_writer::ProviderDebugCapture::new(
+        path_tau_provider_debug_capture_writer::ProviderDebugCapture::new(
             input.request.session_id.clone(),
             agent_prompt_id,
-            tau_provider::debug_capture_writer::ProviderDebugCaptureClass::ResponsesAttemptFailure,
+            path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::ResponsesAttemptFailure,
             serialized,
         ),
     );

@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use base64::Engine as _;
+use base64::{Engine as _, engine as path_base64_engine};
 use futures_util::{SinkExt, StreamExt};
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
@@ -31,8 +31,10 @@ use tau_proto::{
     ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
     ToolUseStatus,
 };
+use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync, time as path_tokio_time};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use ureq::tls as path_ureq_tls;
 
 mod admission;
 mod admission_trace;
@@ -3705,7 +3707,7 @@ impl ShutdownSignal {
     fn new() -> Self {
         Self {
             requested: AtomicBool::new(false),
-            notify: tokio::sync::Notify::new(),
+            notify: path_tokio_sync::Notify::new(),
         }
     }
 
@@ -3757,7 +3759,7 @@ fn socket_worker_loop(
     startup: Option<WorkerStartup>,
     shutdown: Arc<ShutdownSignal>,
 ) {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    let runtime = match path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
@@ -4012,12 +4014,12 @@ async fn socket_worker_once_with_heartbeat(
     tracing::info!(target: LOG_TARGET, lifecycle = "connected", "Slack Socket Mode connected");
     let connected_at = Instant::now();
     let mut hello_at = None;
-    let heartbeat_started_at = tokio::time::Instant::now();
+    let heartbeat_started_at = path_tokio_time::Instant::now();
     let mut heartbeat_tick = tokio::time::interval_at(
         heartbeat_started_at + heartbeat.ping_interval,
         heartbeat.ping_interval,
     );
-    heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat_tick.set_missed_tick_behavior(path_tokio_time::MissedTickBehavior::Skip);
     let pong_deadline = tokio::time::sleep_until(heartbeat_started_at + heartbeat.pong_timeout);
     tokio::pin!(pong_deadline);
     loop {
@@ -4051,7 +4053,7 @@ async fn socket_worker_once_with_heartbeat(
         if matches!(&frame, Message::Pong(_)) {
             pong_deadline
                 .as_mut()
-                .reset(tokio::time::Instant::now() + heartbeat.pong_timeout);
+                .reset(path_tokio_time::Instant::now() + heartbeat.pong_timeout);
         }
         let received_at = Instant::now();
         let trace_seq = ext.trace_seq.fetch_add(1, Ordering::Relaxed);
@@ -5210,7 +5212,7 @@ fn decode_discovery_cursor(cursor: &str) -> Result<String, String> {
         .strip_prefix("v1:")
         .filter(|encoded| !encoded.is_empty())
         .ok_or_else(|| "`cursor` is malformed or stale".to_owned())?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+    let bytes = path_base64_engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded)
         .map_err(|_| "`cursor` is malformed or stale".to_owned())?;
     let alias =
@@ -5574,8 +5576,8 @@ fn slack_post_transport_error(error: &ureq::Error) -> SendFailureCategory {
 
 impl HttpSlackClient {
     fn agent() -> ureq::Agent {
-        let tls_config = ureq::tls::TlsConfig::builder()
-            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        let tls_config = path_ureq_tls::TlsConfig::builder()
+            .root_certs(path_ureq_tls::RootCerts::PlatformVerifier)
             .build();
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(HTTP_TIMEOUT))

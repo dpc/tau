@@ -1,6 +1,7 @@
 //! Contract tests for `SPEC-terminal-output-side-effect-events`.
 
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 /// Build one terminal bell side-effect event.
 fn bell() -> Event {
@@ -17,7 +18,7 @@ fn user_var(value: &str) -> Event {
 
 /// Return whether one source committed an event matching the predicate.
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
@@ -141,7 +142,7 @@ fn unconfigured_and_disconnected_extensions_cannot_publish_terminal_output() {
         .entries
         .get_mut("disconnected")
         .expect("configured entry")
-        .state = crate::extension::ExtensionState::Disconnected;
+        .state = path_crate_extension::ExtensionState::Disconnected;
     h.handle_extension_event_inner(
         &crate::test_connection_id("disconnected"),
         user_var("stale"),

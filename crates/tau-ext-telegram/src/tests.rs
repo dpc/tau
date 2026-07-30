@@ -1,7 +1,8 @@
 use std::io::BufRead;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, atomic as path_std_sync_atomic};
+use std::{io as path_std_io, sync as path_std_sync, time as path_std_time};
 
 use tau_proto::{HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, ToolStarted};
 
@@ -266,7 +267,7 @@ fn cfg() -> RuntimeConfig {
 }
 
 fn temp_ext_root() -> std::path::PathBuf {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static NEXT: path_std_sync::atomic::AtomicU64 = path_std_sync_atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "tau-ext-telegram-test-{}-{}",
         std::process::id(),
@@ -568,7 +569,7 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
         let reader = stream.try_clone().expect("clone stream");
-        let mut reader = std::io::BufReader::new(reader);
+        let mut reader = path_std_io::BufReader::new(reader);
         for index in 0..3 {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read gateway request");
@@ -667,7 +668,7 @@ fn gateway_client_send_forwards_registered_agent_to_gateway() {
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
         let reader = stream.try_clone().expect("clone stream");
-        let mut reader = std::io::BufReader::new(reader);
+        let mut reader = path_std_io::BufReader::new(reader);
         for _ in 0..2 {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read gateway request");
@@ -728,7 +729,7 @@ fn gateway_client_send_failure_does_not_submit_sent_report() {
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
         let reader = stream.try_clone().expect("clone stream");
-        let mut reader = std::io::BufReader::new(reader);
+        let mut reader = path_std_io::BufReader::new(reader);
         for index in 0..2 {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read gateway request");
@@ -785,7 +786,7 @@ fn gateway_client_register_before_session_started_does_not_announce() {
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
         let reader = stream.try_clone().expect("clone stream");
-        let mut reader = std::io::BufReader::new(reader);
+        let mut reader = path_std_io::BufReader::new(reader);
         for _ in 0..2 {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read gateway request");
@@ -936,7 +937,7 @@ fn gateway_client_config_error_sends_goodbye() {
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
         let reader = stream.try_clone().expect("clone stream");
-        let mut reader = std::io::BufReader::new(reader);
+        let mut reader = path_std_io::BufReader::new(reader);
         for _ in 0..2 {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read gateway request");
@@ -982,7 +983,7 @@ fn gateway_client_agent_unload_sends_unregister() {
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
         let reader = stream.try_clone().expect("clone stream");
-        let mut reader = std::io::BufReader::new(reader);
+        let mut reader = path_std_io::BufReader::new(reader);
         for _ in 0..4 {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read gateway request");
@@ -2241,7 +2242,12 @@ fn run_exits_after_register_then_disconnect() {
         .expect("disconnect");
     writer.flush().expect("flush");
 
-    run_with_client(std::io::Cursor::new(input), Vec::new(), FakeClient::new()).expect("run");
+    run_with_client(
+        path_std_io::Cursor::new(input),
+        Vec::new(),
+        FakeClient::new(),
+    )
+    .expect("run");
 }
 
 /// Disconnect handling must not wait for an in-flight long poll to release its
@@ -2281,9 +2287,9 @@ fn run_exits_promptly_when_disconnect_races_long_poll() {
         .expect("disconnect");
     writer.flush().expect("flush");
 
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     run_with_client(
-        std::io::Cursor::new(input),
+        path_std_io::Cursor::new(input),
         Vec::new(),
         Arc::new(SlowPollClient),
     )
@@ -2332,9 +2338,9 @@ fn run_ignores_replayed_tool_delivery_before_live_send() {
     let output = SharedWriter::default();
     let written = output.clone();
     let client = FakeClient::new();
-    run_with_client(std::io::Cursor::new(input), output, client.clone()).expect("run");
+    run_with_client(path_std_io::Cursor::new(input), output, client.clone()).expect("run");
 
-    let mut reader = HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     let mut saw_unregistered_error = false;
     while let Some(frame) = reader.read_message().expect("read output") {
         if let HarnessInputMessage::Emit(emit) = frame
@@ -2375,9 +2381,9 @@ fn run_initial_malformed_config_emits_config_error_without_ready() {
 
     let output = SharedWriter::default();
     let written = output.clone();
-    run_with_client(std::io::Cursor::new(input), output, FakeClient::new()).expect("run");
+    run_with_client(path_std_io::Cursor::new(input), output, FakeClient::new()).expect("run");
 
-    let mut reader = HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     let mut saw_config_error = false;
     let mut saw_ready = false;
     while let Some(frame) = reader.read_message().expect("read output") {
@@ -2436,9 +2442,9 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
 
     let output = SharedWriter::default();
     let written = output.clone();
-    run_with_client(std::io::Cursor::new(input), output, FakeClient::new()).expect("run");
+    run_with_client(path_std_io::Cursor::new(input), output, FakeClient::new()).expect("run");
 
-    let mut reader = HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     let mut saw_register_tool = false;
     let mut saw_send_tool = false;
     let mut saw_register_result = false;
@@ -2519,9 +2525,9 @@ fn run_ignores_unrelated_tool_started_events() {
 
     let output = SharedWriter::default();
     let written = output.clone();
-    run_with_client(std::io::Cursor::new(input), output, FakeClient::new()).expect("run");
+    run_with_client(path_std_io::Cursor::new(input), output, FakeClient::new()).expect("run");
 
-    let mut reader = HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     while let Some(frame) = reader.read_message().expect("read output") {
         if let HarnessInputMessage::Emit(emit) = frame {
             match emit.event.as_ref() {
@@ -2597,9 +2603,9 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
     let output = SharedWriter::default();
     let written = output.clone();
     let client = FakeClient::new();
-    run_with_client(std::io::Cursor::new(input), output, client.clone()).expect("run");
+    run_with_client(path_std_io::Cursor::new(input), output, client.clone()).expect("run");
 
-    let mut reader = HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     let mut saw_config_error = false;
     let mut saw_unregistered_error = false;
     while let Some(frame) = reader.read_message().expect("read output") {
@@ -2682,9 +2688,9 @@ fn run_legacy_tool_namespace_is_rejected() {
     let output = SharedWriter::default();
     let written = output.clone();
     let client = FakeClient::new();
-    run_with_client(std::io::Cursor::new(input), output, client.clone()).expect("run");
+    run_with_client(path_std_io::Cursor::new(input), output, client.clone()).expect("run");
 
-    let mut reader = HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     let mut saw_config_error = false;
     let mut saw_send_error = false;
     while let Some(frame) = reader.read_message().expect("read output") {
@@ -3054,7 +3060,7 @@ fn shutdown_wakes_poller_readiness_wait() {
     let handle = std::thread::spawn(move || poll_loop(state, client, tx.into(), shutdown));
 
     std::thread::sleep(Duration::from_millis(50));
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     ext.request_shutdown();
     handle.join().expect("poller joins after shutdown");
     assert!(start.elapsed() < Duration::from_secs(1));

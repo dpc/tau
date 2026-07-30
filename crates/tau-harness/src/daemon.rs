@@ -10,7 +10,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use std::{fmt, io, thread};
+use std::{fmt, io as path_std_io, io, thread};
 
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::io::Errno;
@@ -28,10 +28,10 @@ use crate::harness::{
     InitialClientStartupErrorOutput, assistant_text_from_output_items,
     tool_calls_from_output_items,
 };
-use crate::runtime_dir;
 use crate::settings::{
     Config, resolve_config, resolve_config_in, resolve_config_with_extension_cli_overrides,
 };
+use crate::{daemon as path_crate_daemon, runtime_dir};
 
 /// Cap on how long [`send_daemon_message_with_trace`] (a synchronous test
 /// helper) waits for a daemon response. This is not a daemon-wide knob —
@@ -1485,8 +1485,8 @@ impl ComponentLaunch {
             Self::SpawnedInitialUiStdio => match transport {
                 Some(value) => {
                     runtime_dir::HarnessInstanceId::parse(value.into_string().map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
+                        path_std_io::Error::new(
+                            path_std_io::ErrorKind::InvalidInput,
                             "harness runtime instance id is not UTF-8",
                         )
                     })?)
@@ -1539,8 +1539,8 @@ fn run_component_with_internal_tools_and_initial_client(
         let eager_session_id = std::env::var("TAU_SESSION_ID")
             .unwrap_or_else(|_| tau_session_inspect::default_session_id().to_owned());
         let session_status = match std::env::var("TAU_SESSION_STATUS").as_deref() {
-            Ok("resumed") => crate::daemon::SessionLaunchStatus::Resumed,
-            _ => crate::daemon::SessionLaunchStatus::New,
+            Ok("resumed") => path_crate_daemon::SessionLaunchStatus::Resumed,
+            _ => path_crate_daemon::SessionLaunchStatus::New,
         };
         let session_persistence = if std::env::var_os(EPHEMERAL_ENV).is_some() {
             tau_core::SessionPersistenceMode::Ephemeral

@@ -1,5 +1,6 @@
 //! Reachable WSS target canary for no-direct-fallback assertions.
 
+use std::io as path_std_io;
 use std::net::{SocketAddr, TcpListener};
 
 /// Reachable secure target whose listener detects forbidden direct fallback.
@@ -34,7 +35,7 @@ impl DirectTargetCanary {
     /// Asserts the selected proxy failure never reached the direct target.
     pub(super) fn assert_untouched(&self) {
         match self.listener.accept() {
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock => {}
             Ok(_) => panic!("selected proxy failure silently reached direct WSS target"),
             Err(error) => panic!("direct-target canary accept failed: {error}"),
         }

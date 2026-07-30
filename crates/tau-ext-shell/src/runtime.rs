@@ -1,5 +1,7 @@
 //! Runtime state and reader-loop dispatch after the ext-shell handshake.
 
+use crate::tools as path_crate_tools;
+
 #[cfg(test)]
 mod tests;
 use std::collections::HashMap;
@@ -311,7 +313,7 @@ impl ShellRuntime {
                     tool_type: tau_proto::ToolType::Function,
                 })
             } else if pending_workdir.matched_request {
-                let output = crate::tools::workdir::output(cwd);
+                let output = path_crate_tools::workdir::output(cwd);
                 Event::ToolResult(ToolResult {
                     call_id: pending_workdir.invoke.call_id,
                     tool_name: pending_workdir.invoke.tool_name,

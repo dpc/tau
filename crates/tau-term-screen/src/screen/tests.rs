@@ -1,3 +1,5 @@
+use std::sync as path_std_sync;
+
 use super::*;
 use crate::style::{Color, Span, display_width};
 
@@ -286,7 +288,7 @@ fn hyperlink_emission_has_exact_safe_boundaries() {
         ch: 'x',
         style: Style::default(),
         width: 1,
-        hyperlink: Some(std::sync::Arc::from("https://bad.test/\u{1b}]8")),
+        hyperlink: Some(path_std_sync::Arc::from("https://bad.test/\u{1b}]8")),
     }];
     let mut unsafe_buf = Vec::new();
     emit_styled_cells(&mut unsafe_buf, &unsafe_cells).expect("unsafe target falls back safely");

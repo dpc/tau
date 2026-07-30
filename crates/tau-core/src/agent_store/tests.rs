@@ -1,3 +1,5 @@
+use std::{sync as path_std_sync, time as path_std_time};
+
 use super::*;
 use crate::journal_sync::SyncTargetKind;
 use crate::record_log::AppendFault;
@@ -37,7 +39,7 @@ fn semantic_append_continues_while_sync_is_blocked() {
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
         .expect("creation appends");
     assert!(sync.wait_until_blocked(), "worker did not block");
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = path_std_sync::mpsc::channel();
     let continued_id = agent_id.clone();
     let continuation = std::thread::spawn(move || {
         let result = store.append_agent_event(
@@ -47,7 +49,7 @@ fn semantic_append_continues_while_sync_is_blocked() {
         );
         tx.send((store, result)).expect("send continuation");
     });
-    let received = rx.recv_timeout(std::time::Duration::from_secs(2));
+    let received = rx.recv_timeout(path_std_time::Duration::from_secs(2));
     sync.release();
     let (store, result) = received.expect("later semantic append blocked on sync");
     result.expect("later semantic append completes");

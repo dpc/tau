@@ -1,6 +1,7 @@
 //! Contract tests for `SPEC-internal-prompt-submit-requests`.
 
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 /// Build one internal-prompt request with visible text and correlation.
 fn request(agent_id: &tau_proto::AgentId, text: &str) -> Event {
@@ -29,7 +30,7 @@ fn connect_internal_prompt_interceptor(h: &mut Harness) {
 
 /// Return whether one source committed an event matching the predicate.
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
@@ -49,7 +50,7 @@ fn first_committed_matching(
     h: &Harness,
     predicate: impl Fn(&Event) -> bool,
 ) -> crate::event_log::LogEntry {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if predicate(&entry.event) {
@@ -352,7 +353,7 @@ fn pre_ready_request_waits_behind_activation() {
         .entries
         .get_mut("requester")
         .expect("requester")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
 
     h.handle_extension_event(
         "requester",
@@ -399,7 +400,7 @@ fn pre_ready_request_after_rollover_is_observation_only() {
         .entries
         .get_mut("requester")
         .expect("requester")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     h.handle_extension_event(
         "requester",
         TestProtocolItem::Event(request(&agent_id, "stale after Ready")),

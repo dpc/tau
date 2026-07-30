@@ -1,12 +1,12 @@
 //! Typed assistant, reasoning, and directional-message projection.
 
-use base64::Engine as _;
+use base64::{Engine as _, engine as path_base64_engine};
 use serde::Serialize;
 use tau_proto::{
     AgentMessageKind, AgentMessageRecipient, ContentPart, ContextItem, ContextRole, Event,
 };
 
-use super::RecordRank;
+use super::{super as path_super_super, RecordRank};
 
 /// One typed semantic family payload.
 #[derive(Clone, Serialize)]
@@ -47,8 +47,8 @@ impl TextProjection {
     /// Selects bounded or complete text while retaining complete metrics.
     fn new(text: &str, mode: super::super::AgentTraceMode) -> Self {
         let (selected, complete) = match mode {
-            super::super::AgentTraceMode::Lite => super::lite_output(text),
-            super::super::AgentTraceMode::Full => (text, true),
+            path_super_super::AgentTraceMode::Lite => super::lite_output(text),
+            path_super_super::AgentTraceMode::Full => (text, true),
         };
         Self {
             text_bytes: text.len(),
@@ -436,5 +436,5 @@ fn contains_unsafe_string(value: &str) -> bool {
 
 /// Encodes UTF-8 bytes as standard padded Base64.
 fn encode_bytes(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+    path_base64_engine::general_purpose::STANDARD.encode(bytes)
 }

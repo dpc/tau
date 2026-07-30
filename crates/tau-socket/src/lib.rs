@@ -10,7 +10,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::time::Duration;
-use std::{fmt, fs, thread};
+use std::{fmt, fs, net as path_std_net, thread};
 
 use tau_proto::{
     DecodeError, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
@@ -505,7 +505,7 @@ fn connect_unix_with_timeout(path: &Path, timeout: Duration) -> io::Result<UnixS
 impl Drop for SocketPeer {
     fn drop(&mut self) {
         self.reader_frames.take();
-        let _ = self.shutdown_stream.shutdown(std::net::Shutdown::Both);
+        let _ = self.shutdown_stream.shutdown(path_std_net::Shutdown::Both);
         if let Some(reader_thread) = self.reader_thread.take() {
             let _ = reader_thread.join();
         }

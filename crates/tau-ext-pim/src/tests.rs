@@ -1,6 +1,7 @@
 //! Boundary-focused coverage follows `testing.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io as path_std_io;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
@@ -676,7 +677,7 @@ fn startup_registers_email_and_calendar_tools() {
         ..RuntimeState::default()
     };
     tau_client::TauExtensionRunner::new(PimExtension)
-        .run(std::io::Cursor::new(input), writer, state)
+        .run(path_std_io::Cursor::new(input), writer, state)
         .expect("startup writes");
 
     let bytes = written.bytes();
@@ -882,10 +883,10 @@ fn prefixed_calendar_invocation_uses_logical_dispatch_and_wire_output() {
         ..RuntimeState::default()
     };
     tau_client::TauExtensionRunner::new(PimExtension)
-        .run(std::io::Cursor::new(input), output, state)
+        .run(path_std_io::Cursor::new(input), output, state)
         .expect("run PIM");
 
-    let mut reader = HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut reader = HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     let mut registered = false;
     let mut progress = false;
     let mut terminal = false;

@@ -1,11 +1,14 @@
 //! Extension-owned public response sampling and delta emission.
 
+use std::time as path_std_time;
+
 #[cfg(test)]
 mod tests;
 
 use std::collections::BTreeMap;
 
-pub(super) const RESPONSE_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+pub(super) const RESPONSE_UPDATE_INTERVAL: std::time::Duration =
+    path_std_time::Duration::from_secs(1);
 
 /// Prompt-local cadence and append-delta state for public transient events.
 pub(super) struct ResponseSampler {
@@ -33,7 +36,7 @@ pub(super) struct ResponseSampler {
 impl ResponseSampler {
     pub(super) fn new() -> Self {
         Self {
-            started_at: std::time::Instant::now(),
+            started_at: path_std_time::Instant::now(),
             last_emitted_at: None,
             last_sample: Default::default(),
             emitted_non_empty: false,
@@ -59,7 +62,7 @@ impl ResponseSampler {
         progress: tau_provider_chat_completions::AttemptProgress<'_>,
         writer: &mut tau_proto::PeerOutputWriter<W>,
     ) {
-        let now = std::time::Instant::now();
+        let now = path_std_time::Instant::now();
         self.observe_progress(now, progress.has_timed_semantic_output());
         let bytes = progress.response_bytes_received();
         if !self.is_due(now, bytes, false) {
@@ -85,7 +88,7 @@ impl ResponseSampler {
         prompt: &tau_proto::AgentPromptCreated,
         writer: &mut tau_proto::PeerOutputWriter<W>,
     ) {
-        self.emit_at(apid, prompt, writer, std::time::Instant::now(), true);
+        self.emit_at(apid, prompt, writer, path_std_time::Instant::now(), true);
     }
 
     pub(super) fn emit_at<W: std::io::Write>(

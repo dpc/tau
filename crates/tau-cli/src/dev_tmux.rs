@@ -6,6 +6,8 @@
 //! Its trust and workflow boundary is specified by
 //! [`SPEC-tau-cli-dev-tmux`](../specs/SPEC-tau-cli-dev-tmux.md).
 
+use std::{fs as path_std_fs, io as path_std_io};
+
 mod provider_access;
 
 use std::fs::File;
@@ -534,7 +536,7 @@ fn reject_symlink(path: &Path) -> Result<(), CliError> {
             path.display()
         ))),
         Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
 }
@@ -543,7 +545,7 @@ fn write_scratch_marker(path: &Path) -> Result<(), CliError> {
     let marker = scratch_marker_path(path);
     let mut file = match std::fs::symlink_metadata(&marker) {
         Ok(_) => open_existing_marker_file_for_write(path)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {
             open_marker_file_for_write(&marker, true)?
         }
         Err(error) => return Err(error.into()),
@@ -577,7 +579,7 @@ fn path_matches_home_root(canonical_path: &Path, home: PathBuf) -> Result<bool, 
 fn open_marker_file_for_read(path: &Path) -> Result<File, std::io::Error> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    std::fs::OpenOptions::new()
+    path_std_fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
@@ -585,14 +587,14 @@ fn open_marker_file_for_read(path: &Path) -> Result<File, std::io::Error> {
 
 #[cfg(not(unix))]
 fn open_marker_file_for_read(path: &Path) -> Result<File, std::io::Error> {
-    std::fs::OpenOptions::new().read(true).open(path)
+    path_std_fs::OpenOptions::new().read(true).open(path)
 }
 
 #[cfg(unix)]
 fn open_marker_file_for_write(path: &Path, create_new: bool) -> Result<File, std::io::Error> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    let mut options = std::fs::OpenOptions::new();
+    let mut options = path_std_fs::OpenOptions::new();
     options.write(true).create_new(create_new);
     options
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -601,7 +603,7 @@ fn open_marker_file_for_write(path: &Path, create_new: bool) -> Result<File, std
 
 #[cfg(not(unix))]
 fn open_marker_file_for_write(path: &Path, create_new: bool) -> Result<File, std::io::Error> {
-    let mut options = std::fs::OpenOptions::new();
+    let mut options = path_std_fs::OpenOptions::new();
     options.write(true).create_new(create_new);
     options.open(path)
 }
@@ -610,7 +612,7 @@ fn open_marker_file_for_write(path: &Path, create_new: bool) -> Result<File, std
 fn set_private_permissions(path: &Path) -> Result<(), CliError> {
     use std::os::unix::fs::PermissionsExt;
 
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(path, path_std_fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 

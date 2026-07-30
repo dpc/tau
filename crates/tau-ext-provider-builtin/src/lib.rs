@@ -6,6 +6,9 @@
 //! Component responsibilities and trust boundaries are summarized in
 //! `ARCH-tau-ext-provider-builtin`.
 
+use std::collections::hash_map as path_std_collections_hash_map;
+use std::io as path_std_io;
+
 mod chat_completions;
 mod oauth_refresh_rejection;
 mod prewarm;
@@ -571,7 +574,7 @@ fn responses_profile_identity(config: &ResolvedConfig) -> InferenceProfileIdenti
 }
 
 fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = path_std_collections_hash_map::DefaultHasher::new();
     match backend {
         PromptBackend::Unavailable => return None,
         PromptBackend::Responses(config) => {
@@ -950,7 +953,7 @@ fn run_openai_codex_login(
     let redirect_input: String = Input::new().with_prompt("Redirect URL").interact_text()?;
 
     let (code, state) = tau_provider_codex::oauth::parse_redirect_url(&redirect_input)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        .map_err(|e| path_std_io::Error::new(path_std_io::ErrorKind::InvalidInput, e))?;
 
     if state != expected_state {
         return Err("state mismatch — possible CSRF attack or stale URL".into());
@@ -1007,7 +1010,7 @@ fn load_profiles_result() -> std::io::Result<BuiltinProviderProfiles> {
     let auth_dir = store.auth_dir();
     let entries = match std::fs::read_dir(&auth_dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(profiles),
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => return Ok(profiles),
         Err(error) => return Err(error),
     };
     for entry in entries {
@@ -3257,9 +3260,9 @@ impl HarnessInputMessageWrite {
 
     fn send_decoded(&self, message: HarnessInputMessage) -> std::io::Result<()> {
         match &self.target {
-            HarnessInputMessageTarget::Handle(handle) => handle
-                .send(message)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)),
+            HarnessInputMessageTarget::Handle(handle) => handle.send(message).map_err(|error| {
+                path_std_io::Error::new(path_std_io::ErrorKind::BrokenPipe, error)
+            }),
             HarnessInputMessageTarget::Worker {
                 tx,
                 waker,
@@ -3276,7 +3279,9 @@ impl HarnessInputMessageWrite {
                     cooldown_probe: cooldown_probe.clone(),
                 },
             )
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed")),
+            .map_err(|_| {
+                path_std_io::Error::new(path_std_io::ErrorKind::BrokenPipe, "writer closed")
+            }),
         }
     }
 }
@@ -3295,7 +3300,7 @@ impl Write for HarnessInputMessageWrite {
         let mut reader = HarnessInputReader::new(Cursor::new(bytes));
         while let Some(message) = reader
             .read_message()
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+            .map_err(|error| path_std_io::Error::new(path_std_io::ErrorKind::InvalidData, error))?
         {
             self.send_decoded(message)?;
         }
@@ -4063,11 +4068,14 @@ fn refresh_chatgpt_credentials_in(
 ) -> Result<OpenAiAuth, RefreshCredentialsError> {
     let lock_result = auth_file.with_lock_result(|locked| {
         let BuiltinProviderProfile::Chatgpt(mut profile) = locked.load()?.ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "provider profile not found")
+            path_std_io::Error::new(
+                path_std_io::ErrorKind::NotFound,
+                "provider profile not found",
+            )
         })?
         else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidData,
                 "provider profile is not a ChatGPT profile",
             ));
         };

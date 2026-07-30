@@ -1,3 +1,5 @@
+use std::fs as path_std_fs;
+
 use super::*;
 
 #[test]
@@ -172,7 +174,7 @@ fn move_update_remove_failure_records_destination_as_partial_add() {
     let source = source_dir.join("source.txt");
     let destination = dest_dir.join("destination.txt");
     std::fs::write(&source, "old\n").expect("write source");
-    std::fs::set_permissions(&source_dir, std::fs::Permissions::from_mode(0o555))
+    std::fs::set_permissions(&source_dir, path_std_fs::Permissions::from_mode(0o555))
         .expect("make source dir read-only");
 
     let mut world = ShellWorld::real();
@@ -190,7 +192,7 @@ fn move_update_remove_failure_records_destination_as_partial_add() {
         &mut world,
     );
 
-    std::fs::set_permissions(&source_dir, std::fs::Permissions::from_mode(0o755))
+    std::fs::set_permissions(&source_dir, path_std_fs::Permissions::from_mode(0o755))
         .expect("restore source dir permissions");
     let err = result.expect_err("source removal should fail after writing destination");
 

@@ -1,4 +1,7 @@
+use std::ffi as path_std_ffi;
+
 use super::*;
+use crate::tools::world as path_crate_tools_world;
 use crate::truncate::MAX_OUTPUT_BYTES;
 
 fn cbor_map_text<'a>(value: &'a CborValue, key: &str) -> Option<&'a str> {
@@ -56,7 +59,7 @@ fn ls_rejects_wrong_type_path() {
         CborValue::Text("path".to_owned()),
         CborValue::Integer(1.into()),
     )]);
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
 
     let err = run_ls(&args, &mut world).expect_err("integer path should be rejected");
 
@@ -67,7 +70,7 @@ fn ls_rejects_wrong_type_path() {
 fn empty_ls_display_uses_zero_line_and_byte_stats() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
 
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let output = run_ls(&ls_args(tempdir.path()), &mut world).expect("ls output");
 
     assert!(output.display.info_chips.is_empty());
@@ -84,7 +87,7 @@ fn ls_display_uses_line_and_byte_stats_instead_of_entry_chip() {
     std::fs::write(tempdir.path().join("alpha"), "a").expect("write alpha");
     std::fs::write(tempdir.path().join("beta"), "b").expect("write beta");
 
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let output = run_ls(&ls_args(tempdir.path()), &mut world).expect("ls output");
 
     assert!(output.display.info_chips.is_empty());
@@ -108,7 +111,7 @@ fn ls_escapes_line_breaks_and_control_characters_in_names() {
     std::fs::write(tempdir.path().join("escape\u{1b}char"), "e").expect("write escape char name");
     std::fs::create_dir(tempdir.path().join("dir\nname")).expect("create escaped dir");
 
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let output = run_ls(&ls_args(tempdir.path()), &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 
@@ -128,10 +131,10 @@ fn ls_marks_invalid_utf8_names_and_shows_replacement_characters() {
     use std::os::unix::ffi::OsStringExt;
 
     let tempdir = tempfile::TempDir::new().expect("tempdir");
-    let invalid_name = std::ffi::OsString::from_vec(vec![b'a', 0xff, b'b']);
+    let invalid_name = path_std_ffi::OsString::from_vec(vec![b'a', 0xff, b'b']);
     std::fs::write(tempdir.path().join(invalid_name), "a").expect("write invalid name");
 
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let output = run_ls(&ls_args(tempdir.path()), &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 
@@ -152,7 +155,7 @@ fn ls_rejects_non_positive_limit() {
         ),
     ]);
 
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let failure = run_ls(&args, &mut world).expect_err("limit should fail");
 
     assert_eq!(failure.message, "limit must be >= 1");
@@ -172,7 +175,7 @@ fn ls_rejects_limit_above_output_cap() {
         ),
     ]);
 
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let failure = run_ls(&args, &mut world).expect_err("limit should fail");
 
     assert_eq!(failure.message, format!("limit must be <= {MAX_LS_LIMIT}"));
@@ -196,7 +199,7 @@ fn ls_limit_truncation_reports_limit_reached_without_exact_totals() {
         ),
     ]);
 
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let output = run_ls(&args, &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 
@@ -228,7 +231,7 @@ fn ls_limit_bounds_world_directory_collection() {
         ),
     ]);
 
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let output = run_ls(&args, &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 
@@ -259,7 +262,7 @@ fn ls_byte_budget_truncation_reports_standard_total_headers() {
         ),
     ]);
 
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let output = run_ls(&args, &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 
@@ -294,7 +297,7 @@ fn ls_line_count_truncation_keeps_head_tail_separator_and_totals() {
         ),
     ]);
 
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let output = run_ls(&args, &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 

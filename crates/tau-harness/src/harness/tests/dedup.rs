@@ -6,13 +6,15 @@
 //! original content or a `[tau-internal]` pointer back to the first
 //! occurrence on the conversation's branch.
 
+use std::io as path_std_io;
+
 use super::*;
-use crate::INTERNAL_MARKER;
 use crate::dedup::DEFAULT_THRESHOLD_BYTES;
 use crate::harness::PendingTool;
+use crate::{INTERNAL_MARKER, agent as path_crate_agent, dedup as path_crate_dedup};
 
 fn encoded_test_png() -> Vec<u8> {
-    let mut encoded = std::io::Cursor::new(Vec::new());
+    let mut encoded = path_std_io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgb8(2, 2)
         .write_to(&mut encoded, image::ImageFormat::Png)
         .expect("encode test PNG");
@@ -466,7 +468,7 @@ fn pointer_entries_are_not_themselves_dedup_anchors() {
     // Result_dup (pointer)]) and we want to verify the pointer was
     // skipped.
     h.agents.get_mut(&cid).expect("default conv").result_dedup =
-        crate::dedup::ResultDedupMap::new();
+        path_crate_dedup::ResultDedupMap::new();
 
     let third = run_tool_result(&mut h, "s1", &cid, "call_third", "read", big.clone());
     assert_eq!(third.status, ToolResultStatus::Success);
@@ -671,7 +673,7 @@ fn dedup_is_scoped_to_a_single_branch() {
     let side_cid: crate::AgentId = crate::parse_agent_id("side-test");
     h.agents.insert(
         side_cid.clone(),
-        crate::agent::Agent::new(
+        path_crate_agent::Agent::new(
             side_cid.clone(),
             1,
             "s1".parse::<tau_proto::SessionId>()

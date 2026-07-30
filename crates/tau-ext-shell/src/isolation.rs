@@ -6,6 +6,7 @@
 
 #[cfg(target_os = "linux")]
 use std::ffi::{CStr, CString};
+use std::io as path_std_io;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(target_os = "linux")]
@@ -85,7 +86,7 @@ pub(crate) fn apply_command_isolation(cmd: &mut Command) {
 #[allow(unsafe_code)]
 fn apply_session_isolation() -> std::io::Result<()> {
     if unsafe { libc::setsid() } == -1 {
-        let err = std::io::Error::last_os_error();
+        let err = path_std_io::Error::last_os_error();
         if err.raw_os_error() != Some(libc::EPERM) {
             return Err(err);
         }
@@ -164,8 +165,8 @@ pub(crate) fn apply_read_only_cwd_mount(
     _cmd: &mut Command,
     _cwd: &std::path::Path,
 ) -> std::io::Result<Option<ReadOnlyMountWarningPipe>> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
+    Err(path_std_io::Error::new(
+        path_std_io::ErrorKind::Unsupported,
         "read-only cwd mount is only supported on Linux",
     ))
 }
@@ -188,7 +189,7 @@ fn apply_read_only_cwd_mount_child(
 ) -> std::io::Result<()> {
     if cvt(unsafe { libc::unshare(libc::CLONE_NEWUSER) }).is_err() {
         let _ = warning_write_fd;
-        return Err(std::io::Error::last_os_error());
+        return Err(path_std_io::Error::last_os_error());
     }
     write_proc_file(c"/proc/self/setgroups", c"deny\n", true)?;
     write_proc_file(c"/proc/self/uid_map", uid_map, false)?;
@@ -319,7 +320,7 @@ fn drop_namespace_capabilities() -> std::io::Result<()> {
         )
     };
     if result == -1 {
-        Err(std::io::Error::last_os_error())
+        Err(path_std_io::Error::last_os_error())
     } else {
         Ok(())
     }
@@ -338,7 +339,7 @@ fn write_warning(fd: libc::c_int, message: &[u8]) {
 fn write_proc_file(path: &CStr, content: &CStr, ignore_enoent: bool) -> std::io::Result<()> {
     let fd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
     if fd == -1 {
-        let err = std::io::Error::last_os_error();
+        let err = path_std_io::Error::last_os_error();
         if ignore_enoent && err.raw_os_error() == Some(libc::ENOENT) {
             return Ok(());
         }
@@ -349,11 +350,11 @@ fn write_proc_file(path: &CStr, content: &CStr, ignore_enoent: bool) -> std::io:
     let written = unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };
     let close_result = unsafe { libc::close(fd) };
     if written < 0 {
-        return Err(std::io::Error::last_os_error());
+        return Err(path_std_io::Error::last_os_error());
     }
     if written as usize != bytes.len() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::WriteZero,
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::WriteZero,
             "short write to proc uid/gid map",
         ));
     }
@@ -364,7 +365,7 @@ fn write_proc_file(path: &CStr, content: &CStr, ignore_enoent: bool) -> std::io:
 #[cfg(unix)]
 fn cvt(result: libc::c_int) -> std::io::Result<()> {
     if result == -1 {
-        Err(std::io::Error::last_os_error())
+        Err(path_std_io::Error::last_os_error())
     } else {
         Ok(())
     }
@@ -373,7 +374,7 @@ fn cvt(result: libc::c_int) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 fn cvt_long(result: libc::c_long) -> std::io::Result<()> {
     if result == -1 {
-        Err(std::io::Error::last_os_error())
+        Err(path_std_io::Error::last_os_error())
     } else {
         Ok(())
     }
@@ -382,7 +383,7 @@ fn cvt_long(result: libc::c_long) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 fn cvt_fd(result: libc::c_long) -> std::io::Result<libc::c_int> {
     if result == -1 {
-        Err(std::io::Error::last_os_error())
+        Err(path_std_io::Error::last_os_error())
     } else {
         Ok(result as libc::c_int)
     }

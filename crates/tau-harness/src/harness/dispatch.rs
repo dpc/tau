@@ -19,6 +19,7 @@
 
 use tau_proto::{AgentId, Event, SessionId};
 
+use crate::agent as path_crate_agent;
 use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::error::HarnessError;
 use crate::harness::{AgentPublishCompletion, Harness};
@@ -176,7 +177,7 @@ impl Harness {
                 }
             )
         {
-            agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+            agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
         }
         if let Some(agent) = self.agents.get_mut(agent_id) {
             agent.lifecycle_notification_only_turn = false;
@@ -275,7 +276,7 @@ impl Harness {
                     && let Some(agent) = self.agents.get_mut(&agent_id)
                 {
                     agent.lifecycle_notification_only_turn = activation_class
-                        == crate::agent::AgentMessageActivationClass::IsolatedWatchNotification;
+                        == path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification;
                 }
                 let model = self
                     .agents
@@ -286,7 +287,7 @@ impl Harness {
                     self.emit_info(&format!(
                         "role `{role_name}` has no available model — use :role to pick a role, :model <provider>/<model> to pick an agent model, or enable a provider"
                     ));
-                    self.set_agent_turn_state(&agent_id, crate::agent::AgentTurnState::Idle);
+                    self.set_agent_turn_state(&agent_id, path_crate_agent::AgentTurnState::Idle);
                     return;
                 };
                 let captured_activation_cut = self.agents.get(&agent_id).and_then(|agent| {
@@ -316,8 +317,8 @@ impl Harness {
                             .head
                             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
                         agent.activation_dispatch =
-                            crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-                                owner: crate::agent::InferenceCheckpointOwner::Inference,
+                            path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+                                owner: path_crate_agent::InferenceCheckpointOwner::Inference,
                                 agent_prompt_id: prompt_id.clone(),
                                 through,
                                 dispatch: crate::agent::InferenceDispatchOwnership {

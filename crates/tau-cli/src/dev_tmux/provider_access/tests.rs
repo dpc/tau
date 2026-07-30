@@ -1,3 +1,4 @@
+use std::os::unix as path_std_os_unix;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;
@@ -265,7 +266,7 @@ fn provider_profile_copy_rejects_source_symlink() {
     std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
     let outside = temp.path().join("outside.json");
     std::fs::write(&outside, "secret").expect("outside");
-    std::os::unix::fs::symlink(&outside, source_auth.join("chatgpt.json")).expect("symlink");
+    path_std_os_unix::fs::symlink(&outside, source_auth.join("chatgpt.json")).expect("symlink");
 
     let error = copy_provider_profile(
         &source_auth,
@@ -323,7 +324,7 @@ fn provider_profile_copy_rejects_destination_symlink() {
     std::fs::write(source_auth.join("chatgpt.json"), "secret").expect("source");
     let outside = temp.path().join("outside.json");
     std::fs::write(&outside, "unchanged").expect("outside");
-    std::os::unix::fs::symlink(&outside, scratch_auth.join("chatgpt.json")).expect("symlink");
+    path_std_os_unix::fs::symlink(&outside, scratch_auth.join("chatgpt.json")).expect("symlink");
 
     let error = copy_provider_profile(
         &source_auth,
@@ -351,7 +352,7 @@ fn provider_allowlist_rejects_source_auth_directory_symlink() {
     let scratch_state = temp.path().join("scratch-state");
     std::fs::create_dir_all(&source_state).expect("mkdir source state");
     std::fs::create_dir_all(&outside_auth).expect("mkdir outside auth");
-    std::os::unix::fs::symlink(&outside_auth, source_state.join(PROVIDER_AUTH_DIR))
+    path_std_os_unix::fs::symlink(&outside_auth, source_state.join(PROVIDER_AUTH_DIR))
         .expect("auth dir symlink");
     let access = provider_access_from_settings(
         Some(source_state),
@@ -381,7 +382,7 @@ fn provider_reconcile_rejects_scratch_auth_entry_symlink() {
     std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
     let outside = temp.path().join("outside.json");
     std::fs::write(&outside, "unchanged").expect("outside");
-    std::os::unix::fs::symlink(&outside, scratch_auth.join("chatgpt.json")).expect("symlink");
+    path_std_os_unix::fs::symlink(&outside, scratch_auth.join("chatgpt.json")).expect("symlink");
     let access = provider_access_from_settings(None, scratch_state, None);
 
     let error = access

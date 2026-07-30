@@ -14,6 +14,7 @@ use std::error::Error;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::thread as path_std_thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -26,6 +27,8 @@ use tau_proto::{
     RawMessagePublisherId, SessionId, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
     ToolStarted, ToolUseState, ToolUseStatus,
 };
+use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync, time as path_tokio_time};
+use tokio_xmpp::rustls::crypto as path_tokio_xmpp_rustls_crypto;
 use tokio_xmpp::{Client, IqRequest, IqResponse};
 use xmpp_parsers::delay::Delay;
 use xmpp_parsers::iq::Iq;
@@ -34,10 +37,10 @@ use xmpp_parsers::message::{Lang, Message, MessageType};
 use xmpp_parsers::muc::muc::History;
 use xmpp_parsers::muc::user::{Invite, Status as MucStatus};
 use xmpp_parsers::muc::{Muc, MucUser};
-use xmpp_parsers::ns;
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza::Stanza;
 use xmpp_parsers::stanza_error::StanzaError;
+use xmpp_parsers::{minidom as path_xmpp_parsers_minidom, ns};
 
 /// Tracing target used by this extension.
 pub const LOG_TARGET: &str = "xmpp";
@@ -185,7 +188,7 @@ impl ShutdownSignal {
     fn new() -> Self {
         Self {
             requested: AtomicBool::new(false),
-            notify: tokio::sync::Notify::new(),
+            notify: path_tokio_sync::Notify::new(),
         }
     }
 
@@ -1111,7 +1114,7 @@ impl XmppBridge for LiveXmppBridge {
         let worker_tx = command_tx.clone();
         let (done_tx, done_rx) = mpsc::channel();
         let worker_shutdown = Arc::clone(&shutdown);
-        let join = std::thread::Builder::new()
+        let join = path_std_thread::Builder::new()
             .name("tau-ext-xmpp".to_owned())
             .spawn(move || {
                 xmpp_thread(cfg, command_rx, output, worker_shutdown);
@@ -1230,7 +1233,7 @@ fn xmpp_thread(
     output: Output,
     shutdown: Arc<ShutdownSignal>,
 ) {
-    match tokio::runtime::Builder::new_current_thread()
+    match path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
@@ -1245,7 +1248,7 @@ async fn xmpp_worker(
     output: Output,
     shutdown: Arc<ShutdownSignal>,
 ) {
-    if let Err(error) = tokio_xmpp::rustls::crypto::ring::default_provider().install_default() {
+    if let Err(error) = path_tokio_xmpp_rustls_crypto::ring::default_provider().install_default() {
         tracing::debug!(target: LOG_TARGET, ?error, "rustls provider was already installed or unavailable");
     }
     let resource = generated_resource(&cfg);
@@ -1328,8 +1331,8 @@ async fn xmpp_worker(
 
 fn std_to_tokio<T: Send + 'static>(
     rx: mpsc::Receiver<T>,
-) -> tokio::sync::mpsc::UnboundedReceiver<T> {
-    let (tx, tokio_rx) = tokio::sync::mpsc::unbounded_channel();
+) -> path_tokio_sync::mpsc::UnboundedReceiver<T> {
+    let (tx, tokio_rx) = path_tokio_sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
         while let Ok(item) = rx.recv() {
             if tx.send(item).is_err() {
@@ -1714,7 +1717,7 @@ impl WorkerState {
     /// Leave all registered MUC conversations before worker shutdown, bounded
     /// by one overall cleanup budget.
     async fn leave_all_with_timeout(&mut self, client: &mut Client, timeout: Duration) {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = path_tokio_time::Instant::now() + timeout;
         let conversations = self
             .conversations
             .drain()
@@ -2404,13 +2407,13 @@ async fn submit_instant_room_config(client: &mut Client, room: &BareJid) -> Resu
 }
 
 fn instant_room_config_query() -> xmpp_parsers::minidom::Element {
-    let form = xmpp_parsers::minidom::Element::builder("x", ns::DATA_FORMS)
+    let form = path_xmpp_parsers_minidom::Element::builder("x", ns::DATA_FORMS)
         .attr(
-            xmpp_parsers::minidom::rxml::xml_ncname!("type").into(),
+            path_xmpp_parsers_minidom::rxml::xml_ncname!("type").into(),
             "submit",
         )
         .build();
-    xmpp_parsers::minidom::Element::builder("query", MUC_OWNER_NS)
+    path_xmpp_parsers_minidom::Element::builder("query", MUC_OWNER_NS)
         .append(form)
         .build()
 }

@@ -1,12 +1,15 @@
+use std::fs as path_std_fs;
+
 use super::dispatch::provider_text_response;
 use super::*;
+use crate::agent as path_crate_agent;
 
 /// Append one framed CBOR record to a semantic-store test journal.
 fn append_persisted_record<T: serde::Serialize>(path: &Path, record: &T) {
     let mut encoded = Vec::new();
     ciborium::into_writer(record, &mut encoded).expect("encode persisted record");
     std::fs::create_dir_all(path.parent().expect("journal parent")).expect("create journal parent");
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = path_std_fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
@@ -2387,7 +2390,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
     sink.lock().expect("sink").clear();
 
     let cid = crate::parse_agent_id(agent_id.as_str());
-    let mut agent = crate::agent::Agent::new(
+    let mut agent = path_crate_agent::Agent::new(
         cid.clone(),
         1,
         h.current_session_id.clone(),
@@ -2874,7 +2877,9 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
         .get_mut(&cid)
         .expect("default conversation")
         .pending_prompts
-        .push_back(crate::agent::PendingPrompt::user("still queued".to_owned()));
+        .push_back(path_crate_agent::PendingPrompt::user(
+            "still queued".to_owned(),
+        ));
 
     let (server_end, client_end) = UnixStream::pair().expect("pair");
     client_end

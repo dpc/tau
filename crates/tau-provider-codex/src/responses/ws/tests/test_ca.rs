@@ -1,5 +1,7 @@
 //! Generated certificate authority for scripted TLS layers.
 
+use rustls::pki_types as path_rustls_pki_types;
+
 /// Generated test-only certificate authority for scripted TLS layers.
 pub(super) struct TestCa {
     /// Self-signed CA certificate.
@@ -35,8 +37,8 @@ impl TestCa {
             .with_no_client_auth()
             .with_single_cert(
                 vec![leaf.der().clone()],
-                rustls::pki_types::PrivateKeyDer::Pkcs8(
-                    rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+                path_rustls_pki_types::PrivateKeyDer::Pkcs8(
+                    path_rustls_pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
                 ),
             )
             .expect("test TLS server")

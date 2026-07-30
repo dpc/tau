@@ -4,7 +4,10 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, OnceLock};
 
-use image::{DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader};
+use image::{
+    DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader,
+    imageops as path_image_imageops,
+};
 use tau_proto::{
     CborValue, ImageContent, ImageDetail, ImageMediaType, ToolResultContentPart, ToolUseStats,
 };
@@ -512,7 +515,7 @@ fn resize_for_mode(mut image: DynamicImage, mode: ImageMode) -> DynamicImage {
         image = image.resize_exact(
             plan.initial.width,
             plan.initial.height,
-            image::imageops::FilterType::Triangle,
+            path_image_imageops::FilterType::Triangle,
         );
     }
     // Preserve the high profile's existing sequence of one-pixel resamples so
@@ -520,7 +523,7 @@ fn resize_for_mode(mut image: DynamicImage, mode: ImageMode) -> DynamicImage {
     while (image.width(), image.height()) != (plan.target.width, plan.target.height) {
         let width = image.width().saturating_sub(1).max(1);
         let height = image.height().saturating_sub(1).max(1);
-        image = image.resize_exact(width, height, image::imageops::FilterType::Triangle);
+        image = image.resize_exact(width, height, path_image_imageops::FilterType::Triangle);
     }
     image
 }

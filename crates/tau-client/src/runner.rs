@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::builder::ExtensionBuilder;
 use crate::manual_runtime::DispatchOutcome;
 use crate::writer_thread::{WriterCommand, run_writer};
-use crate::{ClientError, ClientHandle, ClientResult, TauExtension};
+use crate::{ClientError, ClientHandle, ClientResult, TauExtension, builder as path_crate_builder};
 
 /// Runtime that performs the Tau protocol lifecycle for one extension.
 pub struct TauExtensionRunner<Extension> {
@@ -302,7 +302,7 @@ pub(crate) fn write_startup_after_configure<State>(
         handle.send_startup(tau_proto::HarnessInputMessage::Intercept(intercept.clone()))?;
     }
     for declaration in &builder.startup_events {
-        let crate::builder::StartupDeclaration::Emit(emit) = declaration else {
+        let path_crate_builder::StartupDeclaration::Emit(emit) = declaration else {
             return Err(ClientError::builder(
                 "startup declaration was not resolved after initial Configure",
             ));

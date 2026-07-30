@@ -3,7 +3,11 @@ use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use std::{fs, thread};
+use std::{
+    collections as path_std_collections, fs as path_std_fs, fs, io as path_std_io,
+    path as path_std_path, process as path_std_process, sync as path_std_sync, thread,
+    time as path_std_time,
+};
 
 use tau_proto::{
     CborValue, EventName, EventSelector, HarnessInputMessage, HarnessInputReader,
@@ -31,11 +35,13 @@ use crate::tools::shell::{
 };
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
-    READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME,
+    READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, shell as path_crate_tools_shell,
+    world as path_crate_tools_world,
 };
 use crate::truncate::{
     MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, mark_line, truncate_head, truncate_tail,
 };
+use crate::{config as path_crate_config, tools as path_crate_tools};
 
 const TEST_SAFE_FILE_READ_LIMIT: u64 = 10 * 1024 * 1024;
 
@@ -62,21 +68,21 @@ impl SharedWriter {
 fn read_file(
     arguments: &CborValue,
 ) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     read_file_with_world(arguments, &mut world)
 }
 
 fn edit_file(
     arguments: &CborValue,
 ) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     edit_file_with_world(arguments, &mut world)
 }
 
 fn read_image(
     arguments: &CborValue,
 ) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     read_image_with_world(arguments, &mut world)
 }
 
@@ -87,7 +93,7 @@ fn read_image_returns_typed_provider_content() {
     let tempdir = TempDir::new().expect("tempdir");
     let path = tempdir.path().join("fixture.png");
     let source = image::DynamicImage::new_rgb8(4, 3);
-    let mut bytes = std::io::Cursor::new(Vec::new());
+    let mut bytes = path_std_io::Cursor::new(Vec::new());
     source
         .write_to(&mut bytes, image::ImageFormat::Png)
         .expect("encode PNG");
@@ -144,7 +150,7 @@ fn read_image_bare_call_matches_explicit_high_for_large_image() {
     let tempdir = TempDir::new().expect("tempdir");
     let path = tempdir.path().join("large.png");
     let source = image::DynamicImage::new_rgb8(1601, 1601);
-    let mut bytes = std::io::Cursor::new(Vec::new());
+    let mut bytes = path_std_io::Cursor::new(Vec::new());
     source
         .write_to(&mut bytes, image::ImageFormat::Png)
         .expect("encode PNG");
@@ -175,7 +181,7 @@ fn read_image_overview_crop_reports_transform_metadata() {
     let tempdir = TempDir::new().expect("tempdir");
     let path = tempdir.path().join("fixture.png");
     let source = image::DynamicImage::new_rgb8(100, 80);
-    let mut bytes = std::io::Cursor::new(Vec::new());
+    let mut bytes = path_std_io::Cursor::new(Vec::new());
     source
         .write_to(&mut bytes, image::ImageFormat::Png)
         .expect("encode PNG");
@@ -270,7 +276,7 @@ fn read_image_schema_exposes_bounded_overview_and_complete_region() {
 
 type TestExtensionReader = EventReader<BufReader<UnixStream>>;
 type TestExtensionWriter = EventWriter<BufWriter<UnixStream>>;
-type TestExtensionDone = std::sync::mpsc::Receiver<Result<(), String>>;
+type TestExtensionDone = path_std_sync::mpsc::Receiver<Result<(), String>>;
 
 /// Test-side wrapper around [`HarnessInputReader`] that exposes an
 /// `Event`-flavoured API so the existing tests can stay mechanical. Non-event
@@ -413,7 +419,7 @@ fn spawn_extension_with_exit_and_prefix(
     let reader_stream = runtime_stream
         .try_clone()
         .expect("runtime reader clone should succeed");
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = path_std_sync::mpsc::channel();
     thread::spawn(move || {
         let result = run_impl(reader_stream, runtime_stream)
             .map_err(|error| format!("extension should run: {error}"));
@@ -1396,9 +1402,9 @@ fn initial_dir_lock_override_is_final_before_ready() {
     input_writer.flush().expect("flush input");
     let output = SharedWriter::default();
     let written = output.clone();
-    run_impl(std::io::Cursor::new(input), output).expect("run shell");
+    run_impl(path_std_io::Cursor::new(input), output).expect("run shell");
 
-    let mut reader = tau_proto::HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut reader = tau_proto::HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     let mut frames = Vec::new();
     while let Some(frame) = reader.read_message().expect("frame") {
         frames.push(frame);
@@ -1437,7 +1443,7 @@ fn initial_dir_lock_override_is_final_before_ready() {
 /// when scheduler admission rejects excess work.
 #[test]
 fn schedule_tool_started_reports_queue_full_error() {
-    let (tx, _rx) = std::sync::mpsc::channel();
+    let (tx, _rx) = path_std_sync::mpsc::channel();
     let output = Output::channel(tx);
     let scheduler = WorkScheduler::new(
         output.clone(),
@@ -1484,7 +1490,7 @@ fn schedule_tool_started_cancel_before_start_prevents_mutation() {
     let tempdir = TempDir::new().expect("tempdir");
     let edit_path = tempdir.path().join("queued-edit.txt");
     fs::write(&edit_path, "old\n").expect("initial file");
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = path_std_sync::mpsc::channel();
     let output = Output::channel(tx);
     let scheduler = WorkScheduler::new(
         output.clone(),
@@ -2476,8 +2482,8 @@ fn dir_lock_waiting_progress_preserves_shell_mode() {
     let progress = crate::dir_lock::waiting_progress(
         &invoke,
         &[tempdir.path().to_path_buf()],
-        Some(crate::tools::shell::ShellCommandMode::visible(
-            crate::tools::shell::ShellAccessMode::ReadWrite,
+        Some(path_crate_tools_shell::ShellCommandMode::visible(
+            path_crate_tools_shell::ShellAccessMode::ReadWrite,
         )),
     );
     let display = progress.display.expect("waiting display");
@@ -2832,7 +2838,7 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
     // Agent context is the structured source used by the shell cwd prompt
     // fragment; it must be keyed by durable agent, not by session.
     let cwd = std::env::current_dir().expect("current dir");
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = path_std_sync::mpsc::channel();
     let output = Output::channel(tx);
     let cwd_state = CwdState::new();
 
@@ -5734,7 +5740,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
                 ]),
             )]),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         }))
         .expect("configure");
     writer
@@ -5769,12 +5775,12 @@ fn shell_tool_applies_configured_prefix_and_command() {
 
 #[test]
 fn command_isolation_preserves_explicit_environment() {
-    let mut cmd = std::process::Command::new("sh");
+    let mut cmd = path_std_process::Command::new("sh");
     cmd.arg("-c")
         .arg("printf %s \"${TAU_EXPLICIT_ENV_TEST-unset}\"")
         .env("TAU_EXPLICIT_ENV_TEST", "ok")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::piped());
     crate::isolation::apply_command_isolation(&mut cmd);
     let output = cmd.output().expect("run env probe");
     assert!(output.status.success(), "env probe failed: {output:?}");
@@ -5817,11 +5823,11 @@ fn command_isolation_clears_cargo_build_environment() {
         .map(|env_var| format!("{env_var}=unset\n"))
         .collect::<String>();
 
-    let mut cmd = std::process::Command::new("sh");
+    let mut cmd = path_std_process::Command::new("sh");
     cmd.arg("-c")
         .arg(script)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::piped());
     for env_var in cargo_env_vars {
         cmd.env(env_var, "should-not-leak");
     }
@@ -5852,7 +5858,7 @@ fn shell_extension_rejects_invalid_config() {
                 )]),
             )]),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         }))
         .expect("configure");
     writer.flush().expect("flush");
@@ -5877,7 +5883,7 @@ fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
     use std::os::unix::fs::PermissionsExt;
 
     let tempdir = tempfile::TempDir::new().expect("tempdir");
-    std::fs::set_permissions(tempdir.path(), std::fs::Permissions::from_mode(0o755))
+    std::fs::set_permissions(tempdir.path(), path_std_fs::Permissions::from_mode(0o755))
         .expect("chmod tempdir");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
@@ -5902,7 +5908,7 @@ fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
                 ]),
             )]),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         }))
         .expect("configure");
     writer.flush().expect("flush");
@@ -5992,7 +5998,7 @@ fn shell_extension_reports_invalid_working_directory_config() {
                 missing_dir.to_str().expect("utf8 temp path"),
             )]),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         }))
         .expect("configure");
     writer.flush().expect("flush");
@@ -6033,8 +6039,8 @@ fn shell_hidden_read_write_mode_is_unrestricted_by_default() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6064,8 +6070,8 @@ fn shell_tool_multiline_display_uses_short_args_and_text_payload() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6103,17 +6109,17 @@ fn shell_tool_long_display_args_include_full_text_payload() {
     let expected_payload = Some(tau_proto::ToolUsePayload::Text {
         text: command.to_owned(),
     });
-    let initial = crate::tools::shell::initial_display(
+    let initial = path_crate_tools::shell::initial_display(
         &args,
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
     );
     assert_eq!(initial.args, expected_args);
     assert_eq!(initial.payload, expected_payload);
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6137,8 +6143,8 @@ fn shell_tool_short_display_args_omit_redundant_text_payload() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6161,9 +6167,9 @@ fn shell_tool_use_state_mode_can_show_inferred_access_mode() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::visible(
-            crate::tools::shell::ShellAccessMode::ReadOnly,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::visible(
+            path_crate_tools_shell::ShellAccessMode::ReadOnly,
         ),
         false,
         None,
@@ -6193,8 +6199,8 @@ fn shell_tool_runs_with_tty_outputs_closed_stdin_and_separate_streams() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6235,7 +6241,7 @@ fn model_and_user_shells_share_protected_pager_environment() {
     let CommandOutcome::Finished(model_output) = run_command_live(
         &args,
         &shell_config,
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6247,7 +6253,7 @@ fn model_and_user_shells_share_protected_pager_environment() {
         Some("out(no_nl) cat|cat|cat|cat|cat|tau-test-term")
     );
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = path_std_sync::mpsc::channel();
     let user_command = tau_proto::UiShellCommand {
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
@@ -6259,8 +6265,8 @@ fn model_and_user_shells_share_protected_pager_environment() {
         target_agent_id: None,
     };
     let output = Output::channel(tx);
-    let (_cancel_tx, cancel_rx) = std::sync::mpsc::channel();
-    crate::tools::shell::dispatch_user_shell_command(
+    let (_cancel_tx, cancel_rx) = path_std_sync::mpsc::channel();
+    path_crate_tools::shell::dispatch_user_shell_command(
         user_command,
         shell_config,
         &output,
@@ -6321,7 +6327,7 @@ fn protected_pager_overlay_prevents_stall_and_opt_out_forfeits_guarantee() {
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
         &protected,
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6343,7 +6349,7 @@ fn protected_pager_overlay_prevents_stall_and_opt_out_forfeits_guarantee() {
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
         &unprotected,
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6362,7 +6368,7 @@ fn protected_pager_overlay_prevents_stall_and_opt_out_forfeits_guarantee() {
 #[cfg(unix)]
 #[test]
 fn protected_pager_reports_command_not_found_when_cat_is_absent() {
-    let shell = std::process::Command::new("sh")
+    let shell = path_std_process::Command::new("sh")
         .arg("-c")
         .arg("command -v sh")
         .output()
@@ -6386,7 +6392,7 @@ fn protected_pager_reports_command_not_found_when_cat_is_absent() {
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
         &shell_config,
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6426,8 +6432,8 @@ fn shell_tool_closed_stdin_provides_poll_visible_readiness() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6473,8 +6479,8 @@ fn shell_tool_marks_invalid_utf8_stdout_line_and_marks_output_invalid() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6501,8 +6507,8 @@ fn shell_tool_replaces_invalid_utf8_stderr_and_marks_output_invalid() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6528,8 +6534,8 @@ fn shell_tool_replaces_invalid_utf8_both_streams_in_combined_output() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6555,8 +6561,8 @@ fn shell_tool_marks_crlf_and_cr_line_endings() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6581,8 +6587,8 @@ fn shell_tool_omits_truncation_marker_without_truncation() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6618,8 +6624,8 @@ fn shell_tool_accepts_exact_model_output_byte_cap() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6669,8 +6675,8 @@ fn shell_tool_multibyte_output_over_model_cap_keeps_exact_artifact() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6709,8 +6715,8 @@ fn shell_tool_reports_truncation_marker_and_original_totals() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6729,7 +6735,7 @@ fn shell_tool_reports_truncation_marker_and_original_totals() {
     assert!(cbor_int_field(&output.result, "total_bytes").is_some());
     assert_eq!(cbor_bool_field(&output.result, "truncated"), Some(true));
     assert!(cbor_map_text(&output.result, "truncation_warning").is_some());
-    let path = std::path::PathBuf::from(
+    let path = path_std_path::PathBuf::from(
         cbor_map_text(&output.result, "full_output_path").expect("full output path"),
     );
     let saved =
@@ -6768,8 +6774,8 @@ fn shell_tool_marks_invalid_utf8_and_truncation_together() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6799,8 +6805,8 @@ fn shell_tool_runs_in_requested_cwd() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6832,8 +6838,8 @@ fn shell_tool_timeout_preserves_partial_output() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6869,11 +6875,11 @@ fn shell_tool_returns_after_foreground_exit_even_if_background_holds_output_endp
         ),
     ]);
 
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -6896,7 +6902,7 @@ fn shell_tool_returns_after_foreground_exit_even_if_background_holds_output_endp
 #[cfg(unix)]
 #[test]
 fn user_shell_returns_after_foreground_exit_even_if_background_holds_output_endpoint() {
-    if !std::process::Command::new("sh")
+    if !path_std_process::Command::new("sh")
         .arg("-c")
         .arg("command -v setsid >/dev/null")
         .status()
@@ -6905,7 +6911,7 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_output_endp
         return;
     }
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = path_std_sync::mpsc::channel();
     let cmd = tau_proto::UiShellCommand {
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
@@ -6917,12 +6923,12 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_output_endp
         target_agent_id: None,
     };
 
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
     let output = Output::channel(tx);
-    let (_cancel_tx, cancel_rx) = std::sync::mpsc::channel();
-    crate::tools::shell::dispatch_user_shell_command(
+    let (_cancel_tx, cancel_rx) = path_std_sync::mpsc::channel();
+    path_crate_tools::shell::dispatch_user_shell_command(
         cmd,
-        crate::config::ShellConfig::default(),
+        path_crate_config::ShellConfig::default(),
         &output,
         cancel_rx,
         std::env::current_dir().expect("current dir"),
@@ -6953,7 +6959,7 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_output_endp
 #[cfg(unix)]
 #[test]
 fn shell_tool_timeout_returns_without_waiting_for_escaped_output_holder() {
-    if !std::process::Command::new("sh")
+    if !path_std_process::Command::new("sh")
         .arg("-c")
         .arg("command -v setsid >/dev/null")
         .status()
@@ -6975,11 +6981,11 @@ fn shell_tool_timeout_returns_without_waiting_for_escaped_output_holder() {
         ),
     ]);
 
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
     let CommandOutcome::Finished(result) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -7017,8 +7023,8 @@ fn shell_tool_bounded_huge_output_reports_original_totals() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -7050,8 +7056,8 @@ fn shell_tool_timeout_zero_is_immediate_timeout() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -7086,8 +7092,8 @@ fn shell_tool_rejects_negative_timeout() {
 
     let error = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -7129,20 +7135,20 @@ fn shell_tool_enforced_read_only_mode_bind_mounts_cwd_read_only() {
         ),
     ]);
 
-    let mut world = crate::tools::world::ShellWorld::real();
-    let output = match crate::tools::shell::run_command_cancellable(
+    let mut world = path_crate_tools_world::ShellWorld::real();
+    let output = match path_crate_tools::shell::run_command_cancellable(
         "enforced_ro_test",
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::visible(
-            crate::tools::shell::ShellAccessMode::ReadOnly,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::visible(
+            path_crate_tools_shell::ShellAccessMode::ReadOnly,
         ),
         true,
         None,
         &mut world,
     ) {
-        Ok(crate::tools::shell::CommandOutcome::Finished(output)) => *output,
-        Ok(crate::tools::shell::CommandOutcome::Cancelled) => panic!("unexpected cancellation"),
+        Ok(path_crate_tools_shell::CommandOutcome::Finished(output)) => *output,
+        Ok(path_crate_tools_shell::CommandOutcome::Cancelled) => panic!("unexpected cancellation"),
         Err(error) if error.message.contains("Operation not permitted") => return,
         Err(error) => panic!("unexpected shell start error: {error:?}"),
     };
@@ -7180,8 +7186,8 @@ fn shell_tool_ignores_legacy_wrong_type_mode_argument() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -7208,8 +7214,8 @@ fn shell_tool_rejects_wrong_type_timeout() {
 
     let error = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -7232,8 +7238,8 @@ fn shell_tool_rejects_wrong_type_cwd() {
 
     let error = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -7259,8 +7265,8 @@ fn shell_tool_reports_signal_termination_details() {
 
     let CommandOutcome::Finished(output) = run_command_live(
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -8442,7 +8448,7 @@ fn run_ls_lists_directory_contents() {
         CborValue::Text("path".to_owned()),
         CborValue::Text(tempdir.path().display().to_string()),
     )]);
-    let mut world = crate::tools::world::ShellWorld::real();
+    let mut world = path_crate_tools_world::ShellWorld::real();
     let result = run_ls(&args, &mut world).expect("ls").result;
 
     assert!(cbor_map_field(&result, "path").is_none());
@@ -8580,7 +8586,7 @@ fn shell_surface_directory_overrides_remain_call_local_across_full_dispatch() {
 
     for tool_name in [SHELL_TOOL_NAME, GPT_SHELL_TOOL_NAME] {
         let surface =
-            crate::tools::ShellSurface::for_tool_name(tool_name).expect("known shell surface");
+            path_crate_tools::ShellSurface::for_tool_name(tool_name).expect("known shell surface");
         let mut cases = vec![
             (
                 "override",
@@ -8589,7 +8595,7 @@ fn shell_surface_directory_overrides_remain_call_local_across_full_dispatch() {
             ),
             ("remembered-after", None, remembered.path()),
         ];
-        if surface == crate::tools::ShellSurface::ChatGpt {
+        if surface == path_crate_tools::ShellSurface::ChatGpt {
             cases.push((
                 "relative-override",
                 Some("relative-override".to_owned()),
@@ -8667,11 +8673,11 @@ fn gpt_shell_does_not_accept_legacy_cwd_as_call_local_workdir() {
         ("cwd", &legacy_override.path().display().to_string()),
     ]);
 
-    let error = crate::tools::shell::run_command_live_for_surface(
-        crate::tools::ShellSurface::ChatGpt,
+    let error = path_crate_tools::shell::run_command_live_for_surface(
+        path_crate_tools::ShellSurface::ChatGpt,
         &args,
-        &crate::config::ShellConfig::default(),
-        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        &path_crate_config::ShellConfig::default(),
+        path_crate_tools_shell::ShellCommandMode::READ_WRITE_HIDDEN,
         false,
         None,
     )
@@ -9298,7 +9304,7 @@ fn live_loaded_agent_defaults_workdir_after_replay_boundary_without_metadata() {
 /// default cwd metadata or publish readiness when restore failed.
 #[test]
 fn live_loaded_agent_does_not_default_workdir_after_replay_error() {
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = path_std_sync::mpsc::channel();
     let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
     let agent_id = tau_proto::AgentId::parse("agent-live-error-cwd").expect("agent id");
 

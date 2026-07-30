@@ -56,9 +56,9 @@ impl ShellProcess {
     #[cfg(not(any(target_os = "android", target_os = "linux", target_os = "macos")))]
     pub(crate) fn spawn(command: &mut Command) -> std::io::Result<Self> {
         command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stdin(path_std_process::Stdio::null())
+            .stdout(path_std_process::Stdio::piped())
+            .stderr(path_std_process::Stdio::piped());
         let mut child = command.spawn()?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();

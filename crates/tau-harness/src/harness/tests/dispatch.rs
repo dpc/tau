@@ -1,5 +1,13 @@
+use std::os::unix::net as path_std_os_unix_net;
+use std::sync::{atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc};
+use std::{
+    collections as path_std_collections, fs as path_std_fs, io as path_std_io,
+    path as path_std_path, sync as path_std_sync, time as path_std_time,
+};
+
+use tau_config::settings as path_tau_config_settings;
+
 use super::*;
-use crate::AgentId;
 use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::interception::AgentPublishCompletion;
 use crate::harness::{
@@ -9,6 +17,12 @@ use crate::harness::{
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
     restore_notice_prompt_for_elapsed, self_compaction_terminal_prompt,
     unavailable_tool_error_message, working_status_reminder,
+};
+use crate::{
+    AgentId, agent as path_crate_agent, discovery as path_crate_discovery,
+    event as path_crate_event, event_log as path_crate_event_log,
+    extension as path_crate_extension, harness as path_crate_harness,
+    internal_tools as path_crate_internal_tools,
 };
 
 /// Still-Working steering uses the concise generic wording approved for status
@@ -91,7 +105,7 @@ fn completed_call_clears_all_runtime_observation_correlation_before_id_reuse() {
         .insert(call_id.clone(), observation);
     harness.pending_wait_settlements.insert(
         call_id.clone(),
-        crate::harness::subagents_tool::PendingWaitSettlement {
+        path_crate_harness::subagents_tool::PendingWaitSettlement {
             wait_observation: observation,
             wait_call: tau_proto::ToolCallRef {
                 declaration: observation,
@@ -117,8 +131,8 @@ fn completed_call_clears_all_runtime_observation_correlation_before_id_reuse() {
 /// classification without text or extension-name inference.
 #[test]
 fn timer_prompt_source_maps_to_timer_activation_observation() {
-    let mut prompt = crate::agent::PendingPrompt::internal("wake".into());
-    prompt.source = crate::agent::PendingPromptSource::Timer;
+    let mut prompt = path_crate_agent::PendingPrompt::internal("wake".into());
+    prompt.source = path_crate_agent::PendingPromptSource::Timer;
     assert_eq!(prompt.activation_kind(), tau_proto::ActivationKind::Timer);
 }
 
@@ -610,7 +624,7 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
         })
         .expect("created runtime agent");
     let prompt_count = |h: &Harness| {
-        let mut cursor = crate::event_log::EventLogSeq::new(0);
+        let mut cursor = path_crate_event_log::EventLogSeq::new(0);
         let mut count = 0;
         while let Some(record) = h.event_log.get_next_from(cursor) {
             cursor = record.seq.next();
@@ -845,7 +859,7 @@ fn late_prompt_surface_failure_terminalizes_running_compaction() {
     h.agents
         .get_mut(&cid)
         .expect("user agent")
-        .activation_dispatch = crate::agent::ActivationDispatchState::Running {
+        .activation_dispatch = path_crate_agent::ActivationDispatchState::Running {
         id: transaction_id.clone(),
         cut: tau_proto::AgentHead::Root,
         resume_through: None,
@@ -945,7 +959,7 @@ fn failed_create_prompt_preflight_preserves_later_prompt() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([context_provider]),
+        path_std_collections::HashSet::from([context_provider]),
     );
 
     h.resolving_initial_extension_collisions = false;
@@ -1302,7 +1316,7 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cwd = std::path::PathBuf::from("/tmp/tau-ui-cwd");
+    let cwd = path_std_path::PathBuf::from("/tmp/tau-ui-cwd");
 
     h.handle_ui_create_agent_from(
         &crate::test_connection_id("ui-create-test"),
@@ -1452,7 +1466,7 @@ fn shell_workdir_prompt_renders_prefixed_instances_independently() {
         .expect("core shell workdir fragment");
     h.extension_prompt_fragments.insert(
         crate::test_connection_id("shell-prod"),
-        std::collections::BTreeMap::from([("shell.workdir".to_owned(), fragment)]),
+        path_std_collections::BTreeMap::from([("shell.workdir".to_owned(), fragment)]),
     );
     let mut prod_workdir = shared_test_tool_spec("prod_workdir");
     prod_workdir.tags = vec![tau_proto::ToolTag::new("shell:workdir")];
@@ -1601,11 +1615,11 @@ fn duplicate_shell_workdir_fragments_are_coalesced_once() {
     );
     h.extension_prompt_fragments.insert(
         crate::test_connection_id("shell-a"),
-        std::collections::BTreeMap::from([("shell.workdir".to_owned(), fragment.clone())]),
+        path_std_collections::BTreeMap::from([("shell.workdir".to_owned(), fragment.clone())]),
     );
     h.extension_prompt_fragments.insert(
         crate::test_connection_id("shell-b"),
-        std::collections::BTreeMap::from([("shell.workdir".to_owned(), fragment)]),
+        path_std_collections::BTreeMap::from([("shell.workdir".to_owned(), fragment)]),
     );
     let fragments = h.gather_prompt_fragments();
     assert_eq!(
@@ -2308,7 +2322,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
 /// because they are installed before rehydration and provider readiness.
 #[test]
 fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
-    struct PromptObserver(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    struct PromptObserver(std::sync::Arc<path_std_sync::atomic::AtomicBool>);
 
     impl crate::InternalToolHandler for PromptObserver {
         fn tool_specs(&self) -> Vec<ToolSpec> {
@@ -2325,7 +2339,7 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
             event: &Event,
         ) -> Result<(), HarnessError> {
             if matches!(event, Event::AgentPromptCreated(_)) {
-                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.0.store(true, path_std_sync_atomic::Ordering::SeqCst);
             }
             Ok(())
         }
@@ -2387,7 +2401,7 @@ fn resume_installs_internal_handlers_before_restored_activation_dispatch() {
             .expect("seed outstanding prompt");
     }
 
-    let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
     let dirs = tau_config::settings::TauDirs {
         config_dir: Some(state.join("config")),
         state_dir: Some(state.join("runtime")),
@@ -2721,7 +2735,7 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
     ];
     for path in &paths {
         std::fs::create_dir_all(path.parent().expect("journal parent")).expect("create parent");
-        std::fs::OpenOptions::new()
+        path_std_fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
@@ -3040,7 +3054,7 @@ fn background_placeholder_count(h: &Harness, call_id: &str) -> usize {
 }
 
 fn event_log_contains(h: &Harness, source: &str, matches_event: impl Fn(&Event) -> bool) -> bool {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && matches_event(&entry.event) {
@@ -3051,7 +3065,7 @@ fn event_log_contains(h: &Harness, source: &str, matches_event: impl Fn(&Event) 
 }
 
 fn event_log_position(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> Option<u64> {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches_event(&entry.event) {
@@ -3066,7 +3080,7 @@ fn event_log_position_after(
     after_seq: u64,
     matches_event: impl Fn(&Event) -> bool,
 ) -> Option<u64> {
-    let mut seq = crate::event_log::EventLogSeq::new(after_seq + 1);
+    let mut seq = path_crate_event_log::EventLogSeq::new(after_seq + 1);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches_event(&entry.event) {
@@ -3077,7 +3091,7 @@ fn event_log_position_after(
 }
 
 fn event_log_contains_any_source(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> bool {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches_event(&entry.event) {
@@ -3089,7 +3103,7 @@ fn event_log_contains_any_source(h: &Harness, matches_event: impl Fn(&Event) -> 
 
 fn event_log_count(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> usize {
     let mut count = 0;
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches_event(&entry.event) {
@@ -3288,7 +3302,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
 
     let mut provider_error = None;
     let mut logical_events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         match &entry.event {
@@ -3339,7 +3353,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     .expect("repeat tool call handled");
 
     let mut repeat_error = None;
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::ProviderToolError(error) = &entry.event
@@ -3421,7 +3435,7 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
     let mut published_request = None;
     let mut provider_error = None;
     let mut notice = None;
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         match &entry.event {
@@ -3523,7 +3537,7 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
 
     let mut provider_error = None;
     let mut logical_events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         match &entry.event {
@@ -4757,7 +4771,7 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
 
     let mut unknown_error = None;
     let mut disabled_error = None;
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         match &entry.event {
@@ -4898,7 +4912,7 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
 
     let mut provider_error = None;
     let mut registered_error = None;
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::ProviderToolError(error) = &entry.event
@@ -4993,7 +5007,7 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
     let expected = unavailable_tool_error_message(&ToolName::new("strict_old_tool"));
     let mut provider_error = None;
     let mut logical_events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         match &entry.event {
@@ -7533,8 +7547,8 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
     h.agents
         .get_mut(&cid)
         .expect("conversation")
-        .activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
-        owner: crate::agent::InferenceCheckpointOwner::Inference,
+        .activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
+        owner: path_crate_agent::InferenceCheckpointOwner::Inference,
         agent_prompt_id: spid.clone(),
         through: tau_proto::AgentHead::Root,
         model: Some("test/model".into()),
@@ -7633,8 +7647,8 @@ fn cancel_while_thinking_keeps_standalone_dispatch_ownership() {
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     let agent = h.agents.get_mut(&cid).expect("conversation");
     agent.in_flight_prompt = Some(spid.clone());
-    agent.activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
-        owner: crate::agent::InferenceCheckpointOwner::Standalone {
+    agent.activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
+        owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
             id: transaction_id.clone(),
         },
         agent_prompt_id: spid.clone(),
@@ -7684,8 +7698,8 @@ fn cancel_while_thinking_keeps_mismatched_inference_dispatch_ownership() {
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     let agent = h.agents.get_mut(&cid).expect("conversation");
     agent.in_flight_prompt = Some(canceled_id.clone());
-    agent.activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
-        owner: crate::agent::InferenceCheckpointOwner::Inference,
+    agent.activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
+        owner: path_crate_agent::InferenceCheckpointOwner::Inference,
         agent_prompt_id: owned_id.clone(),
         through: tau_proto::AgentHead::Root,
         model: Some("test/model".into()),
@@ -9109,7 +9123,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     // is published before the next-round AgentPromptCreated, and the
     // latter's `context_items` includes the steered text alongside the
     // original user prompt.
-    let mut cursor = crate::event_log::EventLogSeq::new(0);
+    let mut cursor = path_crate_event_log::EventLogSeq::new(0);
     let mut saw_steered = false;
     let mut saw_next_round = false;
     while let Some(entry) = h.event_log.get_next_from(cursor) {
@@ -9565,7 +9579,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     })
     .expect("finish second");
 
-    let mut cursor = crate::event_log::EventLogSeq::new(0);
+    let mut cursor = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq.next();
         assert!(
@@ -9802,9 +9816,9 @@ fn system_prompt_drift_invalidates_chain_anchor() {
             source_id: tau_proto::ConnectionId::parse("test-ext")
                 .expect("test connection id must satisfy the identifier grammar"),
             description: "appears between turns".to_owned(),
-            source: crate::discovery::DiscoveredSkillSource::File(std::path::PathBuf::from(
-                "/tmp/late-loaded.md",
-            )),
+            source: path_crate_discovery::DiscoveredSkillSource::File(
+                path_std_path::PathBuf::from("/tmp/late-loaded.md"),
+            ),
             add_to_prompt: true,
             user_invocable: true,
             disable_model_invocation: false,
@@ -11126,8 +11140,8 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     h.agents
         .get_mut(&cid)
         .expect("old agent")
-        .activation_dispatch = crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-        owner: crate::agent::InferenceCheckpointOwner::Standalone {
+        .activation_dispatch = path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+        owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
             id: transaction_id.clone(),
         },
         agent_prompt_id: checkpoint_prompt_id.clone(),
@@ -11161,7 +11175,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         .expect("switch");
 
     let mut saw_session_dir = false;
-    let mut cursor = crate::event_log::EventLogSeq::new(0);
+    let mut cursor = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq.next();
         if let Event::HarnessSessionDir(session_dir) = &entry.event
@@ -11284,7 +11298,7 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
     h.available_roles
         .get_mut(&selected_role)
         .expect("selected role")
-        .compaction = Some(tau_config::settings::RoleCompaction::Threshold(1200));
+        .compaction = Some(path_tau_config_settings::RoleCompaction::Threshold(1200));
 
     h.handle_compact_request(test_session_id("s1"), Some(&target_agent_id));
 
@@ -11293,7 +11307,7 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
         Event::AgentCompactionTriggered(triggered)
             if triggered.agent_id.as_str() == target_agent_id.as_str()
     )));
-    let mut cursor = crate::event_log::EventLogSeq::new(0);
+    let mut cursor = path_crate_event_log::EventLogSeq::new(0);
     let mut prompt = None;
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq.next();
@@ -11487,7 +11501,7 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
         .expect("dispatch");
     let prompt = read_nth_prompt_created(&h, 0);
 
-    let mut replacement_role = tau_config::settings::AgentRole::default();
+    let mut replacement_role = path_tau_config_settings::AgentRole::default();
     replacement_role.context_size_alerts.insert(
         "compact-soon".to_owned(),
         tau_config::settings::ContextSizeAlert {
@@ -12500,7 +12514,7 @@ fn reactive_context_overflow_eligibility_fails_closed() {
         if matches!(case, Case::Disabled) {
             let role = h.selected_role.clone();
             h.available_roles.entry(role).or_default().compaction =
-                Some(tau_config::settings::RoleCompaction::Disabled);
+                Some(path_tau_config_settings::RoleCompaction::Disabled);
         }
         let cid = ensure_test_user_agent(&mut h);
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
@@ -13378,8 +13392,8 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
         )
         .expect("seed success");
     h.agents.get_mut(&cid).expect("agent").activation_dispatch =
-        crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-            owner: crate::agent::InferenceCheckpointOwner::Standalone {
+        path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+            owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
                 id: transaction_id.clone(),
             },
             agent_prompt_id: checkpoint_prompt_id.clone(),
@@ -14354,7 +14368,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
     seed_assistant_tool_round(&mut h, &cid, &[("call-image", "read_image")]);
     let assistant_head = h.agents[&cid].head.expect("assistant head");
 
-    let mut encoded = std::io::Cursor::new(Vec::new());
+    let mut encoded = path_std_io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgb8(2, 2)
         .write_to(&mut encoded, image::ImageFormat::Png)
         .expect("encode PNG fixture");
@@ -14389,7 +14403,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         .expect("result node")
         .entry;
     let projected =
-        crate::harness::context_limit_telemetry::projected_transcript_entry_tokens(image_entry)
+        path_crate_harness::context_limit_telemetry::projected_transcript_entry_tokens(image_entry)
             .expect("image projection");
     let expanded = serde_json::to_vec(image_entry)
         .expect("serialize image entry")
@@ -14398,7 +14412,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         projected < expanded,
         "fixture must distinguish canonical from JSON-expanded image bytes"
     );
-    let reserve = crate::harness::context_limit_telemetry::context_projection_reserve(128_000);
+    let reserve = path_crate_harness::context_limit_telemetry::context_projection_reserve(128_000);
     {
         let info = h
             .provider_model_info
@@ -14886,7 +14900,7 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
     set_test_agent_context_wait(
         &mut h,
         crate::parse_agent_id(&agent_id),
-        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+        path_std_collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
             .expect("test connection id must satisfy the identifier grammar")]),
     );
     h.publish_event(
@@ -14964,7 +14978,7 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+        path_std_collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
             .expect("test connection id must satisfy the identifier grammar")]),
     );
 
@@ -15041,7 +15055,7 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+        path_std_collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
             .expect("test connection id must satisfy the identifier grammar")]),
     );
 
@@ -15118,7 +15132,7 @@ fn readiness_deferred_linear_activations_share_one_checkpoint() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+        path_std_collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
             .expect("test connection id must satisfy the identifier grammar")]),
     );
 
@@ -15260,7 +15274,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         set_test_agent_context_wait(
             &mut h,
             agent_id.clone(),
-            std::collections::HashSet::from([context_provider.clone()]),
+            path_std_collections::HashSet::from([context_provider.clone()]),
         );
     }
 
@@ -15436,7 +15450,7 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
         set_test_agent_context_wait(
             &mut h,
             agent_id.clone(),
-            std::collections::HashSet::from([context_provider.clone()]),
+            path_std_collections::HashSet::from([context_provider.clone()]),
         );
     }
 
@@ -15460,8 +15474,8 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
     h.agents
         .get_mut(&blocked_cid)
         .expect("blocked agent")
-        .activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
-        owner: crate::agent::InferenceCheckpointOwner::Inference,
+        .activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
+        owner: path_crate_agent::InferenceCheckpointOwner::Inference,
         agent_prompt_id: test_agent_prompt_id("ap-blocked-uncertain"),
         through: blocked_obligation
             .activation_through
@@ -15537,7 +15551,7 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
     h.agents
         .get_mut(&blocked_cid)
         .expect("release blocked agent")
-        .activation_dispatch = crate::agent::ActivationDispatchState::None;
+        .activation_dispatch = path_crate_agent::ActivationDispatchState::None;
     h.drain_publish_idle_dispatches();
 
     let events = event_log_events(&h);
@@ -15601,7 +15615,7 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
         set_test_agent_context_wait(
             &mut h,
             agent_id.clone(),
-            std::collections::HashSet::from([context_provider.clone()]),
+            path_std_collections::HashSet::from([context_provider.clone()]),
         );
     }
     h.dispatch_prompt_for_agent(
@@ -15740,7 +15754,7 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+        path_std_collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
             .expect("test connection id must satisfy the identifier grammar")]),
     );
 
@@ -15816,7 +15830,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
-        std::collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
+        path_std_collections::HashSet::from([tau_proto::ConnectionId::parse("context-provider")
             .expect("test connection id must satisfy the identifier grammar")]),
     );
 
@@ -16621,9 +16635,9 @@ impl crate::internal_tools::InternalToolHandler for SchedulerCompactionTools {
 /// harness.
 fn install_scheduler_compaction_tools(harness: &mut Harness) {
     let handler: std::sync::Arc<dyn crate::internal_tools::InternalToolHandler> =
-        std::sync::Arc::new(SchedulerCompactionTools);
+        path_std_sync::Arc::new(SchedulerCompactionTools);
     {
-        let mut host = crate::internal_tools::InternalToolHost::new(harness);
+        let mut host = path_crate_internal_tools::InternalToolHost::new(harness);
         for spec in handler.tool_specs() {
             host.register_internal_tool(spec, None);
         }
@@ -19514,7 +19528,7 @@ fn manual_cross_compaction_blocked_repeat_requires_exact_recovery_ownership() {
     let valid = h.agents[&target].activation_dispatch.clone();
     assert!(h.has_matching_blocked_recovery(target_id.as_str(), &valid, current_head));
 
-    let crate::agent::ActivationDispatchState::Blocked {
+    let path_crate_agent::ActivationDispatchState::Blocked {
         failed_id,
         cut,
         resume_through,
@@ -19523,18 +19537,18 @@ fn manual_cross_compaction_blocked_repeat_requires_exact_recovery_ownership() {
         panic!("historical failure must block");
     };
     let mismatches = [
-        crate::agent::ActivationDispatchState::Blocked {
+        path_crate_agent::ActivationDispatchState::Blocked {
             failed_id: tau_proto::CompactionTransactionId::parse("ct-not-owned")
                 .expect("transaction id"),
             cut,
             resume_through,
         },
-        crate::agent::ActivationDispatchState::Blocked {
+        path_crate_agent::ActivationDispatchState::Blocked {
             failed_id: failed_id.clone(),
             cut: tau_proto::AgentHead::Root,
             resume_through,
         },
-        crate::agent::ActivationDispatchState::Blocked {
+        path_crate_agent::ActivationDispatchState::Blocked {
             failed_id,
             cut,
             resume_through: None,
@@ -20371,8 +20385,8 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
     h.agents
         .get_mut(&target)
         .expect("target")
-        .activation_dispatch = crate::agent::ActivationDispatchState::DispatchUncertain {
-        owner: crate::agent::InferenceCheckpointOwner::Inference,
+        .activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
+        owner: path_crate_agent::InferenceCheckpointOwner::Inference,
         agent_prompt_id: test_agent_prompt_id("ap-uncertain"),
         through: tau_proto::AgentHead::Root,
         model: Some("echo/model".into()),
@@ -20484,7 +20498,7 @@ fn manual_cross_compaction_rejects_ineligible_target_matrix() {
     h.agents
         .get_mut(&target)
         .expect("target")
-        .activation_dispatch = crate::agent::ActivationDispatchState::Blocked {
+        .activation_dispatch = path_crate_agent::ActivationDispatchState::Blocked {
         failed_id: tau_proto::CompactionTransactionId::parse("ct-not-owned").expect("transaction"),
         cut: tau_proto::AgentHead::Root,
         resume_through: None,
@@ -21910,7 +21924,7 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
         .filter(|event| matches!(event, Event::ProviderPromptSubmitted(_)))
         .count();
     h.pending_publish_idle_dispatches.push_back(
-        crate::harness::interception::DeferredPromptDispatch {
+        path_crate_harness::interception::DeferredPromptDispatch {
             cid: cid.clone(),
             activation_cut: None,
             activation_through: None,
@@ -23381,7 +23395,7 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
-    let target_agent_id = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let target_agent_id = path_std_sync::Arc::new(path_std_sync::Mutex::new(None));
     h.install_internal_tool_handlers(vec![std::sync::Arc::new(
         ReentrantDelegateCompletionPrompt {
             target_agent_id: target_agent_id.clone(),
@@ -23754,9 +23768,9 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
                 pid: None,
                 in_process_thread: None,
                 supervised_config: None,
-                secrets: std::collections::BTreeMap::new(),
+                secrets: path_std_collections::BTreeMap::new(),
                 restart_attempt: 0,
-                state: crate::extension::ExtensionState::Ready,
+                state: path_crate_extension::ExtensionState::Ready,
                 protocol_io: tau_client::ProtocolIoMeter::default(),
             },
         );
@@ -26507,7 +26521,7 @@ fn drain_stats_updated(frames: &Arc<Mutex<Vec<RoutedFrame>>>) -> Vec<tau_proto::
 fn configure_delegate_error_roles(h: &mut Harness) {
     let available_model: tau_proto::ModelId = "test/available".into();
     set_available_provider_models(h, [provider_model_info(available_model.clone(), 128_000)]);
-    h.available_roles = std::collections::HashMap::from([
+    h.available_roles = path_std_collections::HashMap::from([
         (
             "beta".to_owned(),
             tau_config::settings::AgentRole {
@@ -27252,7 +27266,7 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
     let subscriptions_after_unload = h.agent_watch_subscriptions.clone();
     let provider_status_after_unload = h.agent_watch_provider_status.clone();
     let provider_deliveries_after_unload = h.agent_watch_provider_deliveries.clone();
-    let enable_error = crate::internal_tools::InternalToolHost::new(&mut h)
+    let enable_error = path_crate_internal_tools::InternalToolHost::new(&mut h)
         .try_set_agent_watch(
             &watcher_id,
             &watched_id,
@@ -27269,7 +27283,7 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
         h.agent_watch_provider_deliveries,
         provider_deliveries_after_unload
     );
-    let unknown_error = crate::internal_tools::InternalToolHost::new(&mut h)
+    let unknown_error = path_crate_internal_tools::InternalToolHost::new(&mut h)
         .try_set_agent_watch(
             &watcher_id,
             "agent-never-loaded",
@@ -27358,7 +27372,7 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
     assert!(h.watchers_for_agent(&watched_id).is_empty());
     assert_eq!(h.agent_watch_provider_status_summary(&watched_id), None);
     assert!(!h.agent_watches.contains_key(&watcher_id));
-    crate::internal_tools::InternalToolHost::new(&mut h)
+    path_crate_internal_tools::InternalToolHost::new(&mut h)
         .try_set_agent_watch(
             &watcher_id,
             &watched_id,
@@ -28042,8 +28056,8 @@ fn synthetic_dispatch_terminal_emits_one_unknown_without_reminder() {
     )
     .expect("working");
     h.agents.get_mut(&cid).expect("agent").activation_dispatch =
-        crate::agent::ActivationDispatchState::DispatchUncertain {
-            owner: crate::agent::InferenceCheckpointOwner::Inference,
+        path_crate_agent::ActivationDispatchState::DispatchUncertain {
+            owner: path_crate_agent::InferenceCheckpointOwner::Inference,
             agent_prompt_id: test_agent_prompt_id("synthetic-terminal"),
             through: tau_proto::AgentHead::Root,
             model: Some("test/model".into()),
@@ -29669,7 +29683,7 @@ fn message_tool_call(id: &str, recipient_id: &str, message: &str) -> AgentToolCa
     AgentToolCall {
         call_ref: None,
         id: id.into(),
-        name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+        name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(vec![
             (
@@ -29736,7 +29750,7 @@ fn message_tool_to_user_emits_only_sender_projection() {
     h.handle_message_tool_call(
         &cid,
         &message_tool_call("msg-user", "user", "hello user"),
-        ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+        ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
     )
     .expect("message tool");
 
@@ -29776,7 +29790,7 @@ fn message_tool_unknown_recipient_errors_without_agent_message() {
     h.handle_message_tool_call(
         &cid,
         &message_tool_call("msg-bad", "missing_agent", "hello"),
-        ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+        ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
     )
     .expect("message tool");
 
@@ -30215,7 +30229,7 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
     };
 
     let socket_path = td.path().join("target.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
+    let listener = path_std_os_unix_net::UnixListener::bind(&socket_path).expect("bind socket");
     let mut peer = tau_socket::SocketPeer::connect(&socket_path).expect("connect peer");
     let (stream, _) = listener.accept().expect("accept peer");
     target.accept_client(stream).expect("accept client");
@@ -30245,9 +30259,12 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
     ))
     .expect("send external message");
 
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now() + path_std_time::Duration::from_secs(5);
     let result = loop {
-        match target.rx.recv_timeout(std::time::Duration::from_millis(20)) {
+        match target
+            .rx
+            .recv_timeout(path_std_time::Duration::from_millis(20))
+        {
             Ok(HarnessEvent::FromConnection {
                 connection_id,
                 message,
@@ -30261,13 +30278,13 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
                 .handle_harness_command(command)
                 .expect("handle auth completion"),
             Ok(other) => target.log_event(&other),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(path_std_sync_mpsc::RecvTimeoutError::Timeout) => {}
+            Err(path_std_sync_mpsc::RecvTimeoutError::Disconnected) => {
                 panic!("target harness event channel disconnected");
             }
         }
         match peer
-            .recv_timeout(std::time::Duration::from_millis(20))
+            .recv_timeout(path_std_time::Duration::from_millis(20))
             .expect("receive rpc result")
         {
             tau_socket::SocketReceive::Message {
@@ -30337,7 +30354,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
 
     let sender_path = td.path().join("sender-daemon");
     let sender_listener =
-        std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&sender_path))
+        path_std_os_unix_net::UnixListener::bind(crate::runtime_dir::socket_path(&sender_path))
             .expect("bind sender");
     let sender_tx = sender.tx.clone();
     let accept_sender = std::thread::spawn(move || {
@@ -30353,7 +30370,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
 
     let target_socket = td.path().join("target.sock");
     let target_listener =
-        std::os::unix::net::UnixListener::bind(&target_socket).expect("bind target");
+        path_std_os_unix_net::UnixListener::bind(&target_socket).expect("bind target");
     let mut peer = tau_socket::SocketPeer::connect(&target_socket).expect("connect target");
     let (stream, _) = target_listener.accept().expect("accept target");
     target
@@ -30393,8 +30410,8 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
                     .handle_harness_command(command)
                     .expect("handle peer command"),
                 Ok(other) => harness.log_event(&other),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(path_std_sync_mpsc::RecvTimeoutError::Timeout) => {}
+                Err(path_std_sync_mpsc::RecvTimeoutError::Disconnected) => {
                     panic!("harness event loop disconnected")
                 }
             }
@@ -30451,7 +30468,7 @@ fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
     configure_inter_session_receivers(&mut target, &[("engineer", false)]);
     let target_path = crate::runtime_dir::harnesses_dir().join("real-target");
     let target_listener =
-        std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&target_path))
+        path_std_os_unix_net::UnixListener::bind(crate::runtime_dir::socket_path(&target_path))
             .expect("target listener");
     std::fs::write(
         crate::runtime_dir::metadata_path(&target_path),
@@ -30474,7 +30491,7 @@ fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
     });
     let private_path = crate::runtime_dir::harnesses_dir().join("private-target");
     let _private_listener =
-        std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&private_path))
+        path_std_os_unix_net::UnixListener::bind(crate::runtime_dir::socket_path(&private_path))
             .expect("private listener");
     std::fs::write(
         crate::runtime_dir::metadata_path(&private_path),
@@ -30489,7 +30506,7 @@ fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
     )
     .expect("write private metadata");
     let runtime_root = td.path().to_path_buf();
-    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+    let (snapshot_tx, snapshot_rx) = path_std_sync::mpsc::channel();
     let discovery = std::thread::spawn(move || {
         let _runtime = crate::runtime_dir::override_test_runtime_dir(&runtime_root);
         let snapshot =
@@ -30519,8 +30536,8 @@ fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
                 .handle_harness_command(command)
                 .expect("handle discovery command"),
             Ok(other) => target.log_event(&other),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(path_std_sync_mpsc::RecvTimeoutError::Timeout) => {}
+            Err(path_std_sync_mpsc::RecvTimeoutError::Disconnected) => {
                 panic!("target event loop disconnected")
             }
         }
@@ -30598,8 +30615,8 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
 /// when the receiver is ready to report an auth timeout or late success.
 #[test]
 fn external_agent_message_result_timeout_outlasts_auth_timeout() {
-    let auth_timeout = crate::harness::subagents_tool::EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT;
-    let result_timeout = crate::harness::subagents_tool::EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT;
+    let auth_timeout = path_crate_harness::subagents_tool::EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT;
+    let result_timeout = path_crate_harness::subagents_tool::EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT;
 
     assert!(
         auth_timeout < result_timeout,
@@ -30625,11 +30642,11 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
         "hello".to_owned(),
         tau_proto::AgentMessageKind::Message,
         Some(
-            crate::harness::subagents_tool::ExternalMessageToolCompletion {
+            path_crate_harness::subagents_tool::ExternalMessageToolCompletion {
                 conversation_id: cid.clone(),
                 session_generation: h.current_session_generation,
                 call_id: call_id.clone(),
-                tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+                tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
                 tool_type: tau_proto::ToolType::Function,
                 details: CborValue::Null,
             },
@@ -30642,7 +30659,7 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
     let command = loop {
         match h
             .rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(path_std_time::Duration::from_secs(5))
             .expect("completion command")
         {
             HarnessEvent::Command(command) => break command,
@@ -30674,25 +30691,27 @@ fn external_message_success_completion_publishes_sent_projection_and_tool_result
     let call_id: tau_proto::ToolCallId = "external-message-success-call".into();
     h.tool_agents.insert(call_id.clone(), cid.clone());
 
-    h.handle_harness_command(crate::event::HarnessCommand::ExternalMessageToolCompleted(
-        Box::new(crate::event::ExternalMessageToolCompletedCommand {
-            _permit: None,
-            conversation_id: cid,
-            session_generation: h.current_session_generation,
-            call_id: call_id.clone(),
-            tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
-            tool_type: tau_proto::ToolType::Function,
-            result: Ok((crate::parse_agent_id("recipient_agent"), false)),
-            details: CborValue::Null,
-            auth_message_id: tau_proto::AgentMessageId::parse("delivered-message")
-                .expect("test identifier must satisfy its grammar"),
-            publish_sent: true,
-            sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: test_session_id("other-session"),
-            kind: tau_proto::AgentMessageKind::Message,
-            message: "delivered".to_owned(),
-        }),
-    ))
+    h.handle_harness_command(
+        path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
+            crate::event::ExternalMessageToolCompletedCommand {
+                _permit: None,
+                conversation_id: cid,
+                session_generation: h.current_session_generation,
+                call_id: call_id.clone(),
+                tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
+                tool_type: tau_proto::ToolType::Function,
+                result: Ok((crate::parse_agent_id("recipient_agent"), false)),
+                details: CborValue::Null,
+                auth_message_id: tau_proto::AgentMessageId::parse("delivered-message")
+                    .expect("test identifier must satisfy its grammar"),
+                publish_sent: true,
+                sender_id: crate::parse_agent_id("sender_agent"),
+                recipient_session_id: test_session_id("other-session"),
+                kind: tau_proto::AgentMessageKind::Message,
+                message: "delivered".to_owned(),
+            },
+        )),
+    )
     .expect("handle completion");
 
     assert_eq!(session_agent_message_sent_events(&h).len(), 1);
@@ -31155,9 +31174,10 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
             .expect("agent")
             .pending_message_wakes
             .push_back(crate::agent::PendingMessageWake {
-                source: crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                source: path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
                     durable_event_seq: tau_core::PersistedAgentEventSeq::new(index),
-                    activation_class: crate::agent::AgentMessageActivationClass::OrdinaryAgentInput,
+                    activation_class:
+                        path_crate_agent::AgentMessageActivationClass::OrdinaryAgentInput,
                     peer_admission_bytes: Some(1),
                 },
                 node_id: None,
@@ -31215,9 +31235,9 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
     pending
         .pending_agent_message_wakes
         .extend((0..32).map(|index| crate::agent::PendingMessageWake {
-            source: crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+            source: path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
                 durable_event_seq: tau_core::PersistedAgentEventSeq::new(index),
-                activation_class: crate::agent::AgentMessageActivationClass::OrdinaryAgentInput,
+                activation_class: path_crate_agent::AgentMessageActivationClass::OrdinaryAgentInput,
                 peer_admission_bytes: Some(1),
             },
             node_id: None,
@@ -31240,9 +31260,9 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
     pending
         .pending_agent_message_wakes
         .extend((0..4).map(|index| crate::agent::PendingMessageWake {
-            source: crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+            source: path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
                 durable_event_seq: tau_core::PersistedAgentEventSeq::new(index),
-                activation_class: crate::agent::AgentMessageActivationClass::OrdinaryAgentInput,
+                activation_class: path_crate_agent::AgentMessageActivationClass::OrdinaryAgentInput,
                 peer_admission_bytes: Some(64 * 1024),
             },
             node_id: None,
@@ -31343,25 +31363,27 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
     h.agents.insert(cid.clone(), replacement_agent);
     h.tool_agents.insert(call_id.clone(), cid.clone());
 
-    h.handle_harness_command(crate::event::HarnessCommand::ExternalMessageToolCompleted(
-        Box::new(crate::event::ExternalMessageToolCompletedCommand {
-            _permit: None,
-            conversation_id: cid,
-            session_generation: 0,
-            call_id: call_id.clone(),
-            tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
-            tool_type: tau_proto::ToolType::Function,
-            result: Ok((crate::parse_agent_id("recipient_agent"), false)),
-            details: CborValue::Null,
-            auth_message_id: tau_proto::AgentMessageId::parse("stale-message")
-                .expect("test identifier must satisfy its grammar"),
-            publish_sent: true,
-            sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: test_session_id("other-session"),
-            kind: tau_proto::AgentMessageKind::Message,
-            message: "stale".to_owned(),
-        }),
-    ))
+    h.handle_harness_command(
+        path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
+            crate::event::ExternalMessageToolCompletedCommand {
+                _permit: None,
+                conversation_id: cid,
+                session_generation: 0,
+                call_id: call_id.clone(),
+                tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
+                tool_type: tau_proto::ToolType::Function,
+                result: Ok((crate::parse_agent_id("recipient_agent"), false)),
+                details: CborValue::Null,
+                auth_message_id: tau_proto::AgentMessageId::parse("stale-message")
+                    .expect("test identifier must satisfy its grammar"),
+                publish_sent: true,
+                sender_id: crate::parse_agent_id("sender_agent"),
+                recipient_session_id: test_session_id("other-session"),
+                kind: tau_proto::AgentMessageKind::Message,
+                message: "stale".to_owned(),
+            },
+        )),
+    )
     .expect("handle stale completion");
 
     let events = event_log_events(&h);
@@ -31464,7 +31486,7 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
     h.handle_message_tool_call(
         &cid,
         &message_tool_call("msg-stopped", &recipient_id, "hello"),
-        ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+        ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
     )
     .expect("message tool");
 
@@ -31609,7 +31631,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
     h.handle_provider_response_finished(provider_tool_response(
         &sender_setup,
         MESSAGE_CALL_ID,
-        crate::harness::subagents_tool::MESSAGE_TOOL_NAME,
+        path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME,
         message_tool_call(MESSAGE_CALL_ID, recipient_id.as_str(), BODY).arguments,
     ))
     .expect("run sender message tool");
@@ -31867,7 +31889,7 @@ fn message_tool_to_agent_uses_canonical_projection_and_payload_free_wake() {
             &recipient_id,
             "secret <message>&</message> payload >",
         ),
-        ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+        ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
     )
     .expect("message tool");
 
@@ -33333,7 +33355,7 @@ fn agent_metadata_validation_rejects_bad_key_size_value_and_unknown_target() {
     );
 
     let reserved_key = tau_proto::AgentMetadataKey::new(
-        crate::harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
+        path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
     );
     let reserved_set = tau_proto::AgentMetadataSet {
         agent_id: agent_id.clone(),
@@ -33597,7 +33619,7 @@ fn rendered_prompt_unknown_role_returns_in_band_error() {
 }
 
 fn seed_render_prompt_role(h: &mut Harness) {
-    h.available_roles = std::collections::HashMap::from([(
+    h.available_roles = path_std_collections::HashMap::from([(
         "debug-role".to_owned(),
         tau_config::settings::AgentRole {
             prompt_fragments: vec![tau_config::settings::RolePromptFragment {

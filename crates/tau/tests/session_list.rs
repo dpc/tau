@@ -1,8 +1,10 @@
 use std::io::{BufReader, BufWriter};
+use std::os::unix as path_std_os_unix;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+use std::{fs as path_std_fs, io as path_std_io};
 
 use tempfile::TempDir;
 
@@ -21,7 +23,7 @@ fn runtime_root(temp: &TempDir) -> PathBuf {
 
     let runtime = temp.path().join("runtime");
     std::fs::create_dir(&runtime).expect("runtime root");
-    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
+    std::fs::set_permissions(&runtime, path_std_fs::Permissions::from_mode(0o700))
         .expect("private runtime permissions");
     runtime
 }
@@ -58,7 +60,7 @@ fn serve_current_session(
     let stream = loop {
         match raw_listener.accept() {
             Ok((stream, _)) => break stream,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
                     return Err("timed out waiting for session-list probe".to_owned());
                 }
@@ -147,7 +149,7 @@ fn relative_directory_filter_returns_live_json_record() {
     let project = temp.path().join("project");
     let alias = temp.path().join("alias");
     std::fs::create_dir(&project).expect("project directory");
-    std::os::unix::fs::symlink(&project, &alias).expect("project symlink");
+    path_std_os_unix::fs::symlink(&project, &alias).expect("project symlink");
     let project = project.canonicalize().expect("canonical project");
     let harnesses = runtime.join("tau/harnesses");
     std::fs::create_dir_all(&harnesses).expect("harness runtime directory");

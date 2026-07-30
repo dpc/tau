@@ -2,6 +2,7 @@
 
 #![cfg(unix)]
 
+use nix::errno as path_nix_errno;
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
 
@@ -9,8 +10,8 @@ use nix::unistd::Pid;
 /// group.
 pub(super) fn exists(pgid: Pid) -> bool {
     match kill(Pid::from_raw(-pgid.as_raw()), None) {
-        Ok(()) | Err(nix::errno::Errno::EPERM) => true,
-        Err(nix::errno::Errno::ESRCH) => false,
+        Ok(()) | Err(path_nix_errno::Errno::EPERM) => true,
+        Err(path_nix_errno::Errno::ESRCH) => false,
         Err(_) => true,
     }
 }

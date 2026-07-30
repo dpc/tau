@@ -1,10 +1,13 @@
 use std::collections::HashSet;
+use std::os::unix as path_std_os_unix;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::{ffi as path_std_ffi, fs as path_std_fs, sync as path_std_sync, time as path_std_time};
 
 use clap::{CommandFactory as _, Parser};
 use tau_cli_term::TermHandle;
 use tau_cli_term_raw::{Color, Term};
+use tau_config::settings as path_tau_config_settings;
 use tau_proto::{
     AgentCompactionTriggered, AgentManualCompactionRequested, AgentPromptCreated,
     AgentPromptQueued, AgentPromptSteered, AgentPromptSubmitted, AgentPromptTerminated,
@@ -23,6 +26,7 @@ use super::chat::{
     redacted_command_echo_line, redacted_prompt_history_line, retarget_prompt_draft_snapshot,
     role_cycling_enabled, should_send_draft_snapshot,
 };
+use super::cli as path_super_cli;
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
 
 /// Dynamic action IDs use the bounded ASCII short-ID producer shape accepted by
@@ -87,8 +91,8 @@ fn marker_test_renderer(handle: TermHandle) -> EventRenderer {
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
-        tau_config::settings::CliState::default(),
-        tau_config::settings::TauDirs::default(),
+        path_tau_config_settings::CliState::default(),
+        path_tau_config_settings::TauDirs::default(),
         "◯".to_owned(),
         "⬤".to_owned(),
     )
@@ -139,7 +143,7 @@ use super::tool_render::{
 fn dev_print_prompt_uses_shared_role_flag() {
     // Diagnostics share the same harness-selection args as normal `tau`, so a
     // role can be supplied before or after the hidden dev subcommand.
-    let cli = super::cli::Cli::parse_from(["tau", "dev", "print-prompt", "--role", "engineer"]);
+    let cli = path_super_cli::Cli::parse_from(["tau", "dev", "print-prompt", "--role", "engineer"]);
     assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
     assert!(matches!(
         cli.command,
@@ -155,7 +159,7 @@ fn dev_print_prompt_uses_shared_role_flag() {
 /// session-persistence mode without affecting the separate attach/resume flags.
 #[test]
 fn run_parses_ephemeral_flag() {
-    let cli = super::cli::Cli::parse_from(["tau", "--ephemeral"]);
+    let cli = path_super_cli::Cli::parse_from(["tau", "--ephemeral"]);
     assert!(cli.run.ephemeral);
     assert!(!cli.run.attach);
     assert!(cli.run.resume.is_none());
@@ -175,8 +179,13 @@ fn run_rejects_ephemeral_with_attach_or_resume() {
 
 #[test]
 fn dev_print_prompt_accepts_agents_md_toggle() {
-    let cli =
-        super::cli::Cli::parse_from(["tau", "dev", "print-prompt", "--enable-agents-md", "false"]);
+    let cli = path_super_cli::Cli::parse_from([
+        "tau",
+        "dev",
+        "print-prompt",
+        "--enable-agents-md",
+        "false",
+    ]);
     assert!(matches!(
         cli.command,
         Some(super::cli::Command::Dev {
@@ -189,8 +198,13 @@ fn dev_print_prompt_accepts_agents_md_toggle() {
 
 #[test]
 fn dev_print_system_prompt_uses_shared_role_flag() {
-    let cli =
-        super::cli::Cli::parse_from(["tau", "--role", "engineer", "dev", "print-system-prompt"]);
+    let cli = path_super_cli::Cli::parse_from([
+        "tau",
+        "--role",
+        "engineer",
+        "dev",
+        "print-system-prompt",
+    ]);
     assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
     assert!(matches!(
         cli.command,
@@ -202,7 +216,7 @@ fn dev_print_system_prompt_uses_shared_role_flag() {
 #[test]
 fn dev_print_tools_uses_shared_role_flag() {
     // `print-tools` mirrors print-prompt and uses the same global role flag.
-    let cli = super::cli::Cli::parse_from(["tau", "--role", "engineer", "dev", "print-tools"]);
+    let cli = path_super_cli::Cli::parse_from(["tau", "--role", "engineer", "dev", "print-tools"]);
     assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
     assert!(matches!(
         cli.command,
@@ -217,7 +231,7 @@ fn dev_print_tools_uses_shared_role_flag() {
 /// the user's real Tau state.
 #[test]
 fn dev_tmux_start_parses_isolated_startup_options() {
-    let cli = super::cli::Cli::parse_from([
+    let cli = path_super_cli::Cli::parse_from([
         "tau",
         "dev",
         "tmux",
@@ -256,7 +270,7 @@ fn dev_tmux_start_parses_isolated_startup_options() {
 /// needs to select the root explicitly.
 #[test]
 fn dev_tmux_start_accepts_generated_root_and_root_alias() {
-    let generated = super::cli::Cli::parse_from(["tau", "dev", "tmux", "start"]);
+    let generated = path_super_cli::Cli::parse_from(["tau", "dev", "tmux", "start"]);
     assert!(matches!(
         generated.command,
         Some(super::cli::Command::Dev {
@@ -266,8 +280,14 @@ fn dev_tmux_start_accepts_generated_root_and_root_alias() {
         }) if args.common.scratch_root.is_none()
     ));
 
-    let explicit =
-        super::cli::Cli::parse_from(["tau", "dev", "tmux", "start", "--root", "/tmp/tau-e2e-test"]);
+    let explicit = path_super_cli::Cli::parse_from([
+        "tau",
+        "dev",
+        "tmux",
+        "start",
+        "--root",
+        "/tmp/tau-e2e-test",
+    ]);
     assert!(matches!(
         explicit.command,
         Some(super::cli::Command::Dev {
@@ -283,7 +303,7 @@ fn dev_tmux_start_accepts_generated_root_and_root_alias() {
 /// commands or partial prompts before submitting them.
 #[test]
 fn dev_tmux_send_parses_literal_text_and_enter_toggle() {
-    let cli = super::cli::Cli::parse_from([
+    let cli = path_super_cli::Cli::parse_from([
         "tau",
         "dev",
         "tmux",
@@ -310,7 +330,7 @@ fn dev_tmux_send_parses_literal_text_and_enter_toggle() {
 
 #[test]
 fn component_command_parses_harness() {
-    let cli = super::cli::Cli::parse_from(["tau", "component", "harness"]);
+    let cli = path_super_cli::Cli::parse_from(["tau", "component", "harness"]);
 
     assert!(matches!(
         cli.command,
@@ -324,7 +344,7 @@ fn component_command_parses_harness() {
 /// Public agent-list flags parse additively around one required session id.
 #[test]
 fn list_agents_command_parses_filters() {
-    let cli = super::cli::Cli::parse_from([
+    let cli = path_super_cli::Cli::parse_from([
         "tau",
         "agent",
         "list",
@@ -350,7 +370,7 @@ fn list_agents_command_parses_filters() {
 /// state-directory journal root.
 #[test]
 fn agent_trace_command_parses_defaults() {
-    let cli = super::cli::Cli::parse_from(["tau", "agent", "trace", "agent-root"]);
+    let cli = path_super_cli::Cli::parse_from(["tau", "agent", "trace", "agent-root"]);
 
     assert!(matches!(
         cli.command,
@@ -369,7 +389,7 @@ fn agent_trace_command_parses_defaults() {
 /// default values so generated help cannot drift from parser behavior.
 #[test]
 fn agent_trace_help_shows_compact_toon_lite_defaults() {
-    let command = super::cli::Cli::command();
+    let command = path_super_cli::Cli::command();
     let mut trace = command
         .find_subcommand("agent")
         .and_then(|agent| agent.find_subcommand("trace"))
@@ -388,7 +408,7 @@ fn agent_trace_help_shows_compact_toon_lite_defaults() {
 /// and an explicit offline journal root together.
 #[test]
 fn agent_trace_command_parses_all_options() {
-    let cli = super::cli::Cli::parse_from([
+    let cli = path_super_cli::Cli::parse_from([
         "tau",
         "agent",
         "trace",
@@ -421,15 +441,21 @@ fn agent_trace_command_parses_compact_formats_and_modes() {
     for (name, expected) in [
         (
             "agent-tools-jsonl",
-            super::cli::AgentTraceFormat::AgentToolsJsonl,
+            path_super_cli::AgentTraceFormat::AgentToolsJsonl,
         ),
         (
             "agent-tools-toon",
-            super::cli::AgentTraceFormat::AgentToolsToon,
+            path_super_cli::AgentTraceFormat::AgentToolsToon,
         ),
     ] {
-        let cli =
-            super::cli::Cli::parse_from(["tau", "agent", "trace", "agent-root", "--format", name]);
+        let cli = path_super_cli::Cli::parse_from([
+            "tau",
+            "agent",
+            "trace",
+            "agent-root",
+            "--format",
+            name,
+        ]);
 
         assert!(matches!(
             cli.command,
@@ -439,7 +465,7 @@ fn agent_trace_command_parses_compact_formats_and_modes() {
         ));
     }
 
-    let full = super::cli::Cli::parse_from([
+    let full = path_super_cli::Cli::parse_from([
         "tau",
         "agent",
         "trace",
@@ -463,11 +489,11 @@ fn agent_trace_command_parses_compact_formats_and_modes() {
 #[test]
 fn agent_trace_mode_validation_matches_format_semantics() {
     for format in [
-        super::cli::AgentTraceFormat::TauJsonl,
-        super::cli::AgentTraceFormat::OtlpJson,
-        super::cli::AgentTraceFormat::AgentPerformanceJsonl,
+        path_super_cli::AgentTraceFormat::TauJsonl,
+        path_super_cli::AgentTraceFormat::OtlpJson,
+        path_super_cli::AgentTraceFormat::AgentPerformanceJsonl,
     ] {
-        let error = super::validate_agent_trace_mode(format, super::cli::AgentTraceMode::Full)
+        let error = super::validate_agent_trace_mode(format, path_super_cli::AgentTraceMode::Full)
             .expect_err("full noncompact trace");
         assert_eq!(
             error.to_string(),
@@ -476,10 +502,10 @@ fn agent_trace_mode_validation_matches_format_semantics() {
         );
     }
     for format in [
-        super::cli::AgentTraceFormat::AgentToolsJsonl,
-        super::cli::AgentTraceFormat::AgentToolsToon,
+        path_super_cli::AgentTraceFormat::AgentToolsJsonl,
+        path_super_cli::AgentTraceFormat::AgentToolsToon,
     ] {
-        super::validate_agent_trace_mode(format, super::cli::AgentTraceMode::Full)
+        super::validate_agent_trace_mode(format, path_super_cli::AgentTraceMode::Full)
             .expect("full compact trace");
     }
 }
@@ -488,7 +514,7 @@ fn agent_trace_mode_validation_matches_format_semantics() {
 /// payload-detail mode.
 #[test]
 fn agent_trace_command_parses_performance_format() {
-    let cli = super::cli::Cli::parse_from([
+    let cli = path_super_cli::Cli::parse_from([
         "tau",
         "agent",
         "trace",
@@ -510,7 +536,7 @@ fn agent_trace_command_parses_performance_format() {
 /// as agent inspection.
 #[test]
 fn session_commands_parse_nested_operations() {
-    let list = super::cli::Cli::parse_from(["tau", "session", "list"]);
+    let list = path_super_cli::Cli::parse_from(["tau", "session", "list"]);
     assert!(matches!(
         list.command,
         Some(super::cli::Command::Session {
@@ -519,7 +545,7 @@ fn session_commands_parse_nested_operations() {
             if args.dir.is_none() && !args.json
     ));
 
-    let show = super::cli::Cli::parse_from(["tau", "session", "show", "--session-id", "s1"]);
+    let show = path_super_cli::Cli::parse_from(["tau", "session", "show", "--session-id", "s1"]);
     assert!(matches!(
         show.command,
         Some(super::cli::Command::Session {
@@ -538,7 +564,7 @@ fn session_show_and_stats_reject_invalid_ids_with_missing_roots() {
         } else {
             "--session"
         };
-        let error = match super::cli::Cli::try_parse_from([
+        let error = match path_super_cli::Cli::try_parse_from([
             "tau",
             "session",
             command,
@@ -601,15 +627,15 @@ fn session_list_parses_canonical_directory_and_json() {
     let project = temp.path().join("project");
     let alias = temp.path().join("alias");
     std::fs::create_dir(&project).expect("project directory");
-    std::os::unix::fs::symlink(&project, &alias).expect("project symlink");
+    path_std_os_unix::fs::symlink(&project, &alias).expect("project symlink");
 
-    let cli = super::cli::Cli::try_parse_from([
-        std::ffi::OsStr::new("tau"),
-        std::ffi::OsStr::new("session"),
-        std::ffi::OsStr::new("list"),
-        std::ffi::OsStr::new("--dir"),
+    let cli = path_super_cli::Cli::try_parse_from([
+        path_std_ffi::OsStr::new("tau"),
+        path_std_ffi::OsStr::new("session"),
+        path_std_ffi::OsStr::new("list"),
+        path_std_ffi::OsStr::new("--dir"),
         alias.as_os_str(),
-        std::ffi::OsStr::new("--json"),
+        path_std_ffi::OsStr::new("--json"),
     ])
     .expect("session list arguments");
 
@@ -629,11 +655,11 @@ fn session_list_rejects_invalid_directories_during_parsing() {
     let file = temp.path().join("file");
     std::fs::write(&file, b"not a directory").expect("test file");
     for invalid in [temp.path().join("missing"), file] {
-        let error = match super::cli::Cli::try_parse_from([
-            std::ffi::OsStr::new("tau"),
-            std::ffi::OsStr::new("session"),
-            std::ffi::OsStr::new("list"),
-            std::ffi::OsStr::new("--dir"),
+        let error = match path_super_cli::Cli::try_parse_from([
+            path_std_ffi::OsStr::new("tau"),
+            path_std_ffi::OsStr::new("session"),
+            path_std_ffi::OsStr::new("list"),
+            path_std_ffi::OsStr::new("--dir"),
             invalid.as_os_str(),
         ]) {
             Ok(_) => panic!("invalid directory should be rejected"),
@@ -654,18 +680,18 @@ fn session_list_rejects_inaccessible_directory_during_parsing() {
     let private = temp.path().join("private");
     let directory = private.join("project");
     std::fs::create_dir_all(&directory).expect("private project");
-    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000))
+    std::fs::set_permissions(&private, path_std_fs::Permissions::from_mode(0o000))
         .expect("remove directory access");
 
-    let result = super::cli::Cli::try_parse_from([
-        std::ffi::OsStr::new("tau"),
-        std::ffi::OsStr::new("session"),
-        std::ffi::OsStr::new("list"),
-        std::ffi::OsStr::new("--dir"),
+    let result = path_super_cli::Cli::try_parse_from([
+        path_std_ffi::OsStr::new("tau"),
+        path_std_ffi::OsStr::new("session"),
+        path_std_ffi::OsStr::new("list"),
+        path_std_ffi::OsStr::new("--dir"),
         directory.as_os_str(),
     ]);
 
-    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+    std::fs::set_permissions(&private, path_std_fs::Permissions::from_mode(0o700))
         .expect("restore directory access");
     let error = match result {
         Ok(_) => panic!("inaccessible directory should be rejected"),
@@ -680,7 +706,7 @@ fn session_list_rejects_inaccessible_directory_during_parsing() {
 #[test]
 fn flat_session_and_agent_commands_are_rejected() {
     for command in ["session-list", "session-show", "list-agents"] {
-        let err = match super::cli::Cli::try_parse_from(["tau", command]) {
+        let err = match path_super_cli::Cli::try_parse_from(["tau", command]) {
             Ok(_) => panic!("flat command should be rejected"),
             Err(err) => err,
         };
@@ -690,7 +716,7 @@ fn flat_session_and_agent_commands_are_rejected() {
 
 #[test]
 fn ext_command_is_not_a_component_alias() {
-    let err = match super::cli::Cli::try_parse_from(["tau", "ext", "harness"]) {
+    let err = match path_super_cli::Cli::try_parse_from(["tau", "ext", "harness"]) {
         Ok(_) => panic!("ext should not remain a supported component alias"),
         Err(err) => err,
     };
@@ -700,7 +726,7 @@ fn ext_command_is_not_a_component_alias() {
 
 #[test]
 fn startup_role_flag_is_parsed_for_default_run() {
-    let cli = super::cli::Cli::parse_from(["tau", "--role", "manager"]);
+    let cli = path_super_cli::Cli::parse_from(["tau", "--role", "manager"]);
 
     assert_eq!(cli.harness.role.as_deref(), Some("manager"));
 }
@@ -747,7 +773,7 @@ fn renderer_learns_agent_from_tool_started_event() {
 fn prompt_stdin_flag_is_parsed_for_default_run() {
     // `--prompt-stdin` keeps the normal harness/session args but replaces the
     // terminal UI with the one-shot stdin client.
-    let cli = super::cli::Cli::parse_from(["tau", "--role", "manager", "--prompt-stdin"]);
+    let cli = path_super_cli::Cli::parse_from(["tau", "--role", "manager", "--prompt-stdin"]);
 
     assert!(cli.run.prompt_stdin);
     assert_eq!(cli.harness.role.as_deref(), Some("manager"));
@@ -794,14 +820,14 @@ fn harness_config_overrides_reject_attach_only_paths() {
 /// harness startup appear to use a config file that was never loaded.
 #[test]
 fn legacy_config_path_is_rejected() {
-    let cli = super::cli::Cli::parse_from(["tau", "--config", "legacy.json"]);
+    let cli = path_super_cli::Cli::parse_from(["tau", "--config", "legacy.json"]);
     let err = super::reject_legacy_config_path(cli.run.config.as_deref())
         .expect_err("legacy config path should fail");
 
     assert!(err.to_string().contains("--config is no longer supported"));
 
     let non_run_cli =
-        super::cli::Cli::parse_from(["tau", "--config", "legacy.json", "session", "list"]);
+        path_super_cli::Cli::parse_from(["tau", "--config", "legacy.json", "session", "list"]);
     let non_run_err = super::reject_legacy_config_path(non_run_cli.run.config.as_deref())
         .expect_err("legacy config path should fail before non-run dispatch");
     assert!(
@@ -810,8 +836,9 @@ fn legacy_config_path_is_rejected() {
             .contains("--config is no longer supported")
     );
 
-    let explicit_run_cli = super::cli::Cli::parse_from(["tau", "run", "--config", "legacy.json"]);
-    let Some(super::cli::Command::Run(explicit_run)) = explicit_run_cli.command else {
+    let explicit_run_cli =
+        path_super_cli::Cli::parse_from(["tau", "run", "--config", "legacy.json"]);
+    let Some(path_super_cli::Command::Run(explicit_run)) = explicit_run_cli.command else {
         panic!("expected explicit run command");
     };
     let explicit_run_err = super::reject_legacy_config_path(explicit_run.config.as_deref())
@@ -827,10 +854,10 @@ fn legacy_config_path_is_rejected() {
 /// overrides must fail instead of pretending to reconfigure that daemon.
 #[test]
 fn attach_rejects_startup_overrides_that_existing_daemon_cannot_apply() {
-    let role_overrides = [tau_config::settings::RoleCliOverride::Enable(
+    let role_overrides = [path_tau_config_settings::RoleCliOverride::Enable(
         "manager".to_owned(),
     )];
-    let extension_overrides = [tau_config::settings::ExtensionCliOverride::Disable(
+    let extension_overrides = [path_tau_config_settings::ExtensionCliOverride::Disable(
         "core-shell".to_owned(),
     )];
 
@@ -862,7 +889,8 @@ fn attach_rejects_startup_overrides_that_existing_daemon_cannot_apply() {
 
 #[test]
 fn harness_config_flag_requires_key_value() {
-    let err = match super::cli::Cli::try_parse_from(["tau", "--harness-config=missing-equals"]) {
+    let err = match path_super_cli::Cli::try_parse_from(["tau", "--harness-config=missing-equals"])
+    {
         Ok(_) => panic!("missing KEY=VALUE must fail"),
         Err(err) => err,
     };
@@ -874,7 +902,7 @@ fn harness_config_flag_requires_key_value() {
 fn global_harness_flags_parse_before_dev_print_prompt() {
     // Hidden diagnostic commands use the same global harness args as normal
     // startup, including flags placed before the `dev` subcommand.
-    let cli = super::cli::Cli::parse_from([
+    let cli = path_super_cli::Cli::parse_from([
         "tau",
         "--disable-roles-all",
         "--role",
@@ -897,7 +925,7 @@ fn global_harness_flags_parse_before_dev_print_prompt() {
 
 #[test]
 fn role_cli_flags_accept_repeated_and_mixed_options() {
-    let cli = super::cli::Cli::parse_from([
+    let cli = path_super_cli::Cli::parse_from([
         "tau",
         "--disable-roles-all",
         "--enable-role",
@@ -914,7 +942,7 @@ fn role_cli_flags_accept_repeated_and_mixed_options() {
 
 #[test]
 fn extension_cli_flags_accept_repeated_and_mixed_options() {
-    let cli = super::cli::Cli::parse_from([
+    let cli = path_super_cli::Cli::parse_from([
         "tau",
         "--enable-extensions-all",
         "--disable-extension",
@@ -987,7 +1015,7 @@ fn extension_cli_overrides_preserve_argument_order() {
 fn long_help_documents_extension_environment() {
     use clap::CommandFactory;
     let mut output = Vec::new();
-    super::cli::Cli::command()
+    path_super_cli::Cli::command()
         .write_long_help(&mut output)
         .expect("render long help");
     let help = String::from_utf8(output).expect("help is UTF-8");
@@ -1017,7 +1045,7 @@ fn dev_tmux_rejects_startup_overrides_before_harness_validation() {
     let extension_error = super::reject_dev_tmux_startup_overrides(
         None,
         &[],
-        &[tau_config::settings::ExtensionCliOverride::DisableAll],
+        &[path_tau_config_settings::ExtensionCliOverride::DisableAll],
         &[],
     )
     .expect_err("extension override refused");
@@ -1182,7 +1210,7 @@ impl VtWriter {
     fn new(parser: vt100::Parser) -> Self {
         Self {
             parser: Arc::new(Mutex::new(parser)),
-            frames: Arc::new((Mutex::new(Vec::new()), std::sync::Condvar::new())),
+            frames: Arc::new((Mutex::new(Vec::new()), path_std_sync::Condvar::new())),
         }
     }
 
@@ -1776,7 +1804,10 @@ fn theme_refresh_preserves_optimistic_session_context() {
         cli_test_theme(),
     );
     renderer.set_right_prompt_paths("/tmp/project".into(), None);
-    let draft_handle = Arc::new((Mutex::new(DraftSlot::default()), std::sync::Condvar::new()));
+    let draft_handle = Arc::new((
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    ));
     let active_session = Arc::new(Mutex::new(
         tau_proto::SessionId::parse("old-session").expect("session id"),
     ));
@@ -5329,7 +5360,10 @@ fn manual_compaction_selects_agent_from_empty_state() {
 
 #[test]
 fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
-    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let handle = (
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    );
     {
         let (mtx, _cv) = &handle;
         let mut slot = super::locked(mtx);
@@ -5510,7 +5544,10 @@ fn role_setting_updates_are_typed_and_reset_aware() {
 
 #[test]
 fn action_submission_invalidates_pending_draft_like_prompt_submission() {
-    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let handle = (
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    );
     {
         let (mtx, _cv) = &handle;
         let mut slot = super::locked(mtx);
@@ -5537,7 +5574,10 @@ fn action_submission_invalidates_pending_draft_like_prompt_submission() {
 /// draft without consulting mutable UI selection state.
 #[test]
 fn queued_draft_snapshot_records_selected_agent_target() {
-    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let handle = (
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    );
     let agent_id = tau_proto::AgentId::parse("agent-a").expect("agent id");
 
     queue_prompt_draft_snapshot(
@@ -5560,7 +5600,10 @@ fn queued_draft_snapshot_records_selected_agent_target() {
 /// inheriting whatever agent might become current before the debounce fires.
 #[test]
 fn queued_draft_snapshot_records_no_agent_target() {
-    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let handle = (
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    );
 
     queue_prompt_draft_snapshot(
         &handle,
@@ -5583,7 +5626,10 @@ fn queued_draft_snapshot_records_no_agent_target() {
 /// target.
 #[test]
 fn retarget_draft_snapshot_replaces_agent_a_with_agent_b() {
-    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let handle = (
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    );
     let agent_a = tau_proto::AgentId::parse("agent-a").expect("agent id");
     let agent_b = tau_proto::AgentId::parse("agent-b").expect("agent id");
     queue_prompt_draft_snapshot(
@@ -5612,7 +5658,10 @@ fn retarget_draft_snapshot_replaces_agent_a_with_agent_b() {
 /// debounce fires must make the replacement snapshot unscoped.
 #[test]
 fn retarget_draft_snapshot_replaces_agent_with_no_agent() {
-    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let handle = (
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    );
     let agent_a = tau_proto::AgentId::parse("agent-a").expect("agent id");
     queue_prompt_draft_snapshot(
         &handle,
@@ -5633,14 +5682,20 @@ fn retarget_draft_snapshot_replaces_agent_with_no_agent() {
 
 #[test]
 fn current_draft_snapshot_is_sent_when_epoch_matches() {
-    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let handle = (
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    );
 
     assert!(should_send_draft_snapshot(&handle, 0));
 }
 
 #[test]
 fn draft_snapshot_is_dropped_after_shutdown() {
-    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let handle = (
+        Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
+    );
     {
         let (mtx, _cv) = &handle;
         super::locked(mtx).done = true;
@@ -11479,7 +11534,7 @@ fn status_tool_header_preserves_semantics_and_outcome_when_narrow() {
     let status_index = display.suffixes.len().saturating_sub(1);
     display.suffixes.insert(
         status_index,
-        crate::tool_render::tool_duration_suffix(std::time::Duration::from_secs(12)),
+        crate::tool_render::tool_duration_suffix(path_std_time::Duration::from_secs(12)),
     );
     let block = render_tool_block(&cli_test_theme(), &display);
 

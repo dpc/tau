@@ -11,6 +11,13 @@
 //! candidates and asks each responsive harness for its in-memory session
 //! identity.
 
+use std::{
+    collections as path_std_collections, fs as path_std_fs, io as path_std_io,
+    thread as path_std_thread,
+};
+#[cfg(test)]
+use std::{sync as path_std_sync, sync::atomic as path_std_sync_atomic};
+
 #[cfg(test)]
 mod tests;
 use std::os::unix::net::UnixStream;
@@ -76,8 +83,8 @@ impl HarnessInstanceId {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidInput,
                 "invalid harness runtime instance id",
             ));
         }
@@ -318,7 +325,7 @@ impl HarnessPaths {
 
     /// Writes the daemon metadata. Must be called after the socket is bound.
     pub fn write_metadata(&self) -> Result<(), std::io::Error> {
-        let json = serde_json::to_vec_pretty(&self.metadata).map_err(std::io::Error::other)?;
+        let json = serde_json::to_vec_pretty(&self.metadata).map_err(path_std_io::Error::other)?;
         std::fs::write(metadata_path(&self.path), json)
     }
 
@@ -355,7 +362,7 @@ fn read_metadata_bounded(
     {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = path_std_fs::File::open(path).ok()?;
     if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
         return None;
     }
@@ -468,7 +475,7 @@ pub(crate) fn discover_peer_sessions(
             scan_truncated: true,
         };
     };
-    let queue = Arc::new(Mutex::new(std::collections::VecDeque::from(candidates)));
+    let queue = Arc::new(Mutex::new(path_std_collections::VecDeque::from(candidates)));
     let (tx, rx) = mpsc::channel();
     let workers = SESSION_DISCOVERY_MAX_PROBES.min(queue.lock().expect("queue poisoned").len());
     let mut live = Vec::new();
@@ -518,7 +525,7 @@ pub(crate) fn discover_peer_sessions(
         discovery_probe_slots().1.notify_all();
     });
     live.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-    let mut ambiguous = std::collections::HashSet::new();
+    let mut ambiguous = path_std_collections::HashSet::new();
     for pair in live.windows(2) {
         if pair[0].session_id == pair[1].session_id {
             ambiguous.insert(pair[0].session_id.clone());
@@ -710,13 +717,13 @@ impl Drop for DiscoveryProbeSlot {
 }
 
 #[cfg(test)]
-static ACTIVE_DISCOVERY_WORKERS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static ACTIVE_DISCOVERY_WORKERS: path_std_sync::atomic::AtomicUsize =
+    path_std_sync_atomic::AtomicUsize::new(0);
 #[cfg(test)]
 static TEST_DISCOVERY_SERIAL: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 static TEST_DISCOVERY_SCAN_DELAY: std::sync::LazyLock<Mutex<Option<(PathBuf, u64)>>> =
-    std::sync::LazyLock::new(|| Mutex::new(None));
+    path_std_sync::LazyLock::new(|| Mutex::new(None));
 
 #[cfg(test)]
 struct DiscoveryWorkerGuard;
@@ -744,14 +751,14 @@ impl Drop for DiscoveryWorkerGuard {
 pub fn read_session_id(harness_path: &Path) -> Result<tau_proto::SessionId, std::io::Error> {
     let encoded = std::fs::read_to_string(metadata_path(harness_path))?;
     let metadata: DaemonMetadata = serde_json::from_str(&encoded).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+        path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
             format!("malformed daemon metadata: {error}"),
         )
     })?;
     tau_proto::SessionId::parse(metadata.session_id).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+        path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
             format!("invalid daemon session id: {error}"),
         )
     })
@@ -760,10 +767,11 @@ pub fn read_session_id(harness_path: &Path) -> Result<tau_proto::SessionId, std:
 /// Updates the active/current session id in an existing daemon metadata file.
 pub fn update_session_id(harness_path: &Path, session_id: &str) -> Result<(), std::io::Error> {
     let session_id = validate_session_id_for_metadata(session_id)?;
-    let mut metadata = read_metadata(harness_path)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "metadata missing"))?;
+    let mut metadata = read_metadata(harness_path).ok_or_else(|| {
+        path_std_io::Error::new(path_std_io::ErrorKind::NotFound, "metadata missing")
+    })?;
     metadata.session_id = session_id.to_string();
-    let json = serde_json::to_vec_pretty(&metadata).map_err(std::io::Error::other)?;
+    let json = serde_json::to_vec_pretty(&metadata).map_err(path_std_io::Error::other)?;
     std::fs::write(metadata_path(harness_path), json)
 }
 
@@ -805,8 +813,8 @@ fn validate_session_id_for_metadata(
     session_id: &str,
 ) -> Result<tau_proto::SessionId, std::io::Error> {
     tau_proto::SessionId::parse(session_id).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidInput,
             format!("invalid session id `{session_id}`: {error}"),
         )
     })
@@ -816,8 +824,8 @@ fn ensure_private_runtime_dir(path: &Path) -> Result<(), std::io::Error> {
     std::fs::create_dir_all(path)?;
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::PermissionDenied,
             format!(
                 "runtime directory `{}` must not be a symlink",
                 path.display()
@@ -825,8 +833,8 @@ fn ensure_private_runtime_dir(path: &Path) -> Result<(), std::io::Error> {
         ));
     }
     if !metadata.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotADirectory,
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::NotADirectory,
             format!("runtime path `{}` is not a directory", path.display()),
         ));
     }
@@ -842,8 +850,8 @@ fn ensure_private_runtime_dir_platform(
 
     let uid = current_euid();
     if metadata.uid() != uid {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::PermissionDenied,
             format!(
                 "runtime directory `{}` is owned by uid {}, not current uid {uid}",
                 path.display(),
@@ -854,7 +862,7 @@ fn ensure_private_runtime_dir_platform(
 
     let mode = metadata.permissions().mode() & 0o777;
     if mode != 0o700 {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(path, path_std_fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
@@ -941,7 +949,7 @@ pub fn list_running_sessions() -> Result<Vec<RunningSession>, std::io::Error> {
     let runtime_dir = harnesses_dir();
     let scan_permit = permit.clone();
     let (scan_tx, scan_rx) = mpsc::sync_channel(1);
-    std::thread::Builder::new()
+    path_std_thread::Builder::new()
         .name("tau-running-session-scan".to_owned())
         .spawn(move || {
             let _permit = scan_permit;
@@ -1096,7 +1104,7 @@ fn probe_current_session(
 }
 
 fn running_session_list_incomplete(reason: &str) -> std::io::Error {
-    std::io::Error::other(format!("could not list all running sessions: {reason}"))
+    path_std_io::Error::other(format!("could not list all running sessions: {reason}"))
 }
 
 /// Finds the single live harness advertising `session_id` as its active
@@ -1305,7 +1313,7 @@ enum ProcessLiveness {
 #[cfg(test)]
 static TEST_SESSION_HARNESSES: std::sync::LazyLock<
     Mutex<std::collections::HashMap<String, PathBuf>>,
-> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+> = path_std_sync::LazyLock::new(|| Mutex::new(path_std_collections::HashMap::new()));
 
 /// Registers a real test harness socket for worker-thread session lookup.
 #[cfg(test)]
@@ -1357,7 +1365,7 @@ fn process_liveness_at(proc_root: &Path, pid: u32) -> ProcessLiveness {
     }
     match std::fs::symlink_metadata(proc_root.join(pid.to_string())) {
         Ok(_) => ProcessLiveness::Running,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ProcessLiveness::Dead,
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => ProcessLiveness::Dead,
         Err(_) => ProcessLiveness::Unknown,
     }
 }

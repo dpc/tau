@@ -1,5 +1,7 @@
 //! Closed deterministic provider implementation used only by e2e tests.
 
+use std::{collections as path_std_collections, io as path_std_io};
+
 #[cfg(test)]
 mod tests;
 mod validation;
@@ -2292,7 +2294,7 @@ impl ScenarioConfig {
                     ));
                 }
                 let mut agent_lanes = HashMap::new();
-                let mut bound_lanes = std::collections::HashSet::new();
+                let mut bound_lanes = path_std_collections::HashSet::new();
                 for binding in checkpoint.agent_lanes {
                     if binding.lane_index >= scenario.lanes.len()
                         || !bound_lanes.insert(binding.lane_index)
@@ -2332,7 +2334,7 @@ impl ScenarioConfig {
                     tau_proto::AgentId,
                     std::collections::BTreeMap<usize, tau_proto::AgentId>,
                 >::new();
-                let mut children = std::collections::HashSet::new();
+                let mut children = path_std_collections::HashSet::new();
                 for binding in checkpoint.child_agents {
                     let parent_lane = agent_lanes.get(&binding.parent_agent_id).copied();
                     let consumed_start_count = consumed_start_counts
@@ -2380,7 +2382,7 @@ impl ScenarioConfig {
                     child_agents,
                 })
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {
                 Ok(RestoredScenarioState {
                     cursors: vec![0; scenario.lanes.len()],
                     agent_lanes: HashMap::new(),

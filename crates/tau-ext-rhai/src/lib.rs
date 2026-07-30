@@ -6,6 +6,8 @@
 //! Runtime concurrency and shell-worker supervision follow
 //! `ARCH-tau-ext-rhai`.
 
+use ciborium::value as path_ciborium_value;
+
 mod shell;
 
 #[cfg(test)]
@@ -624,7 +626,7 @@ fn init_config_json(vars: &serde_json::Value, state_dir: Option<&PathBuf>) -> se
 /// without keeping that helper crate as a dependency.
 fn parse_config<C: DeserializeOwned>(value: &CborValue) -> Result<C, String> {
     value.deserialized().map_err(|e| match e {
-        ciborium::value::Error::Custom(message) => message,
+        path_ciborium_value::Error::Custom(message) => message,
     })
 }
 

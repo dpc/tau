@@ -1,3 +1,4 @@
+use std::collections as path_std_collections;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::Duration;
@@ -7,12 +8,13 @@ use calcard::icalendar::{
     ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarPeriod, ICalendarProperty,
     ICalendarValue,
 };
-use calcard::{Entry, Parser};
+use calcard::{Entry, Parser, icalendar as path_calcard_icalendar};
 use chrono::TimeZone;
 use rrule::{RRule, RRuleSet, Unvalidated};
 use tau_proto::SecretValue;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use ureq::tls as path_ureq_tls;
 use url::Url;
 
 use super::config::{ValidatedAccount, ValidatedBackendConfig};
@@ -106,8 +108,8 @@ pub struct TimeRange {
 impl IcsFeedBackend {
     /// Build a backend using the extension-authorized secret set.
     pub fn new(secrets: BTreeMap<String, SecretValue>) -> Self {
-        let tls_config = ureq::tls::TlsConfig::builder()
-            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        let tls_config = path_ureq_tls::TlsConfig::builder()
+            .root_certs(path_ureq_tls::RootCerts::PlatformVerifier)
             .build();
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
@@ -511,7 +513,7 @@ fn expand_calendar_events_in_range(
     }
 
     let mut events = Vec::new();
-    let mut emitted_override_ids = std::collections::BTreeSet::new();
+    let mut emitted_override_ids = path_std_collections::BTreeSet::new();
     for master in &masters {
         let override_group = overrides.get(&master.uid);
         expand_master_in_range(
@@ -546,7 +548,7 @@ fn expand_calendar_events_in_range(
 fn build_range_event_seed<'a>(
     component: &'a ICalendarComponent,
     comp_index: usize,
-    resolver: &calcard::icalendar::timezone::TzResolver<&str>,
+    resolver: &path_calcard_icalendar::timezone::TzResolver<&str>,
 ) -> Option<RangeEventSeed<'a>> {
     let mut dt_start = None;
     let mut dt_start_tzid = None;
@@ -555,7 +557,7 @@ fn build_range_event_seed<'a>(
     let mut recurrence_tzid = None;
     let mut rrules = Vec::new();
     let mut rdates = Vec::new();
-    let mut exdates = std::collections::BTreeSet::new();
+    let mut exdates = path_std_collections::BTreeSet::new();
     for entry in &component.entries {
         match (&entry.name, entry.values.first()) {
             (ICalendarProperty::Dtstart, Some(ICalendarValue::PartialDateTime(dt))) => {

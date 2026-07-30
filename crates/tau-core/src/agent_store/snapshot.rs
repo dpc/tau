@@ -3,6 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
+#[cfg(unix)]
+use std::os::unix::fs as path_std_os_unix_fs;
+#[cfg(windows)]
+use std::os::windows::fs as path_std_os_windows_fs;
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt as Fs2FileExt;
@@ -442,12 +446,12 @@ fn journal_len(file: &File, path: &Path) -> Result<u64, AgentStoreError> {
 fn read_exact_at(file: &File, mut bytes: &mut [u8], mut offset: u64) -> io::Result<()> {
     while !bytes.is_empty() {
         #[cfg(unix)]
-        let read = match std::os::unix::fs::FileExt::read_at(file, bytes, offset) {
+        let read = match path_std_os_unix_fs::FileExt::read_at(file, bytes, offset) {
             Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
         };
         #[cfg(windows)]
-        let read = match std::os::windows::fs::FileExt::seek_read(file, bytes, offset) {
+        let read = match path_std_os_windows_fs::FileExt::seek_read(file, bytes, offset) {
             Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
         };

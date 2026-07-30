@@ -1,5 +1,6 @@
 //! Pseudo-terminal attachment for shell output on explicitly supported targets.
 
+use std::fs as path_std_fs;
 use std::process::{Command, Stdio};
 
 use rustix::fd::OwnedFd;
@@ -45,11 +46,11 @@ impl PtyStdio {
             .stderr(Stdio::from(stderr.user));
 
         Ok(Self {
-            stdout_controller: std::fs::File::from(stdout.controller),
-            stderr_controller: std::fs::File::from(stderr.controller),
+            stdout_controller: path_std_fs::File::from(stdout.controller),
+            stderr_controller: path_std_fs::File::from(stderr.controller),
             output_users: [
-                std::fs::File::from(stdout_user_guard),
-                std::fs::File::from(stderr_user_guard),
+                path_std_fs::File::from(stdout_user_guard),
+                path_std_fs::File::from(stderr_user_guard),
             ],
         })
     }

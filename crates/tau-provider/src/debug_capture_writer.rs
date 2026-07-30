@@ -1,5 +1,9 @@
 //! Bounded best-effort writer for compressed provider debug captures.
 
+use std::{thread as path_std_thread, time as path_std_time};
+
+use zstd::stream::write as path_zstd_stream_write;
+
 #[cfg(test)]
 mod tests;
 
@@ -103,7 +107,7 @@ impl CaptureQueue {
     /// Start one detached worker using the production filesystem writer.
     fn spawn() -> io::Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(CAPTURE_QUEUE_CAPACITY);
-        std::thread::Builder::new()
+        path_std_thread::Builder::new()
             .name("tau-provider-capture".to_owned())
             .spawn(move || run_worker(receiver, write_capture))
             .map(|_| Self { sender })
@@ -160,7 +164,7 @@ pub fn submit_provider_debug_capture(capture: ProviderDebugCapture) {
     let Some(state_dir) = tau_config::settings::state_dir() else {
         return;
     };
-    let timestamp = std::time::SystemTime::now()
+    let timestamp = path_std_time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros();
@@ -195,7 +199,7 @@ fn run_worker(
 /// Compress and write one capture entirely on the worker thread.
 fn write_capture(job: &CaptureJob) -> io::Result<()> {
     write_capture_with(job, |file, json| {
-        let mut encoder = zstd::stream::write::Encoder::new(file, ZSTD_COMPRESSION_LEVEL)?;
+        let mut encoder = path_zstd_stream_write::Encoder::new(file, ZSTD_COMPRESSION_LEVEL)?;
         encoder.write_all(json)?;
         encoder.finish()?;
         Ok(())

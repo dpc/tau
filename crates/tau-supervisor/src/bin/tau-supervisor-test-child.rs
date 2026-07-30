@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Write};
+use std::{io as path_std_io, time as path_std_time};
 
 use tau_proto::{
     CborValue, ClientKind, Event, EventDelivery, HarnessInputMessage, HarnessOutputMessage, Hello,
@@ -64,7 +65,10 @@ fn run_test_mode(
             let message_count = remaining_args
                 .next()
                 .ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing flood count")
+                    path_std_io::Error::new(
+                        path_std_io::ErrorKind::InvalidInput,
+                        "missing flood count",
+                    )
                 })?
                 .parse::<usize>()?;
             write_flood_messages(message_count)?;
@@ -75,7 +79,7 @@ fn run_test_mode(
             Ok(true)
         }
         Some(SLEEP_ARG) => {
-            std::thread::sleep(std::time::Duration::from_secs(60));
+            std::thread::sleep(path_std_time::Duration::from_secs(60));
             Ok(true)
         }
         Some(REPORT_CWD_ARG) => {

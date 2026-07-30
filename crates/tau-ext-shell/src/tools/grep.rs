@@ -1,5 +1,11 @@
 //! `grep` tool: ripgrep-backed search using `rg --json`.
 
+use std::{
+    io as path_std_io, os as path_std_os, process as path_std_process, time as path_std_time,
+};
+
+use base64::engine as path_base64_engine;
+
 #[cfg(test)]
 mod tests;
 use std::fmt;
@@ -234,8 +240,8 @@ fn run_ripgrep(
 
     let mut cmd = Command::new("rg");
     cmd.args(options.ripgrep_args())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::piped());
     apply_command_isolation(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -399,7 +405,7 @@ fn spawn_ripgrep_exit_waiter(
             #[allow(unsafe_code)]
             let result = unsafe { libc::poll(&mut poll_fd, 1, -1) };
             if result < 0 {
-                let error = std::io::Error::last_os_error();
+                let error = path_std_io::Error::last_os_error();
                 if error.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
@@ -426,7 +432,7 @@ fn spawn_ripgrep_exit_waiter(
 }
 
 #[cfg(target_os = "linux")]
-fn open_pidfd(pid: u32) -> Result<std::os::fd::OwnedFd, ToolFailure> {
+fn open_pidfd(pid: u32) -> Result<path_std_os::fd::OwnedFd, ToolFailure> {
     use std::os::fd::{FromRawFd, OwnedFd};
 
     // SAFETY: `pidfd_open` is called with a pid returned by `Child::id` and no
@@ -441,7 +447,7 @@ fn open_pidfd(pid: u32) -> Result<std::os::fd::OwnedFd, ToolFailure> {
     }
     // SAFETY: `fd` was returned by `pidfd_open` above and is uniquely owned here.
     #[allow(unsafe_code)]
-    Ok(unsafe { OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) })
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as path_std_os::fd::RawFd) })
 }
 
 #[cfg(target_os = "linux")]
@@ -485,7 +491,7 @@ fn wait_ripgrep_polling_fallback(
             let _ = child.kill();
             return Ok((child.wait().ok(), cancelled));
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(path_std_time::Duration::from_millis(20));
     }
 }
 
@@ -722,7 +728,7 @@ impl RgText {
 
     fn decoded_bytes(&self) -> Option<Vec<u8>> {
         let bytes = self.bytes.as_ref()?;
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, bytes).ok()
+        base64::Engine::decode(&path_base64_engine::general_purpose::STANDARD, bytes).ok()
     }
 }
 

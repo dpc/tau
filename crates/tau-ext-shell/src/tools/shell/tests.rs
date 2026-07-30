@@ -1,4 +1,7 @@
+use std::time as path_std_time;
+
 use super::*;
+use crate::tools as path_crate_tools;
 
 fn shell_args(command: &str, timeout: i64) -> CborValue {
     CborValue::Map(vec![
@@ -65,7 +68,7 @@ fn replay_rejects_legacy_gpt_cwd_without_consuming_outcome() {
     .expect("replay world");
     let error = run_command_cancellable_for_tool(
         ShellInvocation {
-            surface: crate::tools::ShellSurface::ChatGpt,
+            surface: path_crate_tools::ShellSurface::ChatGpt,
             call_id: "legacy-gpt-cwd",
             arguments: &arguments,
         },
@@ -351,7 +354,7 @@ fn record_cancelled_shell(
         world.finish()?;
         outcome
     });
-    std::thread::sleep(std::time::Duration::from_millis(25));
+    std::thread::sleep(path_std_time::Duration::from_millis(25));
     cancel_tx.send(()).expect("send cancel");
     let outcome = handle
         .join()
@@ -458,7 +461,7 @@ fn shell_vcr_finished_replay_sleeps_at_scaled_recorded_duration() {
         )),
     )
     .expect("replay world");
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
     let outcome = run_command_cancellable(
         "call_slow_finished_shell",
         &args,
@@ -511,7 +514,7 @@ fn shell_vcr_cancelled_replay_requires_cancel_request() {
         world.finish()?;
         outcome
     });
-    std::thread::sleep(std::time::Duration::from_millis(25));
+    std::thread::sleep(path_std_time::Duration::from_millis(25));
     cancel_tx.send(()).expect("send cancel");
 
     let outcome = handle.join().expect("join replay").expect("replay shell");

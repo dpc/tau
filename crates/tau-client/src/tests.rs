@@ -3,6 +3,7 @@ use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
+use std::{collections as path_std_collections, time as path_std_time};
 
 use tau_proto::{
     ActionOutput, ActionSchema, AgentPromptSubmitted, CborValue, Configure, CustomEvent, Event,
@@ -967,7 +968,7 @@ fn config_with_unknown_field() -> HarnessOutputMessage {
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
-        secrets: std::collections::BTreeMap::new(),
+        secrets: path_std_collections::BTreeMap::new(),
     })
 }
 
@@ -1025,7 +1026,7 @@ fn configure_message() -> HarnessOutputMessage {
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
-        secrets: std::collections::BTreeMap::new(),
+        secrets: path_std_collections::BTreeMap::new(),
     })
 }
 
@@ -1304,7 +1305,7 @@ fn configure_application_failure_sends_config_error() {
                 instance_name: tau_proto::ExtensionName::parse("test-extension")
                     .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: None,
-                secrets: std::collections::BTreeMap::new(),
+                secrets: path_std_collections::BTreeMap::new(),
             }),
             HarnessOutputMessage::deliver_live(UnixMicros::new(13), notice("after-error")),
         ],
@@ -1351,7 +1352,7 @@ fn configure_application_failure_runs_error_hook() {
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         })],
     );
 
@@ -1384,7 +1385,7 @@ fn raw_configure_error_emits_config_error_and_continues() {
                 instance_name: tau_proto::ExtensionName::parse("test-extension")
                     .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: None,
-                secrets: std::collections::BTreeMap::new(),
+                secrets: path_std_collections::BTreeMap::new(),
             }),
             config_with_unknown_field(),
             HarnessOutputMessage::deliver_live(UnixMicros::new(21), notice("after-error")),
@@ -1817,7 +1818,7 @@ fn client_handle_send_after_queued_shutdown_fails_promptly() {
         .expect("writer entered blocked write");
 
     let shutdown_thread = std::thread::spawn(move || handle.shutdown());
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     loop {
         match cloned.emit_detached(outbound_event("probe after shutdown")) {
             Ok(()) if start.elapsed() < Duration::from_secs(1) => {
@@ -2519,7 +2520,7 @@ fn manual_loop_finish_before_input_close_detaches_reader() {
     let runtime = TauExtensionRunner::new(ReplayExtension)
         .start_manual_loop(reader, writer, Counts::default())
         .expect("start manual loop");
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
 
     let state = runtime.finish().expect("finish before EOF");
 
@@ -2961,7 +2962,7 @@ fn manual_loop_dispatch_config_error_continues() {
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
-        secrets: std::collections::BTreeMap::new(),
+        secrets: path_std_collections::BTreeMap::new(),
     });
     let mut runtime = TauExtensionRunner::new(RawConfigureExtension)
         .start_manual_loop(
@@ -3368,7 +3369,7 @@ fn configured_tool_prefix_maps_registration_and_dispatch() {
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
-        secrets: std::collections::BTreeMap::new(),
+        secrets: path_std_collections::BTreeMap::new(),
     });
     let (state, frames) = run_messages(
         ToolExtension,
@@ -3453,7 +3454,7 @@ fn manual_loop_uses_configured_tool_scope() {
         instance_name: tau_proto::ExtensionName::parse("test-extension")
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
-        secrets: std::collections::BTreeMap::new(),
+        secrets: path_std_collections::BTreeMap::new(),
     });
     let input = encode_output_messages(&[configure, tool_started("work_owned_tool")]);
     let writer = SharedWriter::default();
@@ -3482,7 +3483,7 @@ fn manual_loop_recv_rejects_changed_prefix_and_preserves_scope() {
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         })
     };
     let writer = SharedWriter::default();
@@ -3524,7 +3525,7 @@ fn manual_loop_try_recv_rejects_changed_prefix_and_preserves_scope() {
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         })
     };
     let writer = SharedWriter::default();
@@ -3573,7 +3574,7 @@ fn changed_tool_prefix_is_rejected_without_reconfiguring() {
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         })
     };
     let (state, frames) = run_messages(
@@ -3599,7 +3600,7 @@ fn changed_tool_prefix_preserves_original_tool_dispatch_scope() {
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         })
     };
     let (state, frames) = run_messages(
@@ -3637,7 +3638,7 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
             instance_name: tau_proto::ExtensionName::parse("test-extension")
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         }))
         .expect("install scope");
     handle.finish_startup().expect("finish test startup");

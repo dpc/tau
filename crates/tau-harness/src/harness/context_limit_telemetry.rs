@@ -1,3 +1,5 @@
+use std::sync as path_std_sync;
+
 use tau_core::AgentEntry;
 use tau_proto::{
     ContextItem, ContextLimitObservation, ModelId, PromptOperation, ToolResultContentPart,
@@ -106,7 +108,7 @@ fn strip_and_count_agent_entry_images(entry: &mut AgentEntry) -> Option<u64> {
         let patches = width_patches.checked_mul(height_patches)?;
         let image_tokens = u64::try_from(image.data.len()).ok()?.checked_add(patches)?;
         total = total.checked_add(image_tokens)?;
-        image.data = std::sync::Arc::from([]);
+        image.data = path_std_sync::Arc::from([]);
         Some(())
     })?;
     Some(total)

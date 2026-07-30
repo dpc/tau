@@ -1,5 +1,7 @@
 //! OpenAI OAuth auth-code + PKCE exchange and refresh.
 
+use tokio::runtime as path_tokio_runtime;
+
 mod error;
 
 use std::collections::HashMap;
@@ -236,7 +238,7 @@ fn post_form(
     body: &str,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<serde_json::Value, OAuthError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(OAuthError::transport)?;

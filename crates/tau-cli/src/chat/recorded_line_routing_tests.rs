@@ -1,4 +1,7 @@
+use std::collections as path_std_collections;
+
 use super::*;
+use crate::list_agents as path_crate_list_agents;
 
 fn action_schema(root: &str, action_id: &str) -> tau_actions::ActionSchema {
     tau_actions::ActionSchema {
@@ -34,7 +37,7 @@ fn routing_state_with_selected_agent(selected: Option<&str>) -> InputRoutingStat
     let current_agent_state = Arc::new(Mutex::new(selected.map(str::to_owned)));
     let known_agents = Arc::new(Mutex::new(Vec::new()));
     let agent_navigation = Arc::new(Mutex::new(AgentNavigation::default()));
-    let ephemeral_agents = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let ephemeral_agents = Arc::new(Mutex::new(path_std_collections::HashSet::new()));
     InputRoutingState::new(
         current_agent_state,
         known_agents,
@@ -162,12 +165,12 @@ fn agent_pickers_are_static_commands_with_matching_filters() {
         (
             ":pick-agent",
             "currently active",
-            crate::list_agents::AgentPickerFilter::Active,
+            path_crate_list_agents::AgentPickerFilter::Active,
         ),
         (
             ":pick-agent-all",
             "current live",
-            crate::list_agents::AgentPickerFilter::All,
+            path_crate_list_agents::AgentPickerFilter::All,
         ),
     ] {
         assert!(BUILTIN_COMMANDS.iter().any(|(candidate, description)| {

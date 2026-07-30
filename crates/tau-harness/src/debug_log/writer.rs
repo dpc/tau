@@ -7,6 +7,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::Instant;
+use std::{fs as path_std_fs, thread as path_std_thread};
+#[cfg(test)]
+use std::{io as path_std_io, sync as path_std_sync};
 
 use fs2::FileExt as _;
 
@@ -166,12 +169,12 @@ impl DebugWriter {
             #[cfg(test)]
             completed_jobs: AtomicUsize::new(0),
             #[cfg(test)]
-            worker_traces: std::sync::Mutex::new(Vec::new()),
+            worker_traces: path_std_sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             test_pauses: DebugWriterTestPauses::default(),
         });
         let worker_queue = Arc::clone(&queue);
-        let worker = match std::thread::Builder::new()
+        let worker = match path_std_thread::Builder::new()
             .name("tau-debug-jsonl".to_owned())
             .spawn(move || debug_writer_worker(worker_queue, receiver))
         {
@@ -406,8 +409,8 @@ impl Drop for RetainedWorkPermit {
 impl DebugWriterTestPause {
     fn new() -> Self {
         Self {
-            entered: Arc::new(std::sync::Barrier::new(2)),
-            resume: Arc::new(std::sync::Barrier::new(2)),
+            entered: Arc::new(path_std_sync::Barrier::new(2)),
+            resume: Arc::new(path_std_sync::Barrier::new(2)),
         }
     }
 
@@ -498,7 +501,7 @@ fn write_debug_job(
         #[cfg(test)]
         maybe_fail_worker_io(job, DebugWriterIoStage::SidecarOpen)?;
         let lock_path = job.path.with_file_name("events.jsonl.lock");
-        let lock = std::fs::OpenOptions::new()
+        let lock = path_std_fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
@@ -517,7 +520,7 @@ fn write_debug_job(
         {
             #[cfg(test)]
             maybe_fail_worker_io(job, DebugWriterIoStage::AppendOpen)?;
-            let file = std::fs::OpenOptions::new()
+            let file = path_std_fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&job.path)
@@ -596,7 +599,7 @@ fn maybe_fail_worker_io(
         return Ok(());
     };
     std::thread::sleep(fault.delay);
-    Err(LineAppendError::without_timing(std::io::Error::other(
+    Err(LineAppendError::without_timing(path_std_io::Error::other(
         "injected early worker I/O failure",
     )))
 }

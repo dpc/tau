@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use std::thread as path_std_thread;
 use std::thread::JoinHandle;
 
 use iroh::endpoint::presets;
@@ -19,6 +20,7 @@ use tau_swarm_api::{
 };
 use tau_swarm_client::{Client, ExpectedPeer};
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync};
 
 use crate::application::{BlockerSubmission, CommandState, PromptSubmission, SwarmApplication};
 use crate::config::{ExtConfig, ResolvedConfig};
@@ -141,8 +143,8 @@ impl SwarmRuntime {
             replay_complete: false,
             projection_valid: true,
             agents: HashMap::new(),
-            projection: Arc::new(tokio::sync::Mutex::new(SessionProjection::new(4_096))),
-            changed: Arc::new(tokio::sync::Notify::new()),
+            projection: Arc::new(path_tokio_sync::Mutex::new(SessionProjection::new(4_096))),
+            changed: Arc::new(path_tokio_sync::Notify::new()),
             pending: Arc::new(Mutex::new(HashMap::new())),
             commands: None,
             worker: None,
@@ -176,8 +178,8 @@ impl SwarmRuntime {
         } else {
             SessionProjection::new(capacity)
         };
-        self.projection = Arc::new(tokio::sync::Mutex::new(projection));
-        self.changed = Arc::new(tokio::sync::Notify::new());
+        self.projection = Arc::new(path_tokio_sync::Mutex::new(projection));
+        self.changed = Arc::new(path_tokio_sync::Notify::new());
     }
 
     fn stop_worker(&mut self) {
@@ -257,8 +259,8 @@ impl SwarmRuntime {
         } else {
             SessionProjection::new(capacity)
         };
-        self.projection = Arc::new(tokio::sync::Mutex::new(projection));
-        self.changed = Arc::new(tokio::sync::Notify::new());
+        self.projection = Arc::new(path_tokio_sync::Mutex::new(projection));
+        self.changed = Arc::new(path_tokio_sync::Notify::new());
         if let Some(handle) = &self.handle {
             let _ = handle.request_notice_detached(
                 "Tau Swarm projection exceeded configured agent/watch bounds; publication is disabled until a fresh session replay",
@@ -324,7 +326,7 @@ impl SwarmRuntime {
                     config.limits.blocker_bytes,
                 ),
         );
-        let thread = std::thread::Builder::new()
+        let thread = path_std_thread::Builder::new()
             .name("tau-ext-swarm".into())
             .spawn(move || {
                 if let Err(error) = worker_main(
@@ -434,7 +436,7 @@ fn worker_main(
     mut blockers: mpsc::Receiver<BlockerSubmission>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = path_tokio_runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
@@ -554,7 +556,7 @@ fn handle_configure(cx: RawConfigureContext<'_, SwarmRuntime>) -> Result<(), Cli
         .resolve(cx.secrets())
         .map_err(ClientError::handler)?;
     cx.state.handle = Some(cx.handle());
-    cx.state.projection = Arc::new(tokio::sync::Mutex::new(
+    cx.state.projection = Arc::new(path_tokio_sync::Mutex::new(
         SessionProjection::new(config.limits.change_history_entries).with_byte_limits(
             config.limits.change_history_bytes,
             config.limits.publication_bytes,
@@ -562,7 +564,7 @@ fn handle_configure(cx: RawConfigureContext<'_, SwarmRuntime>) -> Result<(), Cli
     ));
     cx.state.config = Some(config);
     let limits = &cx.state.config.as_ref().expect("installed config").limits;
-    cx.state.commands = Some(Arc::new(tokio::sync::Mutex::new(CommandState::new(
+    cx.state.commands = Some(Arc::new(path_tokio_sync::Mutex::new(CommandState::new(
         limits.command_entries,
         limits.command_bytes,
     ))));

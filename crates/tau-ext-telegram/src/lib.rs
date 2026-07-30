@@ -12,6 +12,8 @@
 //! The standalone daemon and sidecar split is described by
 //! `ARCH-tau-telegram-gateway`.
 
+use ureq::tls as path_ureq_tls;
+
 mod gateway;
 mod gateway_client;
 mod stream_owner;
@@ -2397,8 +2399,8 @@ struct HttpTelegramClient {
 
 impl HttpTelegramClient {
     fn agent() -> ureq::Agent {
-        let tls_config = ureq::tls::TlsConfig::builder()
-            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        let tls_config = path_ureq_tls::TlsConfig::builder()
+            .root_certs(path_ureq_tls::RootCerts::PlatformVerifier)
             .build();
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(HTTP_TIMEOUT))

@@ -1,5 +1,6 @@
 //! `apply_patch` custom tool: parse Codex-style patch text and apply it.
 
+use std::io as path_std_io;
 use std::path::{Path, PathBuf};
 
 use tau_proto::{CborValue, ToolUsePayload};
@@ -519,7 +520,7 @@ fn render_diagnostic(error: impl std::fmt::Display) -> String {
 fn read_optional_file(path: &Path, world: &mut ShellWorld) -> Result<Option<String>, String> {
     match world.read_to_string_limited(path, MAX_SAFE_FILE_READ_BYTES) {
         Ok(content) => Ok(Some(content)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(render_diagnostic(error)),
     }
 }

@@ -1,3 +1,5 @@
+use std::collections as path_std_collections;
+
 use super::*;
 
 /// Whether the strict provider remains connected after one reply.
@@ -46,7 +48,7 @@ impl StrictProviderReply {
 pub(super) fn validate_closed_tool_timeline(
     context: &tau_proto::PromptContext,
 ) -> Result<(), &'static str> {
-    let mut open = std::collections::HashMap::new();
+    let mut open = path_std_collections::HashMap::new();
     for item in context.flatten_iter() {
         match item {
             ContextItem::ToolCall(call) => {

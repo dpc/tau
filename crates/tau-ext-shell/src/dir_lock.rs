@@ -15,10 +15,16 @@
 //! same-owner reentry, while user-facing diagnostics and `owner_agent_id`
 //! recovery continue to use `AgentId`.
 
+use std::io as path_std_io;
+
+use crate::tools as path_crate_tools;
+
 mod fs;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync as path_std_sync;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -50,7 +56,7 @@ const DUPLICATE_LOCK_OUTPUT: &str = "Directory lock already held by this agent. 
 
 #[cfg(test)]
 static CONFIGURE_PAUSE_FOR_TEST: std::sync::LazyLock<Mutex<Option<Arc<ConfigurePauseForTest>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(None));
+    path_std_sync::LazyLock::new(|| Mutex::new(None));
 
 #[cfg(test)]
 #[derive(Debug)]
@@ -1423,11 +1429,11 @@ pub(crate) fn automatic_lock_dirs_for_tool_in_dir(
             Ok(vec![canonical_write_lock_dir(Path::new(&path))?])
         }
         SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME => {
-            let surface = crate::tools::ShellSurface::for_tool_name(tool_name)
+            let surface = path_crate_tools::ShellSurface::for_tool_name(tool_name)
                 .expect("matched shell tool has a known surface");
             Ok(vec![canonical_shell_cwd(surface, arguments)?])
         }
-        APPLY_PATCH_TOOL_NAME => Ok(crate::tools::apply_patch::lock_directories_in_dir(
+        APPLY_PATCH_TOOL_NAME => Ok(path_crate_tools::apply_patch::lock_directories_in_dir(
             arguments, cwd,
         )?),
         _ => Err(ToolFailure::new(format!(
@@ -1441,11 +1447,11 @@ pub(crate) fn automatic_lock_dirs_for_tool_in_dir(
 pub(crate) fn waiting_progress(
     invoke: &ToolStarted,
     dirs: &[PathBuf],
-    shell_command_mode: Option<crate::tools::shell::ShellCommandMode>,
+    shell_command_mode: Option<path_crate_tools::shell::ShellCommandMode>,
 ) -> ToolProgress {
     let dirs_display = display_dirs(dirs);
     let mut display = match shell_command_mode {
-        Some(mode) => crate::tools::shell::initial_display(&invoke.arguments, mode),
+        Some(mode) => path_crate_tools::shell::initial_display(&invoke.arguments, mode),
         None => crate::tools::initial_display(invoke).unwrap_or_else(|| ToolUseState {
             args: dirs_display.clone(),
             ..Default::default()
@@ -1490,7 +1496,7 @@ pub(crate) fn display_dirs(dirs: &[PathBuf]) -> String {
 /// deepest existing ancestor so `edit` can keep creating parent directories
 /// safely.
 pub(crate) fn canonical_write_lock_dir(path: &Path) -> Result<PathBuf, ToolFailure> {
-    let lock_path = crate::tools::world::final_write_path(path).map_err(|error| {
+    let lock_path = path_crate_tools::world::final_write_path(path).map_err(|error| {
         ToolFailure::from(format!("failed to resolve {}: {error}", path.display()))
             .with_args(path.display().to_string())
     })?;
@@ -1544,7 +1550,9 @@ pub(crate) fn canonical_update_lock_dir(path: &Path) -> Result<PathBuf, ToolFail
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => canonical_existing_file_parent(path),
         Ok(_) => canonical_path_parent(path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => canonical_path_parent(path),
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {
+            canonical_path_parent(path)
+        }
         Err(error) => Err(ToolFailure::from(format!(
             "failed to stat file {}: {error}",
             path.display()

@@ -1,3 +1,4 @@
+use std::collections as path_std_collections;
 use std::io::{Cursor, Read};
 use std::time::Duration;
 
@@ -60,7 +61,7 @@ fn restart_config(mode: &str) -> HarnessOutputMessage {
             CborValue::Text(mode.to_owned()),
         )]),
         state_dir: None,
-        secrets: std::collections::BTreeMap::new(),
+        secrets: path_std_collections::BTreeMap::new(),
     })
 }
 
@@ -101,7 +102,7 @@ fn restart_input(input_frames: &[HarnessOutputMessage]) -> Vec<u8> {
                     .expect("test extension name must satisfy the identifier grammar"),
                 config: CborValue::Map(Vec::new()),
                 state_dir: None,
-                secrets: std::collections::BTreeMap::new(),
+                secrets: path_std_collections::BTreeMap::new(),
             }))
             .expect("write initial configure");
     }
@@ -535,7 +536,7 @@ fn run_intercept(
                 .expect("test extension name must satisfy the identifier grammar"),
             config: CborValue::Map(Vec::new()),
             state_dir: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
         }))
         .expect("write initial configure");
     writer

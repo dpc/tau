@@ -1,10 +1,12 @@
 //! Unit coverage implementing `testing.md`.
 
+use std::io as path_std_io;
 use std::io::Write;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use tau_proto::{HarnessInputMessage, HarnessOutputMessage, ToolStarted};
+use xmpp_parsers::stanza_error as path_xmpp_parsers_stanza_error;
 
 use super::*;
 
@@ -389,10 +391,10 @@ fn run_protocol_messages(
 
     let output = SharedWriter::default();
     let written = output.clone();
-    run_with_bridge(std::io::Cursor::new(input), output, bridge).expect("run");
+    run_with_bridge(path_std_io::Cursor::new(input), output, bridge).expect("run");
 
     let mut frames = Vec::new();
-    let mut reader = tau_proto::HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut reader = tau_proto::HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     while let Some(frame) = reader.read_message().expect("read output") {
         frames.push(frame);
     }
@@ -1365,8 +1367,8 @@ fn muc_join_presence_error_is_reported() {
     presence.from = Some(occupant);
     presence.payloads.push(
         StanzaError::new(
-            xmpp_parsers::stanza_error::ErrorType::Cancel,
-            xmpp_parsers::stanza_error::DefinedCondition::ItemNotFound,
+            path_xmpp_parsers_stanza_error::ErrorType::Cancel,
+            path_xmpp_parsers_stanza_error::DefinedCondition::ItemNotFound,
             "",
             "room locked",
         )

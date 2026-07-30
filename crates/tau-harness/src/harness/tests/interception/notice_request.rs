@@ -1,6 +1,7 @@
 //! Contract tests for `SPEC-extension-notice-requests`.
 
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 fn notice_request(message: &str, level: tau_proto::NoticeLevel) -> HarnessInputMessage {
     HarnessInputMessage::ExtensionNoticeRequest(tau_proto::ExtensionNoticeRequest {
@@ -40,14 +41,14 @@ fn connect_handshaking_configured_extension(
         .entries
         .get_mut(connection_id)
         .expect("configured extension")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     harness.extensions.ready_received.remove(connection_id);
     sink
 }
 
 fn committed_extension_notices(harness: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut notices = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = harness.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches!(
@@ -151,7 +152,7 @@ fn unauthorized_notice_requests_are_silently_denied() {
         .entries
         .get_mut("disconnected")
         .expect("configured entry")
-        .state = crate::extension::ExtensionState::Disconnected;
+        .state = path_crate_extension::ExtensionState::Disconnected;
     harness
         .handle_extension_message(
             &crate::test_connection_id("disconnected"),
@@ -483,7 +484,7 @@ fn pre_hello_request_follows_protocol_failure_path() {
         .entries
         .get_mut("spawning-requester")
         .expect("spawning requester")
-        .state = crate::extension::ExtensionState::Spawning;
+        .state = path_crate_extension::ExtensionState::Spawning;
 
     harness
         .handle_extension_message(

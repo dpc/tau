@@ -1,3 +1,5 @@
+use std::time as path_std_time;
+
 use super::*;
 
 /// Ensures ToolCancelRequest reaches already-running cancellable tool
@@ -20,7 +22,7 @@ fn tool_cancel_request_signals_registered_running_call() {
     });
 
     cancel_rx
-        .recv_timeout(std::time::Duration::from_millis(100))
+        .recv_timeout(path_std_time::Duration::from_millis(100))
         .expect("running call cancel signal");
 }
 
@@ -41,7 +43,7 @@ fn shutdown_signals_registered_running_call() {
     runtime.shutdown();
 
     cancel_rx
-        .recv_timeout(std::time::Duration::from_millis(100))
+        .recv_timeout(path_std_time::Duration::from_millis(100))
         .expect("shutdown cancel signal");
 }
 

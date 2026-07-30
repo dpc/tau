@@ -1,3 +1,4 @@
+use std::io as path_std_io;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd as _;
 #[cfg(target_os = "linux")]
@@ -406,8 +407,8 @@ fn prepared_trace_copy_propagates_destination_failure() {
     struct FailingWriter;
     impl std::io::Write for FailingWriter {
         fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
+            Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::BrokenPipe,
                 "consumer exited",
             ))
         }

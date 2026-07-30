@@ -6,6 +6,8 @@
 //! local `tau`, normal provider authentication, and the shell extension with
 //! user permissions. See `ARCH-tau-e2e-tests` and the crate `SECURITY.md`.
 
+use std::{env as path_std_env, io as path_std_io};
+
 mod deterministic_fixture;
 mod durable_session_snapshot;
 mod durable_snapshot;
@@ -143,8 +145,8 @@ impl VcrFixture {
     ) -> Result<PathBuf, std::io::Error> {
         let path = relative_path.as_ref();
         if path.components().count() != 1 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+            return Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidInput,
                 "fixture path must be one filename",
             ));
         }
@@ -200,8 +202,8 @@ impl VcrFixture {
 fn vcr_enabled_from_env() -> Result<bool, Box<dyn std::error::Error>> {
     let mode = match std::env::var("TAU_VCR") {
         Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => {
+        Err(path_std_env::VarError::NotPresent) => None,
+        Err(path_std_env::VarError::NotUnicode(_)) => {
             return Err("TAU_VCR is not valid Unicode".into());
         }
     };
@@ -211,8 +213,10 @@ fn vcr_enabled_from_env() -> Result<bool, Box<dyn std::error::Error>> {
 fn e2e_model_from_env() -> Result<Option<String>, Box<dyn std::error::Error>> {
     match std::env::var("TAU_E2E_MODEL") {
         Ok(value) => Ok(Some(value)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err("TAU_E2E_MODEL is not valid Unicode".into()),
+        Err(path_std_env::VarError::NotPresent) => Ok(None),
+        Err(path_std_env::VarError::NotUnicode(_)) => {
+            Err("TAU_E2E_MODEL is not valid Unicode".into())
+        }
     }
 }
 

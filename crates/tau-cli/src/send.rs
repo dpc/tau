@@ -1,5 +1,6 @@
 //! Headless command submission client.
 
+use std::io as path_std_io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -213,7 +214,7 @@ fn valid_headless_noop(text: &str) -> bool {
 
 fn read_tree_result(reader: &mut crate::ui_client::UiInputReader) -> Result<String, CliError> {
     loop {
-        let Some(message) = reader.read_message().map_err(std::io::Error::other)? else {
+        let Some(message) = reader.read_message().map_err(path_std_io::Error::other)? else {
             return Err(CliError::Participant(
                 "daemon disconnected before returning the tree".to_owned(),
             ));

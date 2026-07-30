@@ -1,5 +1,7 @@
 use std::str::FromStr;
+use std::{ffi as path_std_ffi, path as path_std_path};
 
+use tau_config::settings as path_tau_config_settings;
 use tau_config::settings::{
     ExtensionCliOverride, ExtensionEntry, HarnessConfigCliOverride, HarnessSettings,
     load_harness_settings_in,
@@ -173,8 +175,10 @@ fn malformed_private_extension_transport_is_fatal() {
     {
         use std::os::unix::ffi::OsStringExt;
         let error =
-            parse_extension_cli_overrides_transport(Some(std::ffi::OsString::from_vec(vec![0xff])))
-                .expect_err("non-UTF-8 must fail");
+            parse_extension_cli_overrides_transport(Some(path_std_ffi::OsString::from_vec(vec![
+                0xff,
+            ])))
+            .expect_err("non-UTF-8 must fail");
         assert!(error.to_string().contains(EXTENSION_CLI_OVERRIDES_ENV));
     }
 }
@@ -247,9 +251,9 @@ fn resolve_extensions_cli_overrides_apply_after_user_config() {
         &s,
         builtins(),
         &[
-            tau_config::settings::ExtensionCliOverride::EnableAll,
-            tau_config::settings::ExtensionCliOverride::Disable("std-websearch".to_owned()),
-            tau_config::settings::ExtensionCliOverride::Enable("test-dummy".to_owned()),
+            path_tau_config_settings::ExtensionCliOverride::EnableAll,
+            path_tau_config_settings::ExtensionCliOverride::Disable("std-websearch".to_owned()),
+            path_tau_config_settings::ExtensionCliOverride::Enable("test-dummy".to_owned()),
         ],
     )
     .expect("resolve");
@@ -270,7 +274,7 @@ fn resolve_extensions_enable_all_skips_test_dummy_builtin() {
     let resolved = resolve_extensions_with_cli_overrides(
         &s,
         builtins(),
-        &[tau_config::settings::ExtensionCliOverride::EnableAll],
+        &[path_tau_config_settings::ExtensionCliOverride::EnableAll],
     )
     .expect("resolve");
     let names = resolved
@@ -301,7 +305,7 @@ fn resolve_extensions_cli_can_enable_disabled_user_extension() {
     let resolved = resolve_extensions_with_cli_overrides(
         &s,
         builtins(),
-        &[tau_config::settings::ExtensionCliOverride::Enable(
+        &[path_tau_config_settings::ExtensionCliOverride::Enable(
             "future-extension".to_owned(),
         )],
     )
@@ -322,7 +326,7 @@ fn resolve_extensions_cli_enable_unknown_extension_errors() {
     let err = resolve_extensions_with_cli_overrides(
         &s,
         builtins(),
-        &[tau_config::settings::ExtensionCliOverride::Enable(
+        &[path_tau_config_settings::ExtensionCliOverride::Enable(
             "missing".to_owned(),
         )],
     )
@@ -688,7 +692,7 @@ fn resolve_extensions_carries_and_merges_secret_declarations() {
     let mut builtins = builtins();
     builtins[0].secrets.insert(
         "builtin_secret".into(),
-        tau_config::settings::ExtensionSecretEntry::default(),
+        path_tau_config_settings::ExtensionSecretEntry::default(),
     );
     let mut s = HarnessSettings::built_in();
     s.extensions.insert(
@@ -721,7 +725,7 @@ fn resolve_extensions_carries_user_extension_cwd() {
         "mything".into(),
         ExtensionEntry {
             command: Some(vec!["/usr/local/bin/mything".into()]),
-            cwd: Some(Some(std::path::PathBuf::from("/srv/mything"))),
+            cwd: Some(Some(path_std_path::PathBuf::from("/srv/mything"))),
             ..Default::default()
         },
     );
@@ -739,7 +743,7 @@ fn resolve_extensions_carries_user_extension_cwd() {
 #[test]
 fn resolve_extensions_user_can_clear_builtin_cwd() {
     let mut builtins = builtins();
-    builtins[0].cwd = Some(std::path::PathBuf::from("/srv/provider"));
+    builtins[0].cwd = Some(path_std_path::PathBuf::from("/srv/provider"));
     let mut s = HarnessSettings::built_in();
     s.extensions.insert(
         "provider-builtin".into(),
@@ -762,7 +766,7 @@ fn resolve_extensions_drops_disabled_entries_with_secret_declarations() {
     let mut builtins = builtins();
     builtins[2].secrets.insert(
         "required_secret".into(),
-        tau_config::settings::ExtensionSecretEntry::default(),
+        path_tau_config_settings::ExtensionSecretEntry::default(),
     );
     let s = HarnessSettings::built_in();
 

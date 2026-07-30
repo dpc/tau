@@ -1,3 +1,5 @@
+use std::{io as path_std_io, net as path_std_net};
+
 use super::*;
 
 const COMPAT_FIXTURE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/compat");
@@ -192,12 +194,14 @@ fn chat_completions_event_snapshot(
     model: ChatCompletionsModel,
     provider_name: &str,
 ) -> Vec<Event> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind compatibility server");
+    let listener =
+        path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind compatibility server");
     let address = listener.local_addr().expect("compatibility server address");
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().expect("accept compatibility request");
         let mut request = [0_u8; 8192];
-        let _ = std::io::Read::read(&mut socket, &mut request).expect("read compatibility request");
+        let _ =
+            path_std_io::Read::read(&mut socket, &mut request).expect("read compatibility request");
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"compatibility text\"},",
             "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,",
@@ -208,7 +212,7 @@ fn chat_completions_event_snapshot(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         );
-        std::io::Write::write_all(&mut socket, response.as_bytes())
+        path_std_io::Write::write_all(&mut socket, response.as_bytes())
             .expect("write compatibility response");
     });
     provider.base_url = format!("http://{address}");

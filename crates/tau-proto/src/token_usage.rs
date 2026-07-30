@@ -1,3 +1,5 @@
+use serde::de as path_serde_de;
+
 #[cfg(test)]
 mod tests;
 use std::collections::BTreeMap;
@@ -111,6 +113,6 @@ where
     match opt {
         None => Ok(None),
         Some(s) if s.is_empty() => Ok(None),
-        Some(s) => s.parse().map(Some).map_err(serde::de::Error::custom),
+        Some(s) => s.parse().map(Some).map_err(path_serde_de::Error::custom),
     }
 }

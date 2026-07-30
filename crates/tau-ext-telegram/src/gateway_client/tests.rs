@@ -1,3 +1,4 @@
+use std::io as path_std_io;
 use std::io::{BufRead, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +22,7 @@ fn connect_error_with_response(response: String) -> String {
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept client");
         let mut line = String::new();
-        std::io::BufReader::new(stream.try_clone().expect("clone stream"))
+        path_std_io::BufReader::new(stream.try_clone().expect("clone stream"))
             .read_line(&mut line)
             .expect("read request");
         writeln!(stream, "{response}").expect("write response");
@@ -72,7 +73,7 @@ fn gateway_error_response_is_rejected() {
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept client");
         let mut line = String::new();
-        std::io::BufReader::new(stream.try_clone().expect("clone stream"))
+        path_std_io::BufReader::new(stream.try_clone().expect("clone stream"))
             .read_line(&mut line)
             .expect("read request");
         writeln!(
@@ -111,7 +112,7 @@ fn heartbeat_interval_is_updated_from_response() {
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept client");
         let mut line = String::new();
-        std::io::BufReader::new(stream.try_clone().expect("clone stream"))
+        path_std_io::BufReader::new(stream.try_clone().expect("clone stream"))
             .read_line(&mut line)
             .expect("read request");
         writeln!(

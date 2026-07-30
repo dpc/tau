@@ -1,3 +1,5 @@
+use std::os::unix as path_std_os_unix;
+
 use super::*;
 
 /// Regression guard: armed temp files are deleted on failure paths before
@@ -37,7 +39,7 @@ fn replaces_symlink_target_and_preserves_permissions() {
     let target = temp_dir.path().join("target.json5");
     let link = temp_dir.path().join("config.json5");
     std::fs::write(&target, b"{}").expect("write target");
-    std::os::unix::fs::symlink(&target, &link).expect("symlink");
+    path_std_os_unix::fs::symlink(&target, &link).expect("symlink");
     std::fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).expect("set perms");
 
     atomic_write_following_symlink(&link, b"{\"updated\":true}", None).expect("atomic write");

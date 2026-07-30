@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
+use std::sync as path_std_sync;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+use iroh::endpoint as path_iroh_endpoint;
 use tau_swarm_api::{
     Agent, AgentActivity, AgentNavigationMode, ApplicationIncarnationId, CorrelationId,
     DeliveryOutcome, Hostname, PromptRequest, SessionId,
@@ -484,8 +486,8 @@ async fn synchronized_reconnect_installs_fresh_snapshot() {
             .snapshot
             .into(),
     };
-    let snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let declarations = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let snapshots = Arc::new(path_std_sync::Mutex::new(Vec::new()));
+    let declarations = Arc::new(path_std_sync::Mutex::new(Vec::new()));
     let disconnect = Arc::new(Notify::new());
     let application_incarnation_id = incarnation(1);
     let client = tau_swarm_client::Client::new(
@@ -559,7 +561,7 @@ async fn synchronized_reconnect_installs_fresh_snapshot() {
 /// remote prompt dispatch, and canonical Tau acceptance completion.
 #[tokio::test]
 async fn published_swarm_server_delivers_prompt_through_application_loopback() {
-    let server_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+    let server_endpoint = iroh::Endpoint::builder(path_iroh_endpoint::presets::Minimal)
         .bind()
         .await
         .expect("server endpoint");
@@ -572,7 +574,7 @@ async fn published_swarm_server_delivers_prompt_through_application_loopback() {
         Credentials::single(credential.clone()),
         tau_swarm_core::CoreService::new(()),
     );
-    let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+    let client_endpoint = iroh::Endpoint::builder(path_iroh_endpoint::presets::Minimal)
         .bind()
         .await
         .expect("client endpoint");
@@ -650,7 +652,7 @@ async fn published_swarm_server_delivers_prompt_through_application_loopback() {
     let _ = client_task.await;
     client_endpoint.close().await;
 
-    let replacement_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+    let replacement_endpoint = iroh::Endpoint::builder(path_iroh_endpoint::presets::Minimal)
         .bind()
         .await
         .expect("replacement endpoint");

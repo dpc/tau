@@ -1,3 +1,8 @@
+use crate::harness::extensions as path_crate_harness_extensions;
+use crate::{
+    agent as path_crate_agent, event_log as path_crate_event_log, extension as path_crate_extension,
+};
+
 mod agent_context;
 mod custom_event;
 mod internal_prompt;
@@ -433,7 +438,7 @@ fn retained_working_final_rejects_root_and_descendant_head_drift() {
 /// Collect committed model declaration/state events with their delivery source.
 fn committed_provider_model_events(h: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         let relevant = match &entry.event {
@@ -882,10 +887,10 @@ fn parked_old_generation_drop_cannot_activate_same_id_replacement() {
         .get_mut("model-provider")
         .expect("replacement provider");
     replacement.instance_id = 43.into();
-    replacement.state = crate::extension::ExtensionState::Handshaking;
+    replacement.state = path_crate_extension::ExtensionState::Handshaking;
     h.extensions.activation_staging.insert(
         crate::test_connection_id("model-provider"),
-        crate::harness::extensions::ExtensionActivationStage::default(),
+        path_crate_harness_extensions::ExtensionActivationStage::default(),
     );
     h.handle_extension_event_inner_with_persist(
         &crate::test_connection_id("model-provider"),
@@ -1312,7 +1317,7 @@ fn message_report_preserves_deferred_publish_fifo() {
 }
 
 fn prompt_created_count(h: &Harness) -> u64 {
-    let mut cursor = crate::event_log::EventLogSeq::new(0);
+    let mut cursor = path_crate_event_log::EventLogSeq::new(0);
     let mut count = 0;
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq.next();
@@ -2761,7 +2766,7 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
         })
         .count();
     h.agents.get_mut(&cid).expect("agent").activation_dispatch =
-        crate::agent::ActivationDispatchState::Running {
+        path_crate_agent::ActivationDispatchState::Running {
             id: transaction_id.clone(),
             cut: tau_proto::AgentHead::Root,
             resume_through: Some(batch_parent),
@@ -2901,7 +2906,7 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
         );
     h.enqueued_standalone_inference_checkpoints.clear();
     h.agents.get_mut(&cid).expect("agent").activation_dispatch =
-        crate::agent::ActivationDispatchState::Running {
+        path_crate_agent::ActivationDispatchState::Running {
             id: transaction_id.clone(),
             cut: tau_proto::AgentHead::Root,
             resume_through: Some(batch_parent),
@@ -3108,8 +3113,8 @@ fn unloading_intercepted_checkpoint_preserves_other_agent_deferred_publish() {
     h.agents
         .get_mut(&cid_a)
         .expect("agent A")
-        .activation_dispatch = crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-        owner: crate::agent::InferenceCheckpointOwner::Inference,
+        .activation_dispatch = path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+        owner: path_crate_agent::InferenceCheckpointOwner::Inference,
         agent_prompt_id: agent_prompt_id.clone(),
         through: tau_proto::AgentHead::Root,
         dispatch: crate::agent::InferenceDispatchOwnership {
@@ -3206,8 +3211,8 @@ fn suspended_interceptor_disconnect_reconnects_unsuspended() {
     let agent_prompt_id = tau_proto::AgentPromptId::parse("ap-suspended-reconnect")
         .expect("known-safe AgentPromptId must be valid");
     h.agents.get_mut(&cid).expect("agent").activation_dispatch =
-        crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-            owner: crate::agent::InferenceCheckpointOwner::Inference,
+        path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+            owner: path_crate_agent::InferenceCheckpointOwner::Inference,
             agent_prompt_id: agent_prompt_id.clone(),
             through: tau_proto::AgentHead::Root,
             dispatch: crate::agent::InferenceDispatchOwnership {
@@ -3373,7 +3378,7 @@ fn intercepted_reactive_drift_terminalization_never_dispatches() {
     planned.recovery_disposition = tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
     h.publish_for_agent(&cid, Event::ProviderResponseFinished(planned));
     h.agents.get_mut(&cid).expect("agent").activation_dispatch =
-        crate::agent::ActivationDispatchState::ContextRecoveryPending {
+        path_crate_agent::ActivationDispatchState::ContextRecoveryPending {
             checkpoint: checkpoint.clone(),
         };
 

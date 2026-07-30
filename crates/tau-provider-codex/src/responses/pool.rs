@@ -25,6 +25,7 @@ use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+use std::{cell as path_std_cell, collections as path_std_collections, time as path_std_time};
 
 use lru::LruCache;
 
@@ -32,8 +33,8 @@ use super::ResponsesConfig;
 use super::ws::WsConn;
 #[cfg(test)]
 use crate::NeverAbort;
-use crate::TurnAbort;
 use crate::common::{LlmError, PromptPayload};
+use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 
 /// Default soft cap on simultaneously-cached WS connections.
 ///
@@ -229,7 +230,7 @@ impl SharedWsPool {
                 pool: WsPool::new(),
                 busy: HashSet::new(),
                 invalidated_busy: HashSet::new(),
-                prewarm_owners: std::collections::HashMap::new(),
+                prewarm_owners: path_std_collections::HashMap::new(),
                 next_prewarm_owner: 0,
                 abort_wake_generation: 0,
             })),
@@ -903,10 +904,10 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         let mut stream = recording_stream(self.record_config);
         let mut response_bytes = 0;
         let mut semantic_progress = false;
-        let updates = std::cell::RefCell::new(on_update);
+        let updates = path_std_cell::RefCell::new(on_update);
         let dispatch = correlation
             .as_deref_mut()
-            .map(crate::attempt_failure::AttemptCaptureCorrelation::next_dispatch);
+            .map(path_crate_attempt_failure::AttemptCaptureCorrelation::next_dispatch);
         match conn.run_turn(
             self.config,
             self.agent_prompt_id,
@@ -983,12 +984,12 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         self.pool.record_fresh_open()?;
         let dispatch = correlation
             .as_deref_mut()
-            .map(crate::attempt_failure::AttemptCaptureCorrelation::next_dispatch);
+            .map(path_crate_attempt_failure::AttemptCaptureCorrelation::next_dispatch);
         conn.carry_response_bytes(carried_response_bytes);
         let mut stream = recording_stream(self.record_config);
         let mut response_bytes = carried_response_bytes;
         let mut semantic_progress = false;
-        let updates = std::cell::RefCell::new(on_update);
+        let updates = path_std_cell::RefCell::new(on_update);
         match conn.run_turn(
             self.config,
             self.agent_prompt_id,
@@ -1168,7 +1169,7 @@ pub fn run_prewarm_through_shared_pool(
     let repair_after_fresh = cached.is_none();
     let mut deadline = None;
     if let Some(mut conn) = cached {
-        let attempt_deadline = std::time::Instant::now() + super::ws::PREWARM_RESPONSE_TIMEOUT;
+        let attempt_deadline = path_std_time::Instant::now() + super::ws::PREWARM_RESPONSE_TIMEOUT;
         deadline = Some(attempt_deadline);
         match conn.run_prewarm(config, request, abort, deadline) {
             Ok(state) => {
@@ -1197,7 +1198,7 @@ pub fn run_prewarm_through_shared_pool(
         }
     }
 
-    if deadline.is_some_and(|deadline| deadline <= std::time::Instant::now()) {
+    if deadline.is_some_and(|deadline| deadline <= path_std_time::Instant::now()) {
         return Err(LlmError::HttpStatus(
             0,
             "websocket prewarm response timeout".to_owned(),
@@ -1206,7 +1207,7 @@ pub fn run_prewarm_through_shared_pool(
     let mut conn =
         match pool.connect_reserved_fresh(&key, config, abort, |config, thread_id, abort| {
             let timeout = deadline
-                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+                .map(|deadline| deadline.saturating_duration_since(path_std_time::Instant::now()))
                 .unwrap_or(super::ws::CONNECT_TIMEOUT);
             WsConn::connect_with_timeout(config, thread_id, &pool.network, abort, timeout)
         }) {
@@ -1215,8 +1216,8 @@ pub fn run_prewarm_through_shared_pool(
         };
     pool.record_fresh_open()
         .map_err(WsTurnError::into_llm_error)?;
-    let deadline =
-        deadline.or_else(|| Some(std::time::Instant::now() + super::ws::PREWARM_RESPONSE_TIMEOUT));
+    let deadline = deadline
+        .or_else(|| Some(path_std_time::Instant::now() + super::ws::PREWARM_RESPONSE_TIMEOUT));
     match conn.run_prewarm(config, request, abort, deadline) {
         Ok(state) => {
             if abort.is_aborted() {
@@ -1232,7 +1233,7 @@ pub fn run_prewarm_through_shared_pool(
             pool.bump_silent_reconnects()
                 .map_err(WsTurnError::into_llm_error)?;
             let deadline = deadline.expect("fresh prewarm establishes response deadline");
-            if deadline <= std::time::Instant::now() {
+            if deadline <= path_std_time::Instant::now() {
                 return Err(LlmError::HttpStatus(
                     0,
                     "websocket prewarm response timeout".to_owned(),
@@ -1245,7 +1246,7 @@ pub fn run_prewarm_through_shared_pool(
                         thread_id,
                         &pool.network,
                         abort,
-                        deadline.saturating_duration_since(std::time::Instant::now()),
+                        deadline.saturating_duration_since(path_std_time::Instant::now()),
                     )
                 })
                 .map_err(WsTurnError::into_llm_error)?;

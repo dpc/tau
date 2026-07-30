@@ -11,6 +11,7 @@
 //! events.
 
 use std::collections::{HashMap, HashSet};
+use std::fs as path_std_fs;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
@@ -1120,7 +1121,7 @@ fn read_text_file_prefix(
     path: &std::path::Path,
     max_bytes: usize,
 ) -> std::io::Result<LimitedTextRead> {
-    let mut file = std::fs::File::open(path)?;
+    let mut file = path_std_fs::File::open(path)?;
     let total_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
     let mut bytes = Vec::new();
     file.by_ref()

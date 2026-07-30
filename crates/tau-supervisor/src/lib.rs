@@ -20,6 +20,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 use std::{fmt, thread};
 
+use rustix::io as path_rustix_io;
 #[cfg(unix)]
 #[cfg(target_os = "linux")]
 use rustix::process::{self, Pid, PidfdFlags, Signal};
@@ -513,7 +514,7 @@ fn child_waiter_disconnected() -> io::Error {
 #[cfg(target_os = "linux")]
 fn kill_pidfd(pidfd: &OwnedFd) -> io::Result<()> {
     match process::pidfd_send_signal(pidfd, Signal::Kill) {
-        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Ok(()) | Err(path_rustix_io::Errno::SRCH) => Ok(()),
         Err(error) => Err(io::Error::from_raw_os_error(error.raw_os_error())),
     }
 }

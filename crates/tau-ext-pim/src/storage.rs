@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs as path_std_fs, io as path_std_io};
 
 use tau_proto::{
     ExtensionDataErrorKind, ExtensionDataPath, ExtensionDataRequestOp, ExtensionDataScope,
@@ -78,7 +79,7 @@ impl FsStorage {
 
     #[cfg(unix)]
     fn harden_dir(&self, path: &Path) -> Result<(), String> {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        std::fs::set_permissions(path, path_std_fs::Permissions::from_mode(0o700))
             .map_err(|error| error.to_string())
     }
 
@@ -89,7 +90,7 @@ impl FsStorage {
 
     #[cfg(unix)]
     fn harden_file(&self, path: &Path) -> Result<(), String> {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(path, path_std_fs::Permissions::from_mode(0o600))
             .map_err(|error| error.to_string())
     }
 
@@ -102,7 +103,7 @@ impl FsStorage {
         let Some(parent) = path.parent() else {
             return Ok(());
         };
-        let dir = std::fs::File::open(parent).map_err(|error| error.to_string())?;
+        let dir = path_std_fs::File::open(parent).map_err(|error| error.to_string())?;
         dir.sync_all().map_err(|error| error.to_string())
     }
 
@@ -126,7 +127,7 @@ impl FsStorage {
     }
 
     fn write_private_temp(&self, path: &Path, contents: Vec<u8>) -> Result<(), String> {
-        let mut options = std::fs::OpenOptions::new();
+        let mut options = path_std_fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
         options.mode(0o600);
@@ -149,7 +150,7 @@ impl Storage for FsStorage {
                 self.harden_file(&path)?;
                 Ok(Some(contents))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.to_string()),
         }
     }
@@ -182,7 +183,7 @@ impl Storage for FsStorage {
                 self.sync_parent_dir(&path)
                     .map_err(StorageCreateError::Other)
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(error) if error.kind() == path_std_io::ErrorKind::AlreadyExists => {
                 let _ = std::fs::remove_file(&temp);
                 Err(StorageCreateError::AlreadyExists)
             }
@@ -197,7 +198,7 @@ impl Storage for FsStorage {
         let path = self.path(path);
         let existed = path.exists();
         self.create_parent_dir(&path)?;
-        let mut options = std::fs::OpenOptions::new();
+        let mut options = path_std_fs::OpenOptions::new();
         options.append(true).create(true);
         #[cfg(unix)]
         options.mode(0o600);
@@ -216,7 +217,7 @@ impl Storage for FsStorage {
         let path = self.path(path);
         match std::fs::remove_file(&path) {
             Ok(()) => self.sync_parent_dir(&path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.to_string()),
         }
     }

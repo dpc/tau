@@ -1,4 +1,5 @@
 use super::*;
+use crate::responses as path_crate_responses;
 
 /// Provider usage preserves an explicitly reported all-zero record while
 /// retaining complete field absence as unavailable.
@@ -346,7 +347,7 @@ fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> Strin
     };
     payload.prompt_cache_key(
         "https://api.openai.com/v1",
-        crate::responses::ResponsesMode::Standard,
+        path_crate_responses::ResponsesMode::Standard,
     )
 }
 
@@ -394,12 +395,12 @@ fn prompt_cache_key_separates_responses_modes() {
     let standard = prompt_cache_key_for(
         "https://chatgpt.com/backend-api",
         &agent,
-        crate::responses::ResponsesMode::Standard,
+        path_crate_responses::ResponsesMode::Standard,
     );
     let lite = prompt_cache_key_for(
         "https://chatgpt.com/backend-api",
         &agent,
-        crate::responses::ResponsesMode::LiteCompatibility,
+        path_crate_responses::ResponsesMode::LiteCompatibility,
     );
 
     assert_ne!(standard, lite);

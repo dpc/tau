@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic as path_std_sync_atomic};
+use std::{io as path_std_io, net as path_std_net, sync as path_std_sync, time as path_std_time};
 
 use super::*;
 
@@ -78,8 +79,8 @@ fn chatgpt_models_publish_provider_owned_basic_prices() {
 
 #[derive(Default)]
 struct TransportCounts {
-    ws_upgrade_requests: std::sync::atomic::AtomicUsize,
-    http_post_requests: std::sync::atomic::AtomicUsize,
+    ws_upgrade_requests: path_std_sync::atomic::AtomicUsize,
+    http_post_requests: path_std_sync::atomic::AtomicUsize,
 }
 
 /// Bounded loopback peer used to prove WebSocket routing never falls back.
@@ -89,7 +90,7 @@ struct WsFailureServer {
     /// Captured transport attempt counts.
     counts: std::sync::Arc<TransportCounts>,
     /// Signals the blocking accept loop to stop.
-    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shutdown: std::sync::Arc<path_std_sync::atomic::AtomicBool>,
     /// Listener address used to wake accept during teardown.
     addr: std::net::SocketAddr,
     /// Joined server worker.
@@ -111,8 +112,8 @@ impl WsFailureServer {
 impl Drop for WsFailureServer {
     fn drop(&mut self) {
         self.shutdown
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = std::net::TcpStream::connect(self.addr);
+            .store(true, path_std_sync_atomic::Ordering::SeqCst);
+        let _ = path_std_net::TcpStream::connect(self.addr);
         if let Some(worker) = self.worker.take() {
             let result = worker.join();
             if !std::thread::panicking() {
@@ -147,20 +148,20 @@ fn spawn_ws_semantic_close_server() -> WsFailureServer {
 }
 
 fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
     let addr = listener.local_addr().expect("fake provider addr");
-    let counts = std::sync::Arc::new(TransportCounts::default());
-    let thread_counts = std::sync::Arc::clone(&counts);
-    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let thread_shutdown = std::sync::Arc::clone(&shutdown);
+    let counts = path_std_sync::Arc::new(TransportCounts::default());
+    let thread_counts = path_std_sync::Arc::clone(&counts);
+    let shutdown = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
+    let thread_shutdown = path_std_sync::Arc::clone(&shutdown);
     let worker = std::thread::spawn(move || {
         const MAX_REQUESTS: usize = 8;
         for request_index in 0..MAX_REQUESTS {
             let (mut stream, _) = listener.accept().expect("accept fake provider request");
-            if thread_shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            if thread_shutdown.load(path_std_sync_atomic::Ordering::SeqCst) {
                 return;
             }
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            let _ = stream.set_read_timeout(Some(path_std_time::Duration::from_secs(2)));
             if matches!(
                 mode,
                 WsFailureMode::ContextWindowExceeded | WsFailureMode::SemanticThenClose
@@ -170,7 +171,7 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                 };
                 thread_counts
                     .ws_upgrade_requests
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    .fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
                 let _ = socket.read();
                 if matches!(mode, WsFailureMode::SemanticThenClose) {
                     let _ = socket.send(tungstenite::Message::Text(
@@ -217,14 +218,14 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
             if request_line == "POST /backend-api/codex/responses HTTP/1.1" {
                 thread_counts
                     .http_post_requests
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    .fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
                 let response = concat!(
                     "HTTP/1.1 500 Internal Server Error\r\n",
                     "Content-Length: 0\r\n",
                     "Connection: close\r\n",
                     "\r\n"
                 );
-                std::io::Write::write_all(&mut stream, response.as_bytes())
+                path_std_io::Write::write_all(&mut stream, response.as_bytes())
                     .expect("reject unexpected HTTP fallback");
                 continue;
             }
@@ -235,7 +236,7 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
             {
                 thread_counts
                     .ws_upgrade_requests
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    .fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
             } else {
                 panic!("unexpected fake-provider request: {request_line}");
             }
@@ -249,7 +250,7 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                         "\r\n",
                         "upgrade unavailable\n"
                     );
-                    let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                    let _ = path_std_io::Write::write_all(&mut stream, response.as_bytes());
                 }
                 WsFailureMode::CloseWithoutResponse => {}
                 WsFailureMode::ContextWindowExceeded => unreachable!("handled above"),
@@ -276,7 +277,8 @@ fn read_bounded_http_request_head(stream: &mut std::net::TcpStream) -> Vec<u8> {
     let mut head = Vec::new();
     let mut byte = [0_u8; 1];
     while head.len() < MAX_HEAD_BYTES {
-        let read = std::io::Read::read(stream, &mut byte).expect("read complete HTTP request head");
+        let read =
+            path_std_io::Read::read(stream, &mut byte).expect("read complete HTTP request head");
         assert_ne!(read, 0, "HTTP request ended before complete head");
         head.push(byte[0]);
         if head.ends_with(b"\r\n\r\n") {

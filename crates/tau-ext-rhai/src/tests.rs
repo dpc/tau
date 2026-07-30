@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::process as path_std_process;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -198,7 +199,7 @@ fn tool_result_has_output(frame: &HarnessInputMessage, expected: &str) -> bool {
 }
 
 fn setsid_available() -> bool {
-    std::process::Command::new("sh")
+    path_std_process::Command::new("sh")
         .arg("-c")
         .arg("command -v setsid >/dev/null")
         .status()

@@ -1,3 +1,6 @@
+use std::collections as path_std_collections;
+
+use tau_config::settings as path_tau_config_settings;
 use tau_proto::{
     Effort, ModelId, NoticeLevel, ProviderModelInfo, ProviderModelsDeclared, ProviderModelsUpdated,
     ThinkingSummary, Verbosity,
@@ -5,6 +8,7 @@ use tau_proto::{
 
 use super::*;
 use crate::model::LoadedRoles;
+use crate::{discovery as path_crate_discovery, event_log as path_crate_event_log};
 
 /// Scan the harness event log for a mandatory warning `HarnessNotice`
 /// containing `needle` and return its message. The startup paths emit
@@ -12,7 +16,7 @@ use crate::model::LoadedRoles;
 /// the test inspects the log every check_*_parses event is already
 /// committed — no need to pump the bus.
 fn find_mandatory_warning_notice(h: &Harness, needle: &str) -> Option<String> {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessNotice(info) = &entry.event
@@ -26,7 +30,7 @@ fn find_mandatory_warning_notice(h: &Harness, needle: &str) -> Option<String> {
 }
 
 fn find_info(h: &Harness, needle: &str) -> Option<String> {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessNotice(info) = &entry.event
@@ -134,7 +138,7 @@ fn echo_provider_declares_transient_models_before_ready() {
 #[test]
 fn role_infos_include_configured_role_description() {
     let model: ModelId = "openai/gpt-4.1".parse().expect("model id");
-    let mut roles = std::collections::HashMap::new();
+    let mut roles = path_std_collections::HashMap::new();
     roles.insert(
         "engineer".to_owned(),
         tau_config::settings::AgentRole {
@@ -164,7 +168,7 @@ fn role_infos_include_configured_role_description() {
 /// iteration is different.
 #[test]
 fn role_groups_sort_roles_by_order_then_name() {
-    let roles = std::collections::HashMap::from([
+    let roles = path_std_collections::HashMap::from([
         (
             "engineer-senior".to_owned(),
             tau_config::settings::AgentRole {
@@ -202,11 +206,11 @@ fn role_groups_sort_roles_by_order_then_name() {
         ),
         (
             "alpha-unordered".to_owned(),
-            tau_config::settings::AgentRole::default(),
+            path_tau_config_settings::AgentRole::default(),
         ),
         (
             "advisor".to_owned(),
-            tau_config::settings::AgentRole::default(),
+            path_tau_config_settings::AgentRole::default(),
         ),
     ]);
     let configured_groups = [tau_config::settings::RoleGroup {
@@ -242,7 +246,7 @@ fn role_groups_sort_roles_by_order_then_name() {
 /// order rather than the role hash map's iteration order.
 #[test]
 fn inter_session_receivers_preserve_configured_role_order_across_groups() {
-    let mut settings = tau_config::settings::HarnessSettings::built_in();
+    let mut settings = path_tau_config_settings::HarnessSettings::built_in();
     let engineer = settings.roles.get_mut("engineer").expect("engineer role");
     engineer.inter_session_receiver = Some(true);
     engineer.inter_session_auto_start = Some(true);
@@ -311,7 +315,7 @@ fn provider_models_snapshot_updates_available_models() {
     let mut saw_canonical_snapshot = false;
     let mut saw_harness_models = false;
     let mut saw_harness_roles = false;
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         match entry.event {
@@ -435,7 +439,7 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
     )));
 
     let mut warning = None;
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessNotice(notice) = entry.event
@@ -528,7 +532,7 @@ fn provider_model_declaration_from_non_provider_is_ignored() {
     assert!(!h.available_models.contains(&model_id));
     assert!(!h.provider_model_info.contains_key(&model_id));
     assert!(!h.provider_model_routes.contains_key(&model_id));
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         assert!(
@@ -561,7 +565,7 @@ fn provider_models_snapshot_from_ui_client_is_ignored() {
     assert!(!h.available_models.contains(&model_id));
     assert!(!h.provider_model_info.contains_key(&model_id));
     assert!(!h.provider_model_routes.contains_key(&model_id));
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         assert!(
@@ -645,9 +649,9 @@ fn role_without_model_selects_highest_default_affinity() {
     let mut high_info = provider_model(high.clone(), 128_000);
     high_info.default_affinity = 100;
     let provider_models = provider_models([low_info, high_info]);
-    let roles = std::collections::HashMap::from([(
+    let roles = path_std_collections::HashMap::from([(
         "engineer".to_owned(),
-        tau_config::settings::AgentRole::default(),
+        path_tau_config_settings::AgentRole::default(),
     )]);
 
     assert_eq!(
@@ -889,7 +893,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
         |path: std::path::PathBuf, description: &str| crate::discovery::DiscoveredSkill {
             source_id: crate::test_connection_id("test-source"),
             description: description.to_owned(),
-            source: crate::discovery::DiscoveredSkillSource::File(path),
+            source: path_crate_discovery::DiscoveredSkillSource::File(path),
             add_to_prompt: true,
             user_invocable: true,
             disable_model_invocation: false,
@@ -1115,7 +1119,7 @@ fn provider_model_metadata_drives_selection_state() {
         ThinkingSummary::Auto
     );
 
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     let mut selected = None;
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
@@ -1162,7 +1166,7 @@ fn provider_model_metadata_drives_selection_state() {
         ThinkingSummary::Off
     );
 
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     let mut selected = None;
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
@@ -1226,7 +1230,7 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
         },
     ]);
 
-    let mut roles = std::collections::HashMap::new();
+    let mut roles = path_std_collections::HashMap::new();
     let mut openai_role = tau_config::settings::AgentRole {
         model: Some(openai.clone()),
         effort: Some(Effort::High),
@@ -1361,9 +1365,9 @@ fn role_without_effort_picks_middle_provider_effort() {
             est_output_cost_1m_usd: Default::default(),
         },
     ]);
-    let roles = std::collections::HashMap::from([(
+    let roles = path_std_collections::HashMap::from([(
         "engineer".to_owned(),
-        tau_config::settings::AgentRole::default(),
+        path_tau_config_settings::AgentRole::default(),
     )]);
 
     assert_eq!(
@@ -1579,9 +1583,9 @@ fn role_without_verbosity_picks_low_when_supported() {
             est_output_cost_1m_usd: Default::default(),
         },
     ]);
-    let roles = std::collections::HashMap::from([(
+    let roles = path_std_collections::HashMap::from([(
         "engineer".to_owned(),
-        tau_config::settings::AgentRole::default(),
+        path_tau_config_settings::AgentRole::default(),
     )]);
 
     assert_eq!(
@@ -2042,7 +2046,7 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
 #[test]
 fn selected_params_use_runtime_role_fields() {
     let model: ModelId = "openai/gpt-5".parse().expect("model id");
-    let roles = std::collections::HashMap::from([(
+    let roles = path_std_collections::HashMap::from([(
         "engineer".to_owned(),
         tau_config::settings::AgentRole {
             model: Some(model.clone()),

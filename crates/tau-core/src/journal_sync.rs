@@ -1,5 +1,8 @@
 //! Coalesced background writeback for semantic journals.
 
+use std::sync as path_std_sync;
+use std::sync::atomic as path_std_sync_atomic;
+
 #[cfg(test)]
 mod tests;
 
@@ -111,13 +114,13 @@ pub(crate) struct JournalSyncWorker {
     /// Filesystem or deterministic test implementation.
     backend: Arc<dyn SyncBackend>,
     /// Permanent best-effort degradation after thread creation fails.
-    unavailable: std::sync::atomic::AtomicBool,
+    unavailable: path_std_sync::atomic::AtomicBool,
     #[cfg(test)]
     /// Injects one deterministic thread-spawn failure.
-    fail_spawn: std::sync::atomic::AtomicBool,
+    fail_spawn: path_std_sync::atomic::AtomicBool,
     #[cfg(test)]
     /// Records that lazy startup reached the spawn attempt.
-    spawn_attempted: std::sync::atomic::AtomicBool,
+    spawn_attempted: path_std_sync::atomic::AtomicBool,
 }
 
 /// Filesystem object and ordering required by one dirty target.
@@ -180,11 +183,11 @@ impl JournalSyncWorker {
             shared: Arc::new(Shared::default()),
             thread: Mutex::new(None),
             backend,
-            unavailable: std::sync::atomic::AtomicBool::new(false),
+            unavailable: path_std_sync_atomic::AtomicBool::new(false),
             #[cfg(test)]
-            fail_spawn: std::sync::atomic::AtomicBool::new(false),
+            fail_spawn: path_std_sync_atomic::AtomicBool::new(false),
             #[cfg(test)]
-            spawn_attempted: std::sync::atomic::AtomicBool::new(false),
+            spawn_attempted: path_std_sync_atomic::AtomicBool::new(false),
         }
     }
 
@@ -241,7 +244,10 @@ impl JournalSyncWorker {
     }
 
     fn ensure_running(&self) {
-        if self.unavailable.load(std::sync::atomic::Ordering::Relaxed) {
+        if self
+            .unavailable
+            .load(path_std_sync_atomic::Ordering::Relaxed)
+        {
             return;
         }
         let mut worker = self
@@ -253,12 +259,15 @@ impl JournalSyncWorker {
         }
         #[cfg(test)]
         self.spawn_attempted
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+            .store(true, path_std_sync_atomic::Ordering::Relaxed);
         #[cfg(test)]
-        if self.fail_spawn.load(std::sync::atomic::Ordering::Relaxed) {
+        if self
+            .fail_spawn
+            .load(path_std_sync_atomic::Ordering::Relaxed)
+        {
             eprintln!("tau: journal sync worker unavailable: injected spawn failure");
             self.unavailable
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+                .store(true, path_std_sync_atomic::Ordering::Relaxed);
             return;
         }
         let shared = Arc::clone(&self.shared);
@@ -271,7 +280,7 @@ impl JournalSyncWorker {
             Err(error) => {
                 eprintln!("tau: journal sync worker unavailable; relying on OS writeback: {error}");
                 self.unavailable
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                    .store(true, path_std_sync_atomic::Ordering::Relaxed);
             }
         }
     }
@@ -279,7 +288,7 @@ impl JournalSyncWorker {
     #[cfg(test)]
     pub(crate) fn inject_spawn_failure(&self) {
         self.fail_spawn
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+            .store(true, path_std_sync_atomic::Ordering::Relaxed);
     }
 
     /// Returns one retained dirty target for deterministic store tests.

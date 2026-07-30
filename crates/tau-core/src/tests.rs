@@ -1,3 +1,4 @@
+use std::fs as path_std_fs;
 use std::path::PathBuf;
 
 use tau_proto::{
@@ -53,7 +54,7 @@ fn append_raw_cbor<T: serde::Serialize>(path: &std::path::Path, record: &T) {
     let mut encoded = Vec::new();
     ciborium::into_writer(record, &mut encoded).expect("encode test record");
     std::fs::create_dir_all(path.parent().expect("record parent")).expect("create parent");
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = path_std_fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
@@ -272,7 +273,7 @@ fn event_bus_releases_catch_up_when_historical_selectors_are_cleared() {
 fn append_partial_record_header(path: &std::path::Path) {
     std::fs::create_dir_all(path.parent().expect("record parent")).expect("create parent");
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = path_std_fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)

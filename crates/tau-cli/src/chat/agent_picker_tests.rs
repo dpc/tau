@@ -1,4 +1,7 @@
+use std::cell as path_std_cell;
+
 use super::{AgentPickerResolution, resolve_agent_picker, with_agent_roster};
+use crate::list_agents as path_crate_list_agents;
 
 fn auto_entry(runtime_state: tau_proto::AgentRuntimeState) -> tau_proto::SessionAgentListEntry {
     tau_proto::SessionAgentListEntry {
@@ -42,7 +45,7 @@ fn picker_orchestration_revalidates_with_initiating_category() {
 
     let active = resolve_agent_picker(
         vec![running.clone(), other.clone()],
-        crate::list_agents::AgentPickerFilter::Active,
+        path_crate_list_agents::AgentPickerFilter::Active,
         |_| Some(tau_proto::EstimatedApiCost::default()),
         pick_auto,
         || Some(vec![idle.clone(), other.clone()]),
@@ -56,7 +59,7 @@ fn picker_orchestration_revalidates_with_initiating_category() {
 
     let all = resolve_agent_picker(
         vec![running, other.clone()],
-        crate::list_agents::AgentPickerFilter::All,
+        path_crate_list_agents::AgentPickerFilter::All,
         |_| Some(tau_proto::EstimatedApiCost::default()),
         pick_auto,
         || Some(vec![idle, other]),
@@ -79,12 +82,12 @@ fn picker_selects_single_row_without_launching_external_picker() {
     let mut ineligible = auto_entry(tau_proto::AgentRuntimeState::Idle);
     ineligible.agent_id =
         tau_proto::AgentId::parse("ineligible").expect("valid ineligible agent id");
-    let picker_launched = std::cell::Cell::new(false);
-    let refresh_called = std::cell::Cell::new(false);
+    let picker_launched = path_std_cell::Cell::new(false);
+    let refresh_called = path_std_cell::Cell::new(false);
 
     let result = resolve_agent_picker(
         vec![running.clone(), ineligible],
-        crate::list_agents::AgentPickerFilter::Active,
+        path_crate_list_agents::AgentPickerFilter::Active,
         |_| None,
         |_| {
             picker_launched.set(true);
@@ -112,7 +115,7 @@ fn picker_selects_single_row_without_launching_external_picker() {
 /// picker can launch, preserving the roster RPC as the sole initial deadline.
 #[test]
 fn picker_does_not_launch_after_current_roster_timeout() {
-    let picker_launched = std::cell::Cell::new(false);
+    let picker_launched = path_std_cell::Cell::new(false);
     let result = with_agent_roster(
         || Err("agent roster request timed out after 10s".to_owned()),
         |_| {

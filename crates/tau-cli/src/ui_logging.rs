@@ -3,8 +3,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::{EnvFilter, fmt as path_tracing_subscriber_fmt};
 
 use crate::mint_short_id;
 
@@ -24,7 +24,7 @@ pub fn init_stderr_from_env(default_filter: &str) {
         .with_ansi(false)
         .with_target(true)
         .with_level(true)
-        .with_timer(tracing_subscriber::fmt::time::SystemTime)
+        .with_timer(path_tracing_subscriber_fmt::time::SystemTime)
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
@@ -103,7 +103,7 @@ pub fn init(state_dir: &Path) -> io::Result<UiLogging> {
             path: log_path.clone(),
         })
         .with_ansi(false)
-        .with_timer(tracing_subscriber::fmt::time::SystemTime)
+        .with_timer(path_tracing_subscriber_fmt::time::SystemTime)
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 
@@ -127,7 +127,7 @@ pub fn init_ephemeral() -> UiLogging {
         .with_env_filter(filter)
         .with_writer(io::sink)
         .with_ansi(false)
-        .with_timer(tracing_subscriber::fmt::time::SystemTime)
+        .with_timer(path_tracing_subscriber_fmt::time::SystemTime)
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 

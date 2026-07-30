@@ -4,6 +4,8 @@
 //! The intentional Gmail/Calendar flow split is recorded in
 //! `SPEC-tau-ext-pim-google-oauth`.
 
+use ureq::tls as path_ureq_tls;
+
 #[cfg(test)]
 mod tests;
 use std::collections::BTreeMap;
@@ -615,8 +617,8 @@ pub(crate) fn pkce_s256_challenge(verifier: &str) -> String {
 
 /// Build a bounded, TLS-verifying HTTP agent for Google API calls.
 pub(crate) fn google_http_agent() -> ureq::Agent {
-    let tls_config = ureq::tls::TlsConfig::builder()
-        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+    let tls_config = path_ureq_tls::TlsConfig::builder()
+        .root_certs(path_ureq_tls::RootCerts::PlatformVerifier)
         .build();
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(REQUEST_TIMEOUT))

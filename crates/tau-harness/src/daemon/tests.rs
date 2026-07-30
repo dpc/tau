@@ -1,8 +1,9 @@
 use std::io::BufReader;
+use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::time::Duration;
-use std::{fs, thread};
+use std::{collections as path_std_collections, fs, io as path_std_io, thread};
 
 use tau_config::settings::TauDirs;
 use tau_proto::{HarnessOutputMessage, PeerInputReader};
@@ -20,7 +21,7 @@ fn project_root_identity_is_canonical_and_requires_a_directory() {
     let alias = temp.path().join("alias");
     let file = temp.path().join("file");
     fs::create_dir(&project).expect("project directory");
-    std::os::unix::fs::symlink(&project, &alias).expect("project symlink");
+    path_std_os_unix::fs::symlink(&project, &alias).expect("project symlink");
     fs::write(&file, b"not a directory").expect("test file");
 
     assert_eq!(
@@ -324,7 +325,7 @@ fn drop_forwarder_with_timeout(forwarder: ListenerForwarder) {
 #[test]
 fn startup_error_is_sent_as_protocol_disconnect() {
     let (harness_end, ui_end) = UnixStream::pair().expect("stream pair");
-    let error = std::io::Error::other("missing startup setting");
+    let error = path_std_io::Error::other("missing startup setting");
 
     send_initial_client_startup_error(
         Some(InitialClientStartupErrorOutput::Stream(harness_end)),
@@ -375,7 +376,7 @@ fn post_accept_startup_error_is_sent_through_normal_writer() {
     let mut pre_accept_stream = None;
 
     let result = notify_startup_error_after_accept::<(), _>(
-        Err(std::io::Error::other("marker write failed")),
+        Err(path_std_io::Error::other("marker write failed")),
         &mut pre_accept_stream,
         &mut harness,
         Some(&client_id),
@@ -479,7 +480,7 @@ fn pre_resolved_daemon_rejects_environment_bypass_and_enforces_allowlist() {
     assert!(validate_pre_resolved_serve_options(&bypass, &config).is_err());
 
     let mismatch = ServeOptions::builder()
-        .allowed_extensions(std::collections::BTreeSet::from([
+        .allowed_extensions(path_std_collections::BTreeSet::from([
             crate::test_extension_name("not-configured"),
         ]))
         .build();

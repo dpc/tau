@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de as path_serde_de, ser as path_serde_ser};
 
 use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentInitializationContextSet,
@@ -2516,7 +2516,7 @@ impl<'de> serde::Deserialize<'de> for AgentOuterTurnId {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Self::parse(value).map_err(serde::de::Error::custom)
+        Self::parse(value).map_err(path_serde_de::Error::custom)
     }
 }
 
@@ -3091,7 +3091,7 @@ impl Serialize for CustomEvent {
         S: serde::Serializer,
     {
         if !Self::name_is_allowed(&self.name) {
-            return Err(serde::ser::Error::custom(InvalidCustomEventName {
+            return Err(path_serde_ser::Error::custom(InvalidCustomEventName {
                 name: self.name.clone(),
             }));
         }
@@ -3127,7 +3127,8 @@ impl<'de> Deserialize<'de> for CustomEvent {
         }
 
         let wire = WireCustomEvent::deserialize(deserializer)?;
-        Self::try_new(wire.name, wire.session_id, wire.payload).map_err(serde::de::Error::custom)
+        Self::try_new(wire.name, wire.session_id, wire.payload)
+            .map_err(path_serde_de::Error::custom)
     }
 }
 

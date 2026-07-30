@@ -5,6 +5,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time as path_std_time;
 use std::time::Duration;
 
 use tau_proto::{
@@ -31,7 +32,7 @@ pub(crate) fn connect_ui_client_until(
     client_name: impl AsRef<str>,
     deadline: std::time::Instant,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
-    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    let timeout = deadline.saturating_duration_since(path_std_time::Instant::now());
     if timeout.is_zero() {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -68,7 +69,7 @@ impl Read for DeadlineUnixReader {
         loop {
             let remaining = self
                 .deadline
-                .checked_duration_since(std::time::Instant::now())
+                .checked_duration_since(path_std_time::Instant::now())
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::TimedOut, "UI request deadline elapsed")
                 })?;
@@ -101,7 +102,7 @@ impl Write for DeadlineUnixWriter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         let remaining = self
             .deadline
-            .checked_duration_since(std::time::Instant::now())
+            .checked_duration_since(path_std_time::Instant::now())
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::TimedOut, "UI request deadline elapsed")
             })?;

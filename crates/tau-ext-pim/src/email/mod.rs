@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
+use std::rc as path_std_rc;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1379,7 +1380,7 @@ impl StateStore {
     pub fn open(state_dir: PathBuf) -> Result<Self, String> {
         Self::open_with_storage(
             state_dir.clone(),
-            std::rc::Rc::new(FsStorage::new(state_dir)),
+            path_std_rc::Rc::new(FsStorage::new(state_dir)),
         )
     }
 

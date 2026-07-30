@@ -1,3 +1,6 @@
+use std::fs as path_std_fs;
+use std::os::unix as path_std_os_unix;
+
 use super::*;
 
 fn common(scratch_root: &Path) -> DevTmuxCommonArgs {
@@ -179,7 +182,7 @@ fn target_validation_rejects_symlink_socket() {
         SCRATCH_MARKER_CONTENT,
     )
     .expect("write marker");
-    std::os::unix::fs::symlink("/tmp/other-tmux.sock", temp.path().join("tmux.sock"))
+    path_std_os_unix::fs::symlink("/tmp/other-tmux.sock", temp.path().join("tmux.sock"))
         .expect("symlink");
     let target = TmuxTarget::for_target_command(common(temp.path())).expect("target");
 
@@ -223,7 +226,7 @@ fn existing_scratch_root_rejects_symlink_marker() {
     let temp = tempfile::tempdir().expect("tempdir");
     let outside = temp.path().join("outside-marker");
     std::fs::write(&outside, SCRATCH_MARKER_CONTENT).expect("write outside marker");
-    std::os::unix::fs::symlink(&outside, temp.path().join(SCRATCH_MARKER_FILE))
+    path_std_os_unix::fs::symlink(&outside, temp.path().join(SCRATCH_MARKER_FILE))
         .expect("marker symlink");
 
     let error = prepare_scratch_root(temp.path()).expect_err("symlink marker refused");
@@ -265,7 +268,7 @@ fn write_scratch_marker_rejects_symlink_marker() {
     let temp = tempfile::tempdir().expect("tempdir");
     let outside = temp.path().join("outside-marker");
     std::fs::write(&outside, "unchanged\n").expect("write outside marker");
-    std::os::unix::fs::symlink(&outside, temp.path().join(SCRATCH_MARKER_FILE))
+    path_std_os_unix::fs::symlink(&outside, temp.path().join(SCRATCH_MARKER_FILE))
         .expect("marker symlink");
 
     let error = write_scratch_marker(temp.path()).expect_err("symlink marker refused");
@@ -339,7 +342,7 @@ fn existing_scratch_root_accepts_exact_marker_content() {
 fn private_directory_rejects_symlink() {
     let temp = tempfile::tempdir().expect("tempdir");
     let link = temp.path().join("home");
-    std::os::unix::fs::symlink(temp.path(), &link).expect("symlink");
+    path_std_os_unix::fs::symlink(temp.path(), &link).expect("symlink");
 
     let error = ensure_private_directory(&link).expect_err("symlink refused");
 
@@ -357,7 +360,8 @@ fn explicit_existing_workdir_is_not_chmodded() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workdir = temp.path().join("repo");
     std::fs::create_dir(&workdir).expect("workdir");
-    std::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o755)).expect("set perms");
+    std::fs::set_permissions(&workdir, path_std_fs::Permissions::from_mode(0o755))
+        .expect("set perms");
     let env = TmuxEnvironment::new(common(&temp.path().join("scratch")), Some(workdir.clone()))
         .expect("env");
 
@@ -391,7 +395,7 @@ fn unsafe_root_shape_rejects_canonical_home_symlink() {
     let real_home = temp.path().join("real-home");
     let symlink_home = temp.path().join("home-link");
     std::fs::create_dir(&real_home).expect("real home");
-    std::os::unix::fs::symlink(&real_home, &symlink_home).expect("home symlink");
+    path_std_os_unix::fs::symlink(&real_home, &symlink_home).expect("home symlink");
 
     let error = reject_unsafe_root_shape_with_home(&real_home, Some(symlink_home))
         .expect_err("canonical HOME root refused");

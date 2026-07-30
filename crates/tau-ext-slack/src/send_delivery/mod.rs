@@ -1,5 +1,9 @@
 //! Bounded, cancellable, at-least-once Slack send delivery.
 
+use std::thread as path_std_thread;
+
+use crate::send_delivery as path_crate_send_delivery;
+
 mod scheduler;
 mod wire;
 
@@ -687,7 +691,7 @@ impl Extension {
         let panic_worker = worker.clone();
         let panic_prepared = prepared.clone();
         let spawn_failure_prepared = prepared.clone();
-        let spawn = std::thread::Builder::new()
+        let spawn = path_std_thread::Builder::new()
             .name("tau-slack-send".to_owned())
             .spawn(move || {
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1083,7 +1087,7 @@ impl SendDeliveryWorker {
             // fail-safe against a panicking predecessor.
             let _ = self
                 .wake
-                .wait(generation, crate::send_delivery::wire::MAX_RETRY_AFTER);
+                .wait(generation, path_crate_send_delivery::wire::MAX_RETRY_AFTER);
         }
     }
 

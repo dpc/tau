@@ -5,19 +5,22 @@
 
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
+use std::{sync as path_std_sync, thread as path_std_thread, time as path_std_time};
 
-use base64::Engine as _;
+use base64::{Engine as _, engine as path_base64_engine};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tau_proto::{
     ContentPart, ContextItem, ContextRole, MessageItem, ResponsesToolCallEnvelope, ToolCallItem,
     ToolResponseHeader, ToolResultItem, ToolResultStatus,
 };
+use tau_provider::debug_capture_writer as path_tau_provider_debug_capture_writer;
+use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync};
 
-use crate::TurnAbort;
 use crate::common::{
     LlmError, PromptPayload, StreamState, cbor_to_json, effort_wire, json_to_cbor,
 };
+use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 
 pub mod pool;
 pub mod ws;
@@ -68,11 +71,11 @@ fn compact_transport_gate() -> &'static (std::sync::Mutex<CompactTransportState>
     static GATE: std::sync::OnceLock<(
         std::sync::Mutex<CompactTransportState>,
         std::sync::Condvar,
-    )> = std::sync::OnceLock::new();
+    )> = path_std_sync::OnceLock::new();
     GATE.get_or_init(|| {
         (
-            std::sync::Mutex::new(CompactTransportState::default()),
-            std::sync::Condvar::new(),
+            path_std_sync::Mutex::new(CompactTransportState::default()),
+            path_std_sync::Condvar::new(),
         )
     })
 }
@@ -81,7 +84,7 @@ fn acquire_compact_transport(
     abort: &mut impl TurnAbort,
 ) -> Result<CompactTransportPermit, LlmError> {
     let (state, changed) = compact_transport_gate();
-    let _abort_waker = abort.register_waker(std::sync::Arc::new(|| {
+    let _abort_waker = abort.register_waker(path_std_sync::Arc::new(|| {
         let (state, changed) = compact_transport_gate();
         if let Ok(mut state) = state.lock() {
             state.wake_generation = state.wake_generation.wrapping_add(1);
@@ -119,9 +122,9 @@ struct CompactCompletion {
 #[cfg(test)]
 struct CompactWorkerExitGate {
     /// Announces that network ownership has ended.
-    reached: std::sync::mpsc::SyncSender<()>,
+    reached: path_std_sync::mpsc::SyncSender<()>,
     /// Releases the worker so its join may complete.
-    release: std::sync::mpsc::Receiver<()>,
+    release: path_std_sync::mpsc::Receiver<()>,
 }
 /// Startup-selected ChatGPT Responses protocol contract.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -360,15 +363,15 @@ fn serialize_and_submit_provider_request_with(
         return Ok(());
     };
     submit(
-        tau_provider::debug_capture_writer::ProviderDebugCapture::new(
+        path_tau_provider_debug_capture_writer::ProviderDebugCapture::new(
             request.session_id.clone(),
             agent_prompt_id,
             match transport {
                 tau_proto::ProviderBackendTransport::HttpSse => {
-                    tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest
+                    path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest
                 }
                 tau_proto::ProviderBackendTransport::Websocket => {
-                    tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketRequest
+                    path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::WebsocketRequest
                 }
             },
             serde_json::to_vec_pretty(&metadata)?,
@@ -464,15 +467,15 @@ fn send_compact_request_inner(
     let permit = acquire_compact_transport(abort)?;
     let thread_id = request.prompt_cache_key(&config.base_url, config.mode);
     let config = config.clone();
-    let completion = std::sync::Arc::new((
-        std::sync::Mutex::new(CompactCompletion::default()),
-        std::sync::Condvar::new(),
+    let completion = path_std_sync::Arc::new((
+        path_std_sync::Mutex::new(CompactCompletion::default()),
+        path_std_sync::Condvar::new(),
     ));
-    let cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let cancel_notify = path_std_sync::Arc::new(path_tokio_sync::Notify::new());
     let _abort_waker = register_compact_abort_waker(abort, &completion, &cancel_notify)?;
-    let network_completion = std::sync::Arc::clone(&completion);
-    let network_cancel = std::sync::Arc::clone(&cancel_notify);
-    let worker = std::thread::Builder::new()
+    let network_completion = path_std_sync::Arc::clone(&completion);
+    let network_cancel = path_std_sync::Arc::clone(&cancel_notify);
+    let worker = path_std_thread::Builder::new()
         .name("responses-compact-http".to_owned())
         .spawn(move || {
             let _permit = permit;
@@ -530,9 +533,9 @@ fn register_compact_abort_waker(
     completion: &std::sync::Arc<(std::sync::Mutex<CompactCompletion>, std::sync::Condvar)>,
     cancel_notify: &std::sync::Arc<tokio::sync::Notify>,
 ) -> Result<Box<dyn crate::TurnAbortWaker>, LlmError> {
-    let wake_completion = std::sync::Arc::clone(completion);
-    let wake_network = std::sync::Arc::clone(cancel_notify);
-    let guard = abort.register_waker(std::sync::Arc::new(move || {
+    let wake_completion = path_std_sync::Arc::clone(completion);
+    let wake_network = path_std_sync::Arc::clone(cancel_notify);
+    let guard = abort.register_waker(path_std_sync::Arc::new(move || {
         if let Ok(mut state) = wake_completion.0.lock() {
             state.canceled = true;
             wake_completion.1.notify_all();
@@ -553,7 +556,7 @@ fn compact_http_request(
     cancel_notify: &tokio::sync::Notify,
 ) -> Result<String, LlmError> {
     let url = compact_url(&config.base_url);
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(LlmError::Io)?;
@@ -1398,7 +1401,7 @@ fn response_incomplete_error(
         code: None,
         retry_after: None,
     }
-    .observed(crate::attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
+    .observed(path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
 }
 
 fn response_failed_error(
@@ -1428,14 +1431,16 @@ fn response_failed_error(
             tau_proto::ProviderFailureKind::ContextWindowExceeded,
             body,
         )
-        .observed(crate::attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode));
+        .observed(
+            path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
+        );
     }
     LlmError::StreamError {
         body,
         code,
         retry_after: None,
     }
-    .observed(crate::attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
+    .observed(path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
 }
 
 fn stream_error_event(
@@ -1471,15 +1476,17 @@ fn stream_error_event(
             tau_proto::ProviderFailureKind::ContextWindowExceeded,
             body,
         )
-        .observed(crate::attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode));
+        .observed(
+            path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode),
+        );
     }
-    let reset_hint = canonical_event_reset_hint(event, std::time::SystemTime::now());
+    let reset_hint = canonical_event_reset_hint(event, path_std_time::SystemTime::now());
     LlmError::StreamError {
         body,
         code: error_code,
         retry_after: reset_hint,
     }
-    .observed(crate::attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
+    .observed(path_crate_attempt_failure::AttemptFailureEvidence::provider_with_mode(event, mode))
 }
 
 fn canonical_event_reset_hint(
@@ -1501,11 +1508,13 @@ fn canonical_event_reset_hint(
             .get("resets_in_seconds")
             .and_then(serde_json::Value::as_u64)
         {
-            return Some(std::time::Duration::from_secs(seconds));
+            return Some(path_std_time::Duration::from_secs(seconds));
         }
         let reset_at = object.get("resets_at")?.as_u64()?;
         let now = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-        Some(std::time::Duration::from_secs(reset_at.saturating_sub(now)))
+        Some(path_std_time::Duration::from_secs(
+            reset_at.saturating_sub(now),
+        ))
     })
 }
 
@@ -2505,7 +2514,7 @@ fn convert_tool_result_output(
         }
         image_budget.image_bytes = next_image_bytes;
         image_budget.data_url_bytes = next_data_url_bytes;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&image.data);
+        let encoded = path_base64_engine::general_purpose::STANDARD.encode(&image.data);
         let mut input_image = serde_json::json!({
             "type": "input_image",
             "image_url": format!(

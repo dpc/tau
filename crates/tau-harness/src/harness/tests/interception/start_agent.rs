@@ -1,6 +1,7 @@
 //! Contract tests for `SPEC-start-agent-requests`.
 
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 /// Build one start-agent request with observable correlation and instruction.
 fn request(query_id: &str, instruction: &str) -> StartAgentRequest {
@@ -37,7 +38,7 @@ fn connect_start_agent_interceptor(h: &mut Harness) {
 
 /// Return whether one source committed a matching event.
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
@@ -52,7 +53,7 @@ fn first_committed_matching(
     h: &Harness,
     predicate: impl Fn(&Event) -> bool,
 ) -> crate::event_log::LogEntry {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if predicate(&entry.event) {
@@ -478,7 +479,7 @@ fn pre_ready_request_keeps_original_admission_session() {
         .entries
         .get_mut("requester")
         .expect("requester")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
 
     h.handle_extension_event(
         "requester",

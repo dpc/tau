@@ -1,6 +1,7 @@
 //! Atomic discovery snapshot regressions.
 
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 fn skill(
     path: &std::path::Path,
@@ -50,7 +51,7 @@ fn connect_snapshot_interceptor(h: &mut Harness, selector: tau_proto::EventName)
 }
 
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
@@ -452,7 +453,7 @@ fn pre_ready_session_snapshot_waits_for_commit_before_activation() {
         .entries
         .get_mut("snapshot-owner")
         .expect("snapshot owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     let path = tmp.path().join("startup.md");
 
     h.handle_extension_event(
@@ -742,7 +743,7 @@ fn oversized_startup_snapshot_replacement_fails_activation() {
         .entries
         .get_mut("snapshot-owner")
         .expect("snapshot owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     let path = tmp.path().join("small.md");
     h.handle_extension_event(
         "snapshot-owner",
@@ -758,7 +759,7 @@ fn oversized_startup_snapshot_replacement_fails_activation() {
     let mut oversized = snapshot(Vec::new(), Vec::new());
     oversized.agents_files.push(tau_proto::DiscoveryAgentsFile {
         file_path: tmp.path().join("AGENTS.md"),
-        content: "x".repeat(super::super::super::MAX_EXTENSION_ACTIVATION_BYTES),
+        content: "x".repeat(crate::harness::MAX_EXTENSION_ACTIVATION_BYTES),
     });
 
     let result = h.handle_extension_event(
@@ -916,7 +917,7 @@ fn configured_snapshot_omits_items_beyond_all_discovery_bounds() {
     );
     let item_path = tmp.path().join("item.md");
     let template = skill(&item_path, "item-0", None);
-    let skills = (0..super::super::super::MAX_DISCOVERY_SNAPSHOT_ITEMS + 10_000)
+    let skills = (0..crate::harness::MAX_DISCOVERY_SNAPSHOT_ITEMS + 10_000)
         .map(|index| {
             let mut candidate = template.clone();
             candidate.name = format!("item-{index}").into();
@@ -941,7 +942,7 @@ fn configured_snapshot_omits_items_beyond_all_discovery_bounds() {
     let oversized_path = tmp.path().join("oversized-description.md");
     let accepted_path = tmp.path().join("accepted-after-bytes.md");
     let mut oversized = skill(&oversized_path, "oversized-description", None);
-    oversized.description = "x".repeat(super::super::super::MAX_DISCOVERY_SNAPSHOT_BYTES + 1);
+    oversized.description = "x".repeat(crate::harness::MAX_DISCOVERY_SNAPSHOT_BYTES + 1);
     h.handle_extension_event_inner(
         &crate::test_connection_id("snapshot-owner"),
         Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(
@@ -993,12 +994,12 @@ fn byte_full_snapshot_still_stops_at_raw_item_limit() {
     );
     let path = tmp.path().join("byte-fill.md");
     let mut byte_fill = skill(&path, "byte-fill", None);
-    byte_fill.description = "x".repeat(super::super::super::MAX_DISCOVERY_SNAPSHOT_BYTES - 1024);
+    byte_fill.description = "x".repeat(crate::harness::MAX_DISCOVERY_SNAPSHOT_BYTES - 1024);
     let template = skill(&path, "tail-0", None);
-    let mut skills = Vec::with_capacity(super::super::super::MAX_DISCOVERY_SNAPSHOT_ITEMS + 10_000);
+    let mut skills = Vec::with_capacity(crate::harness::MAX_DISCOVERY_SNAPSHOT_ITEMS + 10_000);
     skills.push(byte_fill);
     skills.extend(
-        (0..super::super::super::MAX_DISCOVERY_SNAPSHOT_ITEMS + 10_000).map(|index| {
+        (0..crate::harness::MAX_DISCOVERY_SNAPSHOT_ITEMS + 10_000).map(|index| {
             let mut candidate = template.clone();
             candidate.name = format!("tail-{index}").into();
             candidate

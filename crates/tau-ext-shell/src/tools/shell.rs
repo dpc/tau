@@ -1,5 +1,9 @@
 //! `shell` tool and user-initiated `!`/`!!` command dispatch.
 
+use std::{io as path_std_io, os as path_std_os, sync as path_std_sync, time as path_std_time};
+
+use crate::tools as path_crate_tools;
+
 #[cfg(test)]
 mod tests;
 use std::path::PathBuf;
@@ -125,7 +129,7 @@ pub(crate) fn run_command_cancellable(
 ) -> Result<CommandOutcome, ToolFailure> {
     run_command_cancellable_for_tool(
         ShellInvocation {
-            surface: crate::tools::ShellSurface::Generic,
+            surface: path_crate_tools::ShellSurface::Generic,
             call_id,
             arguments,
         },
@@ -166,7 +170,7 @@ pub(crate) fn run_command_cancellable_for_tool(
         return replay_shell_outcome(call_id, outcome, arguments, cancel_rx);
     }
 
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
     let outcome = run_command_live_for_surface(
         surface,
         arguments,
@@ -199,7 +203,7 @@ pub(crate) fn run_command_live(
     cancel_rx: Option<mpsc::Receiver<()>>,
 ) -> Result<CommandOutcome, ToolFailure> {
     run_command_live_for_surface(
-        crate::tools::ShellSurface::Generic,
+        path_crate_tools::ShellSurface::Generic,
         arguments,
         shell_config,
         command_mode,
@@ -229,7 +233,7 @@ pub(crate) fn run_command_live_for_surface(
             .with_mode(display_mode)
             .with_payload(display_payload.clone())
     })?;
-    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let timeout = path_std_time::Duration::from_secs(timeout_secs);
 
     debug!(command = %command, cwd = ?cwd, timeout_secs, "starting shell command");
     let child = shell_config
@@ -261,11 +265,11 @@ pub(crate) fn run_command_live_for_surface(
 
     let child_id = child.child.id();
     debug!(child_id, "shell command spawned");
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
     let wait = wait_with_timeout(child, timeout, cancel_rx);
     let elapsed = started.elapsed();
     let duration_seconds =
-        if std::time::Duration::from_secs(SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS) < elapsed {
+        if path_std_time::Duration::from_secs(SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS) < elapsed {
             Some(elapsed.as_secs_f64().ceil() as u64)
         } else {
             None
@@ -352,7 +356,7 @@ fn validate_surface_arguments(
     surface: crate::tools::ShellSurface,
     arguments: &CborValue,
 ) -> Result<(), ToolFailure> {
-    if surface == crate::tools::ShellSurface::ChatGpt
+    if surface == path_crate_tools::ShellSurface::ChatGpt
         && optional_argument_text(arguments, "cwd")
             .map_err(ToolFailure::from)?
             .is_some()
@@ -397,7 +401,7 @@ fn replay_shell_outcome(
             })))
         }
         WorldShellOutcome::Cancelled => {
-            let timeout = std::time::Duration::from_secs(
+            let timeout = path_std_time::Duration::from_secs(
                 parse_timeout_secs(arguments).map_err(ToolFailure::from)?,
             );
             let Some(cancel_rx) = cancel_rx else {
@@ -428,7 +432,7 @@ fn sleep_for_replay_elapsed(elapsed_ms: u64) {
     if elapsed_ms == 0 {
         return;
     }
-    std::thread::sleep(std::time::Duration::from_millis(
+    std::thread::sleep(path_std_time::Duration::from_millis(
         elapsed_ms.div_ceil(VCR_REPLAY_SPEEDUP),
     ));
 }
@@ -852,10 +856,10 @@ fn merged_user_shell_output(
 #[cfg(unix)]
 const USER_SHELL_READ_CHUNK_BYTES: usize = 8192;
 #[cfg(unix)]
-const USER_SHELL_DRAIN_AFTER_DONE: std::time::Duration = std::time::Duration::from_millis(50);
+const USER_SHELL_DRAIN_AFTER_DONE: std::time::Duration = path_std_time::Duration::from_millis(50);
 
 #[cfg(unix)]
-fn set_user_shell_nonblocking(fd: std::os::fd::RawFd) {
+fn set_user_shell_nonblocking(fd: path_std_os::fd::RawFd) {
     #[allow(unsafe_code)]
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -902,7 +906,7 @@ fn read_available_user_shell<R: std::io::Read>(
                     ));
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock => break,
             Err(_) => {
                 close_pipe = true;
                 break;
@@ -974,7 +978,7 @@ fn wait_for_user_shell_event_until(
     wait_failed: &mut bool,
     cancelled: &mut bool,
 ) {
-    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    let timeout = deadline.saturating_duration_since(path_std_time::Instant::now());
     match event_rx.recv_timeout(timeout) {
         Ok(event) => {
             let _ = apply_user_shell_event(event, status, wait_failed, cancelled);
@@ -988,7 +992,7 @@ fn wait_for_user_shell_event_until(
 
 #[cfg(unix)]
 fn user_shell_poll_timeout_ms(deadline: std::time::Instant) -> i32 {
-    let now = std::time::Instant::now();
+    let now = path_std_time::Instant::now();
     if deadline <= now {
         return 0;
     }
@@ -997,7 +1001,7 @@ fn user_shell_poll_timeout_ms(deadline: std::time::Instant) -> i32 {
 }
 
 #[cfg(unix)]
-fn drain_user_shell_wake_fd(wake_read: &std::os::fd::OwnedFd) {
+fn drain_user_shell_wake_fd(wake_read: &path_std_os::fd::OwnedFd) {
     use std::os::fd::AsRawFd;
 
     let mut buf = [0u8; 16];
@@ -1018,7 +1022,7 @@ fn drain_user_shell_wake_fd(wake_read: &std::os::fd::OwnedFd) {
 }
 
 #[cfg(unix)]
-fn push_user_shell_poll_fd(poll_fds: &mut Vec<libc::pollfd>, fd: std::os::fd::RawFd) {
+fn push_user_shell_poll_fd(poll_fds: &mut Vec<libc::pollfd>, fd: path_std_os::fd::RawFd) {
     poll_fds.push(libc::pollfd {
         fd,
         events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
@@ -1030,7 +1034,7 @@ fn push_user_shell_poll_fd(poll_fds: &mut Vec<libc::pollfd>, fd: std::os::fd::Ra
 fn user_shell_poll_fds(
     stdout_pipe: Option<&ShellStdout>,
     stderr_pipe: Option<&ShellStderr>,
-    wake_read: Option<&std::os::fd::OwnedFd>,
+    wake_read: Option<&path_std_os::fd::OwnedFd>,
 ) -> Vec<libc::pollfd> {
     use std::os::fd::AsRawFd;
 
@@ -1059,7 +1063,7 @@ fn dispatch_user_shell_command_unix(
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let timeout = path_std_time::Duration::from_secs(timeout_secs);
     let pid = process.child.id();
     debug!(
         pid,
@@ -1173,7 +1177,7 @@ fn dispatch_user_shell_command_unix(
     let mut wait_failed = false;
     let mut timed_out = false;
     let mut cancelled = false;
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = path_std_time::Instant::now() + timeout;
 
     loop {
         read_available_user_shell(
@@ -1202,7 +1206,7 @@ fn dispatch_user_shell_command_unix(
             kill_process_group_by_pid(pid);
             break;
         }
-        let now = std::time::Instant::now();
+        let now = path_std_time::Instant::now();
         if deadline <= now {
             timed_out = true;
             kill_process_group_by_pid(pid);
@@ -1246,7 +1250,7 @@ fn dispatch_user_shell_command_unix(
 
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     drop(output_users.take());
-    let drain_deadline = std::time::Instant::now() + USER_SHELL_DRAIN_AFTER_DONE;
+    let drain_deadline = path_std_time::Instant::now() + USER_SHELL_DRAIN_AFTER_DONE;
     loop {
         read_available_user_shell(
             &mut stdout_pipe,
@@ -1268,7 +1272,7 @@ fn dispatch_user_shell_command_unix(
         );
         let _ = collect_user_shell_status(&event_rx, &mut status, &mut wait_failed, &mut cancelled);
         if (stdout_pipe.is_none() && stderr_pipe.is_none())
-            || drain_deadline <= std::time::Instant::now()
+            || drain_deadline <= path_std_time::Instant::now()
         {
             break;
         }
@@ -1320,7 +1324,7 @@ fn dispatch_user_shell_command_blocking(
         capture: std::sync::Arc<std::sync::Mutex<UserStreamCapture>>,
         progress: std::sync::Arc<std::sync::Mutex<UserProgressBudget>>,
         saved_capture: std::sync::Arc<std::sync::Mutex<UserSavedCapture>>,
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        stop: std::sync::Arc<path_std_sync::atomic::AtomicBool>,
         progress_gate: std::sync::Arc<std::sync::Mutex<()>>,
         done_tx: mpsc::Sender<()>,
     ) {
@@ -1331,7 +1335,7 @@ fn dispatch_user_shell_command_blocking(
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
-                        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        if stop.load(path_std_sync_atomic::Ordering::SeqCst) {
                             break;
                         }
                         {
@@ -1351,7 +1355,7 @@ fn dispatch_user_shell_command_blocking(
                             .unwrap_or_else(|error| error.into_inner())
                             .chunk(&chunk);
                         if let Some(chunk) = progress_chunk {
-                            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            if stop.load(path_std_sync_atomic::Ordering::SeqCst) {
                                 break;
                             }
                             let _ = tx.send(HarnessInputMessage::emit(
@@ -1374,12 +1378,14 @@ fn dispatch_user_shell_command_blocking(
 
     let stdout_pipe = process.stdout.take();
     let stderr_pipe = process.stderr.take();
-    let stdout = std::sync::Arc::new(std::sync::Mutex::new(UserStreamCapture::default()));
-    let stderr = std::sync::Arc::new(std::sync::Mutex::new(UserStreamCapture::default()));
-    let stop_pipe_readers = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let progress_gate = std::sync::Arc::new(std::sync::Mutex::new(()));
-    let progress = std::sync::Arc::new(std::sync::Mutex::new(UserProgressBudget::default()));
-    let saved_capture = std::sync::Arc::new(std::sync::Mutex::new(UserSavedCapture::default()));
+    let stdout = path_std_sync::Arc::new(path_std_sync::Mutex::new(UserStreamCapture::default()));
+    let stderr = path_std_sync::Arc::new(path_std_sync::Mutex::new(UserStreamCapture::default()));
+    let stop_pipe_readers = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
+    let progress_gate = path_std_sync::Arc::new(path_std_sync::Mutex::new(()));
+    let progress =
+        path_std_sync::Arc::new(path_std_sync::Mutex::new(UserProgressBudget::default()));
+    let saved_capture =
+        path_std_sync::Arc::new(path_std_sync::Mutex::new(UserSavedCapture::default()));
     let (pipe_done_tx, pipe_done_rx) = mpsc::channel();
     if let Some(p) = stdout_pipe {
         pump(
@@ -1388,11 +1394,11 @@ fn dispatch_user_shell_command_blocking(
             cmd.command_id.clone(),
             cmd.target_agent_id.clone(),
             tx.clone(),
-            std::sync::Arc::clone(&stdout),
-            std::sync::Arc::clone(&progress),
-            std::sync::Arc::clone(&saved_capture),
-            std::sync::Arc::clone(&stop_pipe_readers),
-            std::sync::Arc::clone(&progress_gate),
+            path_std_sync::Arc::clone(&stdout),
+            path_std_sync::Arc::clone(&progress),
+            path_std_sync::Arc::clone(&saved_capture),
+            path_std_sync::Arc::clone(&stop_pipe_readers),
+            path_std_sync::Arc::clone(&progress_gate),
             pipe_done_tx.clone(),
         );
     } else {
@@ -1405,18 +1411,18 @@ fn dispatch_user_shell_command_blocking(
             cmd.command_id.clone(),
             cmd.target_agent_id.clone(),
             tx.clone(),
-            std::sync::Arc::clone(&stderr),
-            std::sync::Arc::clone(&progress),
-            std::sync::Arc::clone(&saved_capture),
-            std::sync::Arc::clone(&stop_pipe_readers),
-            std::sync::Arc::clone(&progress_gate),
+            path_std_sync::Arc::clone(&stderr),
+            path_std_sync::Arc::clone(&progress),
+            path_std_sync::Arc::clone(&saved_capture),
+            path_std_sync::Arc::clone(&stop_pipe_readers),
+            path_std_sync::Arc::clone(&progress_gate),
             pipe_done_tx,
         );
     } else {
         let _ = pipe_done_tx.send(());
     }
 
-    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let timeout = path_std_time::Duration::from_secs(timeout_secs);
     let child_wait = NonUnixChildWait::start(&process.child, timeout, Some(cancel_rx));
     let pid = process.child.id();
     debug!(
@@ -1464,7 +1470,7 @@ fn dispatch_user_shell_command_blocking(
         let _progress_guard = progress_gate
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        stop_pipe_readers.store(true, std::sync::atomic::Ordering::SeqCst);
+        stop_pipe_readers.store(true, path_std_sync_atomic::Ordering::SeqCst);
     }
     let exit_code = status.and_then(|status| status.code());
 
@@ -1502,14 +1508,15 @@ fn append_guaranteed_output_truncated_marker(output: &mut String) {
 
 const SHELL_WAIT_READ_CHUNK_BYTES: usize = 8192;
 #[cfg(unix)]
-const SHELL_WAIT_DRAIN_AFTER_DONE: std::time::Duration = std::time::Duration::from_millis(50);
+const SHELL_WAIT_DRAIN_AFTER_DONE: std::time::Duration = path_std_time::Duration::from_millis(50);
 #[cfg(not(unix))]
-const NON_UNIX_PIPE_DRAIN_AFTER_DONE: std::time::Duration = std::time::Duration::from_millis(50);
+const NON_UNIX_PIPE_DRAIN_AFTER_DONE: std::time::Duration =
+    path_std_time::Duration::from_millis(50);
 #[cfg(not(unix))]
 const NON_UNIX_PIPE_CAPTURE_COUNT: usize = 2;
 
 #[cfg(unix)]
-fn shell_wait_set_nonblocking(fd: std::os::fd::RawFd) {
+fn shell_wait_set_nonblocking(fd: path_std_os::fd::RawFd) {
     #[allow(unsafe_code)]
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -1538,7 +1545,7 @@ fn shell_wait_read_available<R: std::io::Read>(
                 break;
             }
             Ok(n) => capture.push_bytes(stream, &buf[..n]),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock => break,
             Err(_) => {
                 close_pipe = true;
                 break;
@@ -1597,13 +1604,13 @@ fn shell_wait_recv_event_until(
     event_rx: &mpsc::Receiver<ShellWaitEvent>,
     deadline: std::time::Instant,
 ) -> Option<ShellWaitEvent> {
-    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    let timeout = deadline.saturating_duration_since(path_std_time::Instant::now());
     event_rx.recv_timeout(timeout).ok()
 }
 
 #[cfg(unix)]
 fn shell_wait_poll_timeout_ms(deadline: std::time::Instant) -> i32 {
-    let now = std::time::Instant::now();
+    let now = path_std_time::Instant::now();
     if deadline <= now {
         return 0;
     }
@@ -1612,7 +1619,7 @@ fn shell_wait_poll_timeout_ms(deadline: std::time::Instant) -> i32 {
 }
 
 #[cfg(unix)]
-fn shell_wait_dup_owned_fd(fd: &std::os::fd::OwnedFd) -> Option<std::os::fd::OwnedFd> {
+fn shell_wait_dup_owned_fd(fd: &path_std_os::fd::OwnedFd) -> Option<path_std_os::fd::OwnedFd> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     #[allow(unsafe_code)]
@@ -1627,7 +1634,7 @@ fn shell_wait_dup_owned_fd(fd: &std::os::fd::OwnedFd) -> Option<std::os::fd::Own
 }
 
 #[cfg(unix)]
-fn shell_wait_write_wake_byte(fd: &std::os::fd::OwnedFd) {
+fn shell_wait_write_wake_byte(fd: &path_std_os::fd::OwnedFd) {
     use std::os::fd::AsRawFd;
 
     let byte = [1u8];
@@ -1642,7 +1649,7 @@ fn shell_wait_write_wake_byte(fd: &std::os::fd::OwnedFd) {
 }
 
 #[cfg(unix)]
-fn shell_wait_drain_wake_fd(wake_read: &std::os::fd::OwnedFd) {
+fn shell_wait_drain_wake_fd(wake_read: &path_std_os::fd::OwnedFd) {
     use std::os::fd::AsRawFd;
 
     let mut buf = [0u8; 16];
@@ -1677,9 +1684,9 @@ fn shell_wait_poll_fds_until(fds: &mut [libc::pollfd], deadline: std::time::Inst
 #[cfg(unix)]
 struct ShellWaitWakePipe {
     /// Read side observed by the foreground polling loop.
-    read: std::os::fd::OwnedFd,
+    read: path_std_os::fd::OwnedFd,
     /// Write side used by the child waiter thread.
-    write: std::os::fd::OwnedFd,
+    write: path_std_os::fd::OwnedFd,
 }
 
 #[cfg(unix)]
@@ -1726,11 +1733,11 @@ struct ShellWaitState {
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     output_users: Option<[std::fs::File; 2]>,
     /// Wake fd signalled when the child exits or cancellation arrives.
-    wake_read: Option<std::os::fd::OwnedFd>,
+    wake_read: Option<path_std_os::fd::OwnedFd>,
     /// Receiver for child-exit and cancellation events.
     event_rx: mpsc::Receiver<ShellWaitEvent>,
     /// Cross-thread cancellation flag set by the cancellation waiter.
-    cancelled_by_request: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancelled_by_request: std::sync::Arc<path_std_sync::atomic::AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -1799,7 +1806,7 @@ impl ShellWaitState {
         let mut status = None;
         let mut timed_out = false;
         let mut cancelled = false;
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = path_std_time::Instant::now() + timeout;
 
         loop {
             match self.poll_until_terminal(&mut output, &mut status, deadline) {
@@ -1846,7 +1853,7 @@ impl ShellWaitState {
             return ShellWaitPoll::Cancelled;
         }
 
-        let now = std::time::Instant::now();
+        let now = path_std_time::Instant::now();
         if deadline <= now {
             debug!(
                 pid = self.pid,
@@ -1886,7 +1893,7 @@ impl ShellWaitState {
         output: &mut CapturedOutput,
         status: &mut Option<std::process::ExitStatus>,
     ) {
-        let drain_deadline = std::time::Instant::now() + SHELL_WAIT_DRAIN_AFTER_DONE;
+        let drain_deadline = path_std_time::Instant::now() + SHELL_WAIT_DRAIN_AFTER_DONE;
         loop {
             self.read_available_output(output);
             let _ = shell_wait_collect_status(&self.event_rx, status);
@@ -1894,7 +1901,7 @@ impl ShellWaitState {
                 trace!(pid = self.pid, "shell output drain completed");
                 break;
             }
-            if drain_deadline <= std::time::Instant::now() {
+            if drain_deadline <= path_std_time::Instant::now() {
                 trace!(pid = self.pid, "shell output drain deadline reached");
                 break;
             }
@@ -1965,8 +1972,8 @@ impl ShellWaitState {
 fn spawn_shell_cancel_waiter(
     pid: u32,
     cancel_rx: Option<mpsc::Receiver<()>>,
-    cancelled_by_request: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    cancel_wake_write: Option<std::os::fd::OwnedFd>,
+    cancelled_by_request: std::sync::Arc<path_std_sync::atomic::AtomicBool>,
+    cancel_wake_write: Option<path_std_os::fd::OwnedFd>,
     event_tx: mpsc::Sender<ShellWaitEvent>,
 ) {
     use std::sync::Arc;
@@ -1993,8 +2000,8 @@ fn spawn_shell_cancel_waiter(
 fn spawn_shell_child_waiter(
     pid: u32,
     mut child: std::process::Child,
-    wake_write: Option<std::os::fd::OwnedFd>,
-    waiter_wake_read: Option<std::os::fd::OwnedFd>,
+    wake_write: Option<path_std_os::fd::OwnedFd>,
+    waiter_wake_read: Option<path_std_os::fd::OwnedFd>,
     event_tx: mpsc::Sender<ShellWaitEvent>,
 ) {
     let _waiter = std::thread::spawn(move || {
@@ -2048,8 +2055,8 @@ fn wait_with_timeout(
     let stdout_pipe = process.stdout.take();
     let stderr_pipe = process.stderr.take();
 
-    let output = std::sync::Arc::new(std::sync::Mutex::new(CapturedOutput::default()));
-    let stop_pipe_readers = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let output = path_std_sync::Arc::new(path_std_sync::Mutex::new(CapturedOutput::default()));
+    let stop_pipe_readers = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
     let pipe_done_rx =
         spawn_nonunix_shell_pipe_captures(stdout_pipe, stderr_pipe, &output, &stop_pipe_readers);
 
@@ -2081,7 +2088,7 @@ fn wait_with_timeout(
     };
     child_wait.join_exit_and_timeout_watchers();
     drain_nonunix_pipe_captures(&pipe_done_rx, NON_UNIX_PIPE_CAPTURE_COUNT);
-    stop_pipe_readers.store(true, std::sync::atomic::Ordering::SeqCst);
+    stop_pipe_readers.store(true, path_std_sync_atomic::Ordering::SeqCst);
 
     let mut output = std::mem::take(&mut *output.lock().unwrap_or_else(|error| error.into_inner()));
     output.finish();
@@ -2093,21 +2100,21 @@ fn spawn_nonunix_shell_pipe_captures(
     stdout_pipe: Option<impl std::io::Read + Send + 'static>,
     stderr_pipe: Option<impl std::io::Read + Send + 'static>,
     output: &std::sync::Arc<std::sync::Mutex<CapturedOutput>>,
-    stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop: &std::sync::Arc<path_std_sync::atomic::AtomicBool>,
 ) -> mpsc::Receiver<()> {
     let (done_tx, done_rx) = mpsc::channel();
     spawn_nonunix_shell_pipe_capture(
         stdout_pipe,
         OutputStream::Stdout,
-        std::sync::Arc::clone(output),
-        std::sync::Arc::clone(stop),
+        path_std_sync::Arc::clone(output),
+        path_std_sync::Arc::clone(stop),
         done_tx.clone(),
     );
     spawn_nonunix_shell_pipe_capture(
         stderr_pipe,
         OutputStream::Stderr,
-        std::sync::Arc::clone(output),
-        std::sync::Arc::clone(stop),
+        path_std_sync::Arc::clone(output),
+        path_std_sync::Arc::clone(stop),
         done_tx,
     );
     done_rx
@@ -2118,7 +2125,7 @@ fn spawn_nonunix_shell_pipe_capture(
     pipe: Option<impl std::io::Read + Send + 'static>,
     stream: OutputStream,
     output: std::sync::Arc<std::sync::Mutex<CapturedOutput>>,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop: std::sync::Arc<path_std_sync::atomic::AtomicBool>,
     done_tx: mpsc::Sender<()>,
 ) {
     let Some(mut pipe) = pipe else {
@@ -2131,7 +2138,7 @@ fn spawn_nonunix_shell_pipe_capture(
             match pipe.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    if stop.load(path_std_sync_atomic::Ordering::SeqCst) {
                         break;
                     }
                     output
@@ -2147,10 +2154,10 @@ fn spawn_nonunix_shell_pipe_capture(
 
 #[cfg(not(unix))]
 fn drain_nonunix_pipe_captures(done_rx: &mpsc::Receiver<()>, pipe_count: usize) {
-    let deadline = std::time::Instant::now() + NON_UNIX_PIPE_DRAIN_AFTER_DONE;
+    let deadline = path_std_time::Instant::now() + NON_UNIX_PIPE_DRAIN_AFTER_DONE;
     let mut closed = 0;
     while closed < pipe_count {
-        let now = std::time::Instant::now();
+        let now = path_std_time::Instant::now();
         if deadline <= now {
             break;
         }

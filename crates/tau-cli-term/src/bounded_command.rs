@@ -4,6 +4,15 @@
 //! handling, process-group cleanup, and foreground-terminal ownership for
 //! interactive prompt/completion commands.
 
+use std::sync::mpsc as path_std_sync_mpsc;
+use std::{
+    fs as path_std_fs, os as path_std_os, process as path_std_process, sync as path_std_sync,
+    time as path_std_time,
+};
+
+use nix::sys::signal as path_nix_sys_signal;
+use nix::{errno as path_nix_errno, sys as path_nix_sys, unistd as path_nix_unistd};
+
 #[cfg(test)]
 mod tests;
 
@@ -17,7 +26,7 @@ use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-const POST_EXIT_PIPE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const POST_EXIT_PIPE_CLOSE_TIMEOUT: std::time::Duration = path_std_time::Duration::from_secs(1);
 #[cfg(test)]
 static FAIL_NEXT_FOREGROUND_CLAIM: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
@@ -102,7 +111,7 @@ pub(crate) fn run_with_bounded_stdout_after_spawn(
 ) -> Result<BoundedCommandOutput, String> {
     configure_process_ownership(command, ownership)?;
     if stdin_input.is_some() {
-        command.stdin(std::process::Stdio::piped());
+        command.stdin(path_std_process::Stdio::piped());
     }
     let mut child = command
         .spawn()
@@ -143,7 +152,7 @@ struct BoundedStdoutRun {
     /// Owned process-group/foreground-terminal handle for the child.
     process_group: ProcessGroupHandle,
     /// Child/writer/reader event channel.
-    event_rx: std::sync::mpsc::Receiver<BoundedStdoutEvent>,
+    event_rx: path_std_sync::mpsc::Receiver<BoundedStdoutEvent>,
     /// Completed stdout read observed before the direct child exited.
     stdout_result: Option<io::Result<LimitedRead>>,
     /// Whether the optional stdin writer has completed.
@@ -166,7 +175,7 @@ impl BoundedStdoutRun {
             terminate_child(&mut child, process_group.child_pgid());
             return Err("command stdout was not captured".to_owned());
         };
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (event_tx, event_rx) = path_std_sync::mpsc::channel();
         spawn_stdout_reader(stdout, stdout_limit, event_tx.clone());
         let stdin_done = match spawn_stdin_writer(&mut child, stdin_input, event_tx.clone()) {
             StdinWriterState::Done => true,
@@ -195,9 +204,10 @@ impl BoundedStdoutRun {
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<BoundedCommandOutput, String> {
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = path_std_time::Instant::now() + timeout;
         loop {
-            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            let Some(remaining) = deadline.checked_duration_since(path_std_time::Instant::now())
+            else {
                 self.terminate();
                 self.wait_for_stdin_writer();
                 return Err(format!("command exceeded {}s timeout", timeout.as_secs()));
@@ -205,12 +215,12 @@ impl BoundedStdoutRun {
 
             match self.event_rx.recv_timeout(remaining) {
                 Ok(event) => self.handle_event(event)?,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err(path_std_sync_mpsc::RecvTimeoutError::Timeout) => {
                     self.terminate();
                     self.wait_for_stdin_writer();
                     return Err(format!("command exceeded {}s timeout", timeout.as_secs()));
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(path_std_sync_mpsc::RecvTimeoutError::Disconnected) => {
                     self.terminate();
                     self.wait_for_stdin_writer();
                     return Err("command monitor stopped unexpectedly".to_owned());
@@ -366,7 +376,7 @@ enum StdinWriterState {
 fn spawn_stdout_reader(
     stdout: impl Read + Send + 'static,
     stdout_limit: usize,
-    event_tx: std::sync::mpsc::Sender<BoundedStdoutEvent>,
+    event_tx: path_std_sync::mpsc::Sender<BoundedStdoutEvent>,
 ) {
     std::thread::spawn(move || {
         let _ = event_tx.send(BoundedStdoutEvent::Stdout(read_to_limit(
@@ -379,7 +389,7 @@ fn spawn_stdout_reader(
 fn spawn_stdin_writer(
     child: &mut std::process::Child,
     input: Option<&[u8]>,
-    event_tx: std::sync::mpsc::Sender<BoundedStdoutEvent>,
+    event_tx: path_std_sync::mpsc::Sender<BoundedStdoutEvent>,
 ) -> StdinWriterState {
     let Some(input) = input else {
         return StdinWriterState::Done;
@@ -401,7 +411,7 @@ fn spawn_stdin_writer(
 
 fn spawn_bounded_stdout_child_waiter(
     mut child: std::process::Child,
-    event_tx: std::sync::mpsc::Sender<BoundedStdoutEvent>,
+    event_tx: path_std_sync::mpsc::Sender<BoundedStdoutEvent>,
 ) {
     std::thread::spawn(move || {
         let _ = event_tx.send(BoundedStdoutEvent::Child(child.wait()));
@@ -410,8 +420,8 @@ fn spawn_bounded_stdout_child_waiter(
 
 fn spawn_child_waiter(
     mut child: std::process::Child,
-) -> std::sync::mpsc::Receiver<io::Result<std::process::ExitStatus>> {
-    let (tx, rx) = std::sync::mpsc::channel();
+) -> path_std_sync::mpsc::Receiver<io::Result<std::process::ExitStatus>> {
+    let (tx, rx) = path_std_sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(child.wait());
     });
@@ -463,12 +473,12 @@ pub(crate) fn run_with_inherited_stdio(
             terminate_process_group_if_owned(process_group.child_pgid());
             Err(format!("could not wait for command: {error}"))
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+        Err(path_std_sync_mpsc::RecvTimeoutError::Timeout) => {
             terminate_process_group_if_owned(process_group.child_pgid());
             let _ = child_rx.recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT);
             Err(format!("command exceeded {}s timeout", timeout.as_secs()))
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+        Err(path_std_sync_mpsc::RecvTimeoutError::Disconnected) => {
             terminate_process_group_if_owned(process_group.child_pgid());
             Err("command monitor stopped unexpectedly".to_owned())
         }
@@ -523,7 +533,7 @@ impl ChildProcessGroupId {
 
     #[cfg(unix)]
     fn as_nix_pid(self) -> nix::unistd::Pid {
-        nix::unistd::Pid::from_raw(self.0)
+        path_nix_unistd::Pid::from_raw(self.0)
     }
 }
 
@@ -546,9 +556,9 @@ fn terminate_process_group(child_pgid: ChildProcessGroupId) {
     #[cfg(unix)]
     {
         let pgid = child_pgid.as_nix_pid();
-        let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM);
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
+        let _ = path_nix_sys::signal::killpg(pgid, path_nix_sys_signal::Signal::SIGTERM);
+        std::thread::sleep(path_std_time::Duration::from_millis(100));
+        let _ = path_nix_sys::signal::killpg(pgid, path_nix_sys_signal::Signal::SIGKILL);
     }
 }
 
@@ -634,8 +644,10 @@ impl ProcessGroupHandle {
         let child_pgid = ChildProcessGroupId::from_child_id(child_id);
         set_foreground_process_group(child_pgid.as_nix_pid())
             .map_err(|e| format!("could not hand terminal to prompt action: {e}"))?;
-        let _ =
-            nix::sys::signal::killpg(child_pgid.as_nix_pid(), nix::sys::signal::Signal::SIGCONT);
+        let _ = path_nix_sys::signal::killpg(
+            child_pgid.as_nix_pid(),
+            path_nix_sys_signal::Signal::SIGCONT,
+        );
         Ok(Self {
             child_pgid: Some(child_pgid),
             parent_pgid: Some(parent_pgid),
@@ -671,7 +683,7 @@ fn set_foreground_process_group(pgid: nix::unistd::Pid) -> nix::Result<()> {
                 .compare_exchange(target, 0, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
         {
-            return Err(nix::errno::Errno::EIO);
+            return Err(path_nix_errno::Errno::EIO);
         }
     }
     // In non-interactive tests or redirected invocations there may be no
@@ -679,16 +691,16 @@ fn set_foreground_process_group(pgid: nix::unistd::Pid) -> nix::Result<()> {
     // lifecycle checks can still run. Prefer /dev/tty for real prompt actions,
     // but fall back to stdin for embeddings where stdin is the controlling tty.
     match with_controlling_terminal(|fd| tcsetpgrp_blocking_sigtou(fd, pgid)) {
-        Ok(()) | Err(nix::errno::Errno::ENOTTY) => Ok(()),
+        Ok(()) | Err(path_nix_errno::Errno::ENOTTY) => Ok(()),
         Err(error) => Err(error),
     }
 }
 
 #[cfg(unix)]
 fn with_controlling_terminal<T>(
-    f: impl FnOnce(std::os::fd::BorrowedFd<'_>) -> nix::Result<T>,
+    f: impl FnOnce(path_std_os::fd::BorrowedFd<'_>) -> nix::Result<T>,
 ) -> nix::Result<T> {
-    match std::fs::OpenOptions::new()
+    match path_std_fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
@@ -700,20 +712,20 @@ fn with_controlling_terminal<T>(
 
 #[cfg(unix)]
 fn tcsetpgrp_blocking_sigtou(
-    fd: std::os::fd::BorrowedFd<'_>,
+    fd: path_std_os::fd::BorrowedFd<'_>,
     pgid: nix::unistd::Pid,
 ) -> nix::Result<()> {
-    let mut block = nix::sys::signal::SigSet::empty();
-    block.add(nix::sys::signal::Signal::SIGTTOU);
-    let mut previous = nix::sys::signal::SigSet::empty();
-    nix::sys::signal::pthread_sigmask(
-        nix::sys::signal::SigmaskHow::SIG_BLOCK,
+    let mut block = path_nix_sys_signal::SigSet::empty();
+    block.add(path_nix_sys_signal::Signal::SIGTTOU);
+    let mut previous = path_nix_sys_signal::SigSet::empty();
+    path_nix_sys::signal::pthread_sigmask(
+        path_nix_sys_signal::SigmaskHow::SIG_BLOCK,
         Some(&block),
         Some(&mut previous),
     )?;
     let result = nix::unistd::tcsetpgrp(fd, pgid);
-    let restore = nix::sys::signal::pthread_sigmask(
-        nix::sys::signal::SigmaskHow::SIG_SETMASK,
+    let restore = path_nix_sys::signal::pthread_sigmask(
+        path_nix_sys_signal::SigmaskHow::SIG_SETMASK,
         Some(&previous),
         None,
     );

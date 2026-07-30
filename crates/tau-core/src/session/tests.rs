@@ -1,3 +1,5 @@
+use std::io as path_std_io;
+
 use super::*;
 
 /// Stable extension provenance never becomes a run-local route, including when
@@ -308,7 +310,7 @@ fn provider_image_content_rejects_mismatched_media_bytes() {
 #[test]
 fn provider_image_content_rejects_false_decoded_dimensions() {
     let source = image::DynamicImage::new_rgba8(1, 1);
-    let mut encoded = std::io::Cursor::new(Vec::new());
+    let mut encoded = path_std_io::Cursor::new(Vec::new());
     source
         .write_to(&mut encoded, image::ImageFormat::Png)
         .expect("encode fixture");

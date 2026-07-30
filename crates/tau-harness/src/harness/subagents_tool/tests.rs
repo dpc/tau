@@ -1,3 +1,5 @@
+use std::collections as path_std_collections;
+
 use super::*;
 
 /// Peer I/O admission rejects excess work before spawning another worker and
@@ -87,7 +89,7 @@ fn message_args_require_non_empty_recipient_and_message() {
 /// when one sender emits multiple messages with the same timestamp.
 #[test]
 fn generated_agent_message_ids_are_unique_for_same_sender_and_timestamp() {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = path_std_collections::HashSet::new();
     let sender_id = crate::parse_agent_id("agent-test");
     let timestamp = tau_proto::UnixMicros::new(42);
 

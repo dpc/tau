@@ -5,7 +5,7 @@
 //! Tau-issued target and its current source or configured-destination
 //! authority.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map as path_std_collections_hash_map};
 use std::sync::atomic::Ordering;
 
 use tau_proto::{
@@ -213,7 +213,7 @@ impl ReactionState {
         message_ref: MessageFactId,
         target: ReactionTarget,
     ) -> bool {
-        if let std::collections::hash_map::Entry::Occupied(mut entry) =
+        if let path_std_collections_hash_map::Entry::Occupied(mut entry) =
             self.targets.entry(message_ref.clone())
         {
             if entry.get() == &target {

@@ -6,6 +6,7 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::{fs as path_std_fs, io as path_std_io, path as path_std_path, time as path_std_time};
 
 /// Maximum bytes accepted for one extension-owned data file.
 const MAX_EXTENSION_DATA_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -32,9 +33,13 @@ impl ExtensionDataError {
 
     fn io(message: impl Into<String>, error: std::io::Error) -> Self {
         let kind = match error.kind() {
-            std::io::ErrorKind::NotFound => tau_proto::ExtensionDataErrorKind::NotFound,
-            std::io::ErrorKind::AlreadyExists => tau_proto::ExtensionDataErrorKind::AlreadyExists,
-            std::io::ErrorKind::PermissionDenied => tau_proto::ExtensionDataErrorKind::Permission,
+            path_std_io::ErrorKind::NotFound => tau_proto::ExtensionDataErrorKind::NotFound,
+            path_std_io::ErrorKind::AlreadyExists => {
+                tau_proto::ExtensionDataErrorKind::AlreadyExists
+            }
+            path_std_io::ErrorKind::PermissionDenied => {
+                tau_proto::ExtensionDataErrorKind::Permission
+            }
             _ => tau_proto::ExtensionDataErrorKind::Io,
         };
         Self::new(kind, format!("{}: {error}", message.into()))
@@ -65,20 +70,20 @@ pub(super) fn sanitize_extension_data_path(
     let mut out = PathBuf::new();
     for component in input.components() {
         match component {
-            std::path::Component::Normal(part) => out.push(part),
-            std::path::Component::CurDir => {
+            path_std_path::Component::Normal(part) => out.push(part),
+            path_std_path::Component::CurDir => {
                 return Err(ExtensionDataError::new(
                     tau_proto::ExtensionDataErrorKind::InvalidPath,
                     "path must not contain `.`",
                 ));
             }
-            std::path::Component::ParentDir => {
+            path_std_path::Component::ParentDir => {
                 return Err(ExtensionDataError::new(
                     tau_proto::ExtensionDataErrorKind::InvalidPath,
                     "path must not contain `..`",
                 ));
             }
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+            path_std_path::Component::RootDir | path_std_path::Component::Prefix(_) => {
                 return Err(ExtensionDataError::new(
                     tau_proto::ExtensionDataErrorKind::InvalidPath,
                     "path must be relative",
@@ -124,7 +129,7 @@ pub(super) fn checked_extension_data_path(
             tau_proto::ExtensionDataErrorKind::NotFile,
             format!("path `{}` is not a file or directory", rel.display()),
         )),
-        Err(error) if allow_missing_leaf && error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error) if allow_missing_leaf && error.kind() == path_std_io::ErrorKind::NotFound => {
             Ok(full)
         }
         Err(error) => Err(ExtensionDataError::io(
@@ -156,7 +161,7 @@ fn reject_symlink_ancestors(root: &Path, rel: &Path) -> Result<(), ExtensionData
                     format!("path ancestor `{}` is not a directory", current.display()),
                 ));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => break,
             Err(error) => {
                 return Err(ExtensionDataError::io(
                     format!("failed to stat `{}`", current.display()),
@@ -253,7 +258,7 @@ fn create_private_dir_all(path: &Path) -> Result<(), std::io::Error> {
 #[cfg(unix)]
 fn set_private_dir_permissions(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    std::fs::set_permissions(path, path_std_fs::Permissions::from_mode(0o700))
 }
 
 #[cfg(not(unix))]
@@ -264,7 +269,7 @@ fn set_private_dir_permissions(_path: &Path) -> Result<(), std::io::Error> {
 #[cfg(unix)]
 fn open_private_create_new(path: &Path) -> Result<std::fs::File, std::io::Error> {
     use std::os::unix::fs::OpenOptionsExt as _;
-    std::fs::OpenOptions::new()
+    path_std_fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
@@ -273,7 +278,7 @@ fn open_private_create_new(path: &Path) -> Result<std::fs::File, std::io::Error>
 
 #[cfg(not(unix))]
 fn open_private_create_new(path: &Path) -> Result<std::fs::File, std::io::Error> {
-    std::fs::OpenOptions::new()
+    path_std_fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
@@ -287,7 +292,7 @@ fn write_file_sync(mut file: std::fs::File, contents: &[u8]) -> Result<(), std::
 
 fn sync_parent_dir(path: &Path) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
+        path_std_fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
 }
@@ -298,7 +303,7 @@ fn extension_data_temp_path(path: &Path) -> std::path::PathBuf {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
-    let nonce = std::time::SystemTime::now()
+    let nonce = path_std_time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
@@ -344,14 +349,14 @@ pub(super) fn append_extension_data_file(
     #[cfg(unix)]
     let file = {
         use std::os::unix::fs::OpenOptionsExt as _;
-        std::fs::OpenOptions::new()
+        path_std_fs::OpenOptions::new()
             .append(true)
             .create(true)
             .mode(0o600)
             .open(path)?
     };
     #[cfg(not(unix))]
-    let file = std::fs::OpenOptions::new()
+    let file = path_std_fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path)?;
@@ -409,7 +414,7 @@ pub(super) fn run_extension_data_read_file(
             format!("`{}` is not a file", rel.display()),
         ));
     }
-    let mut file = std::fs::File::open(&path).map_err(|error| {
+    let mut file = path_std_fs::File::open(&path).map_err(|error| {
         ExtensionDataError::io(format!("failed to open `{}`", rel.display()), error)
     })?;
     let mut contents = Vec::new();
@@ -504,7 +509,7 @@ pub(super) fn run_extension_data_delete_file(
     }
     match delete_extension_data_file(&path) {
         Ok(()) => Ok(tau_proto::ExtensionDataValue::DeleteFile),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {
             Ok(tau_proto::ExtensionDataValue::DeleteFile)
         }
         Err(error) => Err(ExtensionDataError::io(

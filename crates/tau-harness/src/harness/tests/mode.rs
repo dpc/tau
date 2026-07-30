@@ -1,4 +1,7 @@
 use super::*;
+use crate::{
+    event as path_crate_event, event_log as path_crate_event_log, harness as path_crate_harness,
+};
 
 fn wait_for_socket(sock: &Path) {
     let started = Instant::now();
@@ -292,7 +295,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         ephemeral: true,
     };
 
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id("ui-test"),
         tau_proto::HarnessInputMessage::emit(Event::UiCreateAgent(request)),
     ));
@@ -375,7 +378,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         progress: None,
         display: None,
     });
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(progress_owner),
         tau_proto::HarnessInputMessage::emit_with_persist(progress_report.clone(), false),
     ));
@@ -391,7 +394,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         display: None,
         originator: tau_proto::PromptOriginator::User,
     });
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(progress_owner),
         tau_proto::HarnessInputMessage::emit_with_persist(terminal_report.clone(), false),
     ));
@@ -410,7 +413,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         None,
         "message-debug-secret",
     ));
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id("bridge-connection"),
         tau_proto::HarnessInputMessage::emit(message_fact.clone()),
     ));
@@ -464,7 +467,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         agent_prompt_id: provider_prompt_id.clone(),
         originator: tau_proto::PromptOriginator::User,
     });
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(provider),
         tau_proto::HarnessInputMessage::emit_transient(submitted.clone()),
     ));
@@ -483,7 +486,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     });
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(provider),
         tau_proto::HarnessInputMessage::emit_transient(update.clone()),
     ));
@@ -502,7 +505,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
             cacheable_input_tokens: 1,
             corrected_cache_efficiency: 0.0,
         });
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(provider),
         tau_proto::HarnessInputMessage::emit_transient(cache.clone()),
     ));
@@ -514,7 +517,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
             agent_prompt_id: provider_prompt_id.clone(),
             status: tau_proto::RetryPromptStatus::Accepted,
         });
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(provider),
         tau_proto::HarnessInputMessage::emit_transient(retry_result.clone()),
     ));
@@ -528,19 +531,19 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         ));
     h.remove_agent(&cid);
     assert!(!h.agents.contains_key(&cid));
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(provider),
         tau_proto::HarnessInputMessage::emit_transient(finished.clone()),
     ));
     h.handle_extension_event_inner(&crate::test_connection_id(provider), finished.clone())
         .expect("commit ephemeral finished report");
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(provider),
         tau_proto::HarnessInputMessage::emit_transient(finished.clone()),
     ));
     h.handle_extension_event_inner(&crate::test_connection_id(provider), finished)
         .expect("commit late ephemeral finished report");
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(provider),
         tau_proto::HarnessInputMessage::emit_transient(retry_result.clone()),
     ));
@@ -556,7 +559,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         display: None,
         originator: tau_proto::PromptOriginator::User,
     });
-    h.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(progress_owner),
         tau_proto::HarnessInputMessage::emit_with_persist(duplicate_terminal_report.clone(), false),
     ));
@@ -717,7 +720,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
         .get(agent_id.as_str())
         .cloned()
         .expect("ephemeral route");
-    let sync = crate::harness::interception::ConversationHeadSync {
+    let sync = path_crate_harness::interception::ConversationHeadSync {
         cid,
         agent_id: Some(agent_id),
         session_generation: h.current_session_generation,
@@ -1353,7 +1356,7 @@ fn resumed_startup_publishes_resume_session_started() {
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("start");
 
-    let mut next_seq = crate::event_log::EventLogSeq::new(0);
+    let mut next_seq = path_crate_event_log::EventLogSeq::new(0);
     let mut session_started_reason = None;
     while let Some(entry) = h.event_log.get_next_from(next_seq) {
         next_seq = entry.seq.next();

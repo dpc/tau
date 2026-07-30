@@ -1,8 +1,9 @@
 //! Focused helpers for compact explicit-observation projection.
 
+use base64::engine as path_base64_engine;
 use tau_proto::{AgentMessageKind, AgentMessageRecipient, ContentPart, ContextRole};
 
-use super::*;
+use super::{super as path_super_super, *};
 
 /// Wraps family records in deterministic common timing for serialization tests.
 fn timed_records(records: Vec<Record>) -> Vec<TimedRecord> {
@@ -135,7 +136,7 @@ fn semantic_items_share_global_journal_timing_and_order() {
 
     let records = project_facts(
         vec![sent, received, provider, omitted_origin],
-        super::super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Lite,
     )
     .expect("semantic projection")
     .into_iter()
@@ -170,7 +171,7 @@ fn semantic_items_share_global_journal_timing_and_order() {
 }
 
 fn assert_projection_error(facts: Vec<Fact>, expected: &str) {
-    let error = match project_facts(facts, super::super::AgentTraceMode::Lite) {
+    let error = match project_facts(facts, path_super_super::AgentTraceMode::Lite) {
         Ok(_) => panic!("projection must fail"),
         Err(error) => error,
     };
@@ -296,11 +297,11 @@ fn projected_payload_transformations_match_json_and_toon() {
 
     for (mode, output) in [
         (
-            super::super::AgentTraceMode::Lite,
+            path_super_super::AgentTraceMode::Lite,
             format!("\u{1b}{}\nend", "a".repeat(LITE_OUTPUT_BYTES + 32)),
         ),
         (
-            super::super::AgentTraceMode::Full,
+            path_super_super::AgentTraceMode::Full,
             "first\nsecond\u{1b}".to_owned(),
         ),
     ] {
@@ -346,7 +347,7 @@ fn projected_payload_transformations_match_json_and_toon() {
         let records = project_facts(facts, mode).expect("projection");
         let json = serde_json::to_value(&records[0]).expect("JSON record");
         assert_eq!(json["arguments"]["type"], "map");
-        if mode == super::super::AgentTraceMode::Lite {
+        if mode == path_super_super::AgentTraceMode::Lite {
             assert_eq!(json["output_bytes"], output.len() + 3);
             assert_eq!(json["output_lines"], 2);
             assert_eq!(json["output_complete"], false);
@@ -368,8 +369,8 @@ fn projected_payload_transformations_match_json_and_toon() {
             root_agent_id: &agent_id,
             included_agent_ids: vec![&agent_id],
             content: match mode {
-                super::super::AgentTraceMode::Lite => "lite",
-                super::super::AgentTraceMode::Full => "full",
+                path_super_super::AgentTraceMode::Lite => "lite",
+                path_super_super::AgentTraceMode::Full => "full",
             },
             time_unit: "microseconds",
             absolute_time: "unix_epoch_microseconds_at_journal_append_invocation",
@@ -382,7 +383,7 @@ fn projected_payload_transformations_match_json_and_toon() {
             serde_toon::from_str(std::str::from_utf8(&encoded).expect("UTF-8")).expect("TOON");
         let toon_call = &decoded["items"][0];
         let toon_output = if let Some(output) = toon_call["output_base64"].as_str() {
-            base64::engine::general_purpose::STANDARD
+            path_base64_engine::general_purpose::STANDARD
                 .decode(output)
                 .expect("Base64")
         } else {
@@ -398,7 +399,7 @@ fn projected_payload_transformations_match_json_and_toon() {
         );
         let toon_arguments = if let Some(arguments) = toon_call["arguments_json_base64"].as_str() {
             serde_json::from_slice::<serde_json::Value>(
-                &base64::engine::general_purpose::STANDARD
+                &path_base64_engine::general_purpose::STANDARD
                     .decode(arguments)
                     .expect("Base64"),
             )
@@ -415,8 +416,8 @@ fn projected_payload_transformations_match_json_and_toon() {
 #[test]
 fn shell_outcome_preserves_lifecycle_and_encoding_parity() {
     for mode in [
-        super::super::AgentTraceMode::Lite,
-        super::super::AgentTraceMode::Full,
+        path_super_super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Full,
     ] {
         let mut declared = declaration("agent-a", 1, 0, "shell-call");
         let Event::ProviderResponseFinished(response) = &mut declared.event else {
@@ -556,7 +557,7 @@ fn cancellation_never_projects_a_shell_outcome() {
                 }),
             ),
         ],
-        super::super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Lite,
     )
     .expect("cancelled projection");
     let source = serde_json::to_value(&records[0]).expect("JSON");
@@ -602,7 +603,7 @@ fn non_shell_calls_omit_shell_outcomes() {
                 }),
             ),
         ],
-        super::super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Lite,
     )
     .expect("non-shell projection");
     let call = serde_json::to_value(&records[0]).expect("JSON");
@@ -615,8 +616,8 @@ fn non_shell_calls_omit_shell_outcomes() {
 #[test]
 fn completion_wait_references_source_owned_output_in_lite_and_full() {
     for mode in [
-        super::super::AgentTraceMode::Lite,
-        super::super::AgentTraceMode::Full,
+        path_super_super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Full,
     ] {
         let facts = vec![
             declaration("agent-a", 1, 0, "source"),
@@ -823,7 +824,7 @@ fn incomplete_completion_wait_never_duplicates_source_output() {
             }),
         ));
 
-        let records = project_facts(facts, super::super::AgentTraceMode::Full)
+        let records = project_facts(facts, path_super_super::AgentTraceMode::Full)
             .expect("incomplete wait projection")
             .into_iter()
             .map(|record| serde_json::to_value(record).expect("record JSON"))
@@ -888,7 +889,7 @@ fn exact_wait_transitive_consistency_is_enforced() {
                 }),
             ),
         ],
-        super::super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Lite,
     )
     .expect("foreign exact target fallback")
     .into_iter()
@@ -1143,7 +1144,7 @@ fn immediate_activation_wait_outcomes_project_without_registration() {
                     }),
                 ),
             ],
-            super::super::AgentTraceMode::Lite,
+            path_super_super::AgentTraceMode::Lite,
         )
         .expect("immediate activation settlement");
         let settlement = records
@@ -1187,7 +1188,7 @@ fn crash_tail_and_selected_cut_remain_explicitly_incomplete() {
                 }),
             ),
         ],
-        super::super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Lite,
     )
     .expect("partial projection")
     .into_iter()
@@ -1307,7 +1308,7 @@ fn foreign_background_completion_uses_unresolved_fallbacks() {
                 }),
             ),
         ],
-        super::super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Lite,
     )
     .expect("foreign-endpoint projection")
     .into_iter()
@@ -1391,7 +1392,7 @@ fn foreign_terminal_does_not_transfer_call_status_or_output() {
                 }),
             ),
         ],
-        super::super::AgentTraceMode::Full,
+        path_super_super::AgentTraceMode::Full,
     )
     .expect("foreign terminal projection")
     .into_iter()
@@ -1449,7 +1450,7 @@ fn committed_terminal_supersedes_orphan_classifications() {
                 ),
                 tool_error("agent-a", 4, 3, "source"),
             ],
-            super::super::AgentTraceMode::Lite,
+            path_super_super::AgentTraceMode::Lite,
         )
         .expect("winner projection")
         .into_iter()
@@ -1548,7 +1549,7 @@ fn foreign_cancellation_request_does_not_classify_local_terminal() {
                 tool_error("agent-a", 5, 4, "source"),
             ]);
         }
-        let records = project_facts(facts, super::super::AgentTraceMode::Lite)
+        let records = project_facts(facts, path_super_super::AgentTraceMode::Lite)
             .expect("foreign request projection")
             .into_iter()
             .map(|record| serde_json::to_value(record).expect("record JSON"))
@@ -1634,7 +1635,7 @@ fn wrong_journal_endpoint_families_degrade_without_projection_failure() {
                 }),
             ),
         ],
-        super::super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Lite,
     )
     .expect("wrong-journal refs remain non-fatal")
     .into_iter()
@@ -1739,7 +1740,7 @@ fn local_observations_with_foreign_calls_degrade_as_one_relationship() {
                 }),
             ),
         ],
-        super::super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Lite,
     )
     .expect("mixed-locality projection")
     .into_iter()
@@ -1890,7 +1891,7 @@ fn unavailable_endpoint_halves_do_not_resolve_partial_relationships() {
                 }),
             ),
         ],
-        super::super::AgentTraceMode::Lite,
+        path_super_super::AgentTraceMode::Lite,
     )
     .expect("unavailable halves projection")
     .into_iter()
@@ -1944,7 +1945,7 @@ fn toon_frames_control_bearing_payload_fields() {
             kind: AgentMessageKind::Message,
             message: "secret\u{7}".into(),
         }),
-        super::super::AgentTraceMode::Full,
+        path_super_super::AgentTraceMode::Full,
     )
     .expect("semantic message")
     .record;

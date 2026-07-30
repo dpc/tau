@@ -1,3 +1,5 @@
+use time::format_description as path_time_format_description;
+
 use super::*;
 use crate::calendar::config::{
     CalendarAccountConfig, CalendarBackendConfig, CalendarSelectionConfig, ValidatedReadPolicy,
@@ -1137,14 +1139,14 @@ fn calendar_event_output_uses_account_timezone() {
         start_utc: Some(
             time::OffsetDateTime::parse(
                 "2026-06-04T16:00:00Z",
-                &time::format_description::well_known::Rfc3339,
+                &path_time_format_description::well_known::Rfc3339,
             )
             .expect("time"),
         ),
         end_utc: Some(
             time::OffsetDateTime::parse(
                 "2026-06-04T17:00:00Z",
-                &time::format_description::well_known::Rfc3339,
+                &path_time_format_description::well_known::Rfc3339,
             )
             .expect("time"),
         ),

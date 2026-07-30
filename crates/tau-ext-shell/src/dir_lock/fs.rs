@@ -2,8 +2,11 @@
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
+use std::io as path_std_io;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync as path_std_sync;
 use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,7 +27,7 @@ const FS_WAIT_POLL_MAX_INTERVAL: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
 static FAIL_REAP_FOR_TEST: std::sync::LazyLock<std::sync::Mutex<Option<PathBuf>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+    path_std_sync::LazyLock::new(|| path_std_sync::Mutex::new(None));
 
 /// Filesystem-backed lock registry plus this instance's lease handle.
 #[derive(Clone, Debug)]
@@ -1053,7 +1056,7 @@ fn read_registry(state_dir: &Path) -> Result<FsRegistry, String> {
             }
             Ok(registry)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(FsRegistry::default()),
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(FsRegistry::default()),
         Err(error) => Err(format!("failed to open {}: {error}", path.display())),
     }
 }
@@ -1178,7 +1181,7 @@ fn claim_instance_id(state_dir: &Path) -> Result<FsInstanceId, String> {
         let path = instance_lock_path(state_dir, &instance_id);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(_) => return Ok(instance_id),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == path_std_io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(format!(
                     "failed to claim dir_lock instance id at {}: {error}",
@@ -1208,7 +1211,7 @@ fn instance_liveness(
     let path = instance_lock_path(state_dir, instance_id);
     let file = match OpenOptions::new().read(true).write(true).open(&path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {
             return Ok(InstanceLiveness::Dead);
         }
         Err(error) => {
@@ -1223,7 +1226,9 @@ fn instance_liveness(
             let _ = file.unlock();
             Ok(InstanceLiveness::Dead)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(InstanceLiveness::Alive),
+        Err(error) if error.kind() == path_std_io::ErrorKind::WouldBlock => {
+            Ok(InstanceLiveness::Alive)
+        }
         Err(error) => Err(format!(
             "failed to test dir_lock instance lease {}: {error}",
             path.display()

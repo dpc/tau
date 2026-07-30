@@ -1,3 +1,5 @@
+use std::os::unix as path_std_os_unix;
+
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -65,7 +67,7 @@ fn store_get_returns_none_for_missing_cassette() {
 #[test]
 fn store_get_reports_read_errors_instead_of_treating_them_as_missing() {
     let tempdir = TempDir::new().expect("tempdir");
-    std::os::unix::fs::symlink("loop.yaml", tempdir.path().join("loop.yaml"))
+    path_std_os_unix::fs::symlink("loop.yaml", tempdir.path().join("loop.yaml"))
         .expect("create symlink loop cassette");
     let store = VcrStore::new(tempdir.path());
 
@@ -85,7 +87,7 @@ fn store_rejects_symlinked_root_directory() {
     let actual = tempdir.path().join("actual");
     std::fs::create_dir(&actual).expect("actual directory");
     let linked = tempdir.path().join("linked");
-    std::os::unix::fs::symlink(&actual, &linked).expect("linked root");
+    path_std_os_unix::fs::symlink(&actual, &linked).expect("linked root");
     let store = VcrStore::new(&linked);
 
     assert!(matches!(

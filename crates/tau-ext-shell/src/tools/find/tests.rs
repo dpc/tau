@@ -1,3 +1,5 @@
+use std::sync as path_std_sync;
+
 use super::*;
 
 fn args(limit: CborValue) -> CborValue {
@@ -148,7 +150,7 @@ fn find_cancellable_stops_on_early_cancel_request() {
             CborValue::Text(tempdir.path().display().to_string()),
         ),
     ]);
-    let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
+    let (cancel_tx, cancel_rx) = path_std_sync::mpsc::channel();
     cancel_tx.send(()).expect("send cancel");
 
     let result = run_find_cancellable(&args, Some(&cancel_rx)).expect("find result");

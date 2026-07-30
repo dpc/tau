@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
+use std::{fs as path_std_fs, io as path_std_io};
 
 use tau_client::ProtocolIoMeter;
 use tau_config::settings::InvalidExtensionName;
@@ -307,7 +308,7 @@ fn spawn_extension_stderr_logger(
             );
             return;
         }
-        let mut file = match std::fs::OpenOptions::new()
+        let mut file = match path_std_fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
@@ -334,7 +335,7 @@ fn spawn_extension_stderr_logger(
         let mut reader = BufReader::new(stderr);
         let mut buf = [0u8; 4096];
         loop {
-            match std::io::Read::read(&mut reader, &mut buf) {
+            match path_std_io::Read::read(&mut reader, &mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     let _ = file.write_all(&buf[..n]);

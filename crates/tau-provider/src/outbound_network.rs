@@ -1,12 +1,14 @@
 //! Immutable proxy and TLS policy shared by built-in provider transports.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fmt, fs as path_std_fs};
 
+use reqwest::redirect as path_reqwest_redirect;
+use rustls::crypto as path_rustls_crypto;
 use url::{Host, Url};
 
 const CUSTOM_CA_ENV: &str = "TAU_PROVIDER_CA_BUNDLE";
@@ -278,7 +280,7 @@ impl OutboundNetworkPolicy {
         let route_kind = route.map_or(OutboundRouteKind::Direct, |_| OutboundRouteKind::Proxy);
         let mut builder = reqwest::Client::builder()
             .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(path_reqwest_redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
             .use_preconfigured_tls(prepared.tls.clone());
         if let Some(endpoint) = route {
@@ -451,7 +453,7 @@ fn prepare_policy(
         parse_proxy(selected(environment, "https_proxy", "HTTPS_PROXY").or(all_proxy))?;
     let no_proxy = parse_no_proxy(selected(environment, "no_proxy", "NO_PROXY"))?;
     let roots = load_custom_roots(ca_path)?;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = Arc::new(path_rustls_crypto::ring::default_provider());
     let verifier =
         rustls_platform_verifier::Verifier::new_with_extra_roots(roots, Arc::clone(&provider))
             .map_err(|_| {
@@ -691,7 +693,8 @@ fn load_custom_roots(
     };
     use std::io::Read;
 
-    let file = std::fs::File::open(path).map_err(|_| config_error("unable to read CA bundle"))?;
+    let file =
+        path_std_fs::File::open(path).map_err(|_| config_error("unable to read CA bundle"))?;
     let mut bytes = Vec::new();
     file.take(MAX_CA_BUNDLE_BYTES + 1)
         .read_to_end(&mut bytes)

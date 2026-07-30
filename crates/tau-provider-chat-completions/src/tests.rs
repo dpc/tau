@@ -1,4 +1,9 @@
 use std::io::Write as _;
+use std::sync::atomic as path_std_sync_atomic;
+use std::{
+    collections as path_std_collections, io as path_std_io, net as path_std_net,
+    sync as path_std_sync,
+};
 
 mod scripted_tcp_server;
 
@@ -123,7 +128,7 @@ fn chat_stream_body_counts_transport_bytes_before_complete_sse_line() {
     let mut observed = Vec::new();
 
     read_chat_stream_body(
-        std::io::Cursor::new(bytes),
+        path_std_io::Cursor::new(bytes),
         &mut state,
         &mut raw_events,
         &mut |state| observed.push(state.response_bytes_received()),
@@ -183,7 +188,7 @@ fn chat_stream_body_observes_prompt_cancellation() {
     let mut state = StreamState::new();
     let mut raw_events = Vec::new();
     let error = read_chat_stream_body(
-        std::io::Cursor::new(b"data: never read\n\n"),
+        path_std_io::Cursor::new(b"data: never read\n\n"),
         &mut state,
         &mut raw_events,
         &mut |_| {},
@@ -197,10 +202,11 @@ fn chat_stream_body_observes_prompt_cancellation() {
 /// Runs a real reqwest attempt against a local peer that deliberately stalls
 /// either before response headers or after successful SSE headers.
 fn assert_reqwest_stall_is_canceled(after_headers: bool) {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind cancellation server");
+    let listener =
+        path_std_net::TcpListener::bind(("127.0.0.1", 0)).expect("bind cancellation server");
     let address = listener.local_addr().expect("cancellation server address");
-    let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
-    let (dropped_tx, dropped_rx) = std::sync::mpsc::sync_channel(1);
+    let (accepted_tx, accepted_rx) = path_std_sync::mpsc::sync_channel(1);
+    let (dropped_tx, dropped_rx) = path_std_sync::mpsc::sync_channel(1);
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept cancellation request");
         stream
@@ -239,9 +245,9 @@ fn assert_reqwest_stall_is_canceled(after_headers: bool) {
         dropped_tx.send(()).expect("report dropped connection");
     });
 
-    let canceled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let attempt_canceled = std::sync::Arc::clone(&canceled);
-    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let canceled = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
+    let attempt_canceled = path_std_sync::Arc::clone(&canceled);
+    let (result_tx, result_rx) = path_std_sync::mpsc::sync_channel(1);
     let attempt = std::thread::spawn(move || {
         let mut configured = provider();
         configured.base_url = format!("http://{address}/v1");
@@ -254,9 +260,9 @@ fn assert_reqwest_stall_is_canceled(after_headers: bool) {
             &model,
             false,
             &mut |_| {},
-            &mut || attempt_canceled.load(std::sync::atomic::Ordering::SeqCst),
+            &mut || attempt_canceled.load(path_std_sync_atomic::Ordering::SeqCst),
             &tau_provider::OutboundNetworkPolicy::from_environment(
-                std::collections::BTreeMap::new(),
+                path_std_collections::BTreeMap::new(),
                 None,
             ),
         );
@@ -265,7 +271,7 @@ fn assert_reqwest_stall_is_canceled(after_headers: bool) {
     accepted_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("reqwest request did not reach local peer");
-    canceled.store(true, std::sync::atomic::Ordering::SeqCst);
+    canceled.store(true, path_std_sync_atomic::Ordering::SeqCst);
     assert!(matches!(
         result_rx
             .recv_timeout(Duration::from_secs(2))
@@ -306,7 +312,7 @@ fn attempt_transport_failure_redacts_backend_canaries() {
     let prompt = prompt();
     let resolved = resolved_provider(&configured);
     let network = tau_provider::OutboundNetworkPolicy::from_environment(
-        std::collections::BTreeMap::from([(
+        path_std_collections::BTreeMap::from([(
             "http_proxy".to_owned(),
             format!("http://proxy-user-canary:proxy-pass-canary@{address}"),
         )]),
@@ -342,12 +348,12 @@ fn attempt_transport_failure_redacts_backend_canaries() {
 /// can accept its first request bytes.
 #[test]
 fn attempt_dispatch_precedes_backend_send_and_occurs_once() {
-    let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let server_observation = std::sync::Arc::clone(&dispatched);
+    let dispatched = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
+    let server_observation = path_std_sync::Arc::clone(&dispatched);
     let server = ScriptedTcpServer::spawn(move |mut socket| {
         assert!(server_observation.load(std::sync::atomic::Ordering::SeqCst));
         let mut request = [0_u8; 4096];
-        let bytes_read = std::io::Read::read(&mut socket, &mut request).expect("read request");
+        let bytes_read = path_std_io::Read::read(&mut socket, &mut request).expect("read request");
         assert!(0 < bytes_read);
     });
     let mut configured = provider();
@@ -363,12 +369,12 @@ fn attempt_dispatch_precedes_backend_send_and_occurs_once() {
         &mut |update| {
             if matches!(update, AttemptUpdate::Dispatched(_)) {
                 dispatch_count += 1;
-                dispatched.store(true, std::sync::atomic::Ordering::SeqCst);
+                dispatched.store(true, path_std_sync_atomic::Ordering::SeqCst);
             }
         },
         &mut || false,
         &tau_provider::OutboundNetworkPolicy::from_environment(
-            std::collections::BTreeMap::new(),
+            path_std_collections::BTreeMap::new(),
             None,
         ),
     );
@@ -416,7 +422,7 @@ fn chat_stream_body_rejects_oversized_partial_line() {
     let mut state = StreamState::new();
     let mut raw_events = Vec::new();
     let error = read_chat_stream_body(
-        std::io::Cursor::new(bytes),
+        path_std_io::Cursor::new(bytes),
         &mut state,
         &mut raw_events,
         &mut |_| {},
@@ -441,7 +447,7 @@ fn chat_stream_body_bounds_debug_event_retention() {
     let mut state = StreamState::new();
     let mut raw_events = Vec::new();
     read_chat_stream_body(
-        std::io::Cursor::new(bytes),
+        path_std_io::Cursor::new(bytes),
         &mut state,
         &mut raw_events,
         &mut |_| {},

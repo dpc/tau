@@ -1,3 +1,5 @@
+use std::{cell as path_std_cell, path as path_std_path};
+
 use super::*;
 
 /// The model-visible status contract discourages granular reports and avoids a
@@ -157,7 +159,7 @@ fn status_initial_display_exposes_state_and_title() {
 #[test]
 fn hidden_repository_tool_verification_skills_load_by_exact_query() {
     const PREFIX: &str = "tau-tool-verification-";
-    let skills_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let skills_dir = path_std_path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(".agents/skills");
     let loaded = tau_skills::load_skills_from_skill_dirs(&[tau_skills::SkillDir {
@@ -719,7 +721,7 @@ fn agent_watch_stopped_target_errors_without_mutation() {
         (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
     ]);
     let parsed = parse_agent_watch_args(&args).expect("valid watch arguments");
-    let mutation_called = std::cell::Cell::new(false);
+    let mutation_called = path_std_cell::Cell::new(false);
     let result = agent_watch_tool_result("agent-watcher", &parsed, |_, watched_id, enable| {
         assert!(enable);
         if watched_id == "agent-stopped" {

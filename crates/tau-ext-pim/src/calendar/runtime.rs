@@ -8,6 +8,7 @@ use tau_proto::{
     ToolError, ToolProgress, ToolResult, ToolStarted, ToolUseRange, ToolUseState, ToolUseStats,
     ToolUseStatus,
 };
+use time::format_description as path_time_format_description;
 use time_tz::{OffsetDateTimeExt, OffsetResult, PrimitiveDateTimeExt, TimeZone};
 
 use super::config::{
@@ -1660,7 +1661,7 @@ fn parse_read_bound(
     account_timezone: Option<&str>,
 ) -> Result<time::OffsetDateTime, String> {
     if let Ok(value) =
-        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        time::OffsetDateTime::parse(value, &path_time_format_description::well_known::Rfc3339)
     {
         return Ok(value);
     }
@@ -1681,7 +1682,7 @@ fn format_optional_read_bound(
     value
         .map(|value| {
             value
-                .format(&time::format_description::well_known::Rfc3339)
+                .format(&path_time_format_description::well_known::Rfc3339)
                 .map_err(|error| format!("{field} could not be formatted: {error}"))
         })
         .transpose()
@@ -1716,8 +1717,11 @@ fn default_read_end_bound(
     start_utc: time::OffsetDateTime,
     account_timezone: Option<&str>,
 ) -> Result<time::OffsetDateTime, String> {
-    if time::OffsetDateTime::parse(start_value, &time::format_description::well_known::Rfc3339)
-        .is_ok()
+    if time::OffsetDateTime::parse(
+        start_value,
+        &path_time_format_description::well_known::Rfc3339,
+    )
+    .is_ok()
     {
         return start_utc
             .checked_add(time::Duration::days(DEFAULT_READ_WINDOW_DAYS))
@@ -1979,12 +1983,13 @@ fn default_create_event_end(start: &str) -> Result<String, String> {
             .ok_or_else(|| "default event end is out of range".to_owned())?;
         return Ok(end.to_string());
     }
-    let start = time::OffsetDateTime::parse(start, &time::format_description::well_known::Rfc3339)
-        .map_err(|error| format!("start must be RFC3339 or YYYY-MM-DD: {error}"))?;
+    let start =
+        time::OffsetDateTime::parse(start, &path_time_format_description::well_known::Rfc3339)
+            .map_err(|error| format!("start must be RFC3339 or YYYY-MM-DD: {error}"))?;
     let end = start
         .checked_add(time::Duration::hours(1))
         .ok_or_else(|| "default event end is out of range".to_owned())?;
-    end.format(&time::format_description::well_known::Rfc3339)
+    end.format(&path_time_format_description::well_known::Rfc3339)
         .map_err(|error| format!("default event end could not be formatted: {error}"))
 }
 
@@ -2007,19 +2012,19 @@ fn normalize_write_time_value(
     account_timezone: Option<&str>,
 ) -> Result<String, String> {
     if parse_tool_date(value).is_some()
-        || time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        || time::OffsetDateTime::parse(value, &path_time_format_description::well_known::Rfc3339)
             .is_ok()
     {
         return Ok(value.to_owned());
     }
     match parse_local_read_bound(value, field, account_timezone) {
         Ok(local) => local_read_bound_to_utc(local, field, account_timezone)?
-            .format(&time::format_description::well_known::Rfc3339)
+            .format(&path_time_format_description::well_known::Rfc3339)
             .map_err(|error| format!("{field} could not be formatted: {error}")),
         Err(local_error) => parse_natural_datetime_bound(value, field, account_timezone)
             .and_then(|datetime| {
                 datetime
-                    .format(&time::format_description::well_known::Rfc3339)
+                    .format(&path_time_format_description::well_known::Rfc3339)
                     .map_err(|error| format!("{field} could not be formatted: {error}"))
             })
             .map_err(|natural_error| {
@@ -2039,12 +2044,16 @@ fn validate_time_pair(start: &str, end: &str) -> Result<(), String> {
             Ok(())
         }
         (None, None) => {
-            let start =
-                time::OffsetDateTime::parse(start, &time::format_description::well_known::Rfc3339)
-                    .map_err(|error| format!("start must be RFC3339 or YYYY-MM-DD: {error}"))?;
-            let end =
-                time::OffsetDateTime::parse(end, &time::format_description::well_known::Rfc3339)
-                    .map_err(|error| format!("end must be RFC3339 or YYYY-MM-DD: {error}"))?;
+            let start = time::OffsetDateTime::parse(
+                start,
+                &path_time_format_description::well_known::Rfc3339,
+            )
+            .map_err(|error| format!("start must be RFC3339 or YYYY-MM-DD: {error}"))?;
+            let end = time::OffsetDateTime::parse(
+                end,
+                &path_time_format_description::well_known::Rfc3339,
+            )
+            .map_err(|error| format!("end must be RFC3339 or YYYY-MM-DD: {error}"))?;
             if !is_datetime_before(start, end) {
                 return Err("event start must be before event end".to_owned());
             }
@@ -2499,12 +2508,12 @@ fn event_end_for_output(event: &BackendEvent, timezone: &time_tz::Tz) -> String 
 
 fn event_time_for_output(value: &str, timezone: &time_tz::Tz) -> String {
     let Ok(time) =
-        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        time::OffsetDateTime::parse(value, &path_time_format_description::well_known::Rfc3339)
     else {
         return value.to_owned();
     };
     time.to_timezone(timezone)
-        .format(&time::format_description::well_known::Rfc3339)
+        .format(&path_time_format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| value.to_owned())
 }
 

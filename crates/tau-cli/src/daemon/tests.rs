@@ -1,3 +1,5 @@
+use tau_config::settings as path_tau_config_settings;
+
 use super::*;
 
 /// Once a connected client closes its taken input pipe, dropping the owned
@@ -147,7 +149,7 @@ fn daemon_command_clears_empty_extension_transport() {
 #[test]
 fn daemon_command_forwards_public_extension_environment_separately() {
     let names = vec!["test-dummy".to_owned(), "std-rhai".to_owned()];
-    let cli = [tau_config::settings::ExtensionCliOverride::Disable(
+    let cli = [path_tau_config_settings::ExtensionCliOverride::Disable(
         "test-dummy".to_owned(),
     )];
     let command = build_daemon_command(DaemonCommandSpec {

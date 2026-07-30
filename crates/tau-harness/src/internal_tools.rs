@@ -9,10 +9,14 @@ use tau_proto::{
     ToolSpec, ToolUseState,
 };
 
+#[cfg(test)]
+use crate::agent as path_crate_agent;
 use crate::discovery::DiscoveredSkillSource;
 use crate::error::HarnessError;
 use crate::harness::Harness;
-use crate::{AgentId, AgentToolCall};
+use crate::{
+    AgentId, AgentToolCall, event as path_crate_event, runtime_dir as path_crate_runtime_dir,
+};
 
 /// A handler for tools implemented inside the harness process.
 pub trait InternalToolHandler: Send + Sync {
@@ -250,7 +254,7 @@ impl<'a> InternalToolHost<'a> {
         limit: usize,
     ) {
         self.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
-        let Some(permit) = crate::runtime_dir::DiscoveryCallPermit::try_acquire() else {
+        let Some(permit) = path_crate_runtime_dir::DiscoveryCallPermit::try_acquire() else {
             self.harness.finish_harness_owned_tool_with_error(
                 conversation_id,
                 call.id.clone(),
@@ -316,8 +320,8 @@ impl<'a> InternalToolHost<'a> {
                     CborValue::Bool(snapshot.scan_truncated),
                 ),
             ]);
-            let _ = tx.send(crate::event::HarnessEvent::Command(
-                crate::event::HarnessCommand::SessionDiscoveryCompleted(Box::new(command)),
+            let _ = tx.send(path_crate_event::HarnessEvent::Command(
+                path_crate_event::HarnessCommand::SessionDiscoveryCompleted(Box::new(command)),
             ));
         });
     }
@@ -455,7 +459,7 @@ impl<'a> InternalToolHost<'a> {
             .ok_or_else(|| HarnessError::Participant(format!("unknown test agent `{agent_id}`")))?;
         self.harness.dispatch_prompt_for_agent(
             &cid,
-            crate::agent::PendingPrompt::activating_background_completion(text),
+            path_crate_agent::PendingPrompt::activating_background_completion(text),
         )
     }
 

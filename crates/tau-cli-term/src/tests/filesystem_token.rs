@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, sync as path_std_sync};
 
 use crate::completion::{
     self, CommandCompletion, CompletionData, CompletionRule, CompletionRules, build_candidates,
@@ -181,7 +181,7 @@ fn at_token_completes_agent_mentions_in_prompt_text() {
     // one must replace only the current `@...` token and preserve surrounding
     // prompt text.
     let data = CompletionData::new();
-    data.set_agent_mention_completer(std::sync::Arc::new(|args| {
+    data.set_agent_mention_completer(path_std_sync::Arc::new(|args| {
         assert_eq!(args, ["wo"]);
         vec![crate::completion::CompletionItem::new("worker", "agent")]
     }));
@@ -206,7 +206,7 @@ fn at_mentions_remain_agent_completion_after_dotslash_fuzzy_port() {
     // The external patch also used `@` for file fuzzy search. Tau reserves that
     // prefix for agent mentions, so keep this regression focused and hermetic.
     let data = CompletionData::new();
-    data.set_agent_mention_completer(std::sync::Arc::new(|args| {
+    data.set_agent_mention_completer(path_std_sync::Arc::new(|args| {
         assert_eq!(args, ["wor"]);
         vec![crate::completion::CompletionItem::plain("worker")]
     }));

@@ -1,6 +1,7 @@
 //! Gate 2: real bundled core-shell state reconstruction across process
 //! replacement.
 
+use std::collections as path_std_collections;
 use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{
@@ -232,7 +233,7 @@ fn wait_agent_and_context_ready(
 ) -> Result<tau_proto::AgentId, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut agent = None;
-    let mut context_ready_agents = std::collections::HashSet::new();
+    let mut context_ready_agents = path_std_collections::HashSet::new();
     #[derive(Clone, Copy, Eq, PartialEq)]
     enum ResumeStep {
         Start,

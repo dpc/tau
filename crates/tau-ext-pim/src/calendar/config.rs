@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use url::Url;
 
+use crate::calendar as path_crate_calendar;
+
 /// Top-level calendar module configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -395,7 +397,7 @@ fn validate_ics_feed_source(
 }
 
 fn validate_ics_feed_literal_url(url: &str, allow_plain_http: bool) -> Result<(), String> {
-    crate::calendar::ics_feed::normalize_feed_url(url, allow_plain_http)
+    path_crate_calendar::ics_feed::normalize_feed_url(url, allow_plain_http)
         .map(|_| ())
         .map_err(|message| message.replace("iCalendar feed URL", "ics_feed url"))
 }

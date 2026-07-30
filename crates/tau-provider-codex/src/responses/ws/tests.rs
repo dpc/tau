@@ -1,3 +1,10 @@
+use std::{collections as path_std_collections, net as path_std_net};
+
+use rustls::pki_types as path_rustls_pki_types;
+use tungstenite::http as path_tungstenite_http;
+
+use crate::attempt_failure as path_crate_attempt_failure;
+
 mod direct_target_canary;
 mod scripted_tcp_server;
 mod test_ca;
@@ -41,7 +48,7 @@ fn http_status_zero<T>(result: Result<T, LlmError>) -> String {
 /// raw HTTP boundary into opaque failure evidence.
 #[test]
 fn upgrade_error_extracts_allowlisted_request_id_precedence() {
-    let response = tungstenite::http::Response::builder()
+    let response = path_tungstenite_http::Response::builder()
         .status(503)
         .header("openai-request-id", "req-third")
         .header("request-id", "req-second")
@@ -227,7 +234,7 @@ fn test_responses_config() -> ResponsesConfig {
 fn websocket_upgrade_uses_selected_http_proxy_absolute_form() {
     use std::io::Write;
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
     let address = listener.local_addr().expect("proxy address");
     let (request_tx, request_rx) = std_mpsc::channel();
     let proxy = std::thread::spawn(move || {
@@ -258,8 +265,10 @@ fn websocket_upgrade_uses_selected_http_proxy_absolute_form() {
         stream.flush().expect("flush upgrade");
         request_tx.send(request_text).expect("request capture");
     });
-    let environment =
-        std::collections::BTreeMap::from([("http_proxy".to_owned(), format!("http://{address}"))]);
+    let environment = path_std_collections::BTreeMap::from([(
+        "http_proxy".to_owned(),
+        format!("http://{address}"),
+    )]);
     let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, None);
     let mut config = test_responses_config();
     config.base_url = "http://unresolvable.invalid/backend-api".to_owned();
@@ -284,7 +293,7 @@ fn websocket_upgrade_uses_selected_http_proxy_absolute_form() {
 fn websocket_upgrade_rejects_unsolicited_proxy_extension() {
     use std::io::Write;
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
     let address = listener.local_addr().expect("proxy address");
     let proxy = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("proxy connection");
@@ -306,7 +315,10 @@ fn websocket_upgrade_rejects_unsolicited_proxy_extension() {
         .expect("upgrade response");
     });
     let network = tau_provider::OutboundNetworkPolicy::from_environment(
-        std::collections::BTreeMap::from([("http_proxy".to_owned(), format!("http://{address}"))]),
+        path_std_collections::BTreeMap::from([(
+            "http_proxy".to_owned(),
+            format!("http://{address}"),
+        )]),
         None,
     );
     let mut config = test_responses_config();
@@ -330,7 +342,7 @@ fn websocket_upgrade_rejects_unsolicited_proxy_extension() {
 fn websocket_upgrade_rejects_unsolicited_target_extension() {
     use std::io::Write;
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("target listener");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("target listener");
     let address = listener.local_addr().expect("target address");
     let target = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("target connection");
@@ -373,7 +385,7 @@ fn websocket_upgrade_rejects_unsolicited_target_extension() {
 fn websocket_upgrade_rejects_unsolicited_target_subprotocol() {
     use std::io::Write;
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("target listener");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("target listener");
     let address = listener.local_addr().expect("target address");
     let target = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("target connection");
@@ -429,12 +441,12 @@ fn secure_websocket_proxy_connects_before_target_tls_and_upgrade() {
         .with_no_client_auth()
         .with_single_cert(
             vec![leaf.der().clone()],
-            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-                leaf_key.serialize_der(),
-            )),
+            path_rustls_pki_types::PrivateKeyDer::Pkcs8(
+                path_rustls_pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+            ),
         )
         .expect("target TLS");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
     let address = listener.local_addr().expect("proxy address");
     let (capture_tx, capture_rx) = std_mpsc::channel();
     let proxy = std::thread::spawn(move || {
@@ -478,8 +490,10 @@ fn secure_websocket_proxy_connects_before_target_tls_and_upgrade() {
     let directory = tempfile::tempdir().expect("CA directory");
     let ca_path = directory.path().join("ca.pem");
     std::fs::write(&ca_path, ca.pem()).expect("write CA");
-    let environment =
-        std::collections::BTreeMap::from([("https_proxy".to_owned(), format!("http://{address}"))]);
+    let environment = path_std_collections::BTreeMap::from([(
+        "https_proxy".to_owned(),
+        format!("http://{address}"),
+    )]);
     let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, Some(ca_path));
     let mut config = test_responses_config();
     config.base_url = "https://localhost:4443/backend-api".to_owned();
@@ -544,7 +558,7 @@ fn secure_websocket_through_https_proxy_uses_nested_tls_and_scoped_auth() {
     let ca_path = directory.path().join("nested-ca.pem");
     std::fs::write(&ca_path, format!("{}\n{}", proxy_ca.pem(), target_ca.pem()))
         .expect("write CA bundle");
-    let environment = std::collections::BTreeMap::from([(
+    let environment = path_std_collections::BTreeMap::from([(
         "https_proxy".to_owned(),
         format!("https://proxy-user:proxy-pass@localhost:{}", address.port()),
     )]);
@@ -591,7 +605,7 @@ fn wss_proxy_tls_failure_has_no_direct_fallback() {
         let _ = stream.read(&mut byte);
     });
     let address = proxy.address();
-    let environment = std::collections::BTreeMap::from([(
+    let environment = path_std_collections::BTreeMap::from([(
         "https_proxy".to_owned(),
         format!("https://proxy-user:proxy-pass@localhost:{}", address.port()),
     )]);
@@ -637,7 +651,7 @@ fn wss_connect_rejection_is_generic_and_has_no_direct_fallback() {
         connect
     });
     let address = proxy.address();
-    let environment = std::collections::BTreeMap::from([(
+    let environment = path_std_collections::BTreeMap::from([(
         "https_proxy".to_owned(),
         format!("http://proxy-user:proxy-pass@{address}"),
     )]);
@@ -692,8 +706,10 @@ fn wss_target_tls_failure_has_no_direct_fallback() {
         connect
     });
     let address = proxy.address();
-    let environment =
-        std::collections::BTreeMap::from([("https_proxy".to_owned(), format!("http://{address}"))]);
+    let environment = path_std_collections::BTreeMap::from([(
+        "https_proxy".to_owned(),
+        format!("http://{address}"),
+    )]);
     let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, None);
     let mut config = test_responses_config();
     config.base_url = target.base_url();
@@ -744,8 +760,10 @@ fn wss_upgrade_failure_has_no_direct_fallback() {
     let directory = tempfile::tempdir().expect("CA directory");
     let ca_path = directory.path().join("target-ca.pem");
     std::fs::write(&ca_path, target_ca.pem()).expect("write target CA");
-    let environment =
-        std::collections::BTreeMap::from([("https_proxy".to_owned(), format!("http://{address}"))]);
+    let environment = path_std_collections::BTreeMap::from([(
+        "https_proxy".to_owned(),
+        format!("http://{address}"),
+    )]);
     let network = tau_provider::OutboundNetworkPolicy::from_environment(environment, Some(ca_path));
     let mut config = test_responses_config();
     config.base_url = target.base_url();
@@ -1169,7 +1187,7 @@ fn localhost_ws_silent_turn_returns_typed_idle_timeout() {
         envelope,
         EnvelopeExecution {
             recording_stream: None,
-            evidence_mode: crate::attempt_failure::ProviderEvidenceMode::LiveOnly,
+            evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             timeouts: EnvelopeTimeouts {
                 idle: Duration::from_millis(20),
                 absolute: None,
@@ -1271,7 +1289,7 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
         envelope,
         EnvelopeExecution {
             recording_stream: None,
-            evidence_mode: crate::attempt_failure::ProviderEvidenceMode::LiveOnly,
+            evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             timeouts: EnvelopeTimeouts {
                 idle: Duration::from_millis(50),
                 absolute: None,
@@ -1315,7 +1333,7 @@ fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
         envelope,
         EnvelopeExecution {
             recording_stream: None,
-            evidence_mode: crate::attempt_failure::ProviderEvidenceMode::LiveOnly,
+            evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             timeouts: EnvelopeTimeouts {
                 idle: Duration::from_secs(1),
                 absolute: Some(Duration::ZERO),
@@ -1344,8 +1362,8 @@ fn malformed_text_frame_counts_bytes_before_protocol_error() {
     let malformed = "{not-json";
     inbound_tx
         .send(InboundEvent::FrameFailure(
-            crate::attempt_failure::FrameFailure::new(
-                crate::attempt_failure::FrameFailureKind::MalformedText,
+            path_crate_attempt_failure::FrameFailure::new(
+                path_crate_attempt_failure::FrameFailureKind::MalformedText,
                 malformed.len(),
             ),
         ))

@@ -1,4 +1,5 @@
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 /// Construct one test tool specification.
 fn declaration_tool_spec(name: &str, description: &str) -> tau_proto::ToolSpec {
@@ -32,7 +33,7 @@ fn committed_tool_lifecycle_events(
     tool_name: &str,
 ) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         let relevant = match &entry.event {
@@ -111,7 +112,7 @@ fn parked_startup_tool_declaration_blocks_ready_until_commit() {
         .entries
         .get_mut("tool-provider")
         .expect("tool provider")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
@@ -182,7 +183,7 @@ fn startup_register_then_unregister_exposes_no_intermediate_tool_state() {
         .entries
         .get_mut("tool-provider")
         .expect("tool provider")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     h.handle_extension_event(
         "tool-provider",
         TestProtocolItem::Event(tool_registration_declaration(
@@ -234,7 +235,7 @@ fn required_intercepted_tool_replacement_overflow_fails_startup() {
         .entries
         .get_mut("tool-provider")
         .expect("tool provider")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
@@ -261,7 +262,7 @@ fn required_intercepted_tool_replacement_overflow_fails_startup() {
             TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
                 action: InterceptAction::Pass(Some(Box::new(tool_registration_declaration(
                     "declared_oversized",
-                    &"x".repeat(super::super::super::MAX_EXTENSION_ACTIVATION_BYTES),
+                    &"x".repeat(crate::harness::MAX_EXTENSION_ACTIVATION_BYTES),
                 )))),
             })),
         )
@@ -301,7 +302,7 @@ fn intercepted_tool_resolution_propagates_initial_tool_collision() {
             .entries
             .get_mut(source)
             .expect("required tool")
-            .state = crate::extension::ExtensionState::Handshaking;
+            .state = path_crate_extension::ExtensionState::Handshaking;
     }
     h.handle_extension_event(
         "required-a",

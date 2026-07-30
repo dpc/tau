@@ -9,6 +9,7 @@
 //! view cannot drift.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io as path_std_io;
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
@@ -3083,7 +3084,8 @@ fn validate_provider_content_parts(
             tau_proto::ImageMediaType::Jpeg => image::ImageFormat::Jpeg,
             tau_proto::ImageMediaType::Webp => image::ImageFormat::WebP,
         };
-        let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&image.data), format);
+        let mut reader =
+            image::ImageReader::with_format(path_std_io::Cursor::new(&image.data), format);
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(MAX_IMAGE_SIDE);
         limits.max_image_height = Some(MAX_IMAGE_SIDE);

@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
+use std::{fs as path_std_fs, io as path_std_io};
 
 use fs2::FileExt as _;
 use tempfile::TempDir;
@@ -306,8 +307,8 @@ fn cleanup_isolates_per_file_removal_errors() {
         |path| {
             attempts.push(path.to_path_buf());
             if path.parent().and_then(Path::file_name) == Some("one".as_ref()) {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
+                Err(path_std_io::Error::new(
+                    path_std_io::ErrorKind::PermissionDenied,
                     "denied",
                 ))
             } else {
@@ -343,8 +344,8 @@ fn cleanup_isolates_removal_errors_within_one_session() {
         |path| {
             attempts.push(path.to_path_buf());
             if path == first {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
+                Err(path_std_io::Error::new(
+                    path_std_io::ErrorKind::PermissionDenied,
                     "denied",
                 ))
             } else {
@@ -379,7 +380,7 @@ fn cleanup_skips_protected_and_locked_sessions() {
         )
         .expect("provider capture");
     }
-    let lock = std::fs::OpenOptions::new()
+    let lock = path_std_fs::OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)

@@ -1,10 +1,14 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+#[cfg(test)]
+use std::rc as path_std_rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use crate::storage as path_crate_storage;
 use crate::storage::{SharedStorage, StorageCreateError, file_name};
 
 // Persisted schemas stay at zero per `GATE-no-backward-compatibility`.
@@ -242,7 +246,7 @@ impl StateStore {
     pub(crate) fn open(state_dir: PathBuf) -> Result<Self, String> {
         Self::open_with_storage(
             state_dir.clone(),
-            std::rc::Rc::new(crate::storage::FsStorage::new(state_dir)),
+            path_std_rc::Rc::new(path_crate_storage::FsStorage::new(state_dir)),
         )
     }
 

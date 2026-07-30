@@ -1,6 +1,7 @@
 //! Contract tests for `SPEC-custom-extension-events`.
 
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 /// Build one custom event with an extension-owned nested name.
 fn custom(name: &str, payload: &str) -> Event {
@@ -23,7 +24,7 @@ fn source_committed(
     source: &str,
     predicate: impl Fn(&tau_proto::CustomEvent) -> bool,
 ) -> bool {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source)
@@ -120,7 +121,7 @@ fn unconfigured_and_disconnected_extensions_cannot_publish_custom_events() {
         .entries
         .get_mut("disconnected")
         .expect("configured entry")
-        .state = crate::extension::ExtensionState::Disconnected;
+        .state = path_crate_extension::ExtensionState::Disconnected;
     h.handle_extension_event_inner(
         &crate::test_connection_id("disconnected"),
         custom("demo.disconnected", &crate::test_connection_id("denied")),

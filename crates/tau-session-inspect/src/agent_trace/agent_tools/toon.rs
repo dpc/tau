@@ -1,6 +1,6 @@
 //! TOON serialization for the compact semantic/correlation projection.
 
-use base64::Engine as _;
+use base64::{Engine as _, engine as path_base64_engine};
 use serde::Serialize;
 
 use super::semantic::ToonSemanticRecord;
@@ -397,7 +397,7 @@ fn contains_unsafe_string(value: &str) -> bool {
 }
 
 fn encode_bytes(value: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(value)
+    path_base64_engine::general_purpose::STANDARD.encode(value)
 }
 
 /// Returns whether a JSON payload contains a string that TOON cannot emit

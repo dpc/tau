@@ -1,3 +1,9 @@
+use std::sync::atomic as path_std_sync_atomic;
+use std::{io as path_std_io, time as path_std_time};
+
+use tau_provider::storage as path_tau_provider_storage;
+use tau_provider_codex::oauth as path_tau_provider_codex_oauth;
+
 mod compatibility;
 
 use super::*;
@@ -327,7 +333,8 @@ fn startup_quota_initialization_resolves_once_per_provider() {
         }
     })
     .to_string();
-    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(400, &rejection_body);
+    let rejection =
+        path_tau_provider_codex_oauth::OAuthError::from_http_response(400, &rejection_body);
     let mut refresh_rejections = OAuthRefreshRejectionCache::default();
     let resolved = tracing::subscriber::with_default(subscriber, || {
         profiles.resolve_initial_quota_backends(|model, profiles| {
@@ -401,7 +408,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
 #[test]
 fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
     let temp = tempfile::tempdir().expect("temporary provider state");
-    let auth_file = tau_provider::storage::ProviderStore::open_in(temp.path())
+    let auth_file = path_tau_provider_storage::ProviderStore::open_in(temp.path())
         .auth_file::<BuiltinProviderProfile>("chatgpt")
         .expect("test auth file");
     let provider = ProviderName::new("chatgpt");
@@ -417,7 +424,7 @@ fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
             responses_lite_compatibility: false,
         }))
         .expect("save expired profile");
-    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(
+    let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused","message":"already used"}}"#,
     );
@@ -489,10 +496,12 @@ fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
         &mut cache,
         |_| {
             attempts += 1;
-            Err(tau_provider_codex::oauth::OAuthError::from_http_response(
-                400,
-                r#"{"error":{"code":"refresh_token_reused"}}"#,
-            ))
+            Err(
+                path_tau_provider_codex_oauth::OAuthError::from_http_response(
+                    400,
+                    r#"{"error":{"code":"refresh_token_reused"}}"#,
+                ),
+            )
         },
     )
     .expect_err("profile mode change permits a new attempt");
@@ -550,7 +559,7 @@ fn refresh_credentials_error_debug_excludes_credentials() {
             expires_at_ms: 1,
             account_id: Some(secret.to_owned()),
         }),
-        error: tau_provider_codex::oauth::OAuthError::from_http_response(
+        error: path_tau_provider_codex_oauth::OAuthError::from_http_response(
             400,
             r#"{"error":{"code":"refresh_token_reused"}}"#,
         ),
@@ -571,7 +580,7 @@ fn permanent_rejection_survives_unlock_failure() {
         (now_ms().saturating_sub(1), false),
     ] {
         let temp = tempfile::tempdir().expect("temporary provider state");
-        let auth_file = tau_provider::storage::ProviderStore::open_in(temp.path())
+        let auth_file = path_tau_provider_storage::ProviderStore::open_in(temp.path())
             .auth_file::<BuiltinProviderProfile>("chatgpt")
             .expect("test auth file");
         let provider = ProviderName::new("chatgpt");
@@ -597,7 +606,7 @@ fn permanent_rejection_survives_unlock_failure() {
         })
         .to_string();
         let rejection =
-            tau_provider_codex::oauth::OAuthError::from_http_response(400, &rejection_body);
+            path_tau_provider_codex_oauth::OAuthError::from_http_response(400, &rejection_body);
         let mut subsequent_attempts = 0;
         let mut cache = OAuthRefreshRejectionCache::default();
         let failure = finish_chatgpt_refresh_attempt(
@@ -606,7 +615,7 @@ fn permanent_rejection_survives_unlock_failure() {
                     credentials: authoritative.clone(),
                     error: rejection.clone(),
                 },
-                unlock_error: Some(std::io::Error::other("simulated unlock failure")),
+                unlock_error: Some(path_std_io::Error::other("simulated unlock failure")),
             },
             &provider,
             CodexMode::Standard,
@@ -707,7 +716,7 @@ fn suppressed_generation_survives_unlock_failure() {
         expires_at_ms: now_ms().saturating_sub(1),
         account_id: Some(secret.to_owned()),
     };
-    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(
+    let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
@@ -750,7 +759,7 @@ fn suppressed_generation_survives_unlock_failure() {
                             credentials: locked_expired.clone(),
                             error,
                         },
-                        unlock_error: Some(std::io::Error::other("simulated unlock failure")),
+                        unlock_error: Some(path_std_io::Error::other("simulated unlock failure")),
                     },
                     provider,
                     mode,
@@ -783,7 +792,7 @@ fn authoritative_credentials_survive_unlock_failure() {
         expires_at_ms: now_ms().saturating_sub(1),
         account_id: None,
     };
-    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(
+    let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
@@ -823,7 +832,7 @@ fn authoritative_credentials_survive_unlock_failure() {
                 finish_chatgpt_refresh_attempt(
                     AuthFileLockResult::Completed {
                         value: LockedRefreshOutcome::Credentials(authoritative.clone()),
-                        unlock_error: Some(std::io::Error::other("simulated unlock failure")),
+                        unlock_error: Some(path_std_io::Error::other("simulated unlock failure")),
                     },
                     provider,
                     mode,
@@ -848,12 +857,12 @@ fn authoritative_credentials_survive_unlock_failure() {
 #[test]
 fn rejected_locked_generation_replaces_stale_prelock_credentials() {
     let temp = tempfile::tempdir().expect("temporary provider state");
-    let auth_file = tau_provider::storage::ProviderStore::open_in(temp.path())
+    let auth_file = path_tau_provider_storage::ProviderStore::open_in(temp.path())
         .auth_file::<BuiltinProviderProfile>("chatgpt")
         .expect("test auth file");
     let provider = ProviderName::new("chatgpt");
     let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
-    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(
+    let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
@@ -955,7 +964,7 @@ fn rejected_locked_generation_replaces_stale_prelock_credentials() {
 fn refresh_failure_falls_back_only_to_still_valid_access_token() {
     let provider = ProviderName::new("chatgpt");
     let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
-    let rejection = tau_provider_codex::oauth::OAuthError::from_http_response(
+    let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(
         400,
         r#"{"error":{"code":"refresh_token_reused"}}"#,
     );
@@ -1231,20 +1240,20 @@ fn cancellation_waker_fires_for_matching_prompt_only() {
         .expect("known-safe AgentPromptId must be valid");
     let other_apid = tau_proto::AgentPromptId::parse("ap-other")
         .expect("known-safe AgentPromptId must be valid");
-    let matching = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let other = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let matching = Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
+    let other = Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
 
     let cancel_generation = cancellation.retry_generation();
     let _matching_guard = cancellation.register_abort_waker(&target_apid, cancel_generation, {
         let matching = Arc::clone(&matching);
         Arc::new(move || {
-            matching.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            matching.fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
         })
     });
     let _other_guard = cancellation.register_abort_waker(&other_apid, cancel_generation, {
         let other = Arc::clone(&other);
         Arc::new(move || {
-            other.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            other.fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
         })
     });
 
@@ -1263,20 +1272,20 @@ fn cancellation_global_cancel_wakes_all_registered_abort_wakers() {
         .expect("known-safe AgentPromptId must be valid");
     let second_apid = tau_proto::AgentPromptId::parse("ap-second")
         .expect("known-safe AgentPromptId must be valid");
-    let first = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let second = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
+    let second = Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
     let initial_generation = cancellation.retry_generation();
 
     let _first_guard = cancellation.register_abort_waker(&first_apid, initial_generation, {
         let first = Arc::clone(&first);
         Arc::new(move || {
-            first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            first.fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
         })
     });
     let _second_guard = cancellation.register_abort_waker(&second_apid, initial_generation, {
         let second = Arc::clone(&second);
         Arc::new(move || {
-            second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            second.fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
         })
     });
 
@@ -1295,13 +1304,13 @@ fn cancellation_global_cancel_wakes_late_old_generation_registration() {
     let prompt_id = tau_proto::AgentPromptId::parse("ap-late-registration")
         .expect("known-safe AgentPromptId must be valid");
     let stale_generation = cancellation.retry_generation();
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
 
     cancellation.cancel_all();
     let _guard = cancellation.register_abort_waker(&prompt_id, stale_generation, {
         let calls = Arc::clone(&calls);
         Arc::new(move || {
-            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            calls.fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
         })
     });
 
@@ -1318,20 +1327,20 @@ fn cancellation_shutdown_wakes_all_registered_abort_wakers() {
         .expect("known-safe AgentPromptId must be valid");
     let second_apid = tau_proto::AgentPromptId::parse("ap-second")
         .expect("known-safe AgentPromptId must be valid");
-    let first = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let second = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
+    let second = Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
 
     let cancel_generation = cancellation.retry_generation();
     let _first_guard = cancellation.register_abort_waker(&first_apid, cancel_generation, {
         let first = Arc::clone(&first);
         Arc::new(move || {
-            first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            first.fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
         })
     });
     let _second_guard = cancellation.register_abort_waker(&second_apid, cancel_generation, {
         let second = Arc::clone(&second);
         Arc::new(move || {
-            second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            second.fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
         })
     });
 
@@ -1349,12 +1358,12 @@ fn cancellation_waker_guard_unregisters_on_drop() {
     let cancellation = Arc::new(CancellationState::default());
     let apid =
         tau_proto::AgentPromptId::parse("ap-drop").expect("known-safe AgentPromptId must be valid");
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
 
     let guard = cancellation.register_abort_waker(&apid, cancellation.retry_generation(), {
         let calls = Arc::clone(&calls);
         Arc::new(move || {
-            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            calls.fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
         })
     });
     drop(guard);
@@ -1389,7 +1398,7 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
 }
 
 fn decode_frames(bytes: &[u8]) -> Vec<tau_proto::HarnessInputMessage> {
-    let mut reader = tau_proto::HarnessInputReader::new(std::io::BufReader::new(bytes));
+    let mut reader = tau_proto::HarnessInputReader::new(path_std_io::BufReader::new(bytes));
     let mut frames = Vec::new();
     while let Some(frame) = reader.read_message().expect("decode frame") {
         frames.push(frame);
@@ -1489,7 +1498,7 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
     let prompt = minimal_prompt();
     let mut state = tau_provider_codex::test_stream_state();
     let mut bytes = Vec::new();
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
@@ -1582,7 +1591,7 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
 #[test]
 fn chatgpt_first_output_capture_survives_batching_flush_and_attempt_reset() {
     let prompt = minimal_prompt();
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     let target = ResponseUpdateTarget {
         agent_prompt_id: &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
             .expect("test prompt id"),
@@ -1675,7 +1684,7 @@ fn chatgpt_response_update_emitter_emits_due_stats_only_sample() {
     let prompt = minimal_prompt();
     let state = tau_provider_codex::test_stream_state();
     let mut bytes = Vec::new();
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
@@ -1758,7 +1767,7 @@ fn chatgpt_response_update_emitter_emits_first_bytes_after_idle_sample_promptly(
     let prompt = minimal_prompt();
     let mut state = tau_provider_codex::test_stream_state();
     let mut bytes = Vec::new();
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
@@ -1859,7 +1868,7 @@ fn chatgpt_response_update_emitter_emits_first_stats_only_sample_promptly() {
     let prompt = minimal_prompt();
     let mut state = tau_provider_codex::test_stream_state();
     let mut bytes = Vec::new();
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
@@ -1904,7 +1913,7 @@ fn chatgpt_response_update_emitter_terminal_flush_emits_batched_suffix() {
     let prompt = minimal_prompt();
     let mut state = tau_provider_codex::test_stream_state();
     let mut bytes = Vec::new();
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);

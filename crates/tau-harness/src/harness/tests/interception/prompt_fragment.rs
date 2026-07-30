@@ -1,4 +1,5 @@
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 /// Build one extension prompt-fragment declaration with observable content.
 fn prompt_fragment(name: &str, template: &str) -> Event {
@@ -42,7 +43,7 @@ fn projected_template<'a>(h: &'a Harness, source: &str, name: &str) -> Option<&'
 /// Collect committed prompt-fragment declarations for one fragment name.
 fn committed_fragments(h: &Harness, name: &str) -> Vec<(Option<tau_proto::ConnectionId>, String)> {
     let mut events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::ExtPromptFragmentPublish(publish) = entry.event
@@ -280,7 +281,7 @@ fn parked_startup_prompt_fragment_blocks_ready_until_commit() {
         .entries
         .get_mut("fragment-owner")
         .expect("fragment owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     connect_prompt_fragment_interceptor(&mut h);
 
     h.handle_extension_event(
@@ -348,7 +349,7 @@ fn startup_prompt_fragment_commits_all_updates_and_activates_latest() {
         .entries
         .get_mut("fragment-owner")
         .expect("fragment owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
 
     for template in ["FIRST", "SECOND"] {
         h.handle_extension_event(
@@ -416,7 +417,7 @@ fn dropped_startup_prompt_fragment_releases_activation_reservation() {
         .entries
         .get_mut("fragment-owner")
         .expect("fragment owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     connect_prompt_fragment_interceptor(&mut h);
     h.handle_extension_event(
         "fragment-owner",
@@ -472,7 +473,7 @@ fn oversized_startup_prompt_fragment_replacement_fails_activation() {
         .entries
         .get_mut("fragment-owner")
         .expect("fragment owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     connect_prompt_fragment_interceptor(&mut h);
     h.handle_extension_event(
         "fragment-owner",
@@ -486,7 +487,7 @@ fn oversized_startup_prompt_fragment_replacement_fails_activation() {
             TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
                 action: InterceptAction::Pass(Some(Box::new(prompt_fragment(
                     "test.overflow",
-                    &"x".repeat(super::super::super::MAX_EXTENSION_ACTIVATION_BYTES),
+                    &"x".repeat(crate::harness::MAX_EXTENSION_ACTIVATION_BYTES),
                 )))),
             })),
         )
@@ -524,7 +525,7 @@ fn rollover_stages_deferred_prompt_fragment_for_later_ready() {
         .entries
         .get_mut("fragment-owner")
         .expect("fragment owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     connect_test_tool(&mut h, "rollover-declaration-blocker");
     h.handle_extension_event(
         "rollover-declaration-blocker",
@@ -745,7 +746,7 @@ fn stale_startup_generation_cannot_consume_successor_reservation() {
         .entries
         .get_mut("old-generation")
         .expect("old generation")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     connect_prompt_fragment_interceptor(&mut h);
     h.handle_extension_event(
         "old-generation",
@@ -764,7 +765,7 @@ fn stale_startup_generation_cannot_consume_successor_reservation() {
         .entries
         .get_mut("new-generation")
         .expect("new generation")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     h.handle_extension_event(
         "new-generation",
         TestProtocolItem::Event(prompt_fragment("test.generation", "CURRENT")),

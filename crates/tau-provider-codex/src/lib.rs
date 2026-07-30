@@ -7,10 +7,17 @@
 //! `ARCH-tau-provider-codex` and
 //! `SPEC-tau-provider-codex-streaming-replay`.
 
+#[cfg(test)]
+use std::collections as path_std_collections;
+use std::collections::hash_map as path_std_collections_hash_map;
+use std::{cell as path_std_cell, sync as path_std_sync};
+
+use responses::pool as path_responses_pool;
 use tau_proto::{
     Effort, ModelId, ModelName, ModelTag, ProviderBackendTransport, ProviderModelInfo,
     ProviderName, ThinkingSummary, Verbosity,
 };
+use tau_provider::debug_capture_writer as path_tau_provider_debug_capture_writer;
 
 pub const LOG_TARGET: &str = "provider-codex";
 
@@ -251,7 +258,7 @@ impl ResolvedConfig {
     #[must_use]
     pub fn profile_identity(&self) -> QuotaProfileIdentity {
         use std::hash::{Hash as _, Hasher as _};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = path_std_collections_hash_map::DefaultHasher::new();
         self.inner.base_url.hash(&mut hasher);
         self.inner.account_id.hash(&mut hasher);
         self.inner.api_key.hash(&mut hasher);
@@ -263,7 +270,7 @@ impl ResolvedConfig {
     #[must_use]
     pub fn inference_identity(&self) -> InferenceProfileIdentity {
         use std::hash::{Hash as _, Hasher as _};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = path_std_collections_hash_map::DefaultHasher::new();
         self.profile_identity().0.hash(&mut hasher);
         self.inner.mode.is_lite_compatibility().hash(&mut hasher);
         InferenceProfileIdentity(hasher.finish())
@@ -425,7 +432,10 @@ pub enum CompactOutcome {
 
 #[cfg(test)]
 pub(crate) fn test_network_policy() -> tau_provider::OutboundNetworkPolicy {
-    tau_provider::OutboundNetworkPolicy::from_environment(std::collections::BTreeMap::new(), None)
+    tau_provider::OutboundNetworkPolicy::from_environment(
+        path_std_collections::BTreeMap::new(),
+        None,
+    )
 }
 
 /// Prompt-turn cancellation source used by the WebSocket transport.
@@ -522,7 +532,7 @@ impl CodexRuntime {
     #[must_use]
     pub fn new(network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>) -> Self {
         Self {
-            ws_pool: responses::pool::SharedWsPool::new(std::sync::Arc::clone(&network)),
+            ws_pool: path_responses_pool::SharedWsPool::new(path_std_sync::Arc::clone(&network)),
             network,
         }
     }
@@ -536,7 +546,7 @@ impl CodexRuntime {
     /// Clone the immutable outbound policy for supervised background work.
     #[must_use]
     pub fn network_arc(&self) -> std::sync::Arc<tau_provider::OutboundNetworkPolicy> {
-        std::sync::Arc::clone(&self.network)
+        path_std_sync::Arc::clone(&self.network)
     }
 
     /// Stream one prompt through the Codex WebSocket transport.
@@ -642,7 +652,7 @@ impl CodexRuntime {
         on_update: &mut impl FnMut(StreamUpdate<'_>),
     ) -> AttemptOutcome {
         let mut correlation = attempt_failure::AttemptCaptureCorrelation::new(logical_attempt);
-        let response_bytes = std::cell::Cell::new(0_u64);
+        let response_bytes = path_std_cell::Cell::new(0_u64);
         let mut progress = SemanticProgress::None;
         let result = self.stream(
             agent_prompt_id,
@@ -749,7 +759,7 @@ impl CodexRuntime {
     pub fn invalidate_all_websockets(&self) -> Result<(), CodexError> {
         self.ws_pool
             .invalidate_all()
-            .map_err(responses::pool::WsTurnError::into_llm_error)
+            .map_err(path_responses_pool::WsTurnError::into_llm_error)
             .map_err(CodexError)
     }
 
@@ -758,7 +768,7 @@ impl CodexRuntime {
     pub fn invalidate_profile_websockets(&self, provider: &ProviderName) -> Result<(), CodexError> {
         self.ws_pool
             .invalidate_profile(provider.as_str())
-            .map_err(responses::pool::WsTurnError::into_llm_error)
+            .map_err(path_responses_pool::WsTurnError::into_llm_error)
             .map_err(CodexError)
     }
 
@@ -786,7 +796,7 @@ impl CodexRuntime {
             config.wire(),
             request,
             abort,
-            std::sync::Arc::clone(&self.network),
+            path_std_sync::Arc::clone(&self.network),
         );
         if abort.is_aborted() {
             return CompactOutcome::Canceled;
@@ -861,13 +871,15 @@ fn submit_response_debug_with(
         .as_ref()
         .map(|backend| match backend.transport {
             ProviderBackendTransport::HttpSse => {
-                tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse
+                path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse
             }
             ProviderBackendTransport::Websocket => {
-                tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketResponse
+                path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::WebsocketResponse
             }
         })
-        .unwrap_or(tau_provider::debug_capture_writer::ProviderDebugCaptureClass::UnknownResponse);
+        .unwrap_or(
+            path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::UnknownResponse,
+        );
     let metadata = serde_json::json!({
         "session_id": session_id,
         "agent_prompt_id": response.agent_prompt_id,
@@ -879,7 +891,7 @@ fn submit_response_debug_with(
     });
     match serde_json::to_vec_pretty(&metadata) {
         Ok(json) => submit(
-            tau_provider::debug_capture_writer::ProviderDebugCapture::new(
+            path_tau_provider_debug_capture_writer::ProviderDebugCapture::new(
                 session_id.clone(),
                 response.agent_prompt_id.clone(),
                 transport,
@@ -894,8 +906,10 @@ fn submit_response_debug_with(
 
 fn is_ws_capability_or_limit_error(error: &responses::pool::WsTurnError) -> bool {
     match error {
-        responses::pool::WsTurnError::Canceled => false,
-        responses::pool::WsTurnError::Other(error) => is_ws_capability_or_limit_llm_error(error),
+        path_responses_pool::WsTurnError::Canceled => false,
+        path_responses_pool::WsTurnError::Other(error) => {
+            is_ws_capability_or_limit_llm_error(error)
+        }
     }
 }
 

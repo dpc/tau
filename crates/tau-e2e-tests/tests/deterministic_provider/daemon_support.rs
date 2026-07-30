@@ -4,8 +4,10 @@
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::thread;
+use std::{fs as path_std_fs, thread};
 
+use nix::sys::signal as path_nix_sys_signal;
+use nix::{sys as path_nix_sys, unistd as path_nix_unistd};
 use tau_e2e_tests::DeterministicFixture;
 use tau_proto::{
     ClientKind, Event, EventName, EventSelector, HarnessInputMessage, HarnessOutputMessage, Hello,
@@ -71,7 +73,7 @@ impl DaemonGuard {
     pub(super) fn kill_ungracefully(mut self) -> Result<TerminatedDaemon, String> {
         use std::os::unix::process::ExitStatusExt;
 
-        nix::sys::signal::killpg(self.pgid, nix::sys::signal::Signal::SIGKILL)
+        path_nix_sys::signal::killpg(self.pgid, path_nix_sys_signal::Signal::SIGKILL)
             .map_err(|error| format!("kill deterministic daemon process group: {error}"))?;
         let deadline = Instant::now() + Duration::from_secs(5);
         let child = self.child.as_mut().expect("daemon guard owns child");
@@ -153,13 +155,14 @@ impl Drop for DaemonGuard {
             return;
         }
         if let Some(mut child) = self.child.take() {
-            let _ = nix::sys::signal::killpg(self.pgid, nix::sys::signal::Signal::SIGTERM);
+            let _ = path_nix_sys::signal::killpg(self.pgid, path_nix_sys_signal::Signal::SIGTERM);
             let deadline = Instant::now() + Duration::from_secs(2);
             while Instant::now() < deadline && process_group_exists(self.pgid) {
                 thread::sleep(Duration::from_millis(5));
             }
             if process_group_exists(self.pgid) {
-                let _ = nix::sys::signal::killpg(self.pgid, nix::sys::signal::Signal::SIGKILL);
+                let _ =
+                    path_nix_sys::signal::killpg(self.pgid, path_nix_sys_signal::Signal::SIGKILL);
                 let deadline = Instant::now() + Duration::from_secs(2);
                 while Instant::now() < deadline && process_group_exists(self.pgid) {
                     thread::sleep(Duration::from_millis(5));
@@ -180,7 +183,7 @@ pub(super) fn spawn_daemon(
     let stderr_path = fixture
         .root()
         .join(format!("daemon-{}.stderr", status_label(status)));
-    let stderr = std::fs::File::create(&stderr_path).expect("create daemon stderr");
+    let stderr = path_std_fs::File::create(&stderr_path).expect("create daemon stderr");
     let mut command = Command::new(HARNESS_DAEMON);
     command
         .env_clear()
@@ -208,7 +211,7 @@ pub(super) fn spawn_daemon(
         .stderr(Stdio::from(stderr))
         .spawn()
         .expect("spawn deterministic daemon");
-    let pgid = nix::unistd::Pid::from_raw(child.id().try_into().expect("daemon pid fits i32"));
+    let pgid = path_nix_unistd::Pid::from_raw(child.id().try_into().expect("daemon pid fits i32"));
     DaemonGuard {
         child: Some(child),
         completed: false,
@@ -219,7 +222,7 @@ pub(super) fn spawn_daemon(
 }
 
 fn process_group_exists(pgid: nix::unistd::Pid) -> bool {
-    nix::sys::signal::killpg(pgid, None).is_ok()
+    path_nix_sys::signal::killpg(pgid, None).is_ok()
 }
 
 fn wait_for_process_group_exit(pgid: nix::unistd::Pid, timeout: Duration) -> bool {
@@ -231,11 +234,11 @@ fn wait_for_process_group_exit(pgid: nix::unistd::Pid, timeout: Duration) -> boo
 }
 
 fn force_process_group_cleanup(pgid: nix::unistd::Pid) -> Result<(), String> {
-    let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM);
+    let _ = path_nix_sys::signal::killpg(pgid, path_nix_sys_signal::Signal::SIGTERM);
     if wait_for_process_group_exit(pgid, Duration::from_secs(2)) {
         return Ok(());
     }
-    let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
+    let _ = path_nix_sys::signal::killpg(pgid, path_nix_sys_signal::Signal::SIGKILL);
     if wait_for_process_group_exit(pgid, Duration::from_secs(2)) {
         return Ok(());
     }
@@ -258,7 +261,7 @@ fn daemon_finish_rejects_a_lingering_process_group_member() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn lingering process group");
-    let pgid = nix::unistd::Pid::from_raw(child.id().try_into().expect("child pid fits i32"));
+    let pgid = path_nix_unistd::Pid::from_raw(child.id().try_into().expect("child pid fits i32"));
     let guard = DaemonGuard {
         child: Some(child),
         completed: false,

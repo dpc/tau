@@ -14,6 +14,10 @@
 //! with [`HarnessOutputMessage::Deliver`]. The typed codec aliases make the
 //! intended direction explicit for both harness-side and peer-side transports.
 
+use std::{io as path_std_io, num as path_std_num};
+
+use serde::de as path_serde_de;
+
 mod context;
 mod diff;
 mod discovery_snapshot;
@@ -401,7 +405,7 @@ impl<'de> serde::Deserialize<'de> for AgentId {
         D: serde::Deserializer<'de>,
     {
         let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-        AgentId::parse(&value).map_err(serde::de::Error::custom)
+        AgentId::parse(&value).map_err(path_serde_de::Error::custom)
     }
 }
 
@@ -698,7 +702,7 @@ impl serde::Serialize for ProviderName {
 impl<'de> serde::Deserialize<'de> for ProviderName {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Self::try_new(s).map_err(serde::de::Error::custom)
+        Self::try_new(s).map_err(path_serde_de::Error::custom)
     }
 }
 
@@ -786,7 +790,7 @@ impl serde::Serialize for ModelName {
 impl<'de> serde::Deserialize<'de> for ModelName {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Self::try_new(s).map_err(serde::de::Error::custom)
+        Self::try_new(s).map_err(path_serde_de::Error::custom)
     }
 }
 
@@ -852,7 +856,7 @@ impl serde::Serialize for ModelId {
 impl<'de> serde::Deserialize<'de> for ModelId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
+        s.parse().map_err(path_serde_de::Error::custom)
     }
 }
 
@@ -927,7 +931,7 @@ impl<'de> serde::Deserialize<'de> for ModelTag {
         if Self::is_valid(&s) {
             Ok(Self(s))
         } else {
-            Err(serde::de::Error::custom(format!(
+            Err(path_serde_de::Error::custom(format!(
                 "invalid model tag: {s:?}"
             )))
         }
@@ -994,7 +998,9 @@ impl<'de> serde::Deserialize<'de> for ToolTag {
         if Self::is_valid(&s) {
             Ok(Self(s))
         } else {
-            Err(serde::de::Error::custom(format!("invalid tool tag: {s:?}")))
+            Err(path_serde_de::Error::custom(format!(
+                "invalid tool tag: {s:?}"
+            )))
         }
     }
 }
@@ -1101,7 +1107,7 @@ impl<'de> serde::Deserialize<'de> for ToolName {
         if Self::is_valid(&s) {
             Ok(Self(s))
         } else {
-            Err(serde::de::Error::custom(format!(
+            Err(path_serde_de::Error::custom(format!(
                 "invalid tool name: {s:?}"
             )))
         }
@@ -1203,7 +1209,7 @@ impl<'de> serde::Deserialize<'de> for ToolGroupName {
         if Self::is_valid(&s) {
             Ok(Self(s))
         } else {
-            Err(serde::de::Error::custom(format!(
+            Err(path_serde_de::Error::custom(format!(
                 "invalid tool group name: {s:?}"
             )))
         }
@@ -1261,7 +1267,7 @@ impl ProtocolMessageBytes {
     /// Construct a nonzero count observed by the protocol codec.
     #[must_use]
     pub const fn new(bytes: u64) -> Option<Self> {
-        match std::num::NonZeroU64::new(bytes) {
+        match path_std_num::NonZeroU64::new(bytes) {
             Some(bytes) => Some(Self { bytes }),
             None => None,
         }
@@ -1329,8 +1335,8 @@ where
     let mut cursor = Cursor::new(bytes);
     let message = decode_message(&mut cursor)?;
     if cursor.position() != bytes.len() as u64 {
-        return Err(DecodeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+        return Err(DecodeError::Io(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
             "trailing bytes after protocol message",
         )));
     }
@@ -1591,7 +1597,7 @@ where
     pub fn read_message_with_size(&mut self) -> Result<Option<DecodedMessage<M>>, DecodeError> {
         // Peek one byte to distinguish clean EOF from a real read; if none is
         // available, the stream is at a message boundary.
-        match std::io::BufRead::fill_buf(&mut self.inner) {
+        match path_std_io::BufRead::fill_buf(&mut self.inner) {
             Ok([]) => return Ok(None),
             Ok(_) => {}
             Err(e) => return Err(DecodeError::Io(e)),
@@ -1601,8 +1607,8 @@ where
         let decoded = ciborium::from_reader(&mut limited);
         let consumed = limit - limited.limit();
         if MAX_PROTOCOL_MESSAGE_BYTES < consumed {
-            return Err(DecodeError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(DecodeError::Io(path_std_io::Error::new(
+                path_std_io::ErrorKind::InvalidData,
                 format!(
                     "protocol message exceeds {} encoded bytes",
                     MAX_PROTOCOL_MESSAGE_BYTES

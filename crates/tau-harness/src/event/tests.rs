@@ -1,4 +1,5 @@
 use std::process::Stdio;
+use std::{net as path_std_net, process as path_std_process};
 
 use super::*;
 
@@ -68,7 +69,7 @@ fn reader_reports_decode_failure_separately_from_clean_disconnect() {
         .write_all(&[0xff])
         .expect("write malformed cbor");
     writer_stream
-        .shutdown(std::net::Shutdown::Write)
+        .shutdown(path_std_net::Shutdown::Write)
         .expect("eof");
 
     assert!(matches!(
@@ -107,7 +108,7 @@ fn process_exists(pid: u32) -> bool {
 /// broken pipes do not leave duplicate extension processes behind.
 #[test]
 fn writer_failure_still_reaps_supervised_child() {
-    let child = std::process::Command::new("sh")
+    let child = path_std_process::Command::new("sh")
         .arg("-c")
         .arg("sleep 30")
         .spawn()
@@ -142,7 +143,7 @@ fn writer_failure_still_reaps_supervised_child() {
 fn graceful_supervised_writer_cleanup_cancels_watchdog() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
     let marker = tempdir.path().join("graceful");
-    let mut child = std::process::Command::new("sh")
+    let mut child = path_std_process::Command::new("sh")
         .arg("-c")
         .arg("cat >/dev/null; printf graceful > \"$1\"")
         .arg("sh")
@@ -181,7 +182,7 @@ fn graceful_supervised_writer_cleanup_cancels_watchdog() {
 /// period.
 #[test]
 fn expired_cleanup_deadline_is_carried_into_child_wait() {
-    let mut child = std::process::Command::new("sh")
+    let mut child = path_std_process::Command::new("sh")
         .arg("-c")
         .arg("exec sleep 30")
         .stdin(Stdio::piped())
@@ -216,7 +217,7 @@ fn expired_cleanup_deadline_is_carried_into_child_wait() {
 /// granting a blocked writer a fresh grace period.
 #[test]
 fn shutdown_watchdog_uses_prearmed_runtime_deadline() {
-    let mut child = std::process::Command::new("sh")
+    let mut child = path_std_process::Command::new("sh")
         .arg("-c")
         .arg("exec sleep 30")
         .stdin(Stdio::piped())

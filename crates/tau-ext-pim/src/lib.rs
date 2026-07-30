@@ -9,6 +9,7 @@ use std::error::Error;
 use std::io::{Read, Write};
 use std::rc::Rc;
 
+use ciborium::value as path_ciborium_value;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tau_proto::{ActionArg, ActionArgKind, ActionChoice, ActionSchema, CborValue, Event};
@@ -246,7 +247,7 @@ fn has_pim_module_keys(config: &CborValue) -> bool {
 /// without keeping that helper crate as a dependency.
 pub(crate) fn parse_config<C: DeserializeOwned>(value: &CborValue) -> Result<C, String> {
     value.deserialized().map_err(|e| match e {
-        ciborium::value::Error::Custom(message) => message,
+        path_ciborium_value::Error::Custom(message) => message,
     })
 }
 

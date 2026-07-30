@@ -1,4 +1,5 @@
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 fn submitted(prompt_id: &str) -> Event {
     Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
@@ -13,7 +14,7 @@ fn prompt_submission_events(
     harness: &Harness,
 ) -> Vec<(Option<tau_proto::ConnectionId>, tau_proto::EventName)> {
     let mut events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = harness.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches!(
@@ -28,7 +29,7 @@ fn prompt_submission_events(
 
 fn committed_events(harness: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = harness.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         events.push((entry.source, entry.event));
@@ -207,7 +208,7 @@ fn pre_ready_provider_execution_report_retains_persistence_envelope() {
         .entries
         .get_mut("provider")
         .expect("provider")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     harness.pending_provider_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
@@ -349,7 +350,7 @@ fn canceled_prompt_still_accepts_owned_cache_diagnostic() {
         )
         .expect("cache report");
 
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     let mut found = false;
     while let Some(entry) = harness.event_log.get_next_from(seq) {
         seq = entry.seq.next();

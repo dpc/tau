@@ -1,3 +1,8 @@
+use std::os::unix as path_std_os_unix;
+use std::{
+    fs as path_std_fs, process as path_std_process, sync as path_std_sync, time as path_std_time,
+};
+
 use super::fs::{
     liveness_cap_consumes_backoff_for_test, registry_generation, registry_waiter_count,
     set_fail_reap_for_test, wait_after_observed_wake_for_test, wait_backoff_delays_for_test,
@@ -176,7 +181,7 @@ fn overlapping_waiter_stays_behind_earlier_overlapping_waiter() {
         )
         .expect("manual lock");
 
-    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    let (first_tx, first_rx) = path_std_sync::mpsc::channel();
     let first = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -191,7 +196,7 @@ fn overlapping_waiter_stays_behind_earlier_overlapping_waiter() {
     });
     wait_until(|| manager.inner.state.lock().expect("state").waiters.len() == 1);
 
-    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let (second_tx, second_rx) = path_std_sync::mpsc::channel();
     let second = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -250,7 +255,7 @@ fn queued_same_owner_manual_waiter_errors_instead_of_duplicate_lock() {
         )
         .expect("blocking manual lock");
 
-    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    let (first_tx, first_rx) = path_std_sync::mpsc::channel();
     let first = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -265,7 +270,7 @@ fn queued_same_owner_manual_waiter_errors_instead_of_duplicate_lock() {
     });
     wait_until(|| manager.inner.state.lock().expect("state").waiters.len() == 1);
 
-    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let (second_tx, second_rx) = path_std_sync::mpsc::channel();
     let second = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -437,8 +442,8 @@ fn canonical_write_lock_dir_follows_chained_final_symlink() {
     std::fs::create_dir_all(&b).expect("mkdir b");
     std::fs::create_dir_all(&c).expect("mkdir c");
     std::fs::write(c.join("target.txt"), "old\n").expect("write target");
-    std::os::unix::fs::symlink("../b/link2", a.join("link1")).expect("link1");
-    std::os::unix::fs::symlink("../c/target.txt", b.join("link2")).expect("link2");
+    path_std_os_unix::fs::symlink("../b/link2", a.join("link1")).expect("link1");
+    path_std_os_unix::fs::symlink("../c/target.txt", b.join("link2")).expect("link2");
 
     let lock_dir = canonical_write_lock_dir(&a.join("link1")).expect("lock dir");
 
@@ -667,7 +672,7 @@ fn active_same_owner_auto_prevents_abandoned_lock_error() {
 
     // The manual lock is old, but it is not abandoned while the owner has a
     // mutating tool running inside it.
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = path_std_sync::mpsc::channel();
     let waiter = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -715,10 +720,10 @@ fn make_manual_lock_stale(manager: &DirLockManager, dir: &str) {
 }
 
 fn wait_until(mut predicate: impl FnMut() -> bool) {
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     while !predicate() {
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::thread::sleep(path_std_time::Duration::from_millis(5));
     }
 }
 
@@ -745,7 +750,7 @@ fn filesystem_lock_manager(state_dir: &Path) -> DirLockManager {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(0o700))
+        std::fs::set_permissions(state_dir, path_std_fs::Permissions::from_mode(0o700))
             .expect("private state dir permissions");
     }
     let manager = DirLockManager::default();
@@ -860,7 +865,7 @@ fn filesystem_backend_release_agent_notifies_queued_only_cancellation() {
     manager_a
         .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
         .expect("manual lock a");
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = path_std_sync::mpsc::channel();
     let waiter = std::thread::spawn({
         let manager_b = manager_b.clone();
         move || {
@@ -904,7 +909,7 @@ fn filesystem_backend_blocked_waiter_does_not_block_later_independent_request() 
         )
         .expect("blocking manual lock");
 
-    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    let (first_tx, first_rx) = path_std_sync::mpsc::channel();
     let first = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -919,7 +924,7 @@ fn filesystem_backend_blocked_waiter_does_not_block_later_independent_request() 
     });
     wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 1);
 
-    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let (second_tx, second_rx) = path_std_sync::mpsc::channel();
     let second = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -973,7 +978,7 @@ fn filesystem_backend_overlapping_waiter_stays_behind_earlier_overlapping_waiter
         )
         .expect("manual lock");
 
-    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    let (first_tx, first_rx) = path_std_sync::mpsc::channel();
     let first = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -988,7 +993,7 @@ fn filesystem_backend_overlapping_waiter_stays_behind_earlier_overlapping_waiter
     });
     wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 1);
 
-    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let (second_tx, second_rx) = path_std_sync::mpsc::channel();
     let second = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -1050,7 +1055,7 @@ fn filesystem_backend_queued_same_owner_manual_waiter_errors_instead_of_duplicat
         )
         .expect("blocking manual lock");
 
-    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    let (first_tx, first_rx) = path_std_sync::mpsc::channel();
     let first = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -1065,7 +1070,7 @@ fn filesystem_backend_queued_same_owner_manual_waiter_errors_instead_of_duplicat
     });
     wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 1);
 
-    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let (second_tx, second_rx) = path_std_sync::mpsc::channel();
     let second = std::thread::spawn({
         let manager = manager.clone();
         move || {
@@ -1165,7 +1170,7 @@ fn filesystem_backend_rejects_insecure_configured_state_dir() {
     use std::os::unix::fs::PermissionsExt;
 
     let tempdir = tempfile::TempDir::new().expect("tempdir");
-    std::fs::set_permissions(tempdir.path(), std::fs::Permissions::from_mode(0o755))
+    std::fs::set_permissions(tempdir.path(), path_std_fs::Permissions::from_mode(0o755))
         .expect("chmod tempdir");
     let manager = DirLockManager::default();
     let error = manager
@@ -1252,7 +1257,7 @@ fn failed_filesystem_reconfigure_preserves_existing_memory_locks() {
         .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
         .expect("memory manual lock");
     let tempdir = tempfile::TempDir::new().expect("tempdir");
-    std::fs::set_permissions(tempdir.path(), std::fs::Permissions::from_mode(0o755))
+    std::fs::set_permissions(tempdir.path(), path_std_fs::Permissions::from_mode(0o755))
         .expect("chmod tempdir");
 
     assert!(
@@ -1504,10 +1509,10 @@ fn filesystem_subprocess_lock_holder_helper() {
     if abort {
         std::process::abort();
     }
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     while !release.exists() {
         assert!(start.elapsed() < std::time::Duration::from_secs(120));
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::thread::sleep(path_std_time::Duration::from_millis(5));
     }
 }
 
@@ -1528,7 +1533,7 @@ fn spawn_lock_holder_for_dir(
     abort: bool,
 ) -> std::process::Child {
     let current_exe = std::env::current_exe().expect("current test binary");
-    let mut command = std::process::Command::new(current_exe);
+    let mut command = path_std_process::Command::new(current_exe);
     command
         .arg("--ignored")
         .arg("--exact")
@@ -1622,7 +1627,7 @@ fn filesystem_backend_preserves_peer_record_on_lease_open_error() {
     let original_permissions = std::fs::metadata(&instances_dir)
         .expect("instances metadata")
         .permissions();
-    std::fs::set_permissions(&instances_dir, std::fs::Permissions::from_mode(0o000))
+    std::fs::set_permissions(&instances_dir, path_std_fs::Permissions::from_mode(0o000))
         .expect("hide instances dir");
     let result = manager.acquire_manual(
         "manual-parent".into(),

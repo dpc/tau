@@ -1,6 +1,7 @@
 //! Contract tests for `SPEC-per-agent-context-declarations-and-readiness`.
 
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 /// Build one per-agent context value with an easily inspected payload.
 fn context(agent_id: &str, value: &str) -> Event {
@@ -34,7 +35,7 @@ fn connect_agent_context_interceptor(h: &mut Harness) {
 
 /// Return whether one source committed an event matching the predicate.
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
@@ -305,7 +306,7 @@ fn parked_registration_blocks_ready_activation() {
         .entries
         .get_mut("context-owner")
         .expect("owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     connect_agent_context_interceptor(&mut h);
 
     h.handle_extension_event(
@@ -374,7 +375,7 @@ fn rollover_releases_stale_context_registration_reservation() {
         .entries
         .get_mut("context-owner")
         .expect("owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     connect_agent_context_interceptor(&mut h);
     h.handle_extension_event(
         "context-owner",
@@ -442,7 +443,7 @@ fn rollover_rejects_already_staged_context_declarations_on_ready() {
         .entries
         .get_mut("context-owner")
         .expect("owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     let agent_id = tau_proto::AgentId::parse("stale-context-agent").expect("agent id");
 
     h.handle_extension_event(
@@ -515,7 +516,7 @@ fn dropped_startup_context_releases_reservation_and_ready() {
         .entries
         .get_mut("context-owner")
         .expect("owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     connect_agent_context_interceptor(&mut h);
 
     h.handle_extension_event_inner(
@@ -570,7 +571,7 @@ fn pre_ready_context_readiness_after_rollover_is_observation_only() {
         .entries
         .get_mut("context-owner")
         .expect("owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     let agent_id = tau_proto::AgentId::parse("replacement-agent").expect("agent id");
     h.handle_extension_event(
         "context-owner",

@@ -3,6 +3,7 @@
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::{collections as path_std_collections, io as path_std_io};
 
 const MAX_AGENTS_FILE_BYTES: u64 = 1024 * 1024;
 
@@ -30,7 +31,7 @@ pub(crate) fn discover_agents_files_from(cwd: &Path) -> Vec<DiscoveredAgentsFile
 pub(crate) fn discover_agents_files_from_roots(
     roots: impl IntoIterator<Item = PathBuf>,
 ) -> Vec<DiscoveredAgentsFile> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = path_std_collections::HashSet::new();
     let mut discovered = Vec::new();
     for dir in roots {
         for candidate in agents_file_candidates(&dir) {
@@ -68,7 +69,7 @@ fn read_agents_file(path: &Path) -> std::io::Result<String> {
     let mut content = String::new();
     limited.read_to_string(&mut content)?;
     if MAX_AGENTS_FILE_BYTES < content.len() as u64 {
-        return Err(std::io::Error::other("AGENTS file exceeds safety cap"));
+        return Err(path_std_io::Error::other("AGENTS file exceeds safety cap"));
     }
     Ok(content)
 }

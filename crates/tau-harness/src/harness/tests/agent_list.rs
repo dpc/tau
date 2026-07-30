@@ -1,4 +1,7 @@
+use std::time as path_std_time;
+
 use super::*;
+use crate::agent as path_crate_agent;
 
 /// Current and historical roster scopes preserve harness lifecycle authority,
 /// expose canonical status only for live agents, and omit it once unavailable.
@@ -27,12 +30,12 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
         .expect("live agent runtime")
         .work_status
         .report_at(
-            crate::agent::WorkStatusReport::new(
+            path_crate_agent::WorkStatusReport::new(
                 tau_proto::AgentWorkStatusPhase::Working,
                 "implement picker status".to_owned(),
             )
             .expect("valid work status"),
-            std::time::Instant::now(),
+            path_std_time::Instant::now(),
             false,
         );
 

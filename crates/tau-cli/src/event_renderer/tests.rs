@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::sync as path_std_sync;
+use std::sync::atomic as path_std_sync_atomic;
 
 use tau_cli_term_raw::Term;
+use tau_config::settings as path_tau_config_settings;
 
 use super::{
     AgentActivity, MessageRenderMode, QUEUED_PROJECTION_WINDOW_BYTES, RoleCompletionDetails,
@@ -371,11 +374,11 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
         tau_cli_term::CompletionData::new(),
         crate::tests::cli_test_theme(),
     );
-    let draft_handle = std::sync::Arc::new((
-        std::sync::Mutex::new(DraftSlot::default()),
-        std::sync::Condvar::new(),
+    let draft_handle = path_std_sync::Arc::new((
+        path_std_sync::Mutex::new(DraftSlot::default()),
+        path_std_sync::Condvar::new(),
     ));
-    let session_id = std::sync::Arc::new(std::sync::Mutex::new(
+    let session_id = path_std_sync::Arc::new(path_std_sync::Mutex::new(
         tau_proto::SessionId::parse("s1").expect("session id"),
     ));
     renderer.set_draft_retargeter(draft_handle.clone(), session_id);
@@ -600,27 +603,27 @@ fn show_messages_modes_map_user_and_agent_messages() {
 
     let cases = [
         (
-            tau_config::settings::ShowMessages::None,
+            path_tau_config_settings::ShowMessages::None,
             MessageRenderMode::Full,
             MessageRenderMode::Hidden,
         ),
         (
-            tau_config::settings::ShowMessages::SelfSummary,
+            path_tau_config_settings::ShowMessages::SelfSummary,
             MessageRenderMode::Full,
             MessageRenderMode::Hidden,
         ),
         (
-            tau_config::settings::ShowMessages::SelfFull,
+            path_tau_config_settings::ShowMessages::SelfFull,
             MessageRenderMode::Full,
             MessageRenderMode::Hidden,
         ),
         (
-            tau_config::settings::ShowMessages::AllSummary,
+            path_tau_config_settings::ShowMessages::AllSummary,
             MessageRenderMode::Full,
             MessageRenderMode::Summary,
         ),
         (
-            tau_config::settings::ShowMessages::AllFull,
+            path_tau_config_settings::ShowMessages::AllFull,
             MessageRenderMode::Full,
             MessageRenderMode::Full,
         ),
@@ -1179,7 +1182,7 @@ fn embedded_tool_continuation_trace_renders_fully_idle() {
         saw_main_active |= renderer.main_agent_is_in_progress_for_test();
         saw_global_active |= renderer
             .agent_in_progress_state()
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(path_std_sync_atomic::Ordering::Relaxed);
     }
 
     let mut watched_renderer = renderer_for_agent_id_tests();

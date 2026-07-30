@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync as path_std_sync;
 
 use tau_proto::SecretValue;
 use tau_swarm_api::{Agent, AgentActivity, AgentNavigationMode};
 use tau_swarm_client::Application;
 use tau_swarm_client_api::v2::BlockerAnswerKind;
 use tau_swarm_client_api::{AnswerBlockerRequest, AnswerBlockerResponse};
+use tokio::sync as path_tokio_sync;
 
 use super::*;
 use crate::application::SwarmApplication;
@@ -213,21 +215,21 @@ async fn blocker_tool_answer_lifecycle_and_deduplication() {
         .and_then(serde_json::Value::as_str)
         .expect("blocker ID")
         .to_owned();
-    let (_prompt_tx, _prompt_rx) = tokio::sync::mpsc::channel(2);
-    let (blocker_tx, mut blockers) = tokio::sync::mpsc::channel(2);
-    let application = std::sync::Arc::new(
+    let (_prompt_tx, _prompt_rx) = path_tokio_sync::mpsc::channel(2);
+    let (blocker_tx, mut blockers) = path_tokio_sync::mpsc::channel(2);
+    let application = path_std_sync::Arc::new(
         SwarmApplication::new(
             tau_swarm_api::SessionIdentity::new(
                 tau_swarm_api::Hostname::new("host"),
                 tau_swarm_api::SessionId::new("session"),
             ),
-            std::sync::Arc::clone(&state.projection),
-            std::sync::Arc::clone(&state.changed),
+            path_std_sync::Arc::clone(&state.projection),
+            path_std_sync::Arc::clone(&state.changed),
             _prompt_tx,
             blocker_tx,
         )
         .with_blocker_history(
-            std::sync::Arc::clone(&state.blocker_history),
+            path_std_sync::Arc::clone(&state.blocker_history),
             4 * 1024 * 1024,
         ),
     );
@@ -239,7 +241,7 @@ async fn blocker_tool_answer_lifecycle_and_deduplication() {
         response: "answer".into(),
     };
     let answer = tokio::spawn({
-        let application = std::sync::Arc::clone(&application);
+        let application = path_std_sync::Arc::clone(&application);
         let request = request.clone();
         async move { application.answer_blocker(request).await }
     });

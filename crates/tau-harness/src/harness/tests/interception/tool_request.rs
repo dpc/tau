@@ -1,4 +1,5 @@
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 /// Internal fixture that immediately backgrounds its routed call.
 struct PeerBackgroundTool;
@@ -101,7 +102,7 @@ fn committed_request_family(
     call_id: &str,
 ) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = harness.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         let matches = match &entry.event {
@@ -591,7 +592,7 @@ fn pre_ready_request_preserves_retained_accounting() {
         .entries
         .get_mut("requester")
         .expect("requester")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     let cid = ensure_test_user_agent(&mut harness);
     let agent_id = durable_agent_id_for_conversation(&harness, &cid);
     let event = request("retained-request", "missing", agent_id);

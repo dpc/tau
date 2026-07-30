@@ -1,6 +1,7 @@
 //! Contract tests for `SPEC-ui-prompt-draft-and-focus-events`.
 
 use super::*;
+use crate::event_log as path_crate_event_log;
 
 /// Build one contentful prompt-draft liveness observation.
 fn draft(text: &str) -> Event {
@@ -25,7 +26,7 @@ fn focus(focused: bool) -> Event {
 
 /// Return whether one source committed a matching event.
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {

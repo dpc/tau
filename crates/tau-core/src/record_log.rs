@@ -1,5 +1,7 @@
 //! Shared helpers for length-prefixed durable record logs.
 
+use std::fs as path_std_fs;
+
 #[cfg(test)]
 mod tests;
 
@@ -366,7 +368,7 @@ where
     T: DeserializeOwned,
     F: FnMut(&T) -> bool,
 {
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = path_std_fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)?;

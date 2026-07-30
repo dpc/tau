@@ -32,16 +32,22 @@
 use std::future::Future;
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
+use std::{io as path_std_io, time as path_std_time};
 
 use futures_util::sink::SinkExt;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::AbortHandle;
+use tokio::time as path_tokio_time;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 use tokio_tungstenite::{WebSocketStream, tungstenite};
+use tungstenite::{
+    error as path_tungstenite_error, handshake as path_tungstenite_handshake,
+    http as path_tungstenite_http, protocol as path_tungstenite_protocol,
+};
 
 use super::{
     CachedResponseAnchor, DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT, ProviderRawEventStream,
@@ -49,9 +55,9 @@ use super::{
     load_provider_stream_cassette_candidates, record_provider_raw_event_after,
     stream_idle_timeout_error,
 };
-use crate::TurnAbort;
 use crate::common::{LlmError, PromptPayload, StreamState};
 use crate::responses::ws_runtime;
+use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 
 /// Beta-feature header value the OpenAI WebSocket endpoint expects.
 /// Dated by the server; will need a bump when OpenAI rolls a new
@@ -361,9 +367,9 @@ impl WsConn {
             EnvelopeExecution {
                 recording_stream,
                 evidence_mode: if request.debug_provider_requests {
-                    crate::attempt_failure::ProviderEvidenceMode::Persistent
+                    path_crate_attempt_failure::ProviderEvidenceMode::Persistent
                 } else {
-                    crate::attempt_failure::ProviderEvidenceMode::LiveOnly
+                    path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly
                 },
                 timeouts: EnvelopeTimeouts {
                     idle: TURN_EVENT_TIMEOUT,
@@ -434,7 +440,7 @@ impl WsConn {
             envelope,
             EnvelopeExecution {
                 recording_stream: None,
-                evidence_mode: crate::attempt_failure::ProviderEvidenceMode::LiveOnly,
+                evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
                 timeouts: EnvelopeTimeouts {
                     idle: response_timeout,
                     absolute: Some(response_timeout),
@@ -473,10 +479,10 @@ impl WsConn {
             .send(WsCommand::SendText(text))
             .map_err(|_| {
                 LlmError::HttpStatus(0, "stream error: ws writer task gone".to_owned()).observed(
-                    crate::attempt_failure::AttemptFailureEvidence::transport(
-                        crate::attempt_failure::TransportPhase::Send,
+                    path_crate_attempt_failure::AttemptFailureEvidence::transport(
+                        path_crate_attempt_failure::TransportPhase::Send,
                         true,
-                        crate::attempt_failure::TransportFailureKind::Send,
+                        path_crate_attempt_failure::TransportFailureKind::Send,
                     ),
                 )
             })?;
@@ -540,10 +546,10 @@ impl WsConn {
                         None,
                     )
                     .observed(
-                        crate::attempt_failure::AttemptFailureEvidence::transport(
-                            crate::attempt_failure::TransportPhase::ResponseStream,
+                        path_crate_attempt_failure::AttemptFailureEvidence::transport(
+                            path_crate_attempt_failure::TransportPhase::ResponseStream,
                             true,
-                            crate::attempt_failure::TransportFailureKind::IdleTimeout,
+                            path_crate_attempt_failure::TransportFailureKind::IdleTimeout,
                         ),
                     ));
                 }
@@ -553,10 +559,10 @@ impl WsConn {
                         "stream error: ws reader task gone".to_owned(),
                     )
                     .observed(
-                        crate::attempt_failure::AttemptFailureEvidence::transport(
-                            crate::attempt_failure::TransportPhase::ResponseStream,
+                        path_crate_attempt_failure::AttemptFailureEvidence::transport(
+                            path_crate_attempt_failure::TransportPhase::ResponseStream,
                             true,
-                            crate::attempt_failure::TransportFailureKind::Read,
+                            path_crate_attempt_failure::TransportFailureKind::Read,
                         ),
                     ));
                 }
@@ -576,10 +582,10 @@ impl WsConn {
                     }
                 }
                 InboundEvent::Closed { termination } => {
-                    let evidence = crate::attempt_failure::AttemptFailureEvidence::transport(
-                        crate::attempt_failure::TransportPhase::ResponseStream,
+                    let evidence = path_crate_attempt_failure::AttemptFailureEvidence::transport(
+                        path_crate_attempt_failure::TransportPhase::ResponseStream,
                         true,
-                        crate::attempt_failure::TransportFailureKind::WebSocketTermination(
+                        path_crate_attempt_failure::TransportFailureKind::WebSocketTermination(
                             termination.clone(),
                         ),
                     );
@@ -588,10 +594,10 @@ impl WsConn {
                 InboundEvent::FrameFailure(frame) => {
                     state.record_transport_response_bytes(frame.response_bytes());
                     on_update(&state);
-                    let evidence = crate::attempt_failure::AttemptFailureEvidence::transport(
-                        crate::attempt_failure::TransportPhase::ResponseStream,
+                    let evidence = path_crate_attempt_failure::AttemptFailureEvidence::transport(
+                        path_crate_attempt_failure::TransportPhase::ResponseStream,
                         true,
-                        crate::attempt_failure::TransportFailureKind::Frame(frame),
+                        path_crate_attempt_failure::TransportFailureKind::Frame(frame),
                     );
                     return Err(LlmError::HttpStatus(
                         0,
@@ -600,8 +606,8 @@ impl WsConn {
                     .observed(evidence));
                 }
                 InboundEvent::Error { kind } => {
-                    let evidence = crate::attempt_failure::AttemptFailureEvidence::transport(
-                        crate::attempt_failure::TransportPhase::ResponseStream,
+                    let evidence = path_crate_attempt_failure::AttemptFailureEvidence::transport(
+                        path_crate_attempt_failure::TransportPhase::ResponseStream,
                         true,
                         kind,
                     );
@@ -657,7 +663,7 @@ fn prewarm_compatible(baseline: &PrewarmBaseline, envelope: &super::WsResponseCr
 async fn connect_with_policy(
     request: Request,
     network: &tau_provider::OutboundNetworkPolicy,
-) -> Result<(SharedStream, tungstenite::handshake::client::Response), tungstenite::Error> {
+) -> Result<(SharedStream, path_tungstenite_handshake::client::Response), tungstenite::Error> {
     let websocket_url = request.uri().to_string();
     let http_url = if let Some(rest) = websocket_url.strip_prefix("wss://") {
         format!("https://{rest}")
@@ -665,7 +671,7 @@ async fn connect_with_policy(
         format!("http://{rest}")
     } else {
         return Err(tungstenite::Error::Url(
-            tungstenite::error::UrlError::UnsupportedUrlScheme,
+            path_tungstenite_error::UrlError::UnsupportedUrlScheme,
         ));
     };
     let key = request
@@ -673,17 +679,19 @@ async fn connect_with_policy(
         .get("sec-websocket-key")
         .cloned()
         .ok_or_else(|| {
-            tungstenite::Error::Protocol(tungstenite::error::ProtocolError::MissingSecWebSocketKey)
+            tungstenite::Error::Protocol(
+                path_tungstenite_error::ProtocolError::MissingSecWebSocketKey,
+            )
         })?;
     let client = network
         .client_for(&websocket_url)
-        .map_err(|error| tungstenite::Error::Io(std::io::Error::other(error)))?;
+        .map_err(|error| tungstenite::Error::Io(path_std_io::Error::other(error)))?;
     let mut outbound = client.get(&http_url).version(reqwest::Version::HTTP_11);
     for (name, value) in request.headers() {
         outbound = outbound.header(name, value);
     }
     let response = outbound.send().await.map_err(|error| {
-        tungstenite::Error::Io(std::io::Error::other(network.reqwest_error(
+        tungstenite::Error::Io(path_std_io::Error::other(network.reqwest_error(
             &websocket_url,
             tau_provider::OutboundPhase::Request,
             &error,
@@ -692,10 +700,10 @@ async fn connect_with_policy(
     let status = response.status();
     if status != reqwest::StatusCode::SWITCHING_PROTOCOLS {
         if let Some(error) = network.proxy_response_error(&websocket_url, status.as_u16()) {
-            return Err(tungstenite::Error::Io(std::io::Error::other(error)));
+            return Err(tungstenite::Error::Io(path_std_io::Error::other(error)));
         }
         return Err(tungstenite::Error::Http(Box::new(
-            tungstenite::http::Response::builder()
+            path_tungstenite_http::Response::builder()
                 .status(status)
                 .body(None)
                 .expect("valid provider status"),
@@ -722,19 +730,20 @@ async fn connect_with_policy(
     let negotiation_absent = !headers.contains_key("sec-websocket-extensions")
         && !headers.contains_key("sec-websocket-protocol");
     if !(upgrade_ok && connection_ok && accept_ok && negotiation_absent) {
-        return Err(tungstenite::Error::Io(std::io::Error::other(
+        return Err(tungstenite::Error::Io(path_std_io::Error::other(
             network.protocol_error(&websocket_url, tau_provider::OutboundPhase::Request),
         )));
     }
     let response_headers = response.headers().clone();
     let upgraded = response.upgrade().await.map_err(|_| {
-        tungstenite::Error::Io(std::io::Error::other(
+        tungstenite::Error::Io(path_std_io::Error::other(
             network.protocol_error(&websocket_url, tau_provider::OutboundPhase::Request),
         ))
     })?;
     let stream =
-        WebSocketStream::from_raw_socket(upgraded, tungstenite::protocol::Role::Client, None).await;
-    let mut handshake = tungstenite::http::Response::builder().status(status);
+        WebSocketStream::from_raw_socket(upgraded, path_tungstenite_protocol::Role::Client, None)
+            .await;
+    let mut handshake = path_tungstenite_http::Response::builder().status(status);
     *handshake
         .headers_mut()
         .expect("response builder exposes headers") = response_headers;
@@ -756,11 +765,13 @@ fn map_connect_wait_error(
         ConnectWaitError::Canceled => LlmError::Canceled,
         ConnectWaitError::Timeout => {
             LlmError::Outbound(network.deadline_error(target, tau_provider::OutboundPhase::Connect))
-                .observed(crate::attempt_failure::AttemptFailureEvidence::transport(
-                    crate::attempt_failure::TransportPhase::PreUpgrade,
-                    false,
-                    crate::attempt_failure::TransportFailureKind::Outbound,
-                ))
+                .observed(
+                    path_crate_attempt_failure::AttemptFailureEvidence::transport(
+                        path_crate_attempt_failure::TransportPhase::PreUpgrade,
+                        false,
+                        path_crate_attempt_failure::TransportFailureKind::Outbound,
+                    ),
+                )
         }
         ConnectWaitError::Connect(error) => map_ws_connect_error(error),
     }
@@ -868,7 +879,7 @@ pub(super) fn run_replay(
             return Ok(state);
         }
     }
-    let now = std::time::Instant::now();
+    let now = path_std_time::Instant::now();
     Err(super::stream_ended_without_terminal_error(
         tau_proto::ProviderBackendTransport::Websocket,
         "vcr-replay",
@@ -915,10 +926,12 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
                     Err(_) => {
                         let response_bytes = text.len();
                         (
-                            InboundEvent::FrameFailure(crate::attempt_failure::FrameFailure::new(
-                                crate::attempt_failure::FrameFailureKind::MalformedText,
-                                response_bytes,
-                            )),
+                            InboundEvent::FrameFailure(
+                                path_crate_attempt_failure::FrameFailure::new(
+                                    path_crate_attempt_failure::FrameFailureKind::MalformedText,
+                                    response_bytes,
+                                ),
+                            ),
                             true,
                         )
                     }
@@ -931,7 +944,7 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
                 );
                 (
                     InboundEvent::Closed {
-                        termination: crate::attempt_failure::WsTermination::CloseFrame {
+                        termination: path_crate_attempt_failure::WsTermination::CloseFrame {
                             code: frame.as_ref().map(|frame| u16::from(frame.code)),
                             reason: frame
                                 .as_ref()
@@ -943,8 +956,8 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
                 )
             }
             Ok(Message::Binary(bytes)) => (
-                InboundEvent::FrameFailure(crate::attempt_failure::FrameFailure::new(
-                    crate::attempt_failure::FrameFailureKind::Binary,
+                InboundEvent::FrameFailure(path_crate_attempt_failure::FrameFailure::new(
+                    path_crate_attempt_failure::FrameFailureKind::Binary,
                     bytes.len(),
                 )),
                 true,
@@ -962,7 +975,7 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
                 let _ = e;
                 (
                     InboundEvent::Error {
-                        kind: crate::attempt_failure::TransportFailureKind::Read,
+                        kind: path_crate_attempt_failure::TransportFailureKind::Read,
                     },
                     true,
                 )
@@ -981,7 +994,7 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
     // a `Closed` so the next `run_turn` call returns a retryable
     // error rather than hanging on `blocking_recv`.
     let _ = tx.send(InboundEvent::Closed {
-        termination: crate::attempt_failure::WsTermination::CleanEof,
+        termination: path_crate_attempt_failure::WsTermination::CleanEof,
     });
 }
 
@@ -1003,7 +1016,7 @@ async fn write_loop(
     // First tick fires immediately by default — skip it. Pinging
     // right after a freshly-completed upgrade burns RTT for no
     // benefit; the upstream's timer just reset.
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.set_missed_tick_behavior(path_tokio_time::MissedTickBehavior::Skip);
     ticker.tick().await;
     loop {
         tokio::select! {
@@ -1102,7 +1115,10 @@ fn map_ws_connect_error(e: tungstenite::Error) -> LlmError {
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| {
-                tau_provider::retry_policy::parse_retry_after(value, std::time::SystemTime::now())
+                tau_provider::retry_policy::parse_retry_after(
+                    value,
+                    path_std_time::SystemTime::now(),
+                )
             });
         let request_id = ["x-request-id", "request-id", "openai-request-id"]
             .into_iter()
@@ -1112,9 +1128,9 @@ fn map_ws_connect_error(e: tungstenite::Error) -> LlmError {
             Some(delay) => LlmError::HttpStatusRetryAfter(code, body, delay),
             None => LlmError::HttpStatus(code, body),
         }
-        .observed(crate::attempt_failure::AttemptFailureEvidence::upgrade(
+        .observed(path_crate_attempt_failure::AttemptFailureEvidence::upgrade(
             request_id,
-            crate::attempt_failure::TransportFailureKind::Upgrade,
+            path_crate_attempt_failure::TransportFailureKind::Upgrade,
         ));
     }
     if let tungstenite::Error::Io(error) = &e
@@ -1123,20 +1139,20 @@ fn map_ws_connect_error(e: tungstenite::Error) -> LlmError {
             .and_then(|source| source.downcast_ref::<tau_provider::OutboundError>())
     {
         return LlmError::Outbound(outbound.clone()).observed(
-            crate::attempt_failure::AttemptFailureEvidence::transport(
-                crate::attempt_failure::TransportPhase::PreUpgrade,
+            path_crate_attempt_failure::AttemptFailureEvidence::transport(
+                path_crate_attempt_failure::TransportPhase::PreUpgrade,
                 false,
-                crate::attempt_failure::TransportFailureKind::Outbound,
+                path_crate_attempt_failure::TransportFailureKind::Outbound,
             ),
         );
     }
     // Network / TLS / protocol — treat as retryable transport.
     let _ = e;
     LlmError::HttpStatus(0, "stream error: websocket connection failed".to_owned()).observed(
-        crate::attempt_failure::AttemptFailureEvidence::transport(
-            crate::attempt_failure::TransportPhase::PreUpgrade,
+        path_crate_attempt_failure::AttemptFailureEvidence::transport(
+            path_crate_attempt_failure::TransportPhase::PreUpgrade,
             false,
-            crate::attempt_failure::TransportFailureKind::Upgrade,
+            path_crate_attempt_failure::TransportFailureKind::Upgrade,
         ),
     )
 }

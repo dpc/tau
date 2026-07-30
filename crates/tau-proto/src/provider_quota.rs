@@ -3,7 +3,7 @@
 //! Quota telemetry is transient current state.  It is deliberately separate
 //! from per-response token usage and provider retry policy.
 
-use std::fmt;
+use std::{collections as path_std_collections, fmt};
 
 use serde::{Deserialize, Serialize};
 
@@ -231,7 +231,7 @@ pub fn validate_provider_quota_state(
     if bindings.len() > MAX_PROVIDER_QUOTA_BINDINGS {
         return Err("too many provider quota bindings");
     }
-    let mut window_keys = std::collections::HashSet::new();
+    let mut window_keys = path_std_collections::HashSet::new();
     for window in windows {
         if window.used_basis_points > 10_000 {
             return Err("provider quota usage exceeds 100 percent");
@@ -251,7 +251,7 @@ pub fn validate_provider_quota_state(
             return Err("provider quota server offset fields must be paired");
         }
     }
-    let mut models = std::collections::HashSet::new();
+    let mut models = path_std_collections::HashSet::new();
     for binding in bindings {
         if &binding.model.provider != provider {
             return Err("provider quota binding uses another provider");
@@ -265,7 +265,7 @@ pub fn validate_provider_quota_state(
         if !models.insert(&binding.model) {
             return Err("duplicate provider quota model binding");
         }
-        let mut limits = std::collections::HashSet::new();
+        let mut limits = path_std_collections::HashSet::new();
         if !binding.limit_ids.iter().all(|limit| limits.insert(limit)) {
             return Err("duplicate pool in provider quota binding");
         }

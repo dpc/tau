@@ -1,3 +1,5 @@
+use std::io as path_std_io;
+
 use tau_proto::{Event, EventName, EventSelector, HarnessInputMessage, HarnessOutputMessage};
 
 use crate::CliError;
@@ -22,7 +24,7 @@ pub(crate) fn request_rendered_value<T>(
     crate::ui_client::send_message(&mut writer, &build_request(request_id.clone()))?;
 
     loop {
-        let Some(message) = reader.read_message().map_err(std::io::Error::other)? else {
+        let Some(message) = reader.read_message().map_err(path_std_io::Error::other)? else {
             return Err(CliError::Participant("daemon disconnected".to_owned()));
         };
         match message {
@@ -60,7 +62,7 @@ fn connect_render_client(
 /// initialization, so previews include the stable extension context surface.
 fn wait_for_preview_session(reader: &mut UiInputReader) -> Result<(), CliError> {
     loop {
-        let Some(message) = reader.read_message().map_err(std::io::Error::other)? else {
+        let Some(message) = reader.read_message().map_err(path_std_io::Error::other)? else {
             return Err(CliError::Participant("daemon disconnected".to_owned()));
         };
         match message {

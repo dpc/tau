@@ -1,5 +1,7 @@
 //! `read` tool: read a file (optionally a line slice).
 
+use std::io as path_std_io;
+
 #[cfg(test)]
 mod tests;
 use std::path::{Path, PathBuf};
@@ -30,7 +32,7 @@ pub(crate) fn read_file(
         .read_file_limited(&path_buf, MAX_READ_FILE_BYTES)
         .map_err(|error| {
             let mut message = error.to_string();
-            if error.kind() == std::io::ErrorKind::NotFound
+            if error.kind() == path_std_io::ErrorKind::NotFound
                 && let Some(suggestion) = near_sibling_path_suggestion(&path_buf, world)
             {
                 message.push_str(&format!("; did you mean `{suggestion}`?"));

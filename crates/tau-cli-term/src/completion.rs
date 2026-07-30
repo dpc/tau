@@ -11,9 +11,9 @@
 //! - [`render_menu_block`] — turns a [`CompletionView`] into a [`StyledBlock`]
 
 use std::collections::HashMap;
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::{collections as path_std_collections, fmt};
 
 use tau_cli_term_raw::{Candidate, CompletionView, Span, StyledBlock, StyledText};
 use tau_term_screen::{display_width, truncate_to_width};
@@ -490,7 +490,7 @@ fn build_cmd_candidates(
     dynamic_commands: &[CommandCompletion],
     prefix: &str,
 ) -> Vec<Candidate> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = path_std_collections::HashSet::new();
     static_commands
         .iter()
         .chain(dynamic_commands)

@@ -2,8 +2,11 @@ use std::collections::VecDeque;
 use std::io::{BufReader, Cursor, Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{
+    collections as path_std_collections, io as path_std_io, net as path_std_net,
+    path as path_std_path, sync as path_std_sync, thread,
+};
 
 use tau_proto::{
     Effort, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
@@ -163,7 +166,7 @@ impl VirtualRetryClock {
             .lock()
             .expect("scheduler sender")
             .as_ref()
-            .and_then(std::sync::Weak::upgrade)
+            .and_then(path_std_sync::Weak::upgrade)
         {
             let (acknowledged, ack) = mpsc::sync_channel(0);
             scheduler
@@ -219,7 +222,7 @@ fn try_decode_frames(bytes: &[u8]) -> Option<Vec<HarnessInputMessage>> {
             Ok(Some(frame)) => frames.push(frame),
             Ok(None) => return Some(frames),
             Err(tau_proto::DecodeError::Io(error))
-                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                if error.kind() == path_std_io::ErrorKind::UnexpectedEof =>
             {
                 return None;
             }
@@ -240,7 +243,7 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
                     instance_name: tau_proto::ExtensionName::parse("test-extension")
                         .expect("test extension name must satisfy the identifier grammar"),
                     state_dir: None,
-                    secrets: std::collections::BTreeMap::new(),
+                    secrets: path_std_collections::BTreeMap::new(),
                 }))
                 .expect("encode initial configure");
         }
@@ -296,7 +299,7 @@ fn session_dir(status: tau_proto::SessionDirStatus) -> tau_proto::HarnessSession
         session_id: "session-1"
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
-        path: std::path::PathBuf::from("/tmp/tau-test-session-1"),
+        path: path_std_path::PathBuf::from("/tmp/tau-test-session-1"),
         status,
     }
 }
@@ -722,7 +725,7 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
         "rotated"
     );
     clock.advance(Duration::from_secs(RESET_BOUNDARY_JITTER_MAX.as_secs() + 1));
-    let completed = std::collections::BTreeSet::from([
+    let completed = path_std_collections::BTreeSet::from([
         "rotated".to_owned(),
         completed_rx
             .recv_timeout(Duration::from_secs(1))
@@ -1953,9 +1956,9 @@ fn prompt_workers_start_concurrently() {
         live_event(11, Event::AgentPromptCreated(first)),
         live_event(12, Event::AgentPromptCreated(second)),
     ]);
-    let started = std::sync::Arc::new((Mutex::new((0_usize, 0_usize)), Condvar::new()));
+    let started = path_std_sync::Arc::new((Mutex::new((0_usize, 0_usize)), Condvar::new()));
     let executor_started = started.clone();
-    let executor: PromptExecutor = std::sync::Arc::new(move |execution| {
+    let executor: PromptExecutor = path_std_sync::Arc::new(move |execution| {
         let agent_prompt_id = execution.job.agent_prompt_id.clone();
         let originator = execution.job.prompt.originator.clone();
         let (lock, cv) = &*executor_started;
@@ -2625,7 +2628,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
     );
 
     clock.advance(Duration::from_secs(RESET_BOUNDARY_JITTER_MAX.as_secs() + 1));
-    let mut released = std::collections::BTreeSet::new();
+    let mut released = path_std_collections::BTreeSet::new();
     while released.len() < 2 {
         released.insert(
             completed_rx
@@ -3737,7 +3740,7 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
         .expect("run provider");
     });
 
-    let mut completed = std::collections::BTreeSet::new();
+    let mut completed = path_std_collections::BTreeSet::new();
     for _ in 0..3 {
         completed.insert(
             finished_rx
@@ -4153,7 +4156,8 @@ fn cold_restart_discards_old_work_and_cooldown() {
 /// executor/runtime as one local deterministic terminal with no reschedule.
 #[test]
 fn real_repetition_failure_finishes_once_without_scheduler_retry() {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind repetition server");
+    let listener =
+        path_std_net::TcpListener::bind(("127.0.0.1", 0)).expect("bind repetition server");
     let address = listener.local_addr().expect("repetition server address");
     let server = thread::spawn(move || {
         let (mut socket, _) = listener.accept().expect("accept repetition request");

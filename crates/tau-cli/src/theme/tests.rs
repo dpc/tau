@@ -1,14 +1,18 @@
+use std::os::unix::net as path_std_os_unix_net;
+
+use tau_config::settings as path_tau_config_settings;
+
 use super::*;
 
 /// The active composer must use the configured hollow prompt-state marker.
 #[test]
 fn active_prompt_uses_composing_marker() {
     let theme = select_theme(
-        &tau_config::settings::TauDirs::default(),
+        &path_tau_config_settings::TauDirs::default(),
         CliTheme::default(),
     )
     .expect("default theme loads");
-    let settings = tau_config::settings::CliSettings::built_in();
+    let settings = path_tau_config_settings::CliSettings::built_in();
 
     let prompt = active_prompt_marker(&theme, &settings.prompt_symbol, None);
 
@@ -238,7 +242,8 @@ fn available_theme_choices_omit_description_for_non_regular_entries() {
     #[cfg(unix)]
     let special_name = {
         let socket = themes.join("socket.json5");
-        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket theme");
+        let _listener =
+            path_std_os_unix_net::UnixListener::bind(&socket).expect("bind socket theme");
         "socket"
     };
     #[cfg(not(unix))]

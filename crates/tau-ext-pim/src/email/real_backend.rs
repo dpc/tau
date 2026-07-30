@@ -1,3 +1,7 @@
+use async_imap::error as path_async_imap_error;
+use lettre::transport as path_lettre_transport;
+use rustls::crypto as path_rustls_crypto;
+
 #[cfg(test)]
 mod tests;
 use std::collections::BTreeMap;
@@ -892,7 +896,7 @@ async fn smtp_auth_xoauth2(
     conn: &mut AsyncSmtpConnection,
     smtp: &ValidatedSmtpConfig,
     access_token: &str,
-) -> Result<(), lettre::transport::smtp::Error> {
+) -> Result<(), path_lettre_transport::smtp::Error> {
     conn.auth(
         &smtp_oauth_mechanisms(),
         &Credentials::new(smtp.login.clone(), access_token.to_owned()),
@@ -988,7 +992,7 @@ async fn read_imap_greeting(client: &mut Client<RealImapStream>) -> Result<(), S
 async fn tls_connect(host: &str, tcp: TcpStream) -> Result<TlsStream<TcpStream>, String> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let provider = rustls::crypto::ring::default_provider();
+    let provider = path_rustls_crypto::ring::default_provider();
     let config = ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
         .map_err(|_| "tls_error: failed to configure TLS versions".to_owned())?
@@ -1372,16 +1376,16 @@ fn clone_outgoing_message(message: &OutgoingMessage) -> OutgoingMessage {
 
 fn imap_error(error: async_imap::error::Error) -> String {
     match error {
-        async_imap::error::Error::No(response) => {
+        path_async_imap_error::Error::No(response) => {
             format!("imap_error: IMAP server rejected the command: {response:?}")
         }
-        async_imap::error::Error::Bad(response) => {
+        path_async_imap_error::Error::Bad(response) => {
             format!("imap_error: IMAP server rejected the command: {response:?}")
         }
-        async_imap::error::Error::ConnectionLost => {
+        path_async_imap_error::Error::ConnectionLost => {
             "network_error: IMAP connection lost".to_owned()
         }
-        async_imap::error::Error::Validate(_) => {
+        path_async_imap_error::Error::Validate(_) => {
             "invalid_input: invalid IMAP command input".to_owned()
         }
         error => format!("network_error: IMAP operation failed: {error}"),

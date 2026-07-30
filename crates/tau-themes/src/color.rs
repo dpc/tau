@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use serde::de as path_serde_de;
+
 /// A terminal color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Color {
@@ -109,7 +111,7 @@ impl<'de> serde::Deserialize<'de> for Color {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Color::parse(&s).map_err(serde::de::Error::custom)
+        Color::parse(&s).map_err(path_serde_de::Error::custom)
     }
 }
 

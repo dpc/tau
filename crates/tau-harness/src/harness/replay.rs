@@ -24,6 +24,8 @@
 //! notifications, tool execution) must skip those frames and react only to
 //! live deliveries.
 
+use std::{cmp as path_std_cmp, collections as path_std_collections};
+
 #[cfg(test)]
 mod tests;
 use tau_core::RouteError;
@@ -227,7 +229,7 @@ impl Harness {
             }
         }
 
-        let mut validated_agent_events = std::collections::HashMap::new();
+        let mut validated_agent_events = path_std_collections::HashMap::new();
         for agent_id in &loaded_agents {
             match self.agent_store.agent_events(agent_id.as_str()) {
                 Ok(events) => {
@@ -522,7 +524,7 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         selectors: &[EventSelector],
     ) {
-        let mut agent_by_conversation = std::collections::HashMap::new();
+        let mut agent_by_conversation = path_std_collections::HashMap::new();
         for (agent_id, conversation_id) in &self.agent_routes {
             agent_by_conversation.insert(conversation_id.clone(), agent_id.clone());
         }
@@ -595,7 +597,7 @@ impl Harness {
             (Event::AgentState(left), Event::AgentState(right)) => {
                 left.agent_id.as_str().cmp(right.agent_id.as_str())
             }
-            _ => std::cmp::Ordering::Equal,
+            _ => path_std_cmp::Ordering::Equal,
         });
         for event in agent_state_events {
             if selector_matches_event(selectors, &event) {

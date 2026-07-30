@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
+use std::{io as path_std_io, net as path_std_net, sync as path_std_sync};
 
 use tau_proto::{
     Configure, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
@@ -12,8 +13,10 @@ use tau_swarm_api::{
 use tau_swarm_client::{Connector, ErrorKind, ExpectedPeer};
 use tau_swarm_client_api::{Credential, CredentialId, Secret};
 use tau_swarm_iroh::{Credentials, Server};
+use tokio::sync as path_tokio_sync;
 
 use super::*;
+use crate::tools as path_crate_tools;
 
 fn resolved_config() -> ResolvedConfig {
     let peer_id = iroh::SecretKey::generate().public().to_string();
@@ -48,7 +51,7 @@ fn bounds_terminal_worker_error() {
 fn scopes_application_incarnation_to_extension_process() {
     let mut running = SwarmRuntime::new();
     let incarnation = running.application_incarnation_id.clone();
-    let commands = Arc::new(tokio::sync::Mutex::new(CommandState::new(8, 1_024)));
+    let commands = Arc::new(path_tokio_sync::Mutex::new(CommandState::new(8, 1_024)));
     running.commands = Some(Arc::clone(&commands));
 
     running.reset_session(Some("first".parse().expect("session ID")));
@@ -218,13 +221,13 @@ fn session_switch_clears_incarnation_state_before_replay() {
             description: "description".into(),
             recommended_answer: None,
             task_id: None,
-            state: crate::tools::BlockerState::Active,
+            state: path_crate_tools::BlockerState::Active,
             answer: None,
             answer_kind: None,
             reason: None,
             reserved_answer_bytes: 0,
         });
-    let (completion, _result) = tokio::sync::oneshot::channel();
+    let (completion, _result) = path_tokio_sync::oneshot::channel();
     state.pending.lock().expect("pending").insert(
         PendingKey {
             agent_id: tau_swarm_api::AgentId::new("agent"),
@@ -375,7 +378,7 @@ fn stats_watches_and_unload_converge_projection() {
 #[test]
 fn canonical_prompt_loopback_requires_exact_identity() {
     let state = SwarmRuntime::new();
-    let (completion, mut result) = tokio::sync::oneshot::channel();
+    let (completion, mut result) = path_tokio_sync::oneshot::channel();
     state.pending.lock().expect("pending").insert(
         PendingKey {
             agent_id: tau_swarm_api::AgentId::new("agent"),
@@ -442,7 +445,7 @@ fn canonical_prompt_loopback_requires_exact_identity() {
     );
     assert_eq!(result.try_recv(), Ok(Ok(())));
 
-    let (completion, mut steered_result) = tokio::sync::oneshot::channel();
+    let (completion, mut steered_result) = path_tokio_sync::oneshot::channel();
     state.pending.lock().expect("pending").insert(
         PendingKey {
             agent_id: tau_swarm_api::AgentId::new("agent"),
@@ -494,7 +497,7 @@ fn runner_subscribes_projection_for_restore_and_live_delivery() {
     let mut output = Vec::new();
     TauExtensionRunner::new(SwarmExtension)
         .run(
-            std::io::Cursor::new(input),
+            path_std_io::Cursor::new(input),
             &mut output,
             SwarmRuntime::new(),
         )
@@ -570,7 +573,7 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
     harness_output
         .set_read_timeout(Some(Duration::from_secs(3)))
         .expect("output deadline");
-    let (runner_done_tx, runner_done_rx) = std::sync::mpsc::channel();
+    let (runner_done_tx, runner_done_rx) = path_std_sync::mpsc::channel();
     let runner = std::thread::spawn(move || {
         let result = TauExtensionRunner::new(SwarmExtension)
             .run(extension_input, extension_output, SwarmRuntime::new())
@@ -722,11 +725,11 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
 
     let output = reader.into_inner();
     output
-        .shutdown(std::net::Shutdown::Both)
+        .shutdown(path_std_net::Shutdown::Both)
         .expect("close output socket");
     let input = writer.into_inner();
     input
-        .shutdown(std::net::Shutdown::Both)
+        .shutdown(path_std_net::Shutdown::Both)
         .expect("close input socket");
     tokio::task::spawn_blocking(move || {
         runner_done_rx

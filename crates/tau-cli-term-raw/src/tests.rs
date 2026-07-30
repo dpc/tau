@@ -1,3 +1,5 @@
+use std::{cell as path_std_cell, io as path_std_io, sync as path_std_sync, time as path_std_time};
+
 use super::*;
 
 /// Helper: builds Cell lines from plain strings.
@@ -126,7 +128,7 @@ fn drop_cleanup_is_skipped_while_external_paused() {
 fn virtual_input_shutdown_wakes_blocked_reader() {
     let buf = SharedBuffer::new();
     let (term, handle, _input_tx) = Term::new_virtual(40, 5, "> ", Box::new(buf), CursorShape::Bar);
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (event_tx, event_rx) = path_std_sync::mpsc::channel();
     thread::spawn(move || {
         let _ = event_tx.send(term.get_next_event());
     });
@@ -134,7 +136,7 @@ fn virtual_input_shutdown_wakes_blocked_reader() {
     handle.request_input_shutdown();
 
     let event = event_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
+        .recv_timeout(path_std_time::Duration::from_secs(2))
         .expect("shutdown should wake the reader promptly")
         .expect("shutdown should surface EOF, not an input error");
     assert!(matches!(event, Event::Eof));
@@ -148,7 +150,7 @@ fn virtual_input_shutdown_wakes_blocked_reader() {
 fn virtual_input_disconnect_eof_is_sticky() {
     let buf = SharedBuffer::new();
     let (term, _handle, input_tx) = Term::new_virtual(40, 5, "> ", Box::new(buf), CursorShape::Bar);
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (event_tx, event_rx) = path_std_sync::mpsc::channel();
     thread::spawn(move || {
         let first = term.get_next_event();
         let second = term.get_next_event();
@@ -157,7 +159,7 @@ fn virtual_input_disconnect_eof_is_sticky() {
     drop(input_tx);
 
     let (first, second) = event_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
+        .recv_timeout(path_std_time::Duration::from_secs(2))
         .expect("closed virtual input should not leave repeated reads blocked");
     let first = first.expect("closed virtual input should return EOF");
     let second = second.expect("closed virtual input should keep returning EOF");
@@ -762,8 +764,8 @@ fn output_transaction_blocks_concurrent_local_output_until_visible_snapshot_rest
     handle.print_output("hidden-base", plain_block("hidden base"));
     let hidden_snapshot = handle.output_snapshot();
 
-    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
-    let (printed_tx, printed_rx) = std::sync::mpsc::channel();
+    let (attempt_tx, attempt_rx) = path_std_sync::mpsc::channel();
+    let (printed_tx, printed_rx) = path_std_sync::mpsc::channel();
     let local_handle = handle.clone();
 
     let worker = handle.with_output_transaction(|| {
@@ -774,7 +776,7 @@ fn output_transaction_blocks_concurrent_local_output_until_visible_snapshot_rest
             printed_tx.send(()).expect("printed signal should send");
         });
         attempt_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+            .recv_timeout(path_std_time::Duration::from_secs(1))
             .expect("local output thread should attempt to print");
         assert!(
             printed_rx
@@ -788,7 +790,7 @@ fn output_transaction_blocks_concurrent_local_output_until_visible_snapshot_rest
     });
 
     printed_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
+        .recv_timeout(path_std_time::Duration::from_secs(1))
         .expect("local output should print after transaction exits");
     worker.join().expect("local output worker should finish");
     let snapshot = handle.output_snapshot();
@@ -1628,7 +1630,7 @@ fn blocked_terminal_sink_keeps_cancel_input_responsive() {
     /// Writer that announces its first write and blocks until released.
     struct BlockingWriter {
         /// Signals that a terminal write reached the sink.
-        entered: std::sync::mpsc::Sender<()>,
+        entered: path_std_sync::mpsc::Sender<()>,
         /// Shared release flag and condition variable for the blocked write.
         release: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     }
@@ -1649,8 +1651,11 @@ fn blocked_terminal_sink_keeps_cancel_input_responsive() {
         }
     }
 
-    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-    let release = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (entered_tx, entered_rx) = path_std_sync::mpsc::channel();
+    let release = path_std_sync::Arc::new((
+        path_std_sync::Mutex::new(false),
+        path_std_sync::Condvar::new(),
+    ));
     let (term, _handle, input_tx) = Term::new_virtual(
         80,
         24,
@@ -1662,7 +1667,7 @@ fn blocked_terminal_sink_keeps_cancel_input_responsive() {
         CursorShape::Bar,
     );
     entered_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
+        .recv_timeout(path_std_time::Duration::from_secs(1))
         .expect("redraw entered blocked sink");
 
     for _ in 0..2 {
@@ -3046,7 +3051,7 @@ fn concurrent_redraw_syncs_all_complete() {
     // Warm up — make sure redraw thread has done its first cycle.
     handle.redraw_sync();
 
-    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let barrier = Arc::new(path_std_sync::Barrier::new(4));
     let threads: Vec<_> = (0..4)
         .map(|_| {
             let h = handle.clone();
@@ -3091,7 +3096,7 @@ impl GatedWriter {
                 write_count: 0,
                 flush_count: 0,
             })),
-            condvar: Arc::new(std::sync::Condvar::new()),
+            condvar: Arc::new(path_std_sync::Condvar::new()),
         }
     }
 
@@ -3185,7 +3190,7 @@ fn full_redraw_queues_without_flushing_mid_frame() {
     };
     let plan = TerminalModel::full_redraw_plan(&layout, 10);
 
-    let mut buffered = std::io::BufWriter::new(writer.clone());
+    let mut buffered = path_std_io::BufWriter::new(writer.clone());
     full_render(
         &mut buffered,
         &mut screen,
@@ -3203,7 +3208,7 @@ fn full_redraw_queues_without_flushing_mid_frame() {
     );
     assert_eq!(writer.flush_count(), 0, "full render should not flush");
 
-    std::io::Write::flush(&mut buffered).expect("flush frame");
+    path_std_io::Write::flush(&mut buffered).expect("flush frame");
     assert_eq!(
         writer.write_count(),
         1,
@@ -3272,7 +3277,7 @@ fn synchronized_update_stops_after_begin_error() {
         fail_begin: true,
         ..RecordingFailureWriter::default()
     };
-    let body_called = std::cell::Cell::new(false);
+    let body_called = path_std_cell::Cell::new(false);
 
     let error = with_synchronized_update(&mut writer, |writer| {
         body_called.set(true);
@@ -5614,7 +5619,7 @@ fn long_history_append_selects_fast_scrolling_frame() {
         &model,
         width,
         height,
-        &std::sync::Condvar::new(),
+        &path_std_sync::Condvar::new(),
     )
     .expect("append should produce a redraw pass");
 
@@ -5665,7 +5670,7 @@ fn history_append_replacing_active_rows_selects_full_frame() {
         &model,
         width,
         height,
-        &std::sync::Condvar::new(),
+        &path_std_sync::Condvar::new(),
     )
     .expect("finalization should produce a redraw pass");
 
@@ -5683,7 +5688,7 @@ fn external_pause_failure_rolls_back_through_resume() {
     let (term, _handle, _input_tx) =
         Term::new_virtual(80, 24, "> ", Box::new(std::io::sink()), CursorShape::Bar);
     let _redraw_guard = RedrawSuppressionGuard::new(&term.handle);
-    let release_called = std::cell::Cell::new(false);
+    let release_called = path_std_cell::Cell::new(false);
 
     let error = term
         .pause_for_external_with_release(|| {
@@ -5703,7 +5708,7 @@ fn external_pause_failure_rolls_back_through_resume() {
 /// before the interval, and admit one exactly at the interval boundary.
 #[test]
 fn stall_warning_limiter_rate_limits_deterministically() {
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     let mut limiter = StallWarningLimiter { last: None };
 
     assert!(limiter.admit(start));

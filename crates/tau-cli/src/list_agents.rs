@@ -1,9 +1,9 @@
 //! Running-session agent roster command and picker projection.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io;
 use std::path::Path;
 use std::time::Duration;
+use std::{io, time as path_std_time};
 
 use tau_proto::{
     GetSessionAgentList, HarnessInputMessage, HarnessOutputMessage, SessionAgentFacts,
@@ -111,7 +111,7 @@ fn request_at_socket_with_timeout_typed(
     scope: SessionAgentListScope,
     timeout: Duration,
 ) -> Result<Vec<SessionAgentListEntry>, CliError> {
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = path_std_time::Instant::now() + timeout;
     let (mut reader, mut writer) =
         crate::ui_client::connect_ui_client_until(socket_path, "tau-list-agents", deadline)?;
     let request_id = crate::ui_client::next_request_id("agent-list");
@@ -124,7 +124,7 @@ fn request_at_socket_with_timeout_typed(
         }),
     )?;
     loop {
-        if std::time::Instant::now() >= deadline {
+        if path_std_time::Instant::now() >= deadline {
             return Err(CliError::Participant(
                 "agent roster request timed out".to_owned(),
             ));

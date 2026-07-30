@@ -28,6 +28,8 @@
 //! streamed line remains plain until it receives a newline or final/static
 //! rendering parses the complete string.
 
+use std::sync as path_std_sync;
+
 use tau_themes::{SpanTree, StyleIdx, StyleName, ThemedText, names};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -441,7 +443,7 @@ fn styled_block_from_runs(
         if osc8_links {
             span.hyperlink = target
                 .and_then(tau_cli_term::sanitize_hyperlink_target)
-                .map(std::sync::Arc::from);
+                .map(path_std_sync::Arc::from);
         }
     }
     let mut block = tau_cli_term::StyledBlock::new(rendered);

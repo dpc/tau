@@ -29,6 +29,7 @@ use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::style::{Attribute, Print, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{self, ClearType};
 
+use crate::style as path_crate_style;
 use crate::style::{
     Align, Cell, Style, StyledBlock, StyledText, is_line_break_grapheme, push_grapheme_cells,
     sanitize_hyperlink_target, visit_styled_graphemes,
@@ -732,17 +733,17 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
 
     let mut content_lines = Vec::new();
     match &block.layout {
-        crate::style::BlockLayout::TwoLineElision(elision) => {
+        path_crate_style::BlockLayout::TwoLineElision(elision) => {
             content_lines.extend(elision.layout(content_width));
         }
-        crate::style::BlockLayout::Priority { line, body } => {
+        path_crate_style::BlockLayout::Priority { line, body } => {
             let priority_layout = line.layout_with_fill(content_width, fill.clone());
             content_lines.push(priority_layout.row);
             if priority_layout.required_items_fit && !body.is_empty() {
                 content_lines.extend(layout_lines().content(body).width(content_width).call());
             }
         }
-        crate::style::BlockLayout::Ordinary => {
+        path_crate_style::BlockLayout::Ordinary => {
             content_lines.extend(
                 layout_lines()
                     .content(&block.content)

@@ -1,5 +1,6 @@
 //! Protocol, replay, roster, and provider-budget oracles for S8.
 
+use std::collections as path_std_collections;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
@@ -95,7 +96,7 @@ pub(super) fn wait_two_idle(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let latest = observer.events.iter().fold(
-            std::collections::BTreeMap::new(),
+            path_std_collections::BTreeMap::new(),
             |mut latest, observed| {
                 if let Event::AgentStatsUpdated(stats) = &observed.event {
                     latest.insert(

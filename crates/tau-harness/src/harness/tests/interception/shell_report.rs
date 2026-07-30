@@ -1,5 +1,11 @@
+use std::num as path_std_num;
+
 use super::*;
 use crate::harness::{PendingUiShellCommand, UiShellRouteId};
+use crate::{
+    debug_log as path_crate_debug_log, event as path_crate_event,
+    event_log as path_crate_event_log, extension as path_crate_extension,
+};
 
 /// Register one configured Tool/Core peer as the only generic shell provider
 /// and route a user-shell command to it.
@@ -10,7 +16,7 @@ fn seed_routed_shell_command(
     ui_command_id: &str,
     include_in_context: bool,
 ) -> (tau_proto::UiShellCommand, UiShellRouteId) {
-    for provider in super::super::super::ui_shell_provider_ids(&harness.registry) {
+    for provider in crate::harness::ui_shell_provider_ids(&harness.registry) {
         harness.registry.unregister_connection(&provider);
     }
     connect_ready_configured_extension(harness, source, source, kind);
@@ -97,7 +103,7 @@ fn finished_report(
 /// in their runtime commit order.
 fn committed_shell_events(harness: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = harness.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches!(
@@ -355,7 +361,7 @@ fn intercepted_route_replacement_cannot_leak_ephemeral_report_to_debug_jsonl() {
         .insert(route_id.clone());
     let debug_dir = tmp.path().join("debug");
     harness.debug_log =
-        Some(crate::debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
+        Some(path_crate_debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
     connect_test_tool(&mut harness, "interceptor");
     harness
         .handle_extension_event(
@@ -387,7 +393,7 @@ fn intercepted_route_replacement_cannot_leak_ephemeral_report_to_debug_jsonl() {
             replacement_secret,
         )))),
     };
-    harness.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    harness.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id("interceptor"),
         tau_proto::HarnessInputMessage::InterceptReply(reply.clone()),
     ));
@@ -438,7 +444,7 @@ fn multi_interceptor_replacements_keep_raw_reply_ephemeral_suppression() {
         .insert(route_id.clone());
     let debug_dir = tmp.path().join("debug");
     harness.debug_log =
-        Some(crate::debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
+        Some(path_crate_debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
     for (interceptor, priority) in [("interceptor-a", 0), ("interceptor-b", 1)] {
         connect_test_tool(&mut harness, interceptor);
         harness
@@ -473,7 +479,7 @@ fn multi_interceptor_replacements_keep_raw_reply_ephemeral_suppression() {
             first_secret,
         )))),
     };
-    harness.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    harness.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id("interceptor-a"),
         tau_proto::HarnessInputMessage::InterceptReply(first_reply.clone()),
     ));
@@ -492,7 +498,7 @@ fn multi_interceptor_replacements_keep_raw_reply_ephemeral_suppression() {
             second_secret,
         )))),
     };
-    harness.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    harness.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id("interceptor-b"),
         tau_proto::HarnessInputMessage::InterceptReply(second_reply.clone()),
     ));
@@ -521,7 +527,7 @@ fn canonical_shell_replacement_target_cannot_suppress_raw_reply_audit() {
         tau_core::AgentPersistenceMode::Ephemeral;
     let debug_dir = tmp.path().join("debug");
     harness.debug_log =
-        Some(crate::debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
+        Some(path_crate_debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
     connect_test_tool(&mut harness, "interceptor");
     harness
         .handle_extension_event(
@@ -555,7 +561,7 @@ fn canonical_shell_replacement_target_cannot_suppress_raw_reply_audit() {
             },
         )))),
     };
-    harness.log_event(&crate::event::HarnessEvent::from_connection_for_test(
+    harness.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id("interceptor"),
         tau_proto::HarnessInputMessage::InterceptReply(reply.clone()),
     ));
@@ -588,7 +594,7 @@ fn pre_ready_shell_report_is_deferred_until_activation() {
         .entries
         .get_mut("shell-owner")
         .expect("shell owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     let report = progress_report(&route_id, command.target_agent_id, "deferred");
     let expected_bytes = Harness::encoded_emit_size(&report, false);
 
@@ -640,7 +646,7 @@ fn pre_ready_shell_report_cannot_bind_after_session_rollover() {
         .entries
         .get_mut("shell-owner")
         .expect("shell owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     harness
         .handle_extension_event(
             "shell-owner",
@@ -716,7 +722,7 @@ fn shell_report_ephemeral_classification_uses_private_route_identity() {
         .insert(route_id.clone());
     harness.pending_ephemeral_ui_shell_canonical_events.insert(
         test_shell_command_id("ephemeral-shell-ui"),
-        std::num::NonZeroUsize::MIN,
+        path_std_num::NonZeroUsize::MIN,
     );
     let report = progress_report(&route_id, None, "private output");
     let canonical = Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
@@ -822,7 +828,7 @@ fn unknown_shell_report_retains_ordinary_debug_audit() {
     );
     let debug_dir = tmp.path().join("debug");
     harness.debug_log =
-        Some(crate::debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
+        Some(path_crate_debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
     let secret = "secret-output-that-must-not-enter-debug";
 
     harness
@@ -862,7 +868,7 @@ fn dropping_canonical_progress_releases_ephemeral_marker() {
     let command_id: tau_proto::ShellCommandId = test_shell_command_id("reusable-ui-id");
     harness
         .pending_ephemeral_ui_shell_canonical_events
-        .insert(command_id.clone(), std::num::NonZeroUsize::MIN);
+        .insert(command_id.clone(), path_std_num::NonZeroUsize::MIN);
     harness.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
@@ -911,7 +917,7 @@ fn parked_progress_and_rollover_terminal_keep_ephemeral_debug_suppression() {
         .insert(route_id.clone());
     let debug_dir = tmp.path().join("debug");
     harness.debug_log =
-        Some(crate::debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
+        Some(path_crate_debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
     connect_test_tool(&mut harness, "interceptor");
     harness
         .handle_extension_event(

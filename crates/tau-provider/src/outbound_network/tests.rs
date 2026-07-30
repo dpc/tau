@@ -1,3 +1,8 @@
+use std::{ffi as path_std_ffi, net as path_std_net, process as path_std_process};
+
+use rustls::pki_types as path_rustls_pki_types;
+use tokio::runtime as path_tokio_runtime;
+
 mod fixture;
 
 use fixture::{
@@ -83,7 +88,7 @@ fn policy_is_immutable_after_startup_capture() {
         format!("http://{}", replacement_proxy.address()),
     );
     let url = "http://unresolvable.invalid/startup-snapshot";
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -155,7 +160,8 @@ fn unrelated_non_utf8_environment_is_ignored() {
         );
         return;
     }
-    let mut command = std::process::Command::new(std::env::current_exe().expect("test executable"));
+    let mut command =
+        path_std_process::Command::new(std::env::current_exe().expect("test executable"));
     command
         .arg("--exact")
         .arg("outbound_network::tests::unrelated_non_utf8_environment_is_ignored")
@@ -163,7 +169,7 @@ fn unrelated_non_utf8_environment_is_ignored() {
         .env(CHILD, "1")
         .env(
             "TAU_TEST_UNRELATED_NON_UTF8",
-            std::ffi::OsString::from_vec(vec![0xff]),
+            path_std_ffi::OsString::from_vec(vec![0xff]),
         );
     for key in [
         "http_proxy",
@@ -248,7 +254,7 @@ fn malformed_no_proxy_fails_closed() {
 fn http_proxy_wire_uses_absolute_form_and_decoded_credentials() {
     use std::io::{Read, Write};
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind proxy");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind proxy");
     let address = listener.local_addr().expect("proxy address");
     let proxy = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("proxy connection");
@@ -271,7 +277,7 @@ fn http_proxy_wire_uses_absolute_form_and_decoded_credentials() {
         "http_proxy",
         &format!("http://user%40corp:s3cr%25t@{address}"),
     )]);
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -312,12 +318,12 @@ fn custom_ca_is_additive_for_https_target() {
         .with_no_client_auth()
         .with_single_cert(
             vec![leaf.der().clone()],
-            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-                leaf_key.serialize_der(),
-            )),
+            path_rustls_pki_types::PrivateKeyDer::Pkcs8(
+                path_rustls_pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+            ),
         )
         .expect("server TLS");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("TLS listener");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("TLS listener");
     let address = listener.local_addr().expect("TLS address");
     let server = std::thread::spawn(move || {
         let (socket, _) = listener.accept().expect("TLS connection");
@@ -339,7 +345,7 @@ fn custom_ca_is_additive_for_https_target() {
     std::fs::write(&path, ca.pem()).expect("write CA");
     let policy = OutboundNetworkPolicy::from_environment(BTreeMap::new(), Some(path));
     let url = format!("https://localhost:{}/", address.port());
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -375,7 +381,7 @@ fn custom_ca_file_is_immutable_after_startup_capture() {
     let policy = OutboundNetworkPolicy::from_environment(BTreeMap::new(), Some(path.clone()));
     std::fs::remove_file(path).expect("remove captured CA file");
     let url = format!("https://localhost:{}/", address.port());
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -404,7 +410,7 @@ fn untrusted_direct_target_tls_is_redacted() {
     let address = server.address();
     let policy = policy(&[]);
     let url = format!("https://localhost:{}/target-tls-canary", address.port());
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -445,7 +451,7 @@ fn selected_proxy_early_close_has_no_direct_fallback() {
     });
     let policy = policy(&[("http_proxy", &format!("http://{}", proxy.address()))]);
     let url = target.http_url("127.0.0.1");
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -478,7 +484,7 @@ fn selected_proxy_dns_failure_has_no_direct_fallback() {
     let client = policy
         .client_for_with_resolver(&url, Arc::clone(&resolver))
         .expect("route-fixed client");
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -516,12 +522,12 @@ fn https_proxy_uses_custom_ca_and_absolute_form() {
         .with_no_client_auth()
         .with_single_cert(
             vec![leaf.der().clone()],
-            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-                leaf_key.serialize_der(),
-            )),
+            path_rustls_pki_types::PrivateKeyDer::Pkcs8(
+                path_rustls_pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+            ),
         )
         .expect("proxy TLS");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
     let address = listener.local_addr().expect("proxy address");
     let proxy = std::thread::spawn(move || {
         let (socket, _) = listener.accept().expect("proxy connection");
@@ -546,7 +552,7 @@ fn https_proxy_uses_custom_ca_and_absolute_form() {
         format!("https://localhost:{}", address.port()),
     )]);
     let policy = OutboundNetworkPolicy::from_environment(environment, Some(path));
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -589,7 +595,7 @@ fn untrusted_https_proxy_tls_has_no_direct_fallback_and_is_redacted() {
         &format!("https://proxy-user:proxy-pass@localhost:{}", address.port()),
     )]);
     let url = target.http_url("127.0.0.1");
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -648,7 +654,7 @@ fn https_target_through_https_proxy_uses_nested_tls_and_scoped_basic_auth() {
     )]);
     let policy = OutboundNetworkPolicy::from_environment(environment, Some(ca_path));
     let url = "https://localhost:4443/nested";
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -715,7 +721,7 @@ fn https_target_through_http_proxy_uses_connect_and_target_tls() {
     )]);
     let policy = OutboundNetworkPolicy::from_environment(environment, Some(ca_path));
     let url = "https://localhost:4442/through-http-proxy";
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
@@ -799,13 +805,13 @@ fn named_non_utf8_environment_values_fail_closed() {
         "TAU_PROVIDER_CA_BUNDLE",
     ] {
         let mut command =
-            std::process::Command::new(std::env::current_exe().expect("test executable"));
+            path_std_process::Command::new(std::env::current_exe().expect("test executable"));
         command
             .arg("--exact")
             .arg("outbound_network::tests::named_non_utf8_environment_values_fail_closed")
             .arg("--nocapture")
             .env(CHILD, name)
-            .env(name, std::ffi::OsString::from_vec(vec![0xff]));
+            .env(name, path_std_ffi::OsString::from_vec(vec![0xff]));
         for key in [
             "http_proxy",
             "HTTP_PROXY",

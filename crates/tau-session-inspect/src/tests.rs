@@ -1,5 +1,7 @@
 use std::io::Write as _;
+use std::{collections as path_std_collections, fs as path_std_fs, io as path_std_io};
 
+use opentelemetry_proto::tonic::collector::trace as path_opentelemetry_proto_tonic_collector_trace;
 use tau_proto::{
     AgentId, ContextRole, Event, MessageItem, SessionAgentLoaded, SessionId, ToolType,
 };
@@ -16,7 +18,10 @@ fn export_trace(
     let mut bytes = Vec::new();
     prepared.copy_to(&mut bytes)?;
     String::from_utf8(bytes).map_err(|error| {
-        InspectError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        InspectError::Io(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            error,
+        ))
     })
 }
 
@@ -581,7 +586,8 @@ fn agent_trace_descendants_ignore_unrelated_legacy_creation_record() {
     );
     let legacy_dir = temp.path().join("agent-unrelated-legacy");
     std::fs::create_dir(&legacy_dir).expect("legacy agent directory");
-    let mut legacy = std::fs::File::create(legacy_dir.join("events.cbor")).expect("legacy journal");
+    let mut legacy =
+        path_std_fs::File::create(legacy_dir.join("events.cbor")).expect("legacy journal");
     legacy
         .write_all(&1_u64.to_le_bytes())
         .and_then(|()| legacy.write_all(&[0xa0]))
@@ -627,7 +633,7 @@ fn agent_trace_descendants_reject_reachable_corrupt_journal() {
         None,
         11,
     );
-    std::fs::OpenOptions::new()
+    path_std_fs::OpenOptions::new()
         .append(true)
         .open(temp.path().join("agent-child/events.cbor"))
         .expect("reachable journal")
@@ -716,7 +722,7 @@ fn otlp_agent_trace_is_one_lossy_request_with_raw_events() {
         AgentTraceFormat::OtlpJson,
     )
     .expect("OTLP export");
-    let _: opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest =
+    let _: path_opentelemetry_proto_tonic_collector_trace::v1::ExportTraceServiceRequest =
         serde_json::from_str(&output).expect("standard OTLP protobuf JSON");
     let request: serde_json::Value = serde_json::from_str(&output).expect("one OTLP request");
     let spans = request["resourceSpans"][0]["scopeSpans"][0]["spans"]
@@ -1044,7 +1050,7 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
     assert_eq!(accounted["prompt_cached_tokens"], 1_000);
     assert_eq!(accounted["response_received_tokens"], 25);
     assert_eq!(accounted["estimated_api_cost_picodollars"], 987_654_321);
-    let allowed = std::collections::BTreeSet::from([
+    let allowed = path_std_collections::BTreeSet::from([
         "record_type",
         "agent_id",
         "agent_prompt_id",
@@ -1096,7 +1102,7 @@ fn agent_performance_is_content_free_exact_and_per_agent() {
     assert_eq!(root_summary["cost_reported_occurrences"], 2);
     assert_eq!(root_summary["cost_missing_occurrences"], 1);
     assert_eq!(root_summary["cache_hit_ratio_ppm"], 1_000_000);
-    let summary_allowed = std::collections::BTreeSet::from([
+    let summary_allowed = path_std_collections::BTreeSet::from([
         "record_type",
         "agent_id",
         "provider_prompt_occurrences",
@@ -1273,7 +1279,7 @@ fn agent_trace_failures_produce_no_prepared_output() {
     drop(active_store);
 
     let path = temp.path().join(active_id.as_str()).join("events.cbor");
-    std::fs::OpenOptions::new()
+    path_std_fs::OpenOptions::new()
         .append(true)
         .open(path)
         .expect("journal")

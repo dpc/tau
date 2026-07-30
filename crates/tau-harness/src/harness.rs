@@ -4,16 +4,20 @@
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::io;
 use std::num::NonZeroUsize;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Mutex, atomic as path_std_sync_atomic};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    borrow as path_std_borrow, cmp as path_std_cmp, collections as path_std_collections,
+    io as path_std_io, io, sync as path_std_sync,
+};
 
 use rand::rngs::StdRng;
 use rand::{RngCore as _, SeedableRng as _};
+use tau_config::settings as path_tau_config_settings;
 use tau_core::{
     ActionRegistry, AgentStore, Connection, ConnectionOrigin, EventBus, NodeId,
     PendingConnectionMetadata, RouteError, SessionStore, ToolRegistry, ToolRouteError,
@@ -33,6 +37,13 @@ use tau_proto::{
     ToolDefinition, ToolError, ToolName, ToolRegister, ToolRegistrationDeclared, ToolRejected,
     ToolRequest, ToolResult, ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget,
     nearest_name_suggestion,
+};
+
+#[cfg(test)]
+use crate::event_log as path_crate_event_log;
+use crate::{
+    agent as path_crate_agent, extension as path_crate_extension, harness as path_crate_harness,
+    prompt as path_crate_prompt,
 };
 
 /// Harness-owned validated quota state for one provider extension route.
@@ -1568,9 +1579,9 @@ fn skill_file_modified_time(path: &Path) -> Option<SystemTime> {
 fn compare_skill_modified(a: Option<SystemTime>, b: Option<SystemTime>) -> std::cmp::Ordering {
     match (a, b) {
         (Some(a), Some(b)) => a.cmp(&b),
-        (Some(_), None) => std::cmp::Ordering::Greater,
-        (None, Some(_)) => std::cmp::Ordering::Less,
-        (None, None) => std::cmp::Ordering::Equal,
+        (Some(_), None) => path_std_cmp::Ordering::Greater,
+        (None, Some(_)) => path_std_cmp::Ordering::Less,
+        (None, None) => path_std_cmp::Ordering::Equal,
     }
 }
 
@@ -1596,7 +1607,7 @@ fn render_built_in_self_knowledge_content(
 }
 
 fn render_self_knowledge_config_content() -> std::borrow::Cow<'static, str> {
-    std::borrow::Cow::Owned(format!(
+    path_std_borrow::Cow::Owned(format!(
         include_str!("../../tau-skills/self-knowledge/tau-self-knowledge-config.md"),
         XDG_RUNTIME_DIR = "{XDG_RUNTIME_DIR}",
         harness_config = SELF_KNOWLEDGE_HARNESS_CONFIG,
@@ -1605,7 +1616,7 @@ fn render_self_knowledge_config_content() -> std::borrow::Cow<'static, str> {
 }
 
 fn render_self_knowledge_pim_content() -> std::borrow::Cow<'static, str> {
-    std::borrow::Cow::Owned(format!(
+    path_std_borrow::Cow::Owned(format!(
         include_str!("../../tau-skills/self-knowledge/tau-self-knowledge-ext-pim.md"),
         pim_config = SELF_KNOWLEDGE_PIM_CONFIG,
     ))
@@ -1615,7 +1626,7 @@ fn render_self_knowledge_content(
     content: std::borrow::Cow<'static, str>,
 ) -> std::borrow::Cow<'static, str> {
     let last_modified = crate::version::build_last_modified().unwrap_or_else(|| "unknown".into());
-    std::borrow::Cow::Owned(
+    path_std_borrow::Cow::Owned(
         content
             .replace(SELF_KNOWLEDGE_VERSION_TOKEN, env!("CARGO_PKG_VERSION"))
             .replace(SELF_KNOWLEDGE_HASH_TOKEN, &crate::version::build_revision())
@@ -1739,7 +1750,7 @@ pub(crate) const HARNESS_CONNECTION_ID: &str = "__harness__";
 
 /// Returns the validated identifier for the harness-owned connection.
 pub(crate) fn harness_connection_id() -> &'static tau_proto::ConnectionId {
-    static ID: std::sync::OnceLock<tau_proto::ConnectionId> = std::sync::OnceLock::new();
+    static ID: std::sync::OnceLock<tau_proto::ConnectionId> = path_std_sync::OnceLock::new();
     ID.get_or_init(|| {
         tau_proto::ConnectionId::parse(HARNESS_CONNECTION_ID)
             .expect("the harness connection id must satisfy the connection identifier grammar")
@@ -1748,7 +1759,7 @@ pub(crate) fn harness_connection_id() -> &'static tau_proto::ConnectionId {
 
 /// Returns the validated extension identity for harness-owned originators.
 pub(crate) fn harness_extension_name() -> &'static tau_proto::ExtensionName {
-    static NAME: std::sync::OnceLock<tau_proto::ExtensionName> = std::sync::OnceLock::new();
+    static NAME: std::sync::OnceLock<tau_proto::ExtensionName> = path_std_sync::OnceLock::new();
     NAME.get_or_init(|| {
         tau_proto::ExtensionName::parse(HARNESS_CONNECTION_ID)
             .expect("the harness name must satisfy the extension identifier grammar")
@@ -1824,8 +1835,8 @@ struct PendingRetryPrompt {
 /// Mint a process-unique provider-stage token that cannot collide with a UI's
 /// replayable correlation namespace.
 fn next_provider_retry_token() -> tau_proto::RetryPromptRequestId {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let value = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    static NEXT: path_std_sync::atomic::AtomicU64 = path_std_sync_atomic::AtomicU64::new(0);
+    let value = NEXT.fetch_add(1, path_std_sync_atomic::Ordering::Relaxed);
     tau_proto::RetryPromptRequestId::parse(format!("harness-retry-{value}"))
         .expect("harness retry token is valid")
 }
@@ -2186,7 +2197,7 @@ pub struct Harness {
     pending_terminal_observations: HashMap<ToolCallId, PendingTerminalObservation>,
     /// Wait settlements held until their canonical wait terminal commits.
     pending_wait_settlements:
-        HashMap<ToolCallId, crate::harness::subagents_tool::PendingWaitSettlement>,
+        HashMap<ToolCallId, path_crate_harness::subagents_tool::PendingWaitSettlement>,
     /// Background completion prompt policy retained until its canonical
     /// terminal commits.
     pending_background_completion_modes: HashMap<ToolCallId, BackgroundCompletionPromptMode>,
@@ -2270,10 +2281,10 @@ pub struct Harness {
     /// Auto-started endpoints that have not committed their first peer input.
     pub(crate) uncommitted_peer_auto_starts: HashSet<tau_proto::AgentId>,
     /// Weak cancellation handles for peer I/O tied to the active session.
-    pub(crate) peer_io_cancellations: Vec<std::sync::Weak<std::sync::atomic::AtomicBool>>,
+    pub(crate) peer_io_cancellations: Vec<std::sync::Weak<path_std_sync::atomic::AtomicBool>>,
     /// Inbound callback jobs grouped by the socket whose request owns them.
     pub(crate) inbound_peer_io_cancellations:
-        HashMap<tau_proto::ConnectionId, Vec<std::sync::Weak<std::sync::atomic::AtomicBool>>>,
+        HashMap<tau_proto::ConnectionId, Vec<std::sync::Weak<path_std_sync::atomic::AtomicBool>>>,
     /// A UI sent `:detach` while the harness was still in startup gating.
     /// The main event loop consumes this to preserve detach semantics after
     /// startup completes.
@@ -5261,7 +5272,7 @@ impl Harness {
             self.agents
                 .get(cid)
                 .and_then(|agent| match &agent.activation_dispatch {
-                    crate::agent::ActivationDispatchState::Running {
+                    path_crate_agent::ActivationDispatchState::Running {
                         id,
                         cut,
                         resume_through,
@@ -5359,7 +5370,7 @@ impl Harness {
         let owner_matches = match (continuation.started.operation, &agent.activation_dispatch) {
             (
                 tau_proto::PromptOperation::Inference,
-                crate::agent::ActivationDispatchState::DispatchUncertain {
+                path_crate_agent::ActivationDispatchState::DispatchUncertain {
                     agent_prompt_id,
                     model,
                     operation,
@@ -5372,7 +5383,7 @@ impl Harness {
             }
             (
                 tau_proto::PromptOperation::StandaloneCompaction,
-                crate::agent::ActivationDispatchState::Running {
+                path_crate_agent::ActivationDispatchState::Running {
                     compact_prompt_id,
                     model,
                     ..
@@ -5595,7 +5606,7 @@ impl Harness {
             agent
                 .pending_message_wakes
                 .push_back(crate::agent::PendingMessageWake {
-                    source: crate::agent::PendingMessageWakeSource::MessageFact {
+                    source: path_crate_agent::PendingMessageWakeSource::MessageFact {
                         durable_event_seq: outcome.seq,
                     },
                     node_id: outcome.folded_node_id,
@@ -6136,7 +6147,7 @@ impl Harness {
         {
             return false;
         }
-        let crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+        let path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
             owner,
             agent_prompt_id,
             through,
@@ -6261,18 +6272,19 @@ impl Harness {
         };
         if let Some(agent) = self.agents.get_mut(cid) {
             agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
-            agent.activation_dispatch = crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-                owner: crate::agent::InferenceCheckpointOwner::Standalone {
-                    id: transaction_id.clone(),
-                },
-                agent_prompt_id: agent_prompt_id.clone(),
-                through,
-                dispatch: crate::agent::InferenceDispatchOwnership {
-                    model: model.clone(),
-                    operation: tau_proto::PromptOperation::Inference,
-                    activation_cut,
-                },
-            };
+            agent.activation_dispatch =
+                path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+                    owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
+                        id: transaction_id.clone(),
+                    },
+                    agent_prompt_id: agent_prompt_id.clone(),
+                    through,
+                    dispatch: crate::agent::InferenceDispatchOwnership {
+                        model: model.clone(),
+                        operation: tau_proto::PromptOperation::Inference,
+                        activation_cut,
+                    },
+                };
         }
         self.enqueued_standalone_inference_checkpoints
             .insert((agent_id.clone(), transaction_id.clone()));
@@ -6471,9 +6483,9 @@ impl Harness {
     fn retry_standalone_inference_checkpoint(&mut self, cid: &AgentId) {
         let Some((agent_id, transaction_id, agent_prompt_id, through, dispatch)) =
             self.agents.get(cid).and_then(|agent| {
-                let crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+                let path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
                     owner:
-                        crate::agent::InferenceCheckpointOwner::Standalone { id: transaction_id },
+                        path_crate_agent::InferenceCheckpointOwner::Standalone { id: transaction_id },
                     agent_prompt_id,
                     through,
                     dispatch,
@@ -6553,7 +6565,7 @@ impl Harness {
             return;
         }
         if let Some(agent) = self.agents.get_mut(&cid) {
-            agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+            agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
         }
         self.discard_finished_response_prompt_tracking(&started.agent_prompt_id);
         self.set_agent_turn_state(&cid, AgentTurnState::Idle);
@@ -7075,14 +7087,15 @@ impl Harness {
                     self.acknowledge_deferred_activations_through(&cid, resume_through);
                 }
                 if let Some(agent) = self.agents.get_mut(&cid) {
-                    agent.activation_dispatch = crate::agent::ActivationDispatchState::Running {
-                        id: started.transaction_id.clone(),
-                        cut: started.cut,
-                        resume_through: started.resume_through,
-                        model: started.model.clone(),
-                        branch_generation: agent.branch_generation,
-                        compact_prompt_id: started.compact_prompt_id.clone(),
-                    };
+                    agent.activation_dispatch =
+                        path_crate_agent::ActivationDispatchState::Running {
+                            id: started.transaction_id.clone(),
+                            cut: started.cut,
+                            resume_through: started.resume_through,
+                            model: started.model.clone(),
+                            branch_generation: agent.branch_generation,
+                            compact_prompt_id: started.compact_prompt_id.clone(),
+                        };
                     agent.in_flight_prompt = Some(started.compact_prompt_id.clone());
                 }
                 self.set_agent_turn_state(
@@ -7213,23 +7226,23 @@ impl Harness {
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
         {
-            let failed_prompt_id = self.agents.get(&cid).and_then(|agent| {
-                agent
-                    .in_flight_prompt
-                    .clone()
-                    .or_else(|| match &agent.activation_dispatch {
-                        crate::agent::ActivationDispatchState::ContextRecoveryClaimPending {
+            let failed_prompt_id =
+                self.agents.get(&cid).and_then(|agent| {
+                    agent.in_flight_prompt.clone().or_else(|| {
+                        match &agent.activation_dispatch {
+                        path_crate_agent::ActivationDispatchState::ContextRecoveryClaimPending {
                             checkpoint,
                             ..
                         } => Some(checkpoint.agent_prompt_id.clone()),
                         _ => None,
+                    }
                     })
-            });
+                });
             let suppress_provider_watch = failed_prompt_id
                 .as_ref()
                 .is_some_and(|prompt_id| self.silent_compaction_failure_prompts.remove(prompt_id));
             if let Some(agent) = self.agents.get_mut(&cid) {
-                agent.activation_dispatch = crate::agent::ActivationDispatchState::Blocked {
+                agent.activation_dispatch = path_crate_agent::ActivationDispatchState::Blocked {
                     failed_id: failed.transaction_id.clone(),
                     cut: failed.cut,
                     resume_through: failed.resume_through,
@@ -7267,7 +7280,7 @@ impl Harness {
             if has_terminal_continuation {
                 self.fold_pending_prompts_as_steered(&cid);
                 if let Some(agent) = self.agents.get_mut(&cid) {
-                    agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+                    agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
                 }
                 self.dispatch_prompt_after_publish_idle(&cid);
             }
@@ -7346,7 +7359,7 @@ impl Harness {
                 .agents
                 .get(&cid)
                 .and_then(|agent| match &agent.activation_dispatch {
-                    crate::agent::ActivationDispatchState::Running {
+                    path_crate_agent::ActivationDispatchState::Running {
                         id,
                         cut,
                         resume_through,
@@ -7398,7 +7411,7 @@ impl Harness {
             } else {
                 self.set_agent_turn_state(&cid, AgentTurnState::Idle);
                 if let Some(agent) = self.agents.get_mut(&cid) {
-                    agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+                    agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
                 }
                 self.try_advance_queue();
             }
@@ -7434,8 +7447,9 @@ impl Harness {
                 self.acknowledge_message_wakes_through(&cid, started.through);
                 if let Some(agent) = self.agents.get_mut(&cid) {
                     let owner = match &agent.activation_dispatch {
-                        crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-                            owner, ..
+                        path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+                            owner,
+                            ..
                         } => owner.clone(),
                         _ => unreachable!("matched awaiting checkpoint"),
                     };
@@ -7446,7 +7460,7 @@ impl Harness {
                         "inference checkpoint committed"
                     );
                     agent.activation_dispatch =
-                        crate::agent::ActivationDispatchState::DispatchUncertain {
+                        path_crate_agent::ActivationDispatchState::DispatchUncertain {
                             owner,
                             agent_prompt_id: started.agent_prompt_id.clone(),
                             through: started.through,
@@ -7470,7 +7484,7 @@ impl Harness {
             })
         {
             if let Some(agent) = self.agents.get_mut(&cid) {
-                agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+                agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
             }
             let local_route_failure = self
                 .local_route_failure_prompts
@@ -7665,7 +7679,8 @@ impl Harness {
             let Some(activation_class) = agent_message_activation_class(message) else {
                 return;
             };
-            if activation_class == crate::agent::AgentMessageActivationClass::OrdinaryAgentInput {
+            if activation_class == path_crate_agent::AgentMessageActivationClass::OrdinaryAgentInput
+            {
                 self.promote_lifecycle_notification_turn(&cid);
             }
             let activation = tau_proto::ObservationId::random();
@@ -7683,7 +7698,7 @@ impl Harness {
                 agent
                     .pending_message_wakes
                     .push_back(crate::agent::PendingMessageWake {
-                        source: crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                        source: path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
                             durable_event_seq: outcome.seq,
                             activation_class,
                             peer_admission_bytes,
@@ -7694,10 +7709,10 @@ impl Harness {
                     });
             }
             let kind = match activation_class {
-                crate::agent::AgentMessageActivationClass::OrdinaryAgentInput => {
+                path_crate_agent::AgentMessageActivationClass::OrdinaryAgentInput => {
                     tau_proto::ActivationKind::AgentMessage
                 }
-                crate::agent::AgentMessageActivationClass::IsolatedWatchNotification => {
+                path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification => {
                     tau_proto::ActivationKind::WatchNotification
                 }
             };
@@ -7733,7 +7748,7 @@ impl Harness {
             pending
                 .pending_agent_message_wakes
                 .push_back(crate::agent::PendingMessageWake {
-                    source: crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                    source: path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
                         durable_event_seq: outcome.seq,
                         activation_class,
                         peer_admission_bytes,
@@ -7950,14 +7965,14 @@ impl Harness {
             })
             .map(|wake| wake.source.activation_class());
         let first = classes.next()?;
-        if first == crate::agent::AgentMessageActivationClass::IsolatedWatchNotification
+        if first == path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification
             && classes.all(|class| {
-                class == crate::agent::AgentMessageActivationClass::IsolatedWatchNotification
+                class == path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification
             })
         {
-            Some(crate::agent::AgentMessageActivationClass::IsolatedWatchNotification)
+            Some(path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification)
         } else {
-            Some(crate::agent::AgentMessageActivationClass::OrdinaryAgentInput)
+            Some(path_crate_agent::AgentMessageActivationClass::OrdinaryAgentInput)
         }
     }
 
@@ -8543,7 +8558,7 @@ impl Harness {
 
     fn enable_debug_log(&mut self, dir: &Path) -> Result<PathBuf, HarnessError> {
         if self.debug_log_poisoned {
-            return Err(std::io::Error::other(
+            return Err(path_std_io::Error::other(
                 "debug JSONL append disabled after an incomplete rollback",
             )
             .into());
@@ -10228,29 +10243,29 @@ impl Harness {
         {
             return;
         }
-        let pending = self
-            .agents
-            .iter()
-            .filter_map(|(cid, agent)| match &agent.activation_dispatch {
-                crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-                    owner:
-                        crate::agent::InferenceCheckpointOwner::Standalone {
-                            id: transaction_id,
-                        },
-                    agent_prompt_id,
-                    through,
-                    dispatch,
-                } => Some(RestoredCompactionCheckpoint {
-                    cid: cid.clone(),
-                    agent_id: crate::parse_agent_id(agent.agent_id.as_deref()?),
-                    transaction_id: transaction_id.clone(),
-                    agent_prompt_id: agent_prompt_id.clone(),
-                    through: *through,
-                    dispatch: dispatch.clone(),
-                }),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let pending =
+            self.agents
+                .iter()
+                .filter_map(|(cid, agent)| match &agent.activation_dispatch {
+                    path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+                        owner:
+                            path_crate_agent::InferenceCheckpointOwner::Standalone {
+                                id: transaction_id,
+                            },
+                        agent_prompt_id,
+                        through,
+                        dispatch,
+                    } => Some(RestoredCompactionCheckpoint {
+                        cid: cid.clone(),
+                        agent_id: crate::parse_agent_id(agent.agent_id.as_deref()?),
+                        transaction_id: transaction_id.clone(),
+                        agent_prompt_id: agent_prompt_id.clone(),
+                        through: *through,
+                        dispatch: dispatch.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
         for checkpoint in pending {
             let model = &checkpoint.dispatch.model;
             let absence_is_authoritative = all_absence_is_authoritative
@@ -10878,11 +10893,11 @@ impl Harness {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
                 let Some(next) = self.len.checked_add(bytes.len()) else {
                     self.exceeded = true;
-                    return Err(std::io::Error::other("activation frame exceeds quota"));
+                    return Err(path_std_io::Error::other("activation frame exceeds quota"));
                 };
                 if self.limit < next {
                     self.exceeded = true;
-                    return Err(std::io::Error::other("activation frame exceeds quota"));
+                    return Err(path_std_io::Error::other("activation frame exceeds quota"));
                 }
                 self.len = next;
                 Ok(bytes.len())
@@ -14563,7 +14578,7 @@ impl Harness {
         let mut prompt =
             PendingPrompt::internal(request.text.clone()).with_ctx_id(request.ctx_id.clone());
         if request.activation_kind == Some(tau_proto::InternalPromptActivationKind::Timer) {
-            prompt.source = crate::agent::PendingPromptSource::Timer;
+            prompt.source = path_crate_agent::PendingPromptSource::Timer;
         }
         self.submit_prompt_to_agent(session_id, &agent_id, prompt)?;
         Ok(())
@@ -15239,7 +15254,7 @@ impl Harness {
             .agents
             .get(cid)
             .and_then(|agent| match &agent.activation_dispatch {
-                crate::agent::ActivationDispatchState::ContextRecoveryClaimPending {
+                path_crate_agent::ActivationDispatchState::ContextRecoveryClaimPending {
                     checkpoint,
                     transaction_id,
                 } => Some((
@@ -15396,7 +15411,7 @@ impl Harness {
                     ..
                 } if agent_prompt_id == &canceled_prompt_id
             ) {
-                conv.activation_dispatch = crate::agent::ActivationDispatchState::None;
+                conv.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
             }
         }
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
@@ -15409,7 +15424,7 @@ impl Harness {
             .agents
             .get(cid)
             .and_then(|conv| match &conv.activation_dispatch {
-                crate::agent::ActivationDispatchState::Running {
+                path_crate_agent::ActivationDispatchState::Running {
                     id,
                     cut,
                     resume_through,
@@ -15581,7 +15596,7 @@ impl Harness {
                 self.agents
                     .get(&target_cid)
                     .and_then(|agent| match &agent.activation_dispatch {
-                        crate::agent::ActivationDispatchState::Running {
+                        path_crate_agent::ActivationDispatchState::Running {
                             id,
                             compact_prompt_id,
                             ..
@@ -16000,7 +16015,7 @@ impl Harness {
         {
             for cancellation in cancellations {
                 if let Some(cancellation) = cancellation.upgrade() {
-                    cancellation.store(true, std::sync::atomic::Ordering::Release);
+                    cancellation.store(true, path_std_sync_atomic::Ordering::Release);
                 }
             }
         }
@@ -17455,7 +17470,7 @@ impl Harness {
     }
 
     fn validate_agent_metadata_key(&self, key: &tau_proto::AgentMetadataKey) -> Result<(), String> {
-        if key.as_str() == crate::harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY {
+        if key.as_str() == path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY {
             return Err("agent metadata key is reserved for harness lifecycle state".to_owned());
         }
         if key.as_str().is_empty() {
@@ -17828,7 +17843,7 @@ impl Harness {
         let initial_metadata: Vec<_> = peer_entrypoint_endpoint
             .then(|| tau_proto::AgentInitialMetadata {
                 key: tau_proto::AgentMetadataKey::new(
-                    crate::harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
+                    path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
                 ),
                 value: CborValue::Bool(true),
                 inheritable: false,
@@ -17896,17 +17911,17 @@ impl Harness {
             .filter_map(|wake| {
                 wake.activation_observation.map(|observation| {
                     let kind = match wake.source {
-                        crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                        path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
                             activation_class:
-                                crate::agent::AgentMessageActivationClass::OrdinaryAgentInput,
+                                path_crate_agent::AgentMessageActivationClass::OrdinaryAgentInput,
                             ..
                         } => tau_proto::ActivationKind::AgentMessage,
-                        crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                        path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
                             activation_class:
-                                crate::agent::AgentMessageActivationClass::IsolatedWatchNotification,
+                                path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification,
                             ..
                         } => tau_proto::ActivationKind::WatchNotification,
-                        crate::agent::PendingMessageWakeSource::MessageFact { .. } => {
+                        path_crate_agent::PendingMessageWakeSource::MessageFact { .. } => {
                             tau_proto::ActivationKind::ExternalMessage
                         }
                     };
@@ -18158,7 +18173,7 @@ impl Harness {
             self.emit_info("cannot compact while a prompt or tool turn is in flight");
             return;
         };
-        if tool.name.as_str() != crate::harness::subagents_tool::WAIT_TOOL_NAME
+        if tool.name.as_str() != path_crate_harness::subagents_tool::WAIT_TOOL_NAME
             || !self.claim_wait_for_manual_compaction(&cid, &wait_call_id)
         {
             self.emit_info("cannot compact while a prompt or tool turn is in flight");
@@ -18759,19 +18774,19 @@ impl Harness {
             .available_roles
             .get(&role_name)
             .and_then(|role| role.compaction)
-            .unwrap_or(tau_config::settings::RoleCompaction::ProviderDefault);
+            .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault);
         match role_compaction {
-            tau_config::settings::RoleCompaction::ProviderDefault => {
+            path_tau_config_settings::RoleCompaction::ProviderDefault => {
                 Some(tau_proto::PromptCompactionContext {
                     compact_threshold: None,
                 })
             }
-            tau_config::settings::RoleCompaction::Threshold(compact_threshold) => {
+            path_tau_config_settings::RoleCompaction::Threshold(compact_threshold) => {
                 Some(tau_proto::PromptCompactionContext {
                     compact_threshold: Some(compact_threshold),
                 })
             }
-            tau_config::settings::RoleCompaction::Disabled => None,
+            path_tau_config_settings::RoleCompaction::Disabled => None,
         }
     }
 
@@ -18880,13 +18895,13 @@ impl Harness {
             .available_roles
             .get(&role_name)
             .and_then(|role| role.compaction)
-            .unwrap_or(tau_config::settings::RoleCompaction::ProviderDefault);
+            .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault);
         let threshold = match role_policy {
-            tau_config::settings::RoleCompaction::ProviderDefault => {
+            path_tau_config_settings::RoleCompaction::ProviderDefault => {
                 info.standalone_compaction_threshold
             }
-            tau_config::settings::RoleCompaction::Threshold(threshold) => Some(threshold),
-            tau_config::settings::RoleCompaction::Disabled => None,
+            path_tau_config_settings::RoleCompaction::Threshold(threshold) => Some(threshold),
+            path_tau_config_settings::RoleCompaction::Disabled => None,
         };
         if !matches!(
             conv.activation_dispatch,
@@ -19102,8 +19117,10 @@ impl Harness {
                 compaction_threshold,
             } => {
                 next_role.compaction = Some(match compaction_threshold {
-                    Some(threshold) => tau_config::settings::RoleCompaction::Threshold(threshold),
-                    None => tau_config::settings::RoleCompaction::ProviderDefault,
+                    Some(threshold) => {
+                        path_tau_config_settings::RoleCompaction::Threshold(threshold)
+                    }
+                    None => path_tau_config_settings::RoleCompaction::ProviderDefault,
                 });
             }
             tau_proto::UiRoleUpdateAction::SetTools { tools } => {
@@ -19836,36 +19853,36 @@ impl Harness {
     /// agent's retry-sleep wakes and aborts whatever it's currently
     /// processing.
     fn preempt_blocking_ext_side_agents(&mut self, session_id: &SessionId) {
-        let to_cancel: Vec<(AgentId, SessionId, AgentPromptId, PromptOriginator)> =
-            self.agents
-                .iter()
-                .filter_map(|(cid, conv)| {
-                    if conv.parent_tool_call_id.is_some() {
-                        return None;
-                    }
-                    if !matches!(
-                        conv.originator,
-                        tau_proto::PromptOriginator::Extension { .. }
-                    ) {
-                        return None;
-                    }
-                    let in_flight = conv.in_flight_prompt.clone().or_else(|| {
-                        match &conv.activation_dispatch {
-                        crate::agent::ActivationDispatchState::ContextRecoveryClaimPending {
+        let to_cancel: Vec<(AgentId, SessionId, AgentPromptId, PromptOriginator)> = self
+            .agents
+            .iter()
+            .filter_map(|(cid, conv)| {
+                if conv.parent_tool_call_id.is_some() {
+                    return None;
+                }
+                if !matches!(
+                    conv.originator,
+                    tau_proto::PromptOriginator::Extension { .. }
+                ) {
+                    return None;
+                }
+                let in_flight = conv.in_flight_prompt.clone().or_else(|| {
+                    match &conv.activation_dispatch {
+                        path_crate_agent::ActivationDispatchState::ContextRecoveryClaimPending {
                             checkpoint,
                             ..
                         } => Some(checkpoint.agent_prompt_id.clone()),
                         _ => None,
                     }
-                    })?;
-                    Some((
-                        cid.clone(),
-                        conv.session_id.clone(),
-                        in_flight,
-                        conv.originator.clone(),
-                    ))
-                })
-                .collect();
+                })?;
+                Some((
+                    cid.clone(),
+                    conv.session_id.clone(),
+                    in_flight,
+                    conv.originator.clone(),
+                ))
+            })
+            .collect();
 
         if to_cancel.is_empty() {
             return;
@@ -20199,7 +20216,7 @@ impl Harness {
         self.discard_canceled_peer_receive_publishes(&canceled_message_ids);
         for cancellation in self.peer_io_cancellations.drain(..) {
             if let Some(cancellation) = cancellation.upgrade() {
-                cancellation.store(true, std::sync::atomic::Ordering::Release);
+                cancellation.store(true, path_std_sync_atomic::Ordering::Release);
             }
         }
         for cancellations in self
@@ -20209,7 +20226,7 @@ impl Harness {
         {
             for cancellation in cancellations {
                 if let Some(cancellation) = cancellation.upgrade() {
-                    cancellation.store(true, std::sync::atomic::Ordering::Release);
+                    cancellation.store(true, path_std_sync_atomic::Ordering::Release);
                 }
             }
         }
@@ -20579,7 +20596,8 @@ impl Harness {
             return Vec::new();
         };
         let mut prompts = Vec::new();
-        let mut remaining = std::collections::VecDeque::with_capacity(conv.pending_prompts.len());
+        let mut remaining =
+            path_std_collections::VecDeque::with_capacity(conv.pending_prompts.len());
         while let Some(prompt) = conv.pending_prompts.pop_front() {
             if prompt.is_passive_background_completion() {
                 prompts.push(prompt);
@@ -21147,7 +21165,7 @@ impl Harness {
             .collect::<Vec<_>>();
         for cid in releasable {
             if let Some(agent) = self.agents.get_mut(&cid) {
-                agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+                agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
             }
         }
     }
@@ -21449,7 +21467,7 @@ impl Harness {
     ) -> Option<(tau_proto::AgentOuterTurnActivation, AgentPromptId)> {
         let agent = self.agents.get(cid)?;
         let (through, cut, prompt_id) = match &agent.activation_dispatch {
-            crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+            path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
                 agent_prompt_id,
                 through,
                 dispatch,
@@ -21457,7 +21475,7 @@ impl Harness {
             } if dispatch.operation == tau_proto::PromptOperation::Inference => {
                 (*through, dispatch.activation_cut, agent_prompt_id.clone())
             }
-            crate::agent::ActivationDispatchState::DispatchUncertain {
+            path_crate_agent::ActivationDispatchState::DispatchUncertain {
                 agent_prompt_id,
                 through,
                 operation: Some(tau_proto::PromptOperation::Inference),
@@ -21573,7 +21591,7 @@ impl Harness {
             conv.terminating = true;
             conv.pending_prompts.clear();
             conv.pending_message_wakes.clear();
-            conv.activation_dispatch = crate::agent::ActivationDispatchState::None;
+            conv.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
             conv.agent_id
                 .clone()
                 .map(|agent_id| (conv.session_id.clone(), agent_id))
@@ -21646,8 +21664,8 @@ impl Harness {
             tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{}", conv.next_prompt_index))
                 .expect("known-safe AgentPromptId must be valid");
         conv.next_prompt_index = conv.next_prompt_index.saturating_add(1);
-        conv.activation_dispatch = crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-            owner: crate::agent::InferenceCheckpointOwner::Standalone {
+        conv.activation_dispatch = path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+            owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
                 id: transaction_id.clone(),
             },
             agent_prompt_id: prompt_id.clone(),
@@ -21772,7 +21790,7 @@ impl Harness {
                 .agent(agent_id.as_str())
                 .and_then(|tree| {
                     tree.metadata().get(&tau_proto::AgentMetadataKey::new(
-                        crate::harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
+                        path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
                     ))
                 })
                 .is_some_and(|entry| entry.value == CborValue::Bool(true));
@@ -21862,11 +21880,12 @@ impl Harness {
                     compact_prompt_id,
                 }) => {
                     if let Some(conv) = self.agents.get_mut(&cid) {
-                        conv.activation_dispatch = crate::agent::ActivationDispatchState::Blocked {
-                            failed_id: failed.transaction_id,
-                            cut: failed.cut,
-                            resume_through: failed.resume_through,
-                        };
+                        conv.activation_dispatch =
+                            path_crate_agent::ActivationDispatchState::Blocked {
+                                failed_id: failed.transaction_id,
+                                cut: failed.cut,
+                                resume_through: failed.resume_through,
+                            };
                     }
                     self.project_agent_watch_provider_state(
                         &cid,
@@ -21886,8 +21905,8 @@ impl Harness {
                     let status_prompt_id = checkpoint.agent_prompt_id.clone();
                     if let Some(conv) = self.agents.get_mut(&cid) {
                         conv.activation_dispatch =
-                            crate::agent::ActivationDispatchState::DispatchUncertain {
-                                owner: crate::agent::InferenceCheckpointOwner::Standalone {
+                            path_crate_agent::ActivationDispatchState::DispatchUncertain {
+                                owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
                                     id: checkpoint
                                         .transaction_id
                                         .expect("standalone checkpoint has transaction"),
@@ -21920,7 +21939,9 @@ impl Harness {
                 && let Some(conv) = self.agents.get_mut(&cid)
             {
                 conv.activation_dispatch =
-                    crate::agent::ActivationDispatchState::ContextRecoveryPending { checkpoint };
+                    path_crate_agent::ActivationDispatchState::ContextRecoveryPending {
+                        checkpoint,
+                    };
             }
             if restored_compaction.is_none()
                 && let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
@@ -21929,12 +21950,12 @@ impl Harness {
                 let status_prompt_id = checkpoint.agent_prompt_id.clone();
                 if let Some(conv) = self.agents.get_mut(&cid) {
                     conv.activation_dispatch =
-                        crate::agent::ActivationDispatchState::DispatchUncertain {
+                        path_crate_agent::ActivationDispatchState::DispatchUncertain {
                             owner: match checkpoint.transaction_id {
                                 Some(id) => {
-                                    crate::agent::InferenceCheckpointOwner::Standalone { id }
+                                    path_crate_agent::InferenceCheckpointOwner::Standalone { id }
                                 }
-                                None => crate::agent::InferenceCheckpointOwner::Inference,
+                                None => path_crate_agent::InferenceCheckpointOwner::Inference,
                             },
                             agent_prompt_id: checkpoint.agent_prompt_id,
                             through: checkpoint.through,
@@ -22418,18 +22439,19 @@ impl Harness {
         };
         if let Some(agent) = self.agents.get_mut(target_cid) {
             agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
-            agent.activation_dispatch = crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-                owner: crate::agent::InferenceCheckpointOwner::Standalone {
-                    id: started.transaction_id.clone(),
-                },
-                agent_prompt_id: agent_prompt_id.clone(),
-                through,
-                dispatch: crate::agent::InferenceDispatchOwnership {
-                    model: started.model.clone(),
-                    operation: tau_proto::PromptOperation::Inference,
-                    activation_cut: started.cut,
-                },
-            };
+            agent.activation_dispatch =
+                path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+                    owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
+                        id: started.transaction_id.clone(),
+                    },
+                    agent_prompt_id: agent_prompt_id.clone(),
+                    through,
+                    dispatch: crate::agent::InferenceDispatchOwnership {
+                        model: started.model.clone(),
+                        operation: tau_proto::PromptOperation::Inference,
+                        activation_cut: started.cut,
+                    },
+                };
         }
     }
 
@@ -23217,7 +23239,7 @@ impl Harness {
             originator,
         ) = self.agents.get(cid).and_then(|agent| {
             let (prompt_id, model, operation) = match &agent.activation_dispatch {
-                crate::agent::ActivationDispatchState::Running {
+                path_crate_agent::ActivationDispatchState::Running {
                     compact_prompt_id,
                     model,
                     ..
@@ -23226,7 +23248,7 @@ impl Harness {
                     Some(model.clone()),
                     tau_proto::PromptOperation::StandaloneCompaction,
                 ),
-                crate::agent::ActivationDispatchState::DispatchUncertain {
+                path_crate_agent::ActivationDispatchState::DispatchUncertain {
                     agent_prompt_id,
                     model,
                     operation,
@@ -23336,7 +23358,7 @@ impl Harness {
                 continuation: Some(PostCommitContinuation::PromptMaterialization(
                     PromptDispatchContinuation {
                         started,
-                        prompt: std::sync::Arc::new(prompt),
+                        prompt: path_std_sync::Arc::new(prompt),
                         provider_connection_id,
                         runtime_incarnation,
                     },
@@ -23357,7 +23379,7 @@ impl Harness {
         let agent_id = agent.agent_id.as_deref().map(crate::parse_agent_id);
         let originator = agent.originator.clone();
         let failure = match &agent.activation_dispatch {
-            crate::agent::ActivationDispatchState::Running {
+            path_crate_agent::ActivationDispatchState::Running {
                 id,
                 cut,
                 resume_through,
@@ -23371,8 +23393,9 @@ impl Harness {
                     resume_through: *resume_through,
                 })
             }),
-            crate::agent::ActivationDispatchState::DispatchUncertain {
-                agent_prompt_id, ..
+            path_crate_agent::ActivationDispatchState::DispatchUncertain {
+                agent_prompt_id,
+                ..
             } => agent_id.map(|agent_id| {
                 Event::ProviderResponseFinished(ProviderResponseFinished {
                     estimated_api_cost_rates: None,
@@ -23421,7 +23444,7 @@ impl Harness {
         };
         let originator = agent.originator.clone();
         let failure = match &agent.activation_dispatch {
-            crate::agent::ActivationDispatchState::Running {
+            path_crate_agent::ActivationDispatchState::Running {
                 id,
                 cut,
                 resume_through,
@@ -23435,8 +23458,9 @@ impl Harness {
                     resume_through: *resume_through,
                 })
             }
-            crate::agent::ActivationDispatchState::DispatchUncertain {
-                agent_prompt_id, ..
+            path_crate_agent::ActivationDispatchState::DispatchUncertain {
+                agent_prompt_id,
+                ..
             } => {
                 let agent_prompt_id = agent_prompt_id.clone();
                 self.local_route_failure_prompts
@@ -23495,12 +23519,14 @@ impl Harness {
         let originator = conv.originator.clone();
         let role_name = self.role_name_for_agent(conv);
         let (prompt_model, owned_operation) = match &conv.activation_dispatch {
-            crate::agent::ActivationDispatchState::Running { model, .. } => (
+            path_crate_agent::ActivationDispatchState::Running { model, .. } => (
                 Some(model.clone()),
                 tau_proto::PromptOperation::StandaloneCompaction,
             ),
-            crate::agent::ActivationDispatchState::DispatchUncertain {
-                model, operation, ..
+            path_crate_agent::ActivationDispatchState::DispatchUncertain {
+                model,
+                operation,
+                ..
             } => (
                 model.clone(),
                 operation.unwrap_or(tau_proto::PromptOperation::Inference),
@@ -23549,7 +23575,7 @@ impl Harness {
         // assembled prompt scoped to this agent's history and
         // prevents orphan ToolUse blocks from cross-branch state.
         let compaction_transaction = match &conv.activation_dispatch {
-            crate::agent::ActivationDispatchState::Running {
+            path_crate_agent::ActivationDispatchState::Running {
                 id,
                 cut,
                 resume_through,
@@ -23558,7 +23584,7 @@ impl Harness {
             _ => None,
         };
         let checkpointed_inference = match &conv.activation_dispatch {
-            crate::agent::ActivationDispatchState::DispatchUncertain {
+            path_crate_agent::ActivationDispatchState::DispatchUncertain {
                 owner,
                 agent_prompt_id,
                 through,
@@ -23577,7 +23603,7 @@ impl Harness {
             _ => None,
         };
         let reserved_compact_prompt_id = match &conv.activation_dispatch {
-            crate::agent::ActivationDispatchState::Running {
+            path_crate_agent::ActivationDispatchState::Running {
                 compact_prompt_id: prompt_id,
                 ..
             } => Some(prompt_id.clone()),
@@ -23924,7 +23950,7 @@ impl Harness {
                     key.as_ref() != "workdir" || visible_workdir_contributors.contains(contributor)
                 }),
             template_context,
-            crate::prompt::PromptCapabilities::new(
+            path_crate_prompt::PromptCapabilities::new(
                 tool_specs
                     .iter()
                     .map(|spec| self.tool_model_visible_name(spec).to_string()),
@@ -23937,7 +23963,7 @@ impl Harness {
                 self.extensions
                     .entries
                     .values()
-                    .filter(|entry| entry.state == crate::extension::ExtensionState::Ready)
+                    .filter(|entry| entry.state == path_crate_extension::ExtensionState::Ready)
                     .map(|entry| entry.name.to_string()),
             )
             .with_parallel_tool_calls(
@@ -24739,7 +24765,7 @@ impl Harness {
             .then(|| self.apply_working_final_response_gate(&cid, &response))
             .flatten();
         let completion = match status_gate {
-            Some(crate::agent::WorkingFinalDecision::Challenge) => {
+            Some(path_crate_agent::WorkingFinalDecision::Challenge) => {
                 Some(AgentPublishCompletion::WorkingFinal {
                     agent_prompt_id: response.agent_prompt_id.clone(),
                     batch_parent: self
@@ -24758,7 +24784,7 @@ impl Harness {
                     retry_event: None,
                 })
             }
-            Some(crate::agent::WorkingFinalDecision::AcceptUnknown) => {
+            Some(path_crate_agent::WorkingFinalDecision::AcceptUnknown) => {
                 Some(AgentPublishCompletion::WorkingFinal {
                     agent_prompt_id: response.agent_prompt_id.clone(),
                     batch_parent: self
@@ -24857,19 +24883,19 @@ impl Harness {
             .available_roles
             .get(&self.role_name_for_agent_id(cid))
             .and_then(|role| role.compaction)
-            .unwrap_or(tau_config::settings::RoleCompaction::ProviderDefault);
+            .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault);
         let (compaction_threshold, compaction_policy) = match role_compaction {
-            tau_config::settings::RoleCompaction::Threshold(value) => (
+            path_tau_config_settings::RoleCompaction::Threshold(value) => (
                 Some(value),
                 tau_proto::ContextLimitCompactionPolicy::Threshold,
             ),
-            tau_config::settings::RoleCompaction::ProviderDefault => (
+            path_tau_config_settings::RoleCompaction::ProviderDefault => (
                 self.provider_model_info
                     .get(model)
                     .and_then(|info| info.standalone_compaction_threshold),
                 tau_proto::ContextLimitCompactionPolicy::ProviderDefault,
             ),
-            tau_config::settings::RoleCompaction::Disabled => {
+            path_tau_config_settings::RoleCompaction::Disabled => {
                 (None, tau_proto::ContextLimitCompactionPolicy::Disabled)
             }
         };
@@ -25018,7 +25044,7 @@ impl Harness {
             .available_roles
             .get(&role_name)
             .and_then(|role| role.compaction)
-            == Some(tau_config::settings::RoleCompaction::Disabled)
+            == Some(path_tau_config_settings::RoleCompaction::Disabled)
         {
             return false;
         }
@@ -25063,9 +25089,9 @@ impl Harness {
             .agents
             .iter()
             .filter_map(|(cid, agent)| match &agent.activation_dispatch {
-                crate::agent::ActivationDispatchState::ContextRecoveryPending { checkpoint } => {
-                    Some((cid.clone(), checkpoint.clone()))
-                }
+                path_crate_agent::ActivationDispatchState::ContextRecoveryPending {
+                    checkpoint,
+                } => Some((cid.clone(), checkpoint.clone())),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -25091,7 +25117,7 @@ impl Harness {
                 .available_roles
                 .get(&self.role_name_for_agent_id(&cid))
                 .and_then(|role| role.compaction)
-                != Some(tau_config::settings::RoleCompaction::Disabled);
+                != Some(path_tau_config_settings::RoleCompaction::Disabled);
             let branch_matches = checkpoint.activation_cut.is_some()
                 && self
                     .agents
@@ -25144,7 +25170,7 @@ impl Harness {
         }
         if let Some(agent) = self.agents.get_mut(cid) {
             agent.activation_dispatch =
-                crate::agent::ActivationDispatchState::ContextRecoveryClaimPending {
+                path_crate_agent::ActivationDispatchState::ContextRecoveryClaimPending {
                     checkpoint: checkpoint.clone(),
                     transaction_id: transaction_id.clone(),
                 };
@@ -25218,7 +25244,7 @@ impl Harness {
         if let Some(agent) = self.agents.get_mut(cid) {
             agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
             agent.activation_dispatch =
-                crate::agent::ActivationDispatchState::ContextRecoveryClaimPending {
+                path_crate_agent::ActivationDispatchState::ContextRecoveryClaimPending {
                     checkpoint: checkpoint.clone(),
                     transaction_id: transaction_id.clone(),
                 };
@@ -25253,7 +25279,7 @@ impl Harness {
             self.agents
                 .get(cid)
                 .and_then(|agent| match &agent.activation_dispatch {
-                    crate::agent::ActivationDispatchState::Running {
+                    path_crate_agent::ActivationDispatchState::Running {
                         id,
                         cut,
                         model,
@@ -25307,7 +25333,7 @@ impl Harness {
             .agents
             .get(cid)
             .and_then(|agent| match &agent.activation_dispatch {
-                crate::agent::ActivationDispatchState::Running {
+                path_crate_agent::ActivationDispatchState::Running {
                     resume_through,
                     model,
                     branch_generation,
@@ -25381,7 +25407,7 @@ impl Harness {
             .agents
             .get(cid)
             .and_then(|agent| match &agent.activation_dispatch {
-                crate::agent::ActivationDispatchState::Running {
+                path_crate_agent::ActivationDispatchState::Running {
                     id,
                     cut,
                     resume_through,
@@ -25482,7 +25508,7 @@ impl Harness {
                     ..
                 } if agent_prompt_id == &response.agent_prompt_id
             ) {
-                agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+                agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
             }
         }
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
@@ -28030,7 +28056,7 @@ impl Harness {
         let mut harness = Self::from_config(
             &config,
             &state_dir,
-            tau_config::settings::TauDirs::default(),
+            path_tau_config_settings::TauDirs::default(),
             "s1",
             tau_proto::SessionStartReason::Initial,
             tau_core::SessionPersistenceMode::Durable,
@@ -28106,7 +28132,7 @@ impl Harness {
         session_id: &SessionId,
         prompt_id: &AgentPromptId,
     ) -> Result<AgentPromptCreated, HarnessError> {
-        let mut cursor = crate::event_log::EventLogSeq::new(0);
+        let mut cursor = path_crate_event_log::EventLogSeq::new(0);
         loop {
             let entry = self.event_log.get_next_from(cursor).ok_or_else(|| {
                 HarnessError::Participant("prompt event missing from test observer".to_owned())
@@ -28257,7 +28283,7 @@ fn event_without_provider_image_bytes(event: &Event) -> Event {
         | Event::ProviderToolResult(result) => {
             for part in &mut result.provider_content {
                 let tau_proto::ToolResultContentPart::Image(image) = part;
-                image.data = std::sync::Arc::from([]);
+                image.data = path_std_sync::Arc::from([]);
             }
         }
         Event::AgentPromptCreated(prompt) => prompt.context.clear_provider_image_bytes(),

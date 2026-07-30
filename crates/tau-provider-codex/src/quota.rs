@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use tau_proto::{ProviderQuotaLimitId, ProviderQuotaWindowId};
+use tokio::runtime as path_tokio_runtime;
 
 /// Maximum accepted `/wham/usage` response body.
 pub const MAX_USAGE_BODY_BYTES: u64 = 256 * 1024;
@@ -104,7 +105,7 @@ pub fn fetch_usage(
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<FullQuotaSnapshot, UsageFetchError> {
     let url = format!("{}/wham/usage", base_url.trim_end_matches('/'));
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| UsageFetchError::Runtime)?;

@@ -1,6 +1,7 @@
 use super::*;
 use crate::harness::TerminalSettlement;
 use crate::harness::tests::dispatch::{final_tool_result, setup_routed_test_tool_call, tool_error};
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 /// Collect terminal reports and projections for one call in commit order.
 fn committed_terminal_events(
@@ -8,7 +9,7 @@ fn committed_terminal_events(
     call_id: &str,
 ) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = harness.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         let event_call_id = match &entry.event {
@@ -880,7 +881,7 @@ fn disconnected_parked_source_cannot_publish_terminal_canonical_fact() {
         .entries
         .get_mut("conn-owner")
         .expect("owner")
-        .state = crate::extension::ExtensionState::Disconnected;
+        .state = path_crate_extension::ExtensionState::Disconnected;
     reply(&mut harness, InterceptAction::Pass(None));
 
     assert!(matches!(
@@ -900,7 +901,7 @@ fn pre_ready_terminal_report_preserves_retained_byte_accounting() {
         .entries
         .get_mut("conn-owner")
         .expect("owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     let report = Event::ToolResultReported(final_tool_result(
         "retained-result",
         "owned_tool",

@@ -1,5 +1,7 @@
 //! Opt-in content-free UI protocol diagnostics.
 
+use std::collections as path_std_collections;
+
 #[cfg(test)]
 mod tests;
 
@@ -135,7 +137,7 @@ impl Measurements {
     fn entry(
         &mut self,
         key: MeasurementKey,
-    ) -> std::collections::btree_map::Entry<'_, MeasurementKey, SizeDistribution> {
+    ) -> path_std_collections::btree_map::Entry<'_, MeasurementKey, SizeDistribution> {
         self.0.entry(key)
     }
 

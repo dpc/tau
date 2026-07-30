@@ -1,4 +1,5 @@
 use std::fs::OpenOptions;
+use std::io as path_std_io;
 
 use tau_proto::{
     ActionInvocationId, AgentPromptId, CborValue, ExtensionInstanceId, HarnessInputMessage,
@@ -221,7 +222,7 @@ fn rollback_failure_disables_later_writes_and_reports_once() {
 #[test]
 fn debug_log_diagnostic_is_bounded_at_documented_limit() {
     let error = DebugLogError::Append {
-        source: std::io::Error::other("x".repeat(DEBUG_LOG_DIAGNOSTIC_CHARS * 2)),
+        source: path_std_io::Error::other("x".repeat(DEBUG_LOG_DIAGNOSTIC_CHARS * 2)),
         rollback: None,
     };
 

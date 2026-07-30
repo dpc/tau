@@ -2,6 +2,11 @@
 //! `testing.md`; route/security matrices follow
 //! `SPEC-tau-ext-slack-conversation-routing`.
 
+use std::collections::hash_map as path_std_collections_hash_map;
+use std::{io as path_std_io, net as path_std_net};
+
+use tokio::{net as path_tokio_net, sync as path_tokio_sync, time as path_tokio_time};
+
 mod send_delivery_tests;
 
 use std::io::{Read, Write};
@@ -672,10 +677,10 @@ fn run_protocol_messages(
 
     let output = SharedWriter::default();
     let written = output.clone();
-    run_with_client(std::io::Cursor::new(input), output, client).expect("run");
+    run_with_client(path_std_io::Cursor::new(input), output, client).expect("run");
 
     let mut frames = Vec::new();
-    let mut reader = tau_proto::HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut reader = tau_proto::HarnessInputReader::new(path_std_io::Cursor::new(written.bytes()));
     while let Some(frame) = reader.read_message().expect("read output") {
         frames.push(frame);
     }
@@ -725,7 +730,7 @@ fn admission_context(ext: &Extension) -> AdmissionContext {
 
 fn slack_message(channel_id: &str, channel_type: Option<&str>, text: &str) -> SlackMessage {
     use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = path_std_collections_hash_map::DefaultHasher::new();
     (channel_id, text).hash(&mut hasher);
     let ts = format!("{}.0", hasher.finish());
     SlackMessage {
@@ -1691,14 +1696,14 @@ async fn shutdown_signal_wait_timeout_wakes_before_long_backoff() {
 /// timeout.
 #[tokio::test]
 async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = path_tokio_net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback websocket listener");
     let socket_url = format!(
         "ws://{}/socket-ticket",
         listener.local_addr().expect("listener local address")
     );
-    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let (accepted_tx, accepted_rx) = path_tokio_sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept websocket client");
         let _ws = tokio_tungstenite::accept_async(stream)
@@ -1744,14 +1749,14 @@ async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
 /// ingress forever.
 #[tokio::test(start_paused = true)]
 async fn socket_worker_once_reconnects_after_missing_heartbeat_pong() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = path_tokio_net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback websocket listener");
     let socket_url = format!(
         "ws://{}/socket-ticket",
         listener.local_addr().expect("listener local address")
     );
-    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let (accepted_tx, accepted_rx) = path_tokio_sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept websocket client");
         let _ws = tokio_tungstenite::accept_async(stream)
@@ -1798,15 +1803,15 @@ async fn socket_worker_once_reconnects_after_missing_heartbeat_pong() {
 /// periodic reconnects while the peer remains responsive.
 #[tokio::test(start_paused = true)]
 async fn socket_worker_once_keeps_responsive_idle_connection() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = path_tokio_net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback websocket listener");
     let socket_url = format!(
         "ws://{}/socket-ticket",
         listener.local_addr().expect("listener local address")
     );
-    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
-    let (responsive_tx, responsive_rx) = tokio::sync::oneshot::channel();
+    let (accepted_tx, accepted_rx) = path_tokio_sync::oneshot::channel();
+    let (responsive_tx, responsive_rx) = path_tokio_sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept websocket client");
         let mut ws = tokio_tungstenite::accept_async(stream)
@@ -1876,15 +1881,15 @@ async fn socket_worker_once_keeps_responsive_idle_connection() {
 /// leave the connection marked online after timeout.
 #[tokio::test(start_paused = true)]
 async fn socket_worker_once_times_out_from_off_phase_pong_despite_other_traffic() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = path_tokio_net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback websocket listener");
     let socket_url = format!(
         "ws://{}/socket-ticket",
         listener.local_addr().expect("listener local address")
     );
-    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
-    let (pong_tx, pong_rx) = tokio::sync::oneshot::channel();
+    let (accepted_tx, accepted_rx) = path_tokio_sync::oneshot::channel();
+    let (pong_tx, pong_rx) = path_tokio_sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept websocket client");
         let mut ws = tokio_tungstenite::accept_async(stream)
@@ -1897,7 +1902,7 @@ async fn socket_worker_once_times_out_from_off_phase_pong_despite_other_traffic(
         ws.send(Message::Pong(Vec::new().into()))
             .await
             .expect("send off-phase pong");
-        let _ = pong_tx.send(tokio::time::Instant::now());
+        let _ = pong_tx.send(path_tokio_time::Instant::now());
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
             ws.send(hello.clone())
@@ -1970,7 +1975,7 @@ async fn blocked_socket_write_remains_shutdown_interruptible() {
 #[tokio::test(start_paused = true)]
 async fn blocked_socket_write_remains_pong_deadline_bounded() {
     let shutdown = ShutdownSignal::new();
-    let started_at = tokio::time::Instant::now();
+    let started_at = path_tokio_time::Instant::now();
     let pong_deadline = tokio::time::sleep(Duration::from_secs(40));
     tokio::pin!(pong_deadline);
 
@@ -2020,7 +2025,7 @@ fn worker_connection_failure_notice_is_bounded_and_one_shot() {
 /// ACKs a later envelope, answers Ping, and honors shutdown before release.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = path_tokio_net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback websocket listener");
     let socket_url = format!(
@@ -2050,7 +2055,7 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
             .into(),
         )
     };
-    let (reader_live_tx, reader_live_rx) = tokio::sync::oneshot::channel();
+    let (reader_live_tx, reader_live_rx) = path_tokio_sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept websocket client");
         let mut ws = tokio_tungstenite::accept_async(stream)
@@ -2143,14 +2148,14 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
 /// so Slack can retry after an outstanding terminal outcome releases capacity.
 #[tokio::test]
 async fn saturated_admission_does_not_ack_supported_envelope() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = path_tokio_net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback websocket listener");
     let socket_url = format!(
         "ws://{}/socket-ticket",
         listener.local_addr().expect("listener local address")
     );
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let (result_tx, result_rx) = path_tokio_sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept websocket client");
         let mut ws = tokio_tungstenite::accept_async(stream)
@@ -4031,7 +4036,7 @@ fn auth_test_requires_both_bot_and_team_identity() {
 /// `user_not_found`.
 #[test]
 fn users_info_uses_form_encoding() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
     let address = listener.local_addr().expect("test API address");
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept users.info request");
@@ -4088,7 +4093,7 @@ fn users_info_uses_form_encoding() {
 /// provider text or granting unsafe retry.
 #[test]
 fn post_http_outcomes_are_typed_bounded_and_body_safe() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
     let address = listener.local_addr().expect("test API address");
     let responses = [
         (429, Some("999999999999999999999999999999"), r#"{}"#),
@@ -4195,7 +4200,7 @@ fn post_http_outcomes_are_typed_bounded_and_body_safe() {
 /// selectors.
 #[test]
 fn reactions_use_exact_json_wire_contract() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
     let address = listener.local_addr().expect("test API address");
     let server = std::thread::spawn(move || {
         for (method, emoji) in [("reactions.add", "eyes"), ("reactions.remove", "+1")] {
@@ -4253,7 +4258,7 @@ fn reactions_use_exact_json_wire_contract() {
 /// clamped, missing scope is actionable, and ambiguous bodies never leak.
 #[test]
 fn reaction_http_errors_are_typed_and_body_safe() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
+    let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
     let address = listener.local_addr().expect("test API address");
     let server = std::thread::spawn(move || {
         for response in [

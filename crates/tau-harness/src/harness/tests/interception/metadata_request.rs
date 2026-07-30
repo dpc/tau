@@ -1,6 +1,7 @@
 //! Contract tests for `SPEC-agent-metadata-requests-and-canonical-facts`.
 
 use super::*;
+use crate::event_log as path_crate_event_log;
 
 /// Build one metadata-set request with an optional commit correlation.
 fn set_request(agent_id: &tau_proto::AgentId, value: &str, mutation_id: Option<&str>) -> Event {
@@ -25,7 +26,7 @@ fn unset_request(agent_id: &tau_proto::AgentId) -> Event {
 /// Collect metadata request and canonical commits with their delivery sources.
 fn metadata_commits(h: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut commits = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches!(

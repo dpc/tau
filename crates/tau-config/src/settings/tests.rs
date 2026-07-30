@@ -1,8 +1,10 @@
 use std::str::FromStr;
+use std::{fs as path_std_fs, path as path_std_path, process as path_std_process};
 
 use tempfile::TempDir;
 
 use super::*;
+use crate::settings as path_crate_settings;
 
 /// Ensures the supported extension environment grammar trims OWS, preserves
 /// first-seen order, and makes duplicate enables idempotent.
@@ -132,7 +134,7 @@ fn testing_settings_rejects_non_regular_file() {
 fn testing_settings_rejects_fifo_without_blocking() {
     let td = tempfile::tempdir().expect("tempdir");
     let path = td.path().join("testing.yaml");
-    let output = std::process::Command::new("mkfifo")
+    let output = path_std_process::Command::new("mkfifo")
         .arg(&path)
         .output()
         .expect("run mkfifo");
@@ -559,10 +561,10 @@ fn cli_state_round_trip_through_save_and_load() {
         redraw_counter: true,
         redraw_history_size: 123,
         show_ui_io: true,
-        show_tools: crate::settings::ShowTools::SummarizeTurn,
-        show_messages: crate::settings::ShowMessages::AllSummary,
+        show_tools: path_crate_settings::ShowTools::SummarizeTurn,
+        show_messages: path_crate_settings::ShowMessages::AllSummary,
         notice_level: tau_proto::NoticeLevel::Debug,
-        show_status: crate::settings::ShowStatus::Minimal,
+        show_status: path_crate_settings::ShowStatus::Minimal,
         show_prompt_scroll_indicator: false,
     };
     original.save(&dirs);
@@ -991,12 +993,12 @@ fn unreadable_drop_in_directory_is_reported() {
     std::fs::write(dir.join("cli.yaml"), "greeting: false\n").expect("write base");
     let drop_dir = dir.join("cli.d");
     std::fs::create_dir_all(&drop_dir).expect("mkdir dropins");
-    std::fs::set_permissions(&drop_dir, std::fs::Permissions::from_mode(0o000))
+    std::fs::set_permissions(&drop_dir, path_std_fs::Permissions::from_mode(0o000))
         .expect("chmod unreadable");
 
     let error = load_cli_settings_in(&dirs_with_config(dir)).expect_err("unreadable drop-in dir");
 
-    std::fs::set_permissions(&drop_dir, std::fs::Permissions::from_mode(0o700))
+    std::fs::set_permissions(&drop_dir, path_std_fs::Permissions::from_mode(0o700))
         .expect("restore permissions");
     assert!(
         error.to_string().contains("failed to read"),
@@ -3328,7 +3330,7 @@ fn extension_state_dir_rejects_unsafe_extension_names() {
     // anything outside the conservative extension-name character set keeps the
     // injected state directory confined under state/ext/<extension> and avoids
     // ambiguity in dotted harness config override paths.
-    let state_dir = std::path::Path::new("/tmp/tau-state");
+    let state_dir = path_std_path::Path::new("/tmp/tau-state");
     for name in ["a", "a_b", "x9", "std-email"] {
         assert_eq!(
             extension_state_dir_of(state_dir, name).expect("safe extension name"),

@@ -1,3 +1,5 @@
+use std::time as path_std_time;
+
 use tau_proto::HarnessInputMessage;
 
 use super::*;
@@ -165,7 +167,7 @@ fn control_work_runs_while_bulk_worker_is_busy() {
         .expect("control queued");
 
     control_ran_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
+        .recv_timeout(path_std_time::Duration::from_secs(2))
         .expect("control worker should not be starved by bulk work");
     release_bulk_tx.send(()).expect("release bulk");
 }
@@ -218,7 +220,7 @@ fn drop_cancels_queued_work_and_joins_running_workers() {
     });
 
     queued_drop_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
+        .recv_timeout(path_std_time::Duration::from_secs(2))
         .expect("queued work should be dropped during scheduler drop");
     assert!(
         drop_done_rx
@@ -228,7 +230,7 @@ fn drop_cancels_queued_work_and_joins_running_workers() {
     );
     release_tx.send(()).expect("release running work");
     drop_done_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
+        .recv_timeout(path_std_time::Duration::from_secs(2))
         .expect("drop should finish after running worker exits");
     dropper.join().expect("dropper thread");
 }

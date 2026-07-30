@@ -1,0 +1,12 @@
+id: limit-rust-symbol-path-depth
+valid:
+  - Something
+  - foo::Something
+  - foo::bar::Something
+  - use foo::sub::bar::Something;
+  - type Value = foo::bar::Something;
+invalid:
+  - foo::sub::bar::Something
+  - foo::sub::bar::function()
+  - type Value = foo::sub::bar::Something;
+  - foo::deeply::nested::module::Something

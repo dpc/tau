@@ -1,5 +1,6 @@
 //! `edit` tool: line-oriented replacements on a file.
 
+use std::io as path_std_io;
 use std::path::{Path, PathBuf};
 
 use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus};
@@ -469,7 +470,7 @@ fn read_original_or_empty(
 ) -> Result<(Vec<u8>, bool), ToolFailure> {
     match world.read_file_limited(path, MAX_SAFE_FILE_READ_BYTES) {
         Ok(bytes) => Ok((bytes, false)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Vec::new(), true)),
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok((Vec::new(), true)),
         Err(error) => Err(with_display_args(
             display_args,
             ToolFailure::from(error.to_string()),

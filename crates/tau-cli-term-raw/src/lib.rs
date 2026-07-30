@@ -16,9 +16,13 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufWriter, Write};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, atomic as path_std_sync_atomic};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use std::{sync as path_std_sync, time as path_std_time};
+
+use base64::engine as path_base64_engine;
+use crossterm::cursor as path_crossterm_cursor;
 const PROMPT_INPUT_MAX_HEIGHT_PERCENT: usize = 33;
 const STALL_WARNING_INTERVAL: Duration = Duration::from_secs(5);
 static STALL_WARNING_LIMITER: Mutex<StallWarningLimiter> =
@@ -48,7 +52,7 @@ fn admit_stall_warning() -> bool {
     STALL_WARNING_LIMITER
         .lock()
         .expect("stall warning mutex poisoned")
-        .admit(std::time::Instant::now())
+        .admit(path_std_time::Instant::now())
 }
 
 use crossterm::cursor::{MoveToColumn, MoveUp, SetCursorStyle};
@@ -125,8 +129,8 @@ pub enum CursorShape {
 impl CursorShape {
     fn crossterm_style(self) -> crossterm::cursor::SetCursorStyle {
         match self {
-            Self::Bar => crossterm::cursor::SetCursorStyle::SteadyBar,
-            Self::Block => crossterm::cursor::SetCursorStyle::SteadyBlock,
+            Self::Bar => path_crossterm_cursor::SetCursorStyle::SteadyBar,
+            Self::Block => path_crossterm_cursor::SetCursorStyle::SteadyBlock,
         }
     }
 }
@@ -1006,9 +1010,9 @@ pub struct TermHandle {
     output_transaction: Arc<Mutex<()>>,
     sync_condvar: Arc<std::sync::Condvar>,
     redraw: tau_blocking_notify_channel::Sender,
-    input_tx: std::sync::mpsc::Sender<InputMessage>,
+    input_tx: path_std_sync::mpsc::Sender<InputMessage>,
     /// Number of transcript-sized output snapshot clones requested.
-    output_snapshot_count: Arc<std::sync::atomic::AtomicU64>,
+    output_snapshot_count: Arc<path_std_sync::atomic::AtomicU64>,
 }
 
 thread_local! {
@@ -1114,7 +1118,7 @@ impl TermHandle {
         if self.output_transaction_is_held() {
             return None;
         }
-        let waiting_at = std::time::Instant::now();
+        let waiting_at = path_std_time::Instant::now();
         tracing::trace!(
             target: "tau_cli_term_raw::frontend_progress",
             "terminal output transaction acquisition started"
@@ -1140,7 +1144,7 @@ impl TermHandle {
         Some(OutputTransactionGuard {
             _guard: guard,
             _depth: depth,
-            acquired_at: std::time::Instant::now(),
+            acquired_at: path_std_time::Instant::now(),
         })
     }
 
@@ -1226,7 +1230,7 @@ impl TermHandle {
     /// prompt-history state.
     pub fn output_snapshot(&self) -> OutputSnapshot {
         self.output_snapshot_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, path_std_sync_atomic::Ordering::Relaxed);
         let _transaction = self.output_transaction_barrier();
         let st = self.lock();
         OutputSnapshot {
@@ -1248,7 +1252,7 @@ impl TermHandle {
     /// regressions.
     pub fn output_snapshot_count(&self) -> u64 {
         self.output_snapshot_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(path_std_sync_atomic::Ordering::Relaxed)
     }
 
     /// Replaces all output blocks/zones, preserving prompt input and history.
@@ -1656,7 +1660,7 @@ impl TermHandle {
         }
         let encoded = {
             use base64::Engine as _;
-            base64::engine::general_purpose::STANDARD.encode(value.as_bytes())
+            path_base64_engine::general_purpose::STANDARD.encode(value.as_bytes())
         };
         let sequence = if in_tmux {
             format!("\x1bPtmux;\x1b\x1b]1337;SetUserVar={name}={encoded}\x07\x1b\\")
@@ -1738,7 +1742,7 @@ pub struct Term {
     /// without going through an explicit `.handle()` accessor.
     handle: TermHandle,
     /// Receives raw input, read errors, and shutdown wakeups.
-    input_rx: std::sync::mpsc::Receiver<InputMessage>,
+    input_rx: path_std_sync::mpsc::Receiver<InputMessage>,
     /// Redraw thread handle — taken and joined on drop.
     redraw_thread: Option<JoinHandle<()>>,
     /// Whether to disable raw mode on drop (false for virtual terms).
@@ -1781,8 +1785,8 @@ impl Term {
         )));
 
         let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
-        let sync_condvar = Arc::new(std::sync::Condvar::new());
-        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let sync_condvar = Arc::new(path_std_sync::Condvar::new());
+        let (input_tx, input_rx) = path_std_sync::mpsc::channel();
 
         terminal::enable_raw_mode()?;
         // Opt into bracketed paste so the terminal wraps pasted content
@@ -1815,7 +1819,7 @@ impl Term {
             sync_condvar,
             redraw: redraw_tx,
             input_tx,
-            output_snapshot_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            output_snapshot_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };
 
         handle.redraw.notify();
@@ -1846,7 +1850,7 @@ impl Term {
         left_prompt: impl Into<StyledText>,
         output: Box<dyn Write + Send>,
         cursor_shape: CursorShape,
-    ) -> (Self, TermHandle, std::sync::mpsc::Sender<RawEvent>) {
+    ) -> (Self, TermHandle, path_std_sync::mpsc::Sender<RawEvent>) {
         let state = Arc::new(Mutex::new(SharedState::new(
             width,
             height,
@@ -1854,8 +1858,8 @@ impl Term {
         )));
 
         let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
-        let sync_condvar = Arc::new(std::sync::Condvar::new());
-        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let sync_condvar = Arc::new(path_std_sync::Condvar::new());
+        let (input_tx, input_rx) = path_std_sync::mpsc::channel();
 
         let redraw_state = Arc::clone(&state);
         let redraw_sync_cv = Arc::clone(&sync_condvar);
@@ -1863,7 +1867,7 @@ impl Term {
             redraw_loop(redraw_state, redraw_rx, output, &redraw_sync_cv);
         });
 
-        let (term_input_tx, term_input_rx) = std::sync::mpsc::channel();
+        let (term_input_tx, term_input_rx) = path_std_sync::mpsc::channel();
         let virtual_input_tx = input_tx.clone();
         thread::spawn(move || {
             while let Ok(raw) = term_input_rx.recv() {
@@ -1880,7 +1884,7 @@ impl Term {
             sync_condvar,
             redraw: redraw_tx,
             input_tx,
-            output_snapshot_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            output_snapshot_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };
 
         handle.redraw.notify();
@@ -3761,7 +3765,7 @@ fn redraw_loop(
             break;
         }
 
-        let prepare_started = std::time::Instant::now();
+        let prepare_started = path_std_time::Instant::now();
         tracing::trace!(
             target: "tau_cli_term_raw::frontend_progress",
             "redraw prepare started"
@@ -3783,7 +3787,7 @@ fn redraw_loop(
             prepare_us = prepare_elapsed.as_micros(),
             "redraw prepared"
         );
-        let write_started = std::time::Instant::now();
+        let write_started = path_std_time::Instant::now();
         tracing::trace!(
             target: "tau_cli_term_raw::frontend_progress",
             "terminal write started"
@@ -3798,7 +3802,7 @@ fn redraw_loop(
         );
         let write_elapsed = write_started.elapsed();
 
-        let flush_started = std::time::Instant::now();
+        let flush_started = path_std_time::Instant::now();
         tracing::trace!(
             target: "tau_cli_term_raw::frontend_progress",
             write_us = write_elapsed.as_micros(),

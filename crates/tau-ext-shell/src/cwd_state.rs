@@ -1,6 +1,6 @@
 //! Per-agent remembered workdir state for one shell extension instance.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map as path_std_collections_hash_map};
 use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -107,7 +107,7 @@ impl CwdState {
             pending_workdir_by_agent: Arc::new(Mutex::new(HashMap::new())),
             next_mutation_id: Arc::new(AtomicU64::new(1)),
             mutation_id_salt: {
-                let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+                let mut hasher = path_std_collections_hash_map::RandomState::new().build_hasher();
                 hasher.write_u64(0);
                 hasher.finish()
             },
@@ -385,7 +385,8 @@ impl CwdState {
             agent_id,
             PendingWorkdirResult {
                 mutation_id: {
-                    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+                    let mut hasher =
+                        path_std_collections_hash_map::RandomState::new().build_hasher();
                     hasher.write_u64(self.mutation_id_salt);
                     hasher.write_u64(self.next_mutation_id.fetch_add(1, Ordering::Relaxed));
                     tau_proto::AgentMetadataMutationId::parse(format!(

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::error as path_std_error;
 use std::io::{self, Cursor};
 use std::sync::{Arc, Mutex};
 
@@ -179,7 +180,7 @@ fn all_disabled_errors() {
 #[test]
 fn io_error_exposes_source() {
     let err = PickerError::Io(io::Error::other("synthetic io error"));
-    let source = std::error::Error::source(&err).expect("io source should be exposed");
+    let source = path_std_error::Error::source(&err).expect("io source should be exposed");
 
     assert_eq!(source.to_string(), "synthetic io error");
 }

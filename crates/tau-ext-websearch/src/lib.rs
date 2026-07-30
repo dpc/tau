@@ -21,6 +21,7 @@ use tau_proto::{
     CborValue, Event, ToolError, ToolName, ToolProgress, ToolResult, ToolSpec, ToolStarted,
     ToolUseState, ToolUseStats, ToolUseStatus,
 };
+use ureq::tls as path_ureq_tls;
 use url::Url;
 /// `tracing` target for events emitted from this extension.
 pub const LOG_TARGET: &str = "websearch";
@@ -840,8 +841,8 @@ impl ParallelClient for HttpParallelClient {
 }
 
 fn provider_http_agent() -> ureq::Agent {
-    let tls_config = ureq::tls::TlsConfig::builder()
-        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+    let tls_config = path_ureq_tls::TlsConfig::builder()
+        .root_certs(path_ureq_tls::RootCerts::PlatformVerifier)
         .build();
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(REQUEST_TIMEOUT))

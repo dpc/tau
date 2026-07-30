@@ -1,3 +1,6 @@
+use std::os::unix::net as path_std_os_unix_net;
+use std::time as path_std_time;
+
 use tau_proto::{
     Event, HarnessInputMessage, HarnessOutputMessage, NodeId, PromptOriginator, UiRoleUpdateAction,
     UiTreeNavigationTarget,
@@ -141,12 +144,12 @@ fn tree_commands_request_or_navigate_tree() {
 #[test]
 fn headless_tree_result_reads_one_multiline_notice() {
     let (reader_stream, mut harness_stream) =
-        std::os::unix::net::UnixStream::pair().expect("reader stream pair");
+        path_std_os_unix_net::UnixStream::pair().expect("reader stream pair");
     reader_stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .set_read_timeout(Some(path_std_time::Duration::from_secs(2)))
         .expect("read timeout");
     let (writer_stream, _discard_stream) =
-        std::os::unix::net::UnixStream::pair().expect("writer stream pair");
+        path_std_os_unix_net::UnixStream::pair().expect("writer stream pair");
     let (mut reader, _writer) =
         crate::ui_client::connect_ui_streams(reader_stream, writer_stream, "tree-test")
             .expect("connect UI streams");

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
-use std::{fmt, io};
+use std::{fmt, fs as path_std_fs, io};
 
 use tau_config::settings::{CliTheme, TauDirs};
 use tau_themes::{SpanTree, ThemedText};
@@ -242,7 +242,7 @@ fn external_theme_choices(dirs: &TauDirs) -> Vec<ThemeChoice> {
 }
 
 fn read_theme_choice_description(path: &Path) -> String {
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(file) = path_std_fs::File::open(path) else {
         return String::new();
     };
     let mut limited = file.take(THEME_CHOICE_METADATA_LIMIT + 1);

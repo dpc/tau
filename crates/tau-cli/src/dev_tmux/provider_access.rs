@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::{fs as path_std_fs, io as path_std_io, sync as path_std_sync};
 
 use tau_config::settings::{TauDirs, TestingSettings, load_testing_settings};
 use tau_proto::ProviderName;
@@ -118,7 +119,7 @@ Only these provider auth.d JSON files are available in the scratch Tau state."
 }
 
 fn empty_provider_set() -> &'static BTreeSet<ProviderName> {
-    static EMPTY: std::sync::OnceLock<BTreeSet<ProviderName>> = std::sync::OnceLock::new();
+    static EMPTY: std::sync::OnceLock<BTreeSet<ProviderName>> = path_std_sync::OnceLock::new();
     EMPTY.get_or_init(BTreeSet::new)
 }
 
@@ -249,9 +250,13 @@ fn copy_regular_private_file(source: &Path, destination: &Path) -> std::io::Resu
     let mut source_file = open_regular_file_no_follow(source)?;
     reject_symlink_io(destination)?;
     let parent = destination.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "destination has no parent")
+        path_std_io::Error::new(
+            path_std_io::ErrorKind::NotFound,
+            "destination has no parent",
+        )
     })?;
-    ensure_private_directory(parent).map_err(|error| std::io::Error::other(error.to_string()))?;
+    ensure_private_directory(parent)
+        .map_err(|error| path_std_io::Error::other(error.to_string()))?;
     let mut destination_file = open_private_file_no_follow(destination)?;
     std::io::copy(&mut source_file, &mut destination_file)?;
     Ok(())
@@ -259,12 +264,11 @@ fn copy_regular_private_file(source: &Path, destination: &Path) -> std::io::Resu
 
 fn reject_symlink_io(path: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(std::io::Error::other(format!(
-            "refusing symlink path `{}`",
-            path.display()
-        ))),
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(path_std_io::Error::other(
+            format!("refusing symlink path `{}`", path.display()),
+        )),
         Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
 }
@@ -272,7 +276,7 @@ fn reject_symlink_io(path: &Path) -> std::io::Result<()> {
 fn open_regular_file_no_follow(path: &Path) -> std::io::Result<File> {
     let file = open_file_no_follow_for_read(path)?;
     if !file.metadata()?.is_file() {
-        return Err(std::io::Error::other(format!(
+        return Err(path_std_io::Error::other(format!(
             "refusing non-regular provider profile `{}`",
             path.display()
         )));
@@ -284,7 +288,7 @@ fn open_regular_file_no_follow(path: &Path) -> std::io::Result<File> {
 fn open_file_no_follow_for_read(path: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    std::fs::OpenOptions::new()
+    path_std_fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
@@ -292,14 +296,14 @@ fn open_file_no_follow_for_read(path: &Path) -> std::io::Result<File> {
 
 #[cfg(not(unix))]
 fn open_file_no_follow_for_read(path: &Path) -> std::io::Result<File> {
-    std::fs::OpenOptions::new().read(true).open(path)
+    path_std_fs::OpenOptions::new().read(true).open(path)
 }
 
 #[cfg(unix)]
 fn open_private_file_no_follow(path: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    std::fs::OpenOptions::new()
+    path_std_fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(0o600)
@@ -309,7 +313,7 @@ fn open_private_file_no_follow(path: &Path) -> std::io::Result<File> {
 
 #[cfg(not(unix))]
 fn open_private_file_no_follow(path: &Path) -> std::io::Result<File> {
-    std::fs::OpenOptions::new()
+    path_std_fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)

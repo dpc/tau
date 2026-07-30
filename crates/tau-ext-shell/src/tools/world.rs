@@ -5,6 +5,12 @@
 //! during replay.
 
 #[cfg(test)]
+use std::path as path_std_path;
+use std::{collections as path_std_collections, fs as path_std_fs, time as path_std_time};
+
+use crate::tools as path_crate_tools;
+
+#[cfg(test)]
 mod tests;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -47,7 +53,7 @@ impl ShellWorld {
     pub(crate) fn real() -> Self {
         Self {
             mode: WorldMode::Real,
-            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            cwd: std::env::current_dir().unwrap_or_else(|_| path_std_path::PathBuf::from(".")),
         }
     }
 
@@ -58,7 +64,7 @@ impl ShellWorld {
         arguments: &CborValue,
         config: Option<tau_vcr::VcrConfig>,
     ) -> Result<Self, ToolFailure> {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| path_std_path::PathBuf::from("."));
         Self::for_tool_in_dir(tool_name, call_id, arguments, config, cwd)
     }
 
@@ -495,7 +501,7 @@ fn read_file_limited_real(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> 
 fn open_for_limited_read(path: &Path) -> io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    std::fs::OpenOptions::new()
+    path_std_fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(path)
@@ -503,7 +509,7 @@ fn open_for_limited_read(path: &Path) -> io::Result<std::fs::File> {
 
 #[cfg(not(unix))]
 fn open_for_limited_read(path: &Path) -> io::Result<std::fs::File> {
-    std::fs::File::open(path)
+    path_std_fs::File::open(path)
 }
 
 fn file_too_large_error(max_bytes: usize) -> io::Error {
@@ -634,14 +640,14 @@ fn enforce_current_shell_output_cap(result: &mut CborValue) {
     let Some(output) = text_field(result, "output") else {
         return;
     };
-    if output.len() <= crate::tools::shell::MAX_MODEL_SHELL_OUTPUT_BYTES {
+    if output.len() <= path_crate_tools::shell::MAX_MODEL_SHELL_OUTPUT_BYTES {
         return;
     }
     let truncated = crate::truncate::truncate_line_oriented_lines_with_byte_limit(
         output.lines(),
         output.lines().count(),
         output.len(),
-        crate::tools::shell::MAX_MODEL_SHELL_OUTPUT_BYTES,
+        path_crate_tools::shell::MAX_MODEL_SHELL_OUTPUT_BYTES,
     );
     replace_text_field(result, "output", truncated.content);
     remove_field(result, "truncated");
@@ -755,7 +761,7 @@ fn atomic_write_file_to_temp(target: &Path, temp_path: &Path, bytes: &[u8]) -> i
     })?;
     let mut created_temp = false;
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = path_std_fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(temp_path)?;
@@ -767,7 +773,7 @@ fn atomic_write_file_to_temp(target: &Path, temp_path: &Path, bytes: &[u8]) -> i
         file.sync_all()?;
         drop(file);
         std::fs::rename(temp_path, target)?;
-        if let Ok(dir) = std::fs::File::open(parent) {
+        if let Ok(dir) = path_std_fs::File::open(parent) {
             let _ = dir.sync_all();
         }
         Ok(())
@@ -782,7 +788,7 @@ const MAX_FINAL_SYMLINK_HOPS: usize = 40;
 
 pub(crate) fn final_write_path(path: &Path) -> io::Result<std::path::PathBuf> {
     let mut current = path.to_owned();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = path_std_collections::HashSet::new();
     for _ in 0..MAX_FINAL_SYMLINK_HOPS {
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -821,7 +827,7 @@ pub(crate) fn final_write_path(path: &Path) -> io::Result<std::path::PathBuf> {
 }
 
 fn unique_temp_suffix() -> u128 {
-    std::time::SystemTime::now()
+    path_std_time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default()

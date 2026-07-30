@@ -1,7 +1,9 @@
 use std::fs::OpenOptions;
 use std::path::Path;
+use std::sync::atomic as path_std_sync_atomic;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
+use std::{io as path_std_io, sync as path_std_sync};
 
 use fs2::FileExt as _;
 
@@ -10,15 +12,15 @@ use crate::debug_log::test_io::AppendFault;
 
 fn queue_state() -> super::DebugWriterQueue {
     super::DebugWriterQueue {
-        retained_lines: std::sync::atomic::AtomicUsize::new(0),
-        retained_bytes: std::sync::atomic::AtomicUsize::new(0),
-        poisoned: std::sync::atomic::AtomicBool::new(false),
-        drop_episode: std::sync::atomic::AtomicU64::new(0),
-        io_failures: std::sync::atomic::AtomicU64::new(0),
-        io_warning_active: std::sync::atomic::AtomicBool::new(false),
-        lock_attempts: std::sync::atomic::AtomicUsize::new(0),
-        completed_jobs: std::sync::atomic::AtomicUsize::new(0),
-        worker_traces: std::sync::Mutex::new(Vec::new()),
+        retained_lines: path_std_sync_atomic::AtomicUsize::new(0),
+        retained_bytes: path_std_sync_atomic::AtomicUsize::new(0),
+        poisoned: path_std_sync_atomic::AtomicBool::new(false),
+        drop_episode: path_std_sync_atomic::AtomicU64::new(0),
+        io_failures: path_std_sync_atomic::AtomicU64::new(0),
+        io_warning_active: path_std_sync_atomic::AtomicBool::new(false),
+        lock_attempts: path_std_sync_atomic::AtomicUsize::new(0),
+        completed_jobs: path_std_sync_atomic::AtomicUsize::new(0),
+        worker_traces: path_std_sync::Mutex::new(Vec::new()),
         test_pauses: super::DebugWriterTestPauses::default(),
     }
 }
@@ -46,7 +48,7 @@ fn wait_for_line_count(path: &Path, expected: usize) -> Vec<serde_json::Value> {
     }
 }
 
-fn wait_for_atomic(value: &std::sync::atomic::AtomicUsize, expected: usize, description: &str) {
+fn wait_for_atomic(value: &path_std_sync::atomic::AtomicUsize, expected: usize, description: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while value.load(Ordering::Acquire) != expected {
         assert!(
@@ -88,7 +90,7 @@ fn drop_warning_episode_counts_saturates_and_recovers() {
 #[test]
 fn io_warning_episode_counts_saturates_bounds_and_recovers() {
     let queue = queue_state();
-    let long_error = std::io::Error::other("x".repeat(super::DIAGNOSTIC_CHARS * 2));
+    let long_error = path_std_io::Error::other("x".repeat(super::DIAGNOSTIC_CHARS * 2));
     assert!(super::bounded_diagnostic(&long_error).chars().count() <= super::DIAGNOSTIC_CHARS + 1);
     queue.note_io_failure(&long_error);
     assert_eq!(queue.io_failures.load(Ordering::Acquire), 1);
@@ -109,7 +111,7 @@ fn io_warning_episode_counts_saturates_bounds_and_recovers() {
 fn admission_does_not_wait_for_the_sidecar_lock() {
     let td = tempfile::tempdir().expect("tempdir");
     let path = td.path().join("events.jsonl");
-    let writer = std::sync::Arc::new(DebugWriter::start());
+    let writer = path_std_sync::Arc::new(DebugWriter::start());
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -118,9 +120,9 @@ fn admission_does_not_wait_for_the_sidecar_lock() {
         .open(td.path().join("events.jsonl.lock"))
         .expect("open sidecar");
     lock.lock_exclusive().expect("hold sidecar");
-    let producer = std::sync::Arc::clone(&writer);
+    let producer = path_std_sync::Arc::clone(&writer);
     let producer_path = path.clone();
-    let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+    let (admitted_tx, admitted_rx) = path_std_sync::mpsc::channel();
     let producer_thread = std::thread::spawn(move || {
         let accepted = producer.enqueue(producer_path, b"{\"sequence\":1}\n".to_vec());
         admitted_tx.send(accepted).expect("report admission");
@@ -341,7 +343,7 @@ fn uncertain_rollback_poison_rejects_later_lines() {
 fn poison_receiver_drop_releases_racing_admission_accounting() {
     let td = tempfile::tempdir().expect("tempdir");
     let path = td.path().join("events.jsonl");
-    let writer = std::sync::Arc::new(DebugWriter::start());
+    let writer = path_std_sync::Arc::new(DebugWriter::start());
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -376,7 +378,7 @@ fn poison_receiver_drop_releases_racing_admission_accounting() {
         .lock()
         .expect("after-poison-drain test pause mutex poisoned") = Some(after_poison_drain.clone());
 
-    let producer = std::sync::Arc::clone(&writer);
+    let producer = path_std_sync::Arc::clone(&writer);
     let producer_path = path.clone();
     let producer_thread =
         std::thread::spawn(move || producer.enqueue(producer_path, b"{\"sequence\":2}\n".to_vec()));

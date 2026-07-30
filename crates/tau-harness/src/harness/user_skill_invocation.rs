@@ -1,5 +1,6 @@
 //! User-facing `:skill` command parsing and prompt expansion helpers.
 
+use std::fs as path_std_fs;
 use std::io::Read as _;
 
 use crate::discovery::DiscoveredSkillSource;
@@ -70,7 +71,7 @@ fn read_text_file_prefix(
     path: &std::path::Path,
     max_bytes: usize,
 ) -> std::io::Result<(String, bool, u64)> {
-    let mut file = std::fs::File::open(path)?;
+    let mut file = path_std_fs::File::open(path)?;
     let total_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
     let mut bytes = Vec::new();
     file.by_ref()

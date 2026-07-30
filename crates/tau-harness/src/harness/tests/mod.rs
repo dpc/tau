@@ -5,12 +5,14 @@
 //! pull them in with `use super::*;`.
 
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{collections as path_std_collections, fs as path_std_fs, thread};
 
+use tau_config::settings as path_tau_config_settings;
 use tau_core::{
     AgentEntry, AgentStore, AgentTree, Connection, ConnectionOrigin, ConnectionSendError,
     ConnectionSink, PendingConnectionMetadata, RoutedFrame,
@@ -30,7 +32,6 @@ use tau_session_inspect::{
 use tempfile::TempDir;
 
 use super::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, NormalizedFinishedToolCall};
-use crate::AgentId;
 use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::daemon::{
     ServeOptions, bind_listener, get_daemon_rendered_system_prompt,
@@ -47,6 +48,7 @@ use crate::model::{
 };
 use crate::pending_agent_discovery::PendingAgentDiscovery;
 use crate::turn::{PromptSubmission, TurnState};
+use crate::{AgentId, event_log as path_crate_event_log, extension as path_crate_extension};
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
@@ -556,7 +558,7 @@ fn extension_data_list_skips_symlinks_and_returns_relative_entries() {
     std::fs::create_dir_all(root.join("nested")).expect("mkdir");
     std::fs::write(root.join("file.txt"), b"abc").expect("write file");
     #[cfg(unix)]
-    std::os::unix::fs::symlink("/tmp", root.join("outside")).expect("symlink");
+    path_std_os_unix::fs::symlink("/tmp", root.join("outside")).expect("symlink");
 
     let entries = super::list_extension_data_entries(&root, &root).expect("list entries");
     assert!(
@@ -579,8 +581,8 @@ fn extension_data_checked_path_rejects_symlink_leaf_and_ancestor() {
     std::fs::create_dir_all(&root).expect("mkdir root");
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink("/tmp", root.join("leaf")).expect("leaf symlink");
-        std::os::unix::fs::symlink("/tmp", root.join("parent")).expect("parent symlink");
+        path_std_os_unix::fs::symlink("/tmp", root.join("leaf")).expect("leaf symlink");
+        path_std_os_unix::fs::symlink("/tmp", root.join("parent")).expect("parent symlink");
         assert!(super::checked_extension_data_path(&root, Path::new("leaf"), false).is_err());
         assert!(super::checked_extension_data_path(&root, Path::new("parent/file"), true).is_err());
     }
@@ -594,9 +596,9 @@ fn extension_data_checked_path_rejects_symlink_root() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(&real, path_std_fs::Permissions::from_mode(0o755))
             .expect("chmod real");
-        std::os::unix::fs::symlink(&real, &root).expect("root symlink");
+        path_std_os_unix::fs::symlink(&real, &root).expect("root symlink");
         assert!(super::checked_extension_data_path(&root, Path::new("file"), true).is_err());
         assert!(super::checked_extension_data_path(&root, Path::new(""), true).is_err());
         let real_mode = std::fs::metadata(&real)
@@ -756,7 +758,7 @@ fn minting_agent_ids_reject_display_name_only_template_fields() {
 #[test]
 fn built_in_agent_template_omits_display_name_when_task_name_is_absent() {
     let mut rng = super::deterministic_agent_id_rng();
-    let template = tau_config::settings::HarnessSettings::built_in()
+    let template = path_tau_config_settings::HarnessSettings::built_in()
         .agent_display_name_template
         .expect("built-in display-name template");
     let rendered = super::render_agent_template(
@@ -973,7 +975,7 @@ fn default_agent_node(h: &Harness, id: NodeId) -> &tau_core::AgentNode {
 
 fn event_log_events(h: &Harness) -> Vec<Event> {
     let mut events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         events.push(entry.event);
@@ -1318,9 +1320,9 @@ fn mark_connected_test_extension_configured(
             pid: None,
             in_process_thread: None,
             supervised_config: None,
-            secrets: std::collections::BTreeMap::new(),
+            secrets: path_std_collections::BTreeMap::new(),
             restart_attempt: 0,
-            state: crate::extension::ExtensionState::Ready,
+            state: path_crate_extension::ExtensionState::Ready,
             protocol_io: tau_client::ProtocolIoMeter::default(),
         },
     );
@@ -1637,7 +1639,7 @@ fn peel_inner_event(message: &HarnessOutputMessage) -> Option<&Event> {
 }
 
 fn read_raw_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCreated {
-    let mut cursor = crate::event_log::EventLogSeq::new(0);
+    let mut cursor = path_crate_event_log::EventLogSeq::new(0);
     loop {
         let entry = h
             .event_log
@@ -1654,7 +1656,7 @@ fn read_raw_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCrea
 }
 
 fn read_nth_prompt_created(h: &Harness, index: usize) -> AgentPromptCreated {
-    let mut cursor = crate::event_log::EventLogSeq::new(0);
+    let mut cursor = path_crate_event_log::EventLogSeq::new(0);
     let mut seen = 0;
     loop {
         let entry = h

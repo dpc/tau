@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::{process as path_std_process, time as path_std_time};
 
 use super::*;
 
@@ -32,18 +33,18 @@ fn bounded_command_propagates_foreground_restore_failure() {
     let _guard = FOREGROUND_CLAIM_TEST_LOCK
         .lock()
         .expect("foreground restore test lock");
-    let mut command = std::process::Command::new("sh");
+    let mut command = path_std_process::Command::new("sh");
     command
         .args(["-c", "printf done"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
     FAIL_NEXT_FOREGROUND_RESTORE.store(true, Ordering::SeqCst);
 
     let error = run_with_bounded_stdout(
         &mut command,
         None,
         1024,
-        std::time::Duration::from_secs(2),
+        path_std_time::Duration::from_secs(2),
         ProcessOwnership::ForegroundProcessGroup,
     )
     .expect_err("restore failure must replace otherwise successful output");
@@ -68,19 +69,19 @@ fn bounded_stdout_reader_reports_overflow_without_storing_tail() {
 /// leaving the prompt paused while Tau drains an endless stdout stream.
 #[test]
 fn bounded_command_kills_child_on_stdout_overflow() {
-    let mut command = std::process::Command::new("sh");
+    let mut command = path_std_process::Command::new("sh");
     command
         .arg("-c")
         .arg("yes overflow")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
 
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     let err = run_with_bounded_stdout(
         &mut command,
         None,
         1024,
-        std::time::Duration::from_secs(5),
+        path_std_time::Duration::from_secs(5),
         ProcessOwnership::ProcessGroup,
     )
     .expect_err("overflow should fail");
@@ -93,19 +94,19 @@ fn bounded_command_kills_child_on_stdout_overflow() {
 /// draining must already be active while Tau writes prompt-history rows.
 #[test]
 fn bounded_command_drains_stdout_while_writing_stdin() {
-    let mut command = std::process::Command::new("sh");
+    let mut command = path_std_process::Command::new("sh");
     command
         .arg("-c")
         .arg("printf '%65536s' x; bytes=$(wc -c); printf '\\n%s' \"$bytes\"")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
     let stdin = vec![b'y'; 65536];
 
     let output = run_with_bounded_stdout(
         &mut command,
         Some(&stdin),
         200_000,
-        std::time::Duration::from_secs(5),
+        path_std_time::Duration::from_secs(5),
         ProcessOwnership::ProcessGroup,
     )
     .expect("interleaved stdin/stdout command should finish");
@@ -122,19 +123,19 @@ fn bounded_command_errors_when_stdout_holder_survives_child() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pid_path = dir.path().join("holder.pid");
     let script = format!("sleep 3 & echo $! > {}; printf done", pid_path.display());
-    let mut command = std::process::Command::new("sh");
+    let mut command = path_std_process::Command::new("sh");
     command
         .arg("-c")
         .arg(script)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
 
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     let err = run_with_bounded_stdout(
         &mut command,
         None,
         1024,
-        std::time::Duration::from_secs(5),
+        path_std_time::Duration::from_secs(5),
         ProcessOwnership::ProcessGroup,
     )
     .expect_err("inherited stdout holder should fail promptly");
@@ -147,13 +148,13 @@ fn bounded_command_errors_when_stdout_holder_survives_child() {
         .trim()
         .parse()
         .expect("pid");
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let alive = std::process::Command::new("kill")
+    std::thread::sleep(path_std_time::Duration::from_millis(200));
+    let alive = path_std_process::Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(path_std_process::Stdio::null())
+        .stdout(path_std_process::Stdio::null())
+        .stderr(path_std_process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success());
     assert!(!alive, "stdout holder {pid} should have been killed");
@@ -163,19 +164,19 @@ fn bounded_command_errors_when_stdout_holder_survives_child() {
 /// bounded by the elapsed command timeout.
 #[test]
 fn bounded_command_times_out_quiet_hung_child() {
-    let mut command = std::process::Command::new("sh");
+    let mut command = path_std_process::Command::new("sh");
     command
         .arg("-c")
         .arg("sleep 5")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
 
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     let err = run_with_bounded_stdout(
         &mut command,
         None,
         1024,
-        std::time::Duration::from_millis(100),
+        path_std_time::Duration::from_millis(100),
         ProcessOwnership::ProcessGroup,
     )
     .expect_err("quiet hung child should time out");
@@ -202,23 +203,23 @@ fn process_group_timeout_kills_descendant() {
         pending_pid_path.display(),
         pid_path.display()
     );
-    let mut command = std::process::Command::new("sh");
+    let mut command = path_std_process::Command::new("sh");
     command
         .arg("-c")
         .arg(script)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
 
     let err = run_with_bounded_stdout_after_spawn(
         &mut command,
         None,
         1024,
-        std::time::Duration::from_millis(100),
+        path_std_time::Duration::from_millis(100),
         ProcessOwnership::ProcessGroup,
         || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let deadline = path_std_time::Instant::now() + path_std_time::Duration::from_secs(2);
             while !pid_path.exists() {
-                if deadline <= std::time::Instant::now() {
+                if deadline <= path_std_time::Instant::now() {
                     return Err("descendant PID was not published after command spawn".to_owned());
                 }
                 std::thread::yield_now();
@@ -234,13 +235,13 @@ fn process_group_timeout_kills_descendant() {
         .trim()
         .parse()
         .expect("pid");
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let alive = std::process::Command::new("kill")
+    std::thread::sleep(path_std_time::Duration::from_millis(200));
+    let alive = path_std_process::Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(path_std_process::Stdio::null())
+        .stdout(path_std_process::Stdio::null())
+        .stderr(path_std_process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success());
     assert!(!alive, "descendant process {pid} should have been killed");
@@ -256,19 +257,19 @@ fn process_group_setup_failure_kills_spawned_child() {
         .expect("foreground claim test lock");
     LAST_FAILED_FOREGROUND_CHILD_ID.store(0, Ordering::SeqCst);
     FAIL_FOREGROUND_CLAIM_FOR_CHILD_ID.store(0, Ordering::SeqCst);
-    let mut command = std::process::Command::new("sh");
+    let mut command = path_std_process::Command::new("sh");
     command
         .arg("-c")
         .arg("sleep 5")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
 
     FAIL_NEXT_FOREGROUND_CLAIM.store(true, Ordering::SeqCst);
     let error = run_with_bounded_stdout(
         &mut command,
         None,
         1024,
-        std::time::Duration::from_secs(5),
+        path_std_time::Duration::from_secs(5),
         ProcessOwnership::ForegroundProcessGroup,
     )
     .expect_err("foreground handoff should fail");
@@ -276,13 +277,13 @@ fn process_group_setup_failure_kills_spawned_child() {
 
     let pid = LAST_FAILED_FOREGROUND_CHILD_ID.load(Ordering::SeqCst);
     assert_ne!(pid, 0, "test seam did not record spawned child pid");
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let alive = std::process::Command::new("kill")
+    std::thread::sleep(path_std_time::Duration::from_millis(200));
+    let alive = path_std_process::Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(path_std_process::Stdio::null())
+        .stdout(path_std_process::Stdio::null())
+        .stderr(path_std_process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success());
     assert!(!alive, "spawned child {pid} should have been killed");
@@ -293,18 +294,18 @@ fn process_group_setup_failure_kills_spawned_child() {
 /// cleanup so a stuck editor cannot leave Tau paused indefinitely.
 #[test]
 fn inherited_stdio_command_times_out_quiet_hung_child() {
-    let mut command = std::process::Command::new("sh");
+    let mut command = path_std_process::Command::new("sh");
     command
         .arg("-c")
         .arg("sleep 5")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(path_std_process::Stdio::null())
+        .stdout(path_std_process::Stdio::null())
+        .stderr(path_std_process::Stdio::null());
 
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     let err = run_with_inherited_stdio(
         &mut command,
-        std::time::Duration::from_millis(100),
+        path_std_time::Duration::from_millis(100),
         ProcessOwnership::ProcessGroup,
     )
     .expect_err("quiet hung child should time out");
@@ -317,17 +318,17 @@ fn inherited_stdio_command_times_out_quiet_hung_child() {
 /// returns the direct child's status without requiring captured pipe workers.
 #[test]
 fn inherited_stdio_command_returns_child_status() {
-    let mut command = std::process::Command::new("sh");
+    let mut command = path_std_process::Command::new("sh");
     command
         .arg("-c")
         .arg("exit 7")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(path_std_process::Stdio::null())
+        .stdout(path_std_process::Stdio::null())
+        .stderr(path_std_process::Stdio::null());
 
     let output = run_with_inherited_stdio(
         &mut command,
-        std::time::Duration::from_secs(5),
+        path_std_time::Duration::from_secs(5),
         ProcessOwnership::ProcessGroup,
     )
     .expect("short inherited-stdio command should finish");

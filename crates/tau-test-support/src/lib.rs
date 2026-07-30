@@ -1,5 +1,6 @@
 //! Reusable end-to-end test utilities for `tau` crates.
 
+use std::os::unix as path_std_os_unix;
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -111,8 +112,8 @@ pub fn run_causal_quota_fixture(
     state_dir: impl Into<PathBuf>,
 ) -> Result<CausalQuotaOutcome, CausalQuotaError> {
     fn provider_runner(
-        reader: std::os::unix::net::UnixStream,
-        writer: std::os::unix::net::UnixStream,
+        reader: path_std_os_unix::net::UnixStream,
+        writer: path_std_os_unix::net::UnixStream,
     ) -> Result<(), String> {
         tau_ext_provider_builtin::run_quota_recovery_fixture(reader, writer)
     }

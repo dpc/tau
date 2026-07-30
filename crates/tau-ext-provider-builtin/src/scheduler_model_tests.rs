@@ -1,6 +1,7 @@
 //! Deterministic command-trace model tests for the retry scheduler.
 
 use std::collections::BTreeMap;
+use std::env as path_std_env;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
@@ -497,7 +498,7 @@ fn scheduler_reference_model_fixed_command_traces() {
             .ok()
             .filter(|cases| *cases >= 32)
             .unwrap_or_else(|| panic!("TAU_SCHEDULER_MODEL_CASES must be at least 32")),
-        Err(std::env::VarError::NotPresent) => 32,
+        Err(path_std_env::VarError::NotPresent) => 32,
         Err(error) => panic!("invalid TAU_SCHEDULER_MODEL_CASES: {error}"),
     };
     for seed in PR_SEEDS {

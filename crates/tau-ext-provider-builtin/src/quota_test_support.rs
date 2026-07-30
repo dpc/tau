@@ -5,8 +5,8 @@ use std::io::{BufReader, Cursor, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
 use std::time::Duration;
+use std::{collections as path_std_collections, thread};
 
 use tau_proto::{
     CborValue, ContextItem, Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
@@ -112,7 +112,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
         frame_writer.flush().expect("flush fixture terminal");
     });
 
-    let mut providers = std::collections::BTreeMap::new();
+    let mut providers = path_std_collections::BTreeMap::new();
     providers.insert(
         ProviderName::new(CHATGPT_PROVIDER_NAME),
         BuiltinProviderProfile::Chatgpt(ChatGptProfile {

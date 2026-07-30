@@ -1,3 +1,5 @@
+use std::{io as path_std_io, net as path_std_net};
+
 /// OpenAI's nested OAuth envelope must expose only typed, bounded fields rather
 /// than retaining the complete response body.
 #[test]
@@ -76,7 +78,8 @@ fn malformed_oauth_error_body_is_not_rendered() {
 /// return the same status-only error with credential-safe default formatting.
 #[test]
 fn oversized_oauth_error_body_is_not_retained() {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind OAuth test server");
+    let listener =
+        path_std_net::TcpListener::bind(("127.0.0.1", 0)).expect("bind OAuth test server");
     let address = listener.local_addr().expect("OAuth test server address");
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept OAuth request");
@@ -89,7 +92,8 @@ fn oversized_oauth_error_body_is_not_retained() {
             "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
-        std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write OAuth response");
+        path_std_io::Write::write_all(&mut stream, response.as_bytes())
+            .expect("write OAuth response");
     });
 
     let error = super::post_form(
@@ -224,7 +228,8 @@ fn post_form_bytes_from_test_server(
     status: &'static str,
     body: Vec<u8>,
 ) -> Result<serde_json::Value, super::OAuthError> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind OAuth test server");
+    let listener =
+        path_std_net::TcpListener::bind(("127.0.0.1", 0)).expect("bind OAuth test server");
     let address = listener.local_addr().expect("OAuth test server address");
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept OAuth request");
@@ -233,8 +238,8 @@ fn post_form_bytes_from_test_server(
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
-        let _ = std::io::Write::write_all(&mut stream, headers.as_bytes());
-        let _ = std::io::Write::write_all(&mut stream, &body);
+        let _ = path_std_io::Write::write_all(&mut stream, headers.as_bytes());
+        let _ = path_std_io::Write::write_all(&mut stream, &body);
     });
     let result = super::post_form(
         &format!("http://{address}/oauth/token"),
@@ -257,7 +262,7 @@ fn read_complete_http_request(stream: &mut std::net::TcpStream) {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {
-        let read = std::io::Read::read(stream, &mut buffer).expect("read OAuth request");
+        let read = path_std_io::Read::read(stream, &mut buffer).expect("read OAuth request");
         assert!(read > 0, "OAuth request ended before its headers");
         request.extend_from_slice(&buffer[..read]);
         assert!(

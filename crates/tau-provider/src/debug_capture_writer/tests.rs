@@ -1,5 +1,5 @@
-use std::io;
 use std::sync::{Arc, Mutex, mpsc};
+use std::{fs as path_std_fs, io, path as path_std_path};
 
 use tau_config::provider_debug_capture::ProviderDebugCaptureFilename;
 use tempfile::TempDir;
@@ -34,7 +34,7 @@ fn overload_drops_new_capture_without_blocking() {
     let queue = CaptureQueue { sender };
     queue
         .try_submit(job(
-            std::path::Path::new("session"),
+            path_std_path::Path::new("session"),
             "1-one-http-sse-request.json.zst",
             b"one",
         ))
@@ -42,7 +42,7 @@ fn overload_drops_new_capture_without_blocking() {
 
     let error = queue
         .try_submit(job(
-            std::path::Path::new("session"),
+            path_std_path::Path::new("session"),
             "2-two-http-sse-request.json.zst",
             b"two",
         ))
@@ -57,14 +57,14 @@ fn write_failure_isolated_from_later_capture() {
     let (sender, receiver) = mpsc::sync_channel(2);
     sender
         .try_send(job(
-            std::path::Path::new("session"),
+            path_std_path::Path::new("session"),
             "1-one-http-sse-request.json.zst",
             b"one",
         ))
         .expect("first job");
     sender
         .try_send(job(
-            std::path::Path::new("session"),
+            path_std_path::Path::new("session"),
             "2-two-http-sse-request.json.zst",
             b"two",
         ))
@@ -102,14 +102,14 @@ fn worker_drains_when_test_producers_disconnect() {
     let (sender, receiver) = mpsc::sync_channel(2);
     sender
         .try_send(job(
-            std::path::Path::new("session"),
+            path_std_path::Path::new("session"),
             "1-one-http-sse-request.json.zst",
             b"one",
         ))
         .expect("first job");
     sender
         .try_send(job(
-            std::path::Path::new("session"),
+            path_std_path::Path::new("session"),
             "2-two-http-sse-request.json.zst",
             b"two",
         ))
@@ -144,8 +144,8 @@ fn production_writer_compresses_json_and_requires_existing_session() {
     write_capture(&capture).expect("write capture");
 
     let path = session.join("debug/provider-requests/1-prompt-http-sse-request.json.zst");
-    let decoded =
-        zstd::stream::decode_all(std::fs::File::open(path).expect("capture")).expect("decode zstd");
+    let decoded = zstd::stream::decode_all(path_std_fs::File::open(path).expect("capture"))
+        .expect("decode zstd");
     assert_eq!(decoded, json);
 
     let failure_json = br#"{"capture_kind":"provider_attempt_failure"}"#;
@@ -158,7 +158,7 @@ fn production_writer_compresses_json_and_requires_existing_session() {
     let failure_path =
         session.join("debug/provider-requests/2-prompt-responses-attempt-failure.json.zst");
     let decoded = zstd::stream::decode_all(
-        std::fs::File::open(failure_path).expect("attempt-failure capture"),
+        path_std_fs::File::open(failure_path).expect("attempt-failure capture"),
     )
     .expect("decode attempt-failure zstd");
     assert_eq!(decoded, failure_json);

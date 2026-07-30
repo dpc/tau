@@ -1,6 +1,7 @@
 //! Typed OTLP/OpenInference visualization projection.
 
 use std::collections::BTreeMap;
+use std::io as path_std_io;
 use std::io::{Read as _, Seek as _, Write as _};
 
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
@@ -200,7 +201,7 @@ impl EndpointStore {
     fn append(&mut self, endpoint: &StagedEndpoint) -> Result<Endpoint, InspectError> {
         let mut bytes = Vec::new();
         ciborium::into_writer(endpoint, &mut bytes).map_err(projection_error)?;
-        let offset = self.file.seek(std::io::SeekFrom::End(0))?;
+        let offset = self.file.seek(path_std_io::SeekFrom::End(0))?;
         self.file.write_all(&bytes)?;
         Ok(Endpoint {
             offset,
@@ -209,7 +210,8 @@ impl EndpointStore {
     }
 
     fn load(&mut self, endpoint: Endpoint) -> Result<StagedEndpoint, InspectError> {
-        self.file.seek(std::io::SeekFrom::Start(endpoint.offset))?;
+        self.file
+            .seek(path_std_io::SeekFrom::Start(endpoint.offset))?;
         let mut bytes = vec![0; endpoint.length as usize];
         self.file.read_exact(&mut bytes)?;
         ciborium::from_reader(bytes.as_slice()).map_err(projection_error)

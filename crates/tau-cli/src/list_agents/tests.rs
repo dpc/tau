@@ -1,3 +1,6 @@
+use std::os::unix::net as path_std_os_unix_net;
+use std::{io as path_std_io, time as path_std_time};
+
 use super::*;
 
 /// The direct roster request boundary must reject invalid controlled session
@@ -457,13 +460,13 @@ fn selected_agent_id_rejects_multiline_or_invalid_rows() {
 fn roster_request_times_out_on_silent_peer() {
     let temp = tempfile::tempdir().expect("tempdir");
     let socket_path = temp.path().join("harness.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind listener");
+    let listener = path_std_os_unix_net::UnixListener::bind(&socket_path).expect("bind listener");
     let server = std::thread::spawn(move || {
         let (_stream, _) = listener.accept().expect("accept client");
         std::thread::sleep(Duration::from_millis(100));
     });
 
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
     let result = request_at_socket_with_timeout_typed(
         &socket_path,
         &tau_proto::SessionId::parse("s1").expect("session id"),
@@ -482,10 +485,10 @@ fn roster_request_times_out_on_silent_peer() {
 fn roster_request_deadline_survives_unrelated_frames() {
     let temp = tempfile::tempdir().expect("tempdir");
     let socket_path = temp.path().join("harness.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind listener");
+    let listener = path_std_os_unix_net::UnixListener::bind(&socket_path).expect("bind listener");
     let server = std::thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept client");
-        let mut writer = tau_proto::HarnessOutputWriter::new(std::io::BufWriter::new(stream));
+        let mut writer = tau_proto::HarnessOutputWriter::new(path_std_io::BufWriter::new(stream));
         for index in 0..20 {
             if writer
                 .write_message(&HarnessOutputMessage::PeerSessionProbeResult(
@@ -503,7 +506,7 @@ fn roster_request_deadline_survives_unrelated_frames() {
         }
     });
 
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
     let result = request_at_socket_with_timeout_typed(
         &socket_path,
         &tau_proto::SessionId::parse("s1").expect("session id"),
@@ -525,7 +528,7 @@ fn roster_request_deadline_stops_partial_frame_trickle() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     let socket_path = temp.path().join("harness.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind listener");
+    let listener = path_std_os_unix_net::UnixListener::bind(&socket_path).expect("bind listener");
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept client");
         let frame = tau_proto::encode_message_to_vec(
@@ -543,7 +546,7 @@ fn roster_request_deadline_stops_partial_frame_trickle() {
         }
     });
 
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
     let result = request_at_socket_with_timeout_typed(
         &socket_path,
         &tau_proto::SessionId::parse("s1").expect("session id"),
@@ -584,7 +587,7 @@ fn roster_request_deadline_bounds_saturated_backlog_connect() {
     }
     assert!(!backlog.is_empty());
 
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
     let result = request_at_socket_with_timeout_typed(
         &socket_path,
         &tau_proto::SessionId::parse("s1").expect("session id"),

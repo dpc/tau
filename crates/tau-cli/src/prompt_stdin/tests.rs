@@ -1,3 +1,5 @@
+use std::time as path_std_time;
+
 use tau_proto::{AgentPromptCreated, MessageItem, PromptOriginator, ProviderStopReason};
 
 use super::*;
@@ -66,7 +68,7 @@ fn prompt_stdin_admission_reports_matching_rejection() {
         &rx,
         "wanted",
         "wanted-prompt",
-        std::time::Instant::now() + Duration::from_secs(1),
+        path_std_time::Instant::now() + Duration::from_secs(1),
     )
     .expect_err("rejection must fail");
     assert_eq!(
@@ -84,7 +86,7 @@ fn prompt_stdin_admission_timeout_is_bounded() {
         &rx,
         "wanted",
         "wanted-prompt",
-        std::time::Instant::now()
+        path_std_time::Instant::now()
             .checked_sub(Duration::from_secs(1))
             .expect("past deadline"),
     )
@@ -112,7 +114,7 @@ fn prompt_stdin_admission_accepts_created_result() {
         &rx,
         "wanted",
         "wanted-prompt",
-        std::time::Instant::now() + Duration::from_secs(1),
+        path_std_time::Instant::now() + Duration::from_secs(1),
     )
     .expect("created admission");
 }
@@ -139,7 +141,7 @@ fn prompt_stdin_admission_rejects_foreign_same_ctx_binding() {
         &rx,
         "request-1",
         "prompt-1",
-        std::time::Instant::now() + Duration::from_secs(1),
+        path_std_time::Instant::now() + Duration::from_secs(1),
     )
     .expect("created admission");
     assert_eq!(admission.initial_prompt_index, None);

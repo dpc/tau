@@ -1,5 +1,7 @@
 //! Closed grammar and resource validation for fake-provider scenarios.
 
+use std::collections as path_std_collections;
+
 use super::*;
 
 pub(super) fn validate_v1(scenario: &ScenarioV1) -> ClientResult<()> {
@@ -72,12 +74,12 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     {
         return Err(ClientError::handler("scenario exceeds 16384 bytes"));
     }
-    let mut ids = std::collections::HashSet::new();
+    let mut ids = path_std_collections::HashSet::new();
     let mut barriers: HashMap<&str, (usize, std::collections::HashSet<&str>)> = HashMap::new();
-    let mut dummy_call_ids = std::collections::HashSet::new();
-    let mut core_call_ids = std::collections::HashSet::new();
-    let mut agent_start_call_ids = std::collections::HashSet::new();
-    let mut agent_watch_call_ids = std::collections::HashSet::new();
+    let mut dummy_call_ids = path_std_collections::HashSet::new();
+    let mut core_call_ids = path_std_collections::HashSet::new();
+    let mut agent_start_call_ids = path_std_collections::HashSet::new();
+    let mut agent_watch_call_ids = path_std_collections::HashSet::new();
     for lane in &scenario.lanes {
         if lane.ctx_id.is_empty() || lane.ctx_id.len() > 64 || !ids.insert(lane.ctx_id.as_str()) {
             return Err(ClientError::handler(
@@ -312,7 +314,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                 } => {
                     let entry = barriers
                         .entry(barrier)
-                        .or_insert_with(|| (*participants, std::collections::HashSet::new()));
+                        .or_insert_with(|| (*participants, path_std_collections::HashSet::new()));
                     if entry.0 != *participants {
                         return Err(ClientError::handler(
                             "barrier participant counts must agree",

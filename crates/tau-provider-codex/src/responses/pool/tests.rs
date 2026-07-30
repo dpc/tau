@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex, mpsc as std_mpsc};
-use std::thread;
+use std::{sync as path_std_sync, thread, time as path_std_time};
 
 use tau_proto::ContextItem;
-use tungstenite::Message;
+use tungstenite::protocol::frame::coding as path_tungstenite_protocol_frame_coding;
+use tungstenite::{Message, handshake as path_tungstenite_handshake};
 
 use super::*;
 use crate::common::PromptPayload;
@@ -508,7 +509,7 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
         .busy
         .insert(key.clone());
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = path_std_sync::mpsc::channel();
     let handle = {
         let config = config.clone();
         let pool = pool.clone();
@@ -1068,7 +1069,8 @@ fn pool_reopens_aged_out_connections_on_checkout() {
         false,
     );
     if let Some(conn) = pool.conns.get_mut(&key) {
-        conn.opened_at = std::time::Instant::now() - MAX_CONNECTION_AGE - Duration::from_secs(1);
+        conn.opened_at =
+            path_std_time::Instant::now() - MAX_CONNECTION_AGE - Duration::from_secs(1);
     } else {
         panic!("expected connection in pool");
     }
@@ -2193,7 +2195,7 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
     let mut ws = match tungstenite::accept_hdr(
         stream,
         #[allow(clippy::result_large_err)]
-        |request: &tungstenite::handshake::server::Request, response| {
+        |request: &path_tungstenite_handshake::server::Request, response| {
             upgrade_headers = capture_headers(request.headers());
             Ok(response)
         },
@@ -2248,7 +2250,7 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
                     // sees `Message::Close` → `LlmError(0, "stream
                     // error: ws closed mid-stream ...")`.
                     let _ = ws.send(Message::Close(Some(tungstenite::protocol::CloseFrame {
-                        code: tungstenite::protocol::frame::coding::CloseCode::Error,
+                        code: path_tungstenite_protocol_frame_coding::CloseCode::Error,
                         reason: "keepalive ping timeout".into(),
                     })));
                     finish_server_turn(&state);

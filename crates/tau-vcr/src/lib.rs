@@ -4,13 +4,13 @@
 //! mode parsing, cassette directory/key handling, key validation, and YAML
 //! `get`/`put` operations. Callers own cassette schemas, request validation,
 //! live-vs-replay branching, timing, and response replay.
-use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::{env as path_std_env, fmt, fs as path_std_fs, io as path_std_io};
 
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de as path_serde_de};
 
 const ENV_MODE: &str = "TAU_VCR";
 const ENV_DIR: &str = "TAU_VCR_DIR";
@@ -69,8 +69,10 @@ impl VcrConfig {
     pub fn from_env() -> Option<Self> {
         let mode = match std::env::var(ENV_MODE) {
             Ok(value) => VcrMode::parse(&value).unwrap_or_else(|error| panic!("{error}")),
-            Err(std::env::VarError::NotPresent) => VcrMode::Off,
-            Err(std::env::VarError::NotUnicode(_)) => panic!("{} is not valid Unicode", ENV_MODE),
+            Err(path_std_env::VarError::NotPresent) => VcrMode::Off,
+            Err(path_std_env::VarError::NotUnicode(_)) => {
+                panic!("{} is not valid Unicode", ENV_MODE)
+            }
         };
         if mode == VcrMode::Off {
             return None;
@@ -134,7 +136,7 @@ impl<'de> Deserialize<'de> for EscapedBytes {
         let text = String::deserialize(deserializer)?;
         decode_escaped_bytes(&text)
             .map(Self)
-            .map_err(serde::de::Error::custom)
+            .map_err(path_serde_de::Error::custom)
     }
 }
 
@@ -414,12 +416,11 @@ impl VcrStore {
             #[cfg(unix)]
             if !existed {
                 use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
-                    |source| VcrError::CreateDir {
+                std::fs::set_permissions(parent, path_std_fs::Permissions::from_mode(0o700))
+                    .map_err(|source| VcrError::CreateDir {
                         path: parent.to_path_buf(),
                         source,
-                    },
-                )?;
+                    })?;
             }
         }
         Ok(())
@@ -437,7 +438,7 @@ impl VcrStore {
                         .map_err(|source| VcrError::Write { path, source })?;
                 }
                 Ok(_) => return Err(VcrError::UnsafePath { path }),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {}
                 Err(source) => {
                     return Err(VcrError::Read { path, source });
                 }
@@ -500,7 +501,7 @@ impl VcrStore {
         }
         let file = match options.open(&path) {
             Ok(file) => file,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) if source.kind() == path_std_io::ErrorKind::NotFound => return Ok(None),
             #[cfg(unix)]
             Err(source) if source.raw_os_error() == Some(libc::ELOOP) => {
                 return Err(VcrError::UnsafePath { path });
@@ -583,7 +584,7 @@ fn reject_symlink_components(path: &Path) -> Result<(), VcrError> {
             path: path.to_path_buf(),
         }),
         Ok(_) => Ok(()),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) if source.kind() == path_std_io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(VcrError::Read {
             path: path.to_path_buf(),
             source,

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de as path_serde_de};
 
 use crate::{ToolGroupName, ToolName};
 
@@ -112,7 +112,7 @@ impl<'de> Deserialize<'de> for ToolNamePrefix {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Self::parse(value).map_err(serde::de::Error::custom)
+        Self::parse(value).map_err(path_serde_de::Error::custom)
     }
 }
 

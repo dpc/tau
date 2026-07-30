@@ -13,6 +13,7 @@
 
 use std::sync::OnceLock;
 
+use tokio::runtime as path_tokio_runtime;
 use tokio::runtime::{Handle, Runtime};
 
 /// Worker thread count. Two is enough for typical provider operation
@@ -34,7 +35,7 @@ pub fn handle() -> Handle {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
     RUNTIME
         .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
+            path_tokio_runtime::Builder::new_multi_thread()
                 .worker_threads(WORKER_THREADS)
                 .enable_all()
                 .thread_name("tau-provider-builtin-net")

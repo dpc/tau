@@ -1,9 +1,9 @@
 //! Event names and subscription selectors.
 
-use std::fmt;
 use std::str::FromStr;
+use std::{borrow as path_std_borrow, fmt};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de as path_serde_de};
 
 /// First segment of a dotted event name.
 ///
@@ -103,12 +103,12 @@ pub struct EventCall(std::borrow::Cow<'static, str>);
 impl EventCall {
     /// Create an event call from a static string.
     pub const fn from_static(s: &'static str) -> Self {
-        Self(std::borrow::Cow::Borrowed(s))
+        Self(path_std_borrow::Cow::Borrowed(s))
     }
 
     /// Create an event call from owned or borrowed text.
     pub fn new(s: impl Into<String>) -> Self {
-        Self(std::borrow::Cow::Owned(s.into()))
+        Self(path_std_borrow::Cow::Owned(s.into()))
     }
 
     /// Borrow the call segment as a string slice.
@@ -132,7 +132,7 @@ impl From<&'static str> for EventCall {
 
 impl From<String> for EventCall {
     fn from(s: String) -> Self {
-        Self(std::borrow::Cow::Owned(s))
+        Self(path_std_borrow::Cow::Owned(s))
     }
 }
 
@@ -568,7 +568,7 @@ impl Serialize for EventName {
 impl<'de> Deserialize<'de> for EventName {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
+        s.parse().map_err(path_serde_de::Error::custom)
     }
 }
 

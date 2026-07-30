@@ -1,5 +1,9 @@
 //! Best-effort startup cleanup for non-authoritative session diagnostics.
 
+use std::thread as path_std_thread;
+
+use tau_config::provider_debug_capture as path_tau_config_provider_debug_capture;
+
 #[cfg(test)]
 mod tests;
 
@@ -45,7 +49,7 @@ fn spawn_diagnostic_cleanup_inner(
     let Some(retention) = retention.filter(|_| persistence.is_durable()) else {
         return Ok(None);
     };
-    std::thread::Builder::new()
+    path_std_thread::Builder::new()
         .name("tau-diagnostic-cleanup".to_owned())
         .spawn(move || cleanup_diagnostics(&sessions_dir, retention, &protected_sessions))
         .map(Some)
@@ -194,7 +198,7 @@ fn cleanup_provider_captures(
 
 /// Return whether a filename is one legacy or compressed provider capture.
 fn is_provider_capture_filename(filename: &str) -> bool {
-    tau_config::provider_debug_capture::ProviderDebugCaptureFilename::parse(filename).is_some()
+    path_tau_config_provider_debug_capture::ProviderDebugCaptureFilename::parse(filename).is_some()
 }
 
 /// Return whether `path` is a directory and not a final-component symlink.

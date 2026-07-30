@@ -11,8 +11,8 @@
 //! "tool.started", "payload": {...}}` shape.
 
 use std::collections::BTreeMap;
-use std::fmt;
 use std::path::PathBuf;
+use std::{fmt, time as path_std_time};
 
 use serde::{Deserialize, Serialize};
 
@@ -210,7 +210,7 @@ impl UnixMicros {
     /// infallible.
     #[must_use]
     pub fn now() -> Self {
-        let micros = std::time::SystemTime::now()
+        let micros = path_std_time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
             .unwrap_or(0);

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use super::*;
+use crate::harness::RuntimeEventWait;
 
 /// Return durable long-wait deliveries in publication order.
 fn long_wait_deliveries(harness: &Harness) -> Vec<tau_proto::AgentMessageReceived> {
@@ -638,12 +639,14 @@ fn received_event_at_threshold_equality_drains_deadline_first() {
         Some(start + Duration::from_secs(30 * 60))
     );
     let _received = match first {
-        super::super::RuntimeEventWait::Event(event) => event,
-        super::super::RuntimeEventWait::DeadlineElapsed => match harness.next_runtime_event() {
-            super::super::RuntimeEventWait::Event(event) => event,
+        RuntimeEventWait::Event(event) => event,
+        RuntimeEventWait::DeadlineElapsed => match harness.next_runtime_event() {
+            RuntimeEventWait::Event(event) => event,
             _ => panic!("held event must follow bounded deadline catch-up"),
         },
-        super::super::RuntimeEventWait::Disconnected => panic!("event channel remains connected"),
+        RuntimeEventWait::Disconnected => {
+            panic!("event channel remains connected")
+        }
     };
     harness.set_agent_watch(
         &watcher_id,

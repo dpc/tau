@@ -1,8 +1,11 @@
 //! [`DebugEventLog`]: serialization and nonblocking admission for the
 //! append-only JSONL debug mirror.
 
+#[cfg(test)]
+use std::fs as path_std_fs;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync as path_std_sync;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -45,7 +48,7 @@ impl DebugEventLog {
         #[cfg(test)]
         std::fs::create_dir_all(dir)?;
         #[cfg(test)]
-        let file = std::fs::OpenOptions::new()
+        let file = path_std_fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)?;
@@ -849,7 +852,7 @@ fn redact_event_binary_content(event: &mut Event) {
         | Event::ProviderToolResult(result) => {
             for part in &mut result.provider_content {
                 let tau_proto::ToolResultContentPart::Image(image) = part;
-                image.data = std::sync::Arc::from([]);
+                image.data = path_std_sync::Arc::from([]);
             }
         }
         Event::AgentPromptCreated(prompt) => prompt.context.clear_provider_image_bytes(),

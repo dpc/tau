@@ -1,3 +1,5 @@
+use std::fs as path_std_fs;
+
 use super::*;
 
 /// Ensures extension data reads reject oversized files before allocating the
@@ -6,7 +8,7 @@ use super::*;
 fn read_file_rejects_files_larger_than_extension_data_limit() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("too-large.bin");
-    std::fs::File::create(&file_path)
+    path_std_fs::File::create(&file_path)
         .expect("create file")
         .set_len(MAX_EXTENSION_DATA_FILE_BYTES + 1)
         .expect("make sparse oversized file");
@@ -51,7 +53,7 @@ fn create_file_rejects_payloads_larger_than_extension_data_limit() {
 fn append_file_rejects_growth_beyond_extension_data_limit() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("nearly-full.bin");
-    std::fs::File::create(&file_path)
+    path_std_fs::File::create(&file_path)
         .expect("create file")
         .set_len(MAX_EXTENSION_DATA_FILE_BYTES)
         .expect("make sparse quota-sized file");

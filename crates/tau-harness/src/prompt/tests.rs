@@ -1,9 +1,12 @@
+use std::{borrow as path_std_borrow, collections as path_std_collections};
+
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem, ToolError,
     ToolResultStatus,
 };
 
 use super::*;
+use crate::discovery as path_crate_discovery;
 
 /// Work-status prompts use one generic state/title shape and prevent
 /// model-authored titles from injecting invisible structure.
@@ -74,7 +77,7 @@ fn custom_system_template_receives_exact_sentinel_rule() {
     let rule = "outer sentinel policy";
     let prompt = build_system_prompt_with_tool_template_context(
         "{{#if exact_sentinel_boundary_rule}}RULE={{exact_sentinel_boundary_rule}}{{else}}NONE{{/if}}",
-        &std::collections::HashMap::new(),
+        &path_std_collections::HashMap::new(),
         &[],
         &[],
         serde_json::json!({}),
@@ -200,8 +203,8 @@ fn discovered_skill(description: &str, add_to_prompt: bool) -> DiscoveredSkill {
     DiscoveredSkill {
         source_id: crate::test_connection_id("test-extension"),
         description: description.to_owned(),
-        source: crate::discovery::DiscoveredSkillSource::BuiltIn {
-            content: std::borrow::Cow::Borrowed(""),
+        source: path_crate_discovery::DiscoveredSkillSource::BuiltIn {
+            content: path_std_borrow::Cow::Borrowed(""),
         },
         add_to_prompt,
         user_invocable: true,
@@ -213,14 +216,14 @@ fn discovered_skill(description: &str, add_to_prompt: bool) -> DiscoveredSkill {
 
 #[test]
 fn system_prompt_excludes_disable_model_invocation_skills() {
-    let mut skills = std::collections::HashMap::new();
+    let mut skills = path_std_collections::HashMap::new();
     skills.insert(
         tau_proto::SkillName::new("manual-only"),
         DiscoveredSkill {
             source_id: crate::test_connection_id("test-extension"),
             description: "Manual only".to_owned(),
-            source: crate::discovery::DiscoveredSkillSource::BuiltIn {
-                content: std::borrow::Cow::Borrowed(""),
+            source: path_crate_discovery::DiscoveredSkillSource::BuiltIn {
+                content: path_std_borrow::Cow::Borrowed(""),
             },
             add_to_prompt: true,
             user_invocable: true,
@@ -297,7 +300,7 @@ fn exact_line_index(text: &str, expected: &str) -> usize {
 
 #[test]
 fn build_system_prompt_without_fragments_does_not_render_cwd_prose() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let prompt = build_system_prompt(&skills, &[]);
     assert_eq!(
         prompt
@@ -330,7 +333,7 @@ fn build_system_prompt_without_fragments_does_not_render_cwd_prose() {
 /// exactly so the model can pass it back to shell/file tools.
 #[test]
 fn build_system_prompt_does_not_html_escape_cwd() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let prompt = build_system_prompt_with_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
         &skills,
@@ -349,7 +352,7 @@ fn build_system_prompt_does_not_html_escape_cwd() {
 
 #[test]
 fn build_system_prompt_encourages_parallel_tool_calls() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let prompt = build_system_prompt_with_tool_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
         &skills,
@@ -397,7 +400,7 @@ Tau comes with a set of `self-knowledge` skills describing it. Search for them a
 /// top-level section heading, and do not retain the old fragment wrapper.
 #[test]
 fn build_system_prompt_renders_single_unwrapped_tau_harness_section() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let prompt = build_system_prompt(&skills, &[]);
     assert_single_unwrapped_tau_harness_section(&prompt);
 }
@@ -406,7 +409,7 @@ fn build_system_prompt_renders_single_unwrapped_tau_harness_section() {
 /// before insertion so prompts can refer to stable per-prompt context.
 #[test]
 fn build_system_prompt_renders_role_prompt_handlebars_context() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let fragments = vec![
         tau_proto::PromptFragment::new(
             "engineer.instructions",
@@ -441,7 +444,7 @@ fn build_system_prompt_renders_role_prompt_handlebars_context() {
 /// configured group independently from the role name.
 #[test]
 fn prompt_and_system_templates_expose_configured_role_group() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let fragments = vec![tau_proto::PromptFragment::new(
         "review.instructions",
         tau_proto::PromptPriority::new(100),
@@ -466,7 +469,7 @@ fn prompt_and_system_templates_expose_configured_role_group() {
 /// context, keeping the shell extension as the single cwd source of truth.
 #[test]
 fn build_system_prompt_exposes_shell_cwd_to_handlebars() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let fragments = vec![tau_proto::PromptFragment::new(
         "engineer.cwd.conditional",
         tau_proto::PromptPriority::new(100),
@@ -492,7 +495,7 @@ fn build_system_prompt_exposes_shell_cwd_to_handlebars() {
 /// explicitly so custom role prompts control their presentation.
 #[test]
 fn build_system_prompt_exposes_sortable_skills_to_handlebars() {
-    let skills = std::collections::HashMap::from([
+    let skills = path_std_collections::HashMap::from([
         (
             tau_proto::SkillName::from("zeta"),
             discovered_skill("last skill", true),
@@ -533,7 +536,7 @@ fn build_system_prompt_exposes_sortable_skills_to_handlebars() {
 /// text for paths and user-authored role instructions.
 #[test]
 fn build_system_prompt_xml_escapes_builtin_skill_section() {
-    let skills = std::collections::HashMap::from([(
+    let skills = path_std_collections::HashMap::from([(
         tau_proto::SkillName::from("a&b"),
         discovered_skill("use <fast> \"mode\"", true),
     )]);
@@ -548,7 +551,7 @@ fn build_system_prompt_xml_escapes_builtin_skill_section() {
 /// than assuming object-shaped values with a `name` field.
 #[test]
 fn build_system_prompt_sort_helper_sorts_scalar_items_without_default_key() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let template = tau_proto::PromptContent::new(
         r#"{{#each (sort numbers)}}{{this}} {{/each}}
 {{#each (sort words)}}{{this}} {{/each}}"#,
@@ -585,7 +588,7 @@ alpha middle zeta "
 /// cannot collide with built-in prompt fields like `cwd` or `role`.
 #[test]
 fn build_system_prompt_exposes_agent_context_to_handlebars() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let fragments = vec![tau_proto::PromptFragment::new(
         "role.engineer.context",
         tau_proto::PromptPriority::new(100),
@@ -620,7 +623,7 @@ fn prompt_fragment_renders_agent_context_variable() {
 
     let prompt = build_system_prompt_with_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
-        &std::collections::HashMap::new(),
+        &path_std_collections::HashMap::new(),
         &fragments,
         serde_json::json!({
             "demo": [
@@ -644,7 +647,7 @@ fn prompt_fragments_order_by_priority_name_and_expose_priority() {
     ];
     let data = system_prompt_template_data(
         RolePromptTemplateContext::for_role("engineer"),
-        &std::collections::HashMap::new(),
+        &path_std_collections::HashMap::new(),
         &fragments,
         &[],
         serde_json::json!({}),
@@ -667,7 +670,7 @@ fn big_system_prompt_template_is_builtin_and_renders_context() {
     let templates = built_in_system_prompt_templates();
     assert!(templates.contains_key(BIG_SYSTEM_TEMPLATE_NAME));
 
-    let skills = std::collections::HashMap::from([(
+    let skills = path_std_collections::HashMap::from([(
         tau_proto::SkillName::from("test-skill"),
         discovered_skill("test skill description", true),
     )]);
@@ -708,7 +711,7 @@ fn big_system_prompt_template_is_builtin_and_renders_context() {
 /// all tool instructions and immediately before their skills section.
 #[test]
 fn built_in_prompts_place_external_message_boundaries_between_tools_and_skills() {
-    let skills = std::collections::HashMap::from([(
+    let skills = path_std_collections::HashMap::from([(
         tau_proto::SkillName::from("test-skill"),
         discovered_skill("test skill description", true),
     )]);
@@ -780,7 +783,7 @@ fn built_in_prompts_place_external_message_boundaries_between_tools_and_skills()
             templates
                 .get(template_name)
                 .expect("built-in template exists"),
-            &std::collections::HashMap::new(),
+            &path_std_collections::HashMap::new(),
             &[],
             &[],
             serde_json::json!({}),
@@ -798,7 +801,7 @@ fn built_in_prompts_place_external_message_boundaries_between_tools_and_skills()
 /// blocks even when no payload-boundary section appears between them.
 #[test]
 fn built_in_prompt_separates_final_tool_instruction_from_skills() {
-    let skills = std::collections::HashMap::from([(
+    let skills = path_std_collections::HashMap::from([(
         tau_proto::SkillName::from("test-skill"),
         discovered_skill("test skill description", true),
     )]);
@@ -831,7 +834,7 @@ fn built_in_prompt_separates_final_tool_instruction_from_skills() {
 fn tool_prompt_fragments_render_in_dedicated_section() {
     let prompt = build_system_prompt_with_tool_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
-        &std::collections::HashMap::new(),
+        &path_std_collections::HashMap::new(),
         &[tau_proto::PromptFragment::new(
             "role.instructions",
             tau_proto::PromptPriority::new(10),
@@ -870,7 +873,7 @@ fn rendered_empty_tool_prompt_fragment_skips_automatic_heading() {
     // leave behind a bare automatic tool heading.
     let prompt = build_system_prompt_with_tool_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
-        &std::collections::HashMap::new(),
+        &path_std_collections::HashMap::new(),
         &[],
         &[ToolPromptFragment::new(
             tau_proto::ToolName::new("conditional_tool"),
@@ -955,7 +958,7 @@ fn prompt_capabilities_are_deterministic() {
 fn system_prompt_renders_effective_parallel_tool_capability() {
     let parallel = build_system_prompt_with_tool_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
-        &std::collections::HashMap::new(),
+        &path_std_collections::HashMap::new(),
         &[],
         &[],
         serde_json::json!({}),
@@ -964,7 +967,7 @@ fn system_prompt_renders_effective_parallel_tool_capability() {
     );
     let serial = build_system_prompt_with_tool_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
-        &std::collections::HashMap::new(),
+        &path_std_collections::HashMap::new(),
         &[],
         &[],
         serde_json::json!({}),
@@ -993,7 +996,7 @@ fn failed_prompt_fragment_is_an_explicit_error() {
 
     let result = try_build_system_prompt_with_tool_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
-        &std::collections::HashMap::new(),
+        &path_std_collections::HashMap::new(),
         &fragments,
         &[],
         serde_json::json!({}),
@@ -1009,7 +1012,7 @@ fn failed_prompt_fragment_is_an_explicit_error() {
 /// fragment is intentionally late so it remains the prompt epilogue.
 #[test]
 fn build_system_prompt_composes_role_and_prompt_fragments_in_order() {
-    let skills = std::collections::HashMap::from([(
+    let skills = path_std_collections::HashMap::from([(
         tau_proto::SkillName::from("test-skill"),
         discovered_skill("test skill", true),
     )]);
@@ -1100,7 +1103,7 @@ fn build_system_prompt_composes_role_and_prompt_fragments_in_order() {
 /// together and do not add trailing blank space to the system prompt.
 #[test]
 fn build_system_prompt_normalizes_prompt_fragment_spacing() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let prompt = build_system_prompt_with_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
         &skills,
@@ -1130,7 +1133,7 @@ fn build_system_prompt_normalizes_prompt_fragment_spacing() {
 /// Empty hook entries are ignored without adding a blank prompt section.
 #[test]
 fn build_system_prompt_ignores_empty_prompt_fragment_sections() {
-    let skills = std::collections::HashMap::new();
+    let skills = path_std_collections::HashMap::new();
     let without_hook = build_system_prompt(&skills, &[]);
     let empty_fragments = vec![tau_proto::PromptFragment::new(
         "tool.empty",
@@ -1155,7 +1158,7 @@ fn rendered_empty_prompt_fragments_are_omitted_from_custom_templates() {
     let render = |fragments: &[tau_proto::PromptFragment], capabilities| {
         try_build_system_prompt_with_tool_template_context(
             "{{#each prompt_fragments}}{{name}}={{content}}{{/each}}",
-            &std::collections::HashMap::new(),
+            &path_std_collections::HashMap::new(),
             fragments,
             &[],
             serde_json::json!({}),

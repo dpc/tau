@@ -1,5 +1,6 @@
 //! Deterministic selected-proxy DNS failure fixture.
 
+use std::io as path_std_io;
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
@@ -41,10 +42,11 @@ impl reqwest::dns::Resolve for FailingProxyResolver {
             });
         }
         Box::pin(async move {
-            Err(
-                std::io::Error::new(std::io::ErrorKind::NotFound, "scripted proxy DNS failure")
-                    .into(),
+            Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::NotFound,
+                "scripted proxy DNS failure",
             )
+            .into())
         })
     }
 }

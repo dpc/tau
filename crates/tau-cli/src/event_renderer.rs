@@ -7,9 +7,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, atomic as path_std_sync_atomic};
 use std::time::{Duration, Instant};
+use std::{sync as path_std_sync, time as path_std_time};
 
+use tau_config::settings as path_tau_config_settings;
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem,
     ProviderResponseCompactionStatus, ProviderResponseTextDelta, ToolCallItem, UnixMicros,
@@ -37,7 +39,11 @@ use crate::tool_render::{
     synthesize_fallback_display, tool_duration_suffix, ui_dir_block,
 };
 use crate::watch_activity::WatchActivityProjection;
-use crate::{MUTEX_POISONED, build_banner};
+use crate::{
+    MUTEX_POISONED, build_banner, estimated_cost as path_crate_estimated_cost,
+    message_fact_render as path_crate_message_fact_render,
+    provider_quota as path_crate_provider_quota,
+};
 
 pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
 const UI_IO_HIGH_BYTES_PER_SEC: u64 = 100 * 1024;
@@ -45,7 +51,7 @@ const UI_IO_HIGH_BYTES_PER_SEC: u64 = 100 * 1024;
 const AGENT_START_TOOL_NAME: &str = "agent_start";
 const TIMER_WAKEUP_CTX_PREFIX: &str = "timer:";
 static LAST_HANDLER_STALL_WARNING: std::sync::OnceLock<Mutex<Option<Instant>>> =
-    std::sync::OnceLock::new();
+    path_std_sync::OnceLock::new();
 
 fn admit_handler_stall_warning(now: Instant) -> bool {
     let mut last = LAST_HANDLER_STALL_WARNING
@@ -464,10 +470,10 @@ pub(crate) struct EventRenderer {
     /// Cumulative end-to-end time spent waiting for agent responses.
     cumulative_agent_latency: Duration,
     /// Shared effort mirror kept in sync with harness state.
-    effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    effort_state: std::sync::Arc<path_std_sync::atomic::AtomicU8>,
     /// Shared fast-service-tier mirror for the input thread's `fast-toggle`
     /// binding.
-    fast_service_tier_state: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    fast_service_tier_state: std::sync::Arc<path_std_sync::atomic::AtomicBool>,
     /// Shared active-role mirror for input-thread role cycling.
     current_role_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Shared ordered role names for input-thread role cycling.
@@ -479,10 +485,10 @@ pub(crate) struct EventRenderer {
     /// Last selected role per role group for in-memory group cycling.
     role_group_memory: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Shared verbosity mirror kept symmetric with `effort_state`.
-    verbosity_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    verbosity_state: std::sync::Arc<path_std_sync::atomic::AtomicU8>,
     /// Shared thinking-summary mirror. Kept symmetric with the
     /// other knobs for future cycle helpers.
-    thinking_summary_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    thinking_summary_state: std::sync::Arc<path_std_sync::atomic::AtomicU8>,
     /// Context appended to files opened by the external prompt editor.
     /// Locked with `if let Ok(...)` rather than [`crate::locked`] because
     /// this is best-effort UI metadata: if another holder panicked we'd
@@ -650,12 +656,12 @@ impl ToolTimerNotifier {
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new((
-                std::sync::Mutex::new(ToolTimerState {
+                path_std_sync::Mutex::new(ToolTimerState {
                     active_tool_ids: HashSet::new(),
                     quota_active: false,
                     done: false,
                 }),
-                std::sync::Condvar::new(),
+                path_std_sync::Condvar::new(),
             )),
         }
     }
@@ -1193,7 +1199,7 @@ fn status_chip(
 }
 
 pub(crate) fn unix_time_millis() -> u64 {
-    std::time::SystemTime::now()
+    path_std_time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
@@ -1259,7 +1265,7 @@ fn response_stats_indicator_suffix(stats: &tau_proto::ProviderResponseStats) -> 
     let total_rate = format!("{}/s", format_progress_bytes(total_bytes_per_sec));
     let first_output = stats
         .first_semantic_output_elapsed_micros
-        .map(std::time::Duration::from_micros)
+        .map(path_std_time::Duration::from_micros)
         .map_or_else(String::new, |duration| {
             format!(", first output {}", format_compact_duration(duration))
         });
@@ -1267,10 +1273,10 @@ fn response_stats_indicator_suffix(stats: &tau_proto::ProviderResponseStats) -> 
 }
 
 fn format_compact_duration(duration: std::time::Duration) -> String {
-    if duration < std::time::Duration::from_secs(5) {
+    if duration < path_std_time::Duration::from_secs(5) {
         return format!("{}ms", duration.as_millis());
     }
-    if duration < std::time::Duration::from_secs(5 * 60) {
+    if duration < path_std_time::Duration::from_secs(5 * 60) {
         return format!("{}s", duration.as_secs());
     }
     format!("{}m", duration.as_secs() / 60)
@@ -1483,7 +1489,7 @@ impl EventRenderer {
             handle,
             completion_data,
             theme,
-            tau_config::settings::CliState::default(),
+            path_tau_config_settings::CliState::default(),
             tau_config::settings::TauDirs {
                 config_dir: None,
                 state_dir: None,
@@ -1502,7 +1508,7 @@ impl EventRenderer {
         prompt_symbol: String,
         submitted_prompt_symbol: String,
     ) -> Self {
-        let cli_state_mirror = std::sync::Arc::new(std::sync::Mutex::new(state.clone()));
+        let cli_state_mirror = path_std_sync::Arc::new(path_std_sync::Mutex::new(state.clone()));
         handle.set_redraw_history_size(state.redraw_history_size);
         Self {
             handle: RendererHandle::new(handle),
@@ -1521,10 +1527,10 @@ impl EventRenderer {
             contains_global_message_fact: false,
             contains_overview_message: false,
             overview_message_ids: HashSet::new(),
-            known_agents: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            agent_display_names: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            known_agents: path_std_sync::Arc::new(path_std_sync::Mutex::new(Vec::new())),
+            agent_display_names: path_std_sync::Arc::new(path_std_sync::Mutex::new(HashMap::new())),
             agent_navigation: Arc::new(Mutex::new(AgentNavigation::default())),
-            ephemeral_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            ephemeral_agents: path_std_sync::Arc::new(path_std_sync::Mutex::new(HashSet::new())),
             query_agents: HashMap::new(),
             prompt_agents: HashMap::new(),
             tool_agents: HashMap::new(),
@@ -1532,14 +1538,14 @@ impl EventRenderer {
             watched_agents: HashMap::new(),
             agent_watchers: HashMap::new(),
             agent_stats: HashMap::new(),
-            agent_estimated_api_costs: crate::estimated_cost::AgentCostProjection::default(),
+            agent_estimated_api_costs: path_crate_estimated_cost::AgentCostProjection::default(),
             agent_models: HashMap::new(),
             watched_agent_turn_states: HashMap::new(),
             active_agent_prompts: HashMap::new(),
             terminal_agent_prompts: HashSet::new(),
             finished_provider_prompts: HashSet::new(),
             watched_agent_blocks: HashMap::new(),
-            current_agent_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_agent_state: path_std_sync::Arc::new(path_std_sync::Mutex::new(None)),
             draft_retargeter: None,
             prompts: HashMap::new(),
             last_user_block: None,
@@ -1574,7 +1580,7 @@ impl EventRenderer {
             message_history: Vec::new(),
             state_dirs,
             current_model: None,
-            quota_pacing: crate::provider_quota::QuotaPacingState::default(),
+            quota_pacing: path_crate_provider_quota::QuotaPacingState::default(),
             last_quota_tick: None,
             current_role: None,
             model_params: tau_proto::ModelParams::default(),
@@ -1594,22 +1600,24 @@ impl EventRenderer {
             last_full_render_count: 0,
             last_full_render_at: None,
             cumulative_agent_latency: Duration::ZERO,
-            effort_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            effort_state: path_std_sync::Arc::new(path_std_sync_atomic::AtomicU8::new(
                 tau_proto::Effort::Off.as_u8(),
             )),
-            fast_service_tier_state: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            current_role_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            roles_available: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            custom_prompts: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            role_groups_available: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            role_group_memory: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            verbosity_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            fast_service_tier_state: path_std_sync::Arc::new(
+                path_std_sync_atomic::AtomicBool::new(false),
+            ),
+            current_role_state: path_std_sync::Arc::new(path_std_sync::Mutex::new(None)),
+            roles_available: path_std_sync::Arc::new(path_std_sync::Mutex::new(Vec::new())),
+            custom_prompts: path_std_sync::Arc::new(path_std_sync::Mutex::new(Vec::new())),
+            role_groups_available: path_std_sync::Arc::new(path_std_sync::Mutex::new(Vec::new())),
+            role_group_memory: path_std_sync::Arc::new(path_std_sync::Mutex::new(HashMap::new())),
+            verbosity_state: path_std_sync::Arc::new(path_std_sync_atomic::AtomicU8::new(
                 tau_proto::Verbosity::default().as_u8(),
             )),
-            thinking_summary_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            thinking_summary_state: path_std_sync::Arc::new(path_std_sync_atomic::AtomicU8::new(
                 tau_proto::ThinkingSummary::default().as_u8(),
             )),
-            editor_context: std::sync::Arc::new(std::sync::Mutex::new(
+            editor_context: path_std_sync::Arc::new(path_std_sync::Mutex::new(
                 tau_cli_term::EditorContext::default(),
             )),
             editor_conversation_context: EditorConversationContext::default(),
@@ -2485,7 +2493,7 @@ impl EventRenderer {
             show_tools: self.show_tools,
             show_messages: self.show_messages,
             notice_level: self.notice_level,
-            show_status: tau_config::settings::ShowStatus::All,
+            show_status: path_tau_config_settings::ShowStatus::All,
             show_prompt_scroll_indicator: self.show_prompt_scroll_indicator,
         };
         if let Ok(mut mirror) = self.cli_state_mirror.lock() {
@@ -2560,7 +2568,9 @@ impl EventRenderer {
 
     /// Returns a clone of the shared Fast-mode mirror, used by configurable
     /// bindings.
-    pub(crate) fn fast_service_tier_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    pub(crate) fn fast_service_tier_state(
+        &self,
+    ) -> std::sync::Arc<path_std_sync::atomic::AtomicBool> {
         self.fast_service_tier_state.clone()
     }
 
@@ -2642,12 +2652,12 @@ impl EventRenderer {
             }
             "show-ui-io" => self.set_show_ui_io(on),
             "show-tools" => {
-                if let Some(show_tools) = tau_config::settings::ShowTools::parse(value) {
+                if let Some(show_tools) = path_tau_config_settings::ShowTools::parse(value) {
                     self.set_show_tools(show_tools);
                 }
             }
             "show-messages" => {
-                if let Some(show_messages) = tau_config::settings::ShowMessages::parse(value) {
+                if let Some(show_messages) = path_tau_config_settings::ShowMessages::parse(value) {
                     self.set_show_messages(show_messages);
                 }
             }
@@ -2843,11 +2853,11 @@ impl EventRenderer {
 
     fn render_tool_history_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
         match self.show_tools {
-            tau_config::settings::ShowTools::Full => render_tool_block(&self.theme, display),
-            tau_config::settings::ShowTools::Compact => self.render_compact_tool_block(display),
-            tau_config::settings::ShowTools::Off
-            | tau_config::settings::ShowTools::SummarizeTurn
-            | tau_config::settings::ShowTools::SummarizePrompt => Self::empty_block(),
+            path_tau_config_settings::ShowTools::Full => render_tool_block(&self.theme, display),
+            path_tau_config_settings::ShowTools::Compact => self.render_compact_tool_block(display),
+            path_tau_config_settings::ShowTools::Off
+            | path_tau_config_settings::ShowTools::SummarizeTurn
+            | path_tau_config_settings::ShowTools::SummarizePrompt => Self::empty_block(),
         }
     }
 
@@ -2863,7 +2873,7 @@ impl EventRenderer {
         diff: &tau_proto::ToolUsePayload,
     ) -> tau_cli_term::StyledBlock {
         match self.show_tools {
-            tau_config::settings::ShowTools::Full => match diff {
+            path_tau_config_settings::ShowTools::Full => match diff {
                 tau_proto::ToolUsePayload::Diff(summary) => {
                     render_diff_tool_block(&self.theme, display, summary, self.diffs_expanded)
                 }
@@ -2872,10 +2882,10 @@ impl EventRenderer {
                 }
                 tau_proto::ToolUsePayload::Text { .. } => render_tool_block(&self.theme, display),
             },
-            tau_config::settings::ShowTools::Compact => self.render_compact_tool_block(display),
-            tau_config::settings::ShowTools::Off
-            | tau_config::settings::ShowTools::SummarizeTurn
-            | tau_config::settings::ShowTools::SummarizePrompt => Self::empty_block(),
+            path_tau_config_settings::ShowTools::Compact => self.render_compact_tool_block(display),
+            path_tau_config_settings::ShowTools::Off
+            | path_tau_config_settings::ShowTools::SummarizeTurn
+            | path_tau_config_settings::ShowTools::SummarizePrompt => Self::empty_block(),
         }
     }
 
@@ -3388,11 +3398,11 @@ impl EventRenderer {
             quota_model.and_then(|model| self.quota_pacing.classify(&model, unix_time_millis()));
         if let Some(quota) = quota {
             let style = match quota {
-                crate::provider_quota::QuotaPacing::FarUnder => names::STATUS_QUOTA_UNDER,
-                crate::provider_quota::QuotaPacing::Aligned => names::STATUS_QUOTA_ALIGNED,
-                crate::provider_quota::QuotaPacing::Over => names::STATUS_QUOTA_OVER,
-                crate::provider_quota::QuotaPacing::Danger => names::STATUS_QUOTA_DANGER,
-                crate::provider_quota::QuotaPacing::Unknown => names::STATUS_QUOTA_UNKNOWN,
+                path_crate_provider_quota::QuotaPacing::FarUnder => names::STATUS_QUOTA_UNDER,
+                path_crate_provider_quota::QuotaPacing::Aligned => names::STATUS_QUOTA_ALIGNED,
+                path_crate_provider_quota::QuotaPacing::Over => names::STATUS_QUOTA_OVER,
+                path_crate_provider_quota::QuotaPacing::Danger => names::STATUS_QUOTA_DANGER,
+                path_crate_provider_quota::QuotaPacing::Unknown => names::STATUS_QUOTA_UNKNOWN,
             };
             line.push(
                 StatusElement::WeeklyQuota.priority(),
@@ -4548,7 +4558,7 @@ impl EventRenderer {
     /// snapshot, preserving unavailable and invalid facts as global output.
     fn message_fact_snapshot_owner(&self, event: &Event) -> Option<UiSnapshotOwner> {
         match crate::message_fact_render::target_agent_id(event)? {
-            crate::message_fact_render::MessageFactTarget::Valid(agent_id)
+            path_crate_message_fact_render::MessageFactTarget::Valid(agent_id)
                 if self
                     .agent_navigation
                     .lock()
@@ -4557,8 +4567,8 @@ impl EventRenderer {
             {
                 Some(UiSnapshotOwner::Agent(agent_id.to_string()))
             }
-            crate::message_fact_render::MessageFactTarget::Valid(_)
-            | crate::message_fact_render::MessageFactTarget::Invalid => {
+            path_crate_message_fact_render::MessageFactTarget::Valid(_)
+            | path_crate_message_fact_render::MessageFactTarget::Invalid => {
                 Some(UiSnapshotOwner::NoAgent)
             }
         }
@@ -4796,15 +4806,16 @@ impl EventRenderer {
     fn handle_message_fact_event(&mut self, event: &Event) -> bool {
         let target_context =
             crate::message_fact_render::target_agent_id(event).is_some_and(|target| {
-                let crate::message_fact_render::MessageFactTarget::Valid(agent_id) = target else {
+                let path_crate_message_fact_render::MessageFactTarget::Valid(agent_id) = target
+                else {
                     return false;
                 };
                 self.displayed_agent_id.as_deref() == Some(agent_id.as_str())
             });
         let target_context = if target_context {
-            crate::message_fact_render::MessageFactTargetContext::Implied
+            path_crate_message_fact_render::MessageFactTargetContext::Implied
         } else {
-            crate::message_fact_render::MessageFactTargetContext::Explicit
+            path_crate_message_fact_render::MessageFactTargetContext::Explicit
         };
         let Some(rendered) = crate::message_fact_render::render(event, target_context) else {
             return false;
@@ -5167,14 +5178,20 @@ impl EventRenderer {
             })
         );
         match (show_messages, self_msg) {
-            (tau_config::settings::ShowMessages::None, _) => MessageRenderMode::Hidden,
-            (tau_config::settings::ShowMessages::SelfSummary, true) => MessageRenderMode::Summary,
-            (tau_config::settings::ShowMessages::SelfSummary, false) => MessageRenderMode::Hidden,
-            (tau_config::settings::ShowMessages::SelfFull, true) => MessageRenderMode::Full,
-            (tau_config::settings::ShowMessages::SelfFull, false) => MessageRenderMode::Hidden,
-            (tau_config::settings::ShowMessages::AllSummary, true) => MessageRenderMode::Full,
-            (tau_config::settings::ShowMessages::AllSummary, false) => MessageRenderMode::Summary,
-            (tau_config::settings::ShowMessages::AllFull, _) => MessageRenderMode::Full,
+            (path_tau_config_settings::ShowMessages::None, _) => MessageRenderMode::Hidden,
+            (path_tau_config_settings::ShowMessages::SelfSummary, true) => {
+                MessageRenderMode::Summary
+            }
+            (path_tau_config_settings::ShowMessages::SelfSummary, false) => {
+                MessageRenderMode::Hidden
+            }
+            (path_tau_config_settings::ShowMessages::SelfFull, true) => MessageRenderMode::Full,
+            (path_tau_config_settings::ShowMessages::SelfFull, false) => MessageRenderMode::Hidden,
+            (path_tau_config_settings::ShowMessages::AllSummary, true) => MessageRenderMode::Full,
+            (path_tau_config_settings::ShowMessages::AllSummary, false) => {
+                MessageRenderMode::Summary
+            }
+            (path_tau_config_settings::ShowMessages::AllFull, _) => MessageRenderMode::Full,
         }
     }
 
@@ -7289,7 +7306,7 @@ impl EventRenderer {
             self.render_model_status();
         }
         let completer: tau_cli_term::ArgCompleter =
-            std::sync::Arc::new(move |args| role_command_completions(&role_items, args));
+            path_std_sync::Arc::new(move |args| role_command_completions(&role_items, args));
         self.completion_data
             .set_arg_completer(tau_cli_term::CommandName::new(":role"), completer);
     }
@@ -7318,22 +7335,22 @@ impl EventRenderer {
         self.model_params = selected.model_params;
         self.effort_state.store(
             selected.model_params.effort.as_u8(),
-            std::sync::atomic::Ordering::Relaxed,
+            path_std_sync_atomic::Ordering::Relaxed,
         );
         self.verbosity_state.store(
             selected.model_params.verbosity.as_u8(),
-            std::sync::atomic::Ordering::Relaxed,
+            path_std_sync_atomic::Ordering::Relaxed,
         );
         self.thinking_summary_state.store(
             selected.model_params.thinking_summary.as_u8(),
-            std::sync::atomic::Ordering::Relaxed,
+            path_std_sync_atomic::Ordering::Relaxed,
         );
         self.fast_service_tier_state.store(
             matches!(
                 selected.model_params.service_tier,
                 Some(tau_proto::ServiceTier::Fast)
             ),
-            std::sync::atomic::Ordering::Relaxed,
+            path_std_sync_atomic::Ordering::Relaxed,
         );
         if let Ok(mut role) = self.current_role_state.lock() {
             *role = Some(selected.role.clone());

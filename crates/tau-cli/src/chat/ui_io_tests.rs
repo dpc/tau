@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc;
+use std::sync::{atomic as path_std_sync_atomic, mpsc};
 
 use tau_proto::HarnessOutputWriter;
 
@@ -33,7 +33,7 @@ fn renderer_byte_budget_blocks_and_releases_at_cap() {
 #[test]
 fn renderer_disconnect_waits_at_exact_byte_cap_and_releases_all_permits() {
     let budget = Arc::new(RendererByteBudget::new());
-    let queued_items = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let queued_items = Arc::new(path_std_sync_atomic::AtomicUsize::new(1));
     budget.acquire(RENDERER_QUEUE_MAX_BYTES);
     let blocked_budget = budget.clone();
     let blocked_items = queued_items.clone();
@@ -63,7 +63,7 @@ fn renderer_disconnect_waits_at_exact_byte_cap_and_releases_all_permits() {
 #[test]
 fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
     let (remote_tx, remote_rx) = mpsc::sync_channel(4);
-    let admitted = Arc::new(std::sync::atomic::AtomicU64::new(2));
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(2));
     let arbiter = Arc::new(Mutex::new(()));
     let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
     remote_tx
@@ -125,7 +125,7 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
 #[test]
 fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
     let (remote_tx, remote_rx) = mpsc::sync_channel(2);
-    let admitted = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(1));
     let arbiter = Arc::new(Mutex::new(()));
     let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
     local_tx
@@ -161,7 +161,7 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
 #[test]
 fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
     let (remote_tx, remote_rx) = mpsc::sync_channel(1);
-    let admitted = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(1));
     let arbiter = Arc::new(Mutex::new(()));
     let (local_tx, local_rx) = LocalRendererSender::channel(admitted, arbiter.clone());
     remote_tx
@@ -217,7 +217,7 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
 #[test]
 fn renderer_scheduler_places_action_before_later_remote_result() {
     let (remote_tx, remote_rx) = mpsc::sync_channel(4);
-    let admitted = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(1));
     let arbiter = Arc::new(Mutex::new(()));
     let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
     remote_tx
@@ -265,7 +265,7 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
 #[test]
 fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
     let (remote_tx, remote_rx) = mpsc::sync_channel(8);
-    let admitted = Arc::new(std::sync::atomic::AtomicU64::new(2));
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(2));
     let arbiter = Arc::new(Mutex::new(()));
     let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
     local_tx
@@ -309,7 +309,7 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
     let budget = Arc::new(RendererByteBudget::new());
     budget.acquire(RENDERER_QUEUE_MAX_BYTES);
     let (remote_tx, remote_rx) = mpsc::sync_channel(1);
-    let admitted = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(1));
     let arbiter = Arc::new(Mutex::new(()));
     let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
     remote_tx

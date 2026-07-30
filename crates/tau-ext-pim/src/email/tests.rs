@@ -3,7 +3,7 @@ use std::io::{BufReader, BufWriter};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::thread;
+use std::{collections as path_std_collections, fs as path_std_fs, thread};
 
 use tau_proto::{
     HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
@@ -505,7 +505,7 @@ fn cfg() -> EmailExtensionConfig {
 }
 
 fn configure_secrets() -> std::collections::BTreeMap<String, tau_proto::SecretValue> {
-    std::collections::BTreeMap::from([(
+    path_std_collections::BTreeMap::from([(
         "email_password".to_owned(),
         tau_proto::SecretValue::new("secret"),
     )])
@@ -1200,7 +1200,7 @@ fn google_oauth_config_validation_and_secret_checks() {
     assert_eq!(auth.method, AuthMethod::Oauth2);
     assert_eq!(auth.provider, Some(EmailOauth2Provider::Google));
 
-    let secrets = std::collections::BTreeMap::from([
+    let secrets = path_std_collections::BTreeMap::from([
         (
             "google_client_id".to_owned(),
             tau_proto::SecretValue::new("client-id"),
@@ -4339,11 +4339,11 @@ fn state_paths_are_private_and_existing_files_are_hardened() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let state_dir = temp.path().join("state");
     std::fs::create_dir_all(state_dir.join("policy")).expect("mkdir");
-    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755))
+    std::fs::set_permissions(&state_dir, path_std_fs::Permissions::from_mode(0o755))
         .expect("chmod state");
     let allow_path = state_dir.join("policy").join("incoming-allow.json");
     std::fs::write(&allow_path, r#"{"schema":0,"patterns":[]}"#).expect("allow");
-    std::fs::set_permissions(&allow_path, std::fs::Permissions::from_mode(0o644))
+    std::fs::set_permissions(&allow_path, path_std_fs::Permissions::from_mode(0o644))
         .expect("chmod allow");
 
     let state = StateStore::open(state_dir.clone()).expect("state");
@@ -4402,7 +4402,8 @@ fn state_paths_are_private_and_existing_files_are_hardened() {
     let log_path = state_dir.join("logs/email.jsonl");
     std::fs::create_dir_all(state_dir.join("logs")).expect("mkdir logs");
     std::fs::write(&log_path, b"").expect("log");
-    std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o644)).expect("chmod log");
+    std::fs::set_permissions(&log_path, path_std_fs::Permissions::from_mode(0o644))
+        .expect("chmod log");
     state
         .append_email_log(&EmailLogEntry {
             schema: 0,
@@ -4442,7 +4443,8 @@ fn recent_email_log_hardens_existing_log_file_on_read() {
 "#,
     )
     .expect("log");
-    std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o644)).expect("chmod log");
+    std::fs::set_permissions(&log_path, path_std_fs::Permissions::from_mode(0o644))
+        .expect("chmod log");
 
     let entries = state.recent_email_log(1).expect("recent log");
 
@@ -4585,7 +4587,7 @@ fn password_secret_must_be_present_in_configure_secrets() {
     // Account config refers to a secret by name; the extension must reject a
     // configure handshake where the harness did not provide that secret value.
     let config = cfg().validate().expect("valid config");
-    let err = validate_config_secrets(&config, &std::collections::BTreeMap::new())
+    let err = validate_config_secrets(&config, &path_std_collections::BTreeMap::new())
         .expect_err("missing configure secret rejected");
     assert!(err.contains("work"));
     assert!(err.contains("email_password"));
@@ -4605,7 +4607,7 @@ fn disabled_email_config_and_accounts_do_not_require_password_secrets() {
     let config = disabled_extension
         .validate()
         .expect("disabled extension skips password-secret validation");
-    validate_config_secrets(&config, &std::collections::BTreeMap::new())
+    validate_config_secrets(&config, &path_std_collections::BTreeMap::new())
         .expect("disabled extension skips Configure.secrets validation");
 
     let mut disabled_account = cfg();
@@ -4617,7 +4619,7 @@ fn disabled_email_config_and_accounts_do_not_require_password_secrets() {
     let config = disabled_account
         .validate()
         .expect("disabled account skips password-secret validation");
-    validate_config_secrets(&config, &std::collections::BTreeMap::new())
+    validate_config_secrets(&config, &path_std_collections::BTreeMap::new())
         .expect("disabled account skips Configure.secrets validation");
 
     let mut enabled_account = cfg();

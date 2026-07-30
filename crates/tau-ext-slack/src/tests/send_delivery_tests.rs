@@ -1,5 +1,7 @@
 //! Slack send-delivery state machine, retry, replay, and concurrency tests.
 
+use std::io as path_std_io;
+
 use super::*;
 use crate::send_delivery::{InternalSourceMention, PostCompositionError};
 
@@ -519,7 +521,7 @@ fn disconnect_and_eof_retire_before_a_reserved_initial_attempt() {
             let reader_boundary = SendReaderBoundary::default();
             reader_boundary.install(&ext);
             let mut reader = RetiringReader {
-                inner: std::io::Cursor::new(Vec::<u8>::new()),
+                inner: path_std_io::Cursor::new(Vec::<u8>::new()),
                 boundary: Arc::new(reader_boundary),
             };
             let mut byte = [0_u8; 1];

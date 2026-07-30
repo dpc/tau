@@ -1,5 +1,7 @@
 //! Native, OTLP, and compact exports of durable agent journals.
 
+use std::fs as path_std_fs;
+
 mod agent_tools;
 mod native;
 mod otlp;
@@ -115,7 +117,7 @@ fn prepare_agent_trace_with_after_capture(
     #[cfg(unix)]
     file.set_permissions({
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::Permissions::from_mode(0o600)
+        path_std_fs::Permissions::from_mode(0o600)
     })?;
     match format {
         AgentTraceFormat::TauJsonl => native::write_jsonl(root_agent_id, &snapshot, &mut file)?,

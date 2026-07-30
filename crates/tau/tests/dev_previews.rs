@@ -1,3 +1,4 @@
+use std::ffi as path_std_ffi;
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
@@ -181,7 +182,7 @@ fn previews_reject_non_utf8_extension_environment() {
             .env("XDG_STATE_HOME", home.path().join(".state"))
             .env(
                 "TAU_ENABLE_EXTENSIONS",
-                std::ffi::OsString::from_vec(vec![0xff]),
+                path_std_ffi::OsString::from_vec(vec![0xff]),
             )
             .args(["--role", "engineer", "dev", command_name])
             .output()

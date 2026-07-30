@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io as path_std_io;
 use std::io::ErrorKind;
 
 use super::*;
@@ -15,6 +16,7 @@ use crate::harness::{
     tool_unavailable_notice_prompt, unavailable_tool_error_message, validate_protocol_version,
 };
 use crate::settings::ExtensionConfig;
+use crate::{event_log as path_crate_event_log, settings as path_crate_settings};
 
 fn test_session_id(value: impl Into<String>) -> tau_proto::SessionId {
     tau_proto::SessionId::parse(value).expect("test session id")
@@ -98,7 +100,7 @@ fn event_log_contains_source_event(
     source: &str,
     mut predicate: impl FnMut(&Event) -> bool,
 ) -> bool {
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
@@ -2058,7 +2060,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
     let command = format!("/definitely/not/a/{}-trailing-secret", "y".repeat(300));
     let config = crate::settings::Config {
         core: crate::settings::CoreConfig {
-            mode: crate::settings::CoreMode::Embedded,
+            mode: path_crate_settings::CoreMode::Embedded,
         },
         extensions: BTreeMap::from([(
             extension_name.clone(),
@@ -4522,7 +4524,7 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
     }));
     let committed: Vec<_> = {
         let mut events = Vec::new();
-        let mut seq = crate::event_log::EventLogSeq::new(0);
+        let mut seq = path_crate_event_log::EventLogSeq::new(0);
         while let Some(entry) = h.event_log.get_next_from(seq) {
             seq = entry.seq.next();
             let relevant = entry.event.name() == custom_name
@@ -4618,7 +4620,7 @@ fn terminal_output_events_are_deferred_in_order_until_ready() {
 
     let committed: Vec<_> = {
         let mut names = Vec::new();
-        let mut seq = crate::event_log::EventLogSeq::new(0);
+        let mut seq = path_crate_event_log::EventLogSeq::new(0);
         while let Some(entry) = h.event_log.get_next_from(seq) {
             seq = entry.seq.next();
             if entry.source.as_deref() == Some(conn_id)
@@ -5485,7 +5487,7 @@ fn assigned_tool_prefix_rejects_unprefixed_registration() {
         .expect("handle registration");
         assert!(h.registry.providers_for(name).is_empty());
     }
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     let mut saw_notice = false;
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
@@ -7345,7 +7347,7 @@ fn accepted_initial_client_startup_error_uses_normal_writer() {
     let (server_end, client_end) = UnixStream::pair().expect("pair");
     let client_id = h.accept_client(server_end).expect("accept client");
 
-    let error = std::io::Error::other("post-accept startup failure");
+    let error = path_std_io::Error::other("post-accept startup failure");
     h.send_startup_disconnect_to_initial_client(Some(&client_id), &error);
 
     let mut reader = HarnessOutputReader::new(BufReader::new(client_end));

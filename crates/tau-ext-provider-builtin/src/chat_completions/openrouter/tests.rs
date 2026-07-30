@@ -1,5 +1,7 @@
 //! Deterministic OpenRouter discovery and cache acceptance.
 
+use std::collections as path_std_collections;
+
 mod scripted_http_server;
 
 use scripted_http_server::ScriptedHttpServer;
@@ -11,7 +13,10 @@ const MODELS: &str = r#"{"data":[{"id":"vendor/model","name":"Fixture","context_
 
 /// Builds a direct-only provider policy without ambient discovery.
 fn network() -> tau_provider::OutboundNetworkPolicy {
-    tau_provider::OutboundNetworkPolicy::from_environment(std::collections::BTreeMap::new(), None)
+    tau_provider::OutboundNetworkPolicy::from_environment(
+        path_std_collections::BTreeMap::new(),
+        None,
+    )
 }
 
 /// Ensures successful discovery sends bearer auth, normalizes models, and
@@ -125,7 +130,7 @@ fn cache_policy_preserves_last_good_data_across_failure_classes() {
     }
 
     let invalid_network = tau_provider::OutboundNetworkPolicy::from_environment(
-        std::collections::BTreeMap::from([(
+        path_std_collections::BTreeMap::from([(
             "https_proxy".to_owned(),
             "socks5://unsupported.invalid".to_owned(),
         )]),

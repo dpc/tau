@@ -2,9 +2,12 @@
 //! AGENTS.md context message, and the conversation assembly that turns a
 //! [`tau_core::AgentTree`] into item-based prompt context.
 
+use std::{cmp as path_std_cmp, collections as path_std_collections, time as path_std_time};
+
 use tau_core::AgentEntry;
 use tau_proto::{ContextItem, PromptFragment, ToolName};
 
+use crate::discovery as path_crate_discovery;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 pub(crate) const BUILT_IN_SYSTEM_TEMPLATE_NAME: &str = "built-in";
 const BUILT_IN_SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../prompts/system.hbs");
@@ -22,7 +25,7 @@ const WATCH_PROMPT_CLOSE: &str = "</prompt>";
 const WATCH_PROMPT_CLOSE_VISIBLE: &str = "&lt;/prompt&gt;";
 
 pub(crate) fn built_in_system_prompt_templates() -> std::collections::HashMap<String, String> {
-    std::collections::HashMap::from([
+    path_std_collections::HashMap::from([
         (
             BUILT_IN_SYSTEM_TEMPLATE_NAME.to_owned(),
             BUILT_IN_SYSTEM_PROMPT_TEMPLATE.to_owned(),
@@ -534,11 +537,13 @@ fn prompt_template_skills(
         .filter(|(_, skill)| skill.add_to_prompt && !skill.disable_model_invocation)
         .map(|(name, skill)| {
             let base_dir = match &skill.source {
-                crate::discovery::DiscoveredSkillSource::File(path) => path
+                path_crate_discovery::DiscoveredSkillSource::File(path) => path
                     .parent()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| path.display().to_string()),
-                crate::discovery::DiscoveredSkillSource::BuiltIn { .. } => "<builtin>".to_owned(),
+                path_crate_discovery::DiscoveredSkillSource::BuiltIn { .. } => {
+                    "<builtin>".to_owned()
+                }
             };
             serde_json::json!({
                 "name": name.as_str(),
@@ -821,7 +826,7 @@ fn compare_template_values(
         (serde_json::Value::Number(a), serde_json::Value::Number(b)) => a
             .as_f64()
             .partial_cmp(&b.as_f64())
-            .unwrap_or(std::cmp::Ordering::Equal),
+            .unwrap_or(path_std_cmp::Ordering::Equal),
         (serde_json::Value::String(a), serde_json::Value::String(b)) => a.cmp(b),
         (serde_json::Value::Bool(a), serde_json::Value::Bool(b)) => a.cmp(b),
         _ => value_type_rank(a)
@@ -900,7 +905,7 @@ pub(crate) fn render_effective_prompt_message(
 /// Returns the current date as YYYY-MM-DD without chrono.
 pub(crate) fn chrono_free_date() -> String {
     // Use UNIX timestamp to derive date.
-    let secs = std::time::SystemTime::now()
+    let secs = path_std_time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);

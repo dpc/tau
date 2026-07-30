@@ -1,8 +1,12 @@
+use std::sync as path_std_sync;
+use std::sync::atomic as path_std_sync_atomic;
+
 #[cfg(test)]
 mod tests;
 use tau_proto::{PromptMessageClass, PromptOriginator, UiCreateAgent};
 
-static NEXT_CREATE_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static NEXT_CREATE_REQUEST_ID: path_std_sync::atomic::AtomicU64 =
+    path_std_sync_atomic::AtomicU64::new(1);
 
 /// Default role used when the UI submits a prompt without an explicit selected
 /// role from session state.
@@ -43,7 +47,7 @@ pub(crate) fn create_user_agent_prompt(
     prompt: impl Into<String>,
     options: CreateUserAgentPromptOptions,
 ) -> UiCreateAgent {
-    let next_id = || NEXT_CREATE_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let next_id = || NEXT_CREATE_REQUEST_ID.fetch_add(1, path_std_sync_atomic::Ordering::Relaxed);
     let process_id = std::process::id();
     UiCreateAgent {
         request_id: format!("ui-create-{process_id}-{}", next_id()),

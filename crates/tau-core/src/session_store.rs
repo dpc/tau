@@ -6,6 +6,8 @@
 //! memory only. Agent transcripts live in [`crate::AgentStore`] under the
 //! global agents directory in both modes.
 
+use std::collections as path_std_collections;
+
 #[cfg(test)]
 mod tests;
 
@@ -447,7 +449,7 @@ impl SessionStore {
             ephemeral_membership_overlay: HashMap::new(),
             restore_events: HashMap::new(),
             locks: HashMap::new(),
-            dirty_meta_rebuilds: std::collections::HashSet::new(),
+            dirty_meta_rebuilds: path_std_collections::HashSet::new(),
             mode: SessionPersistenceMode::Durable,
         })
     }
@@ -467,7 +469,7 @@ impl SessionStore {
             ephemeral_membership_overlay: HashMap::new(),
             restore_events: HashMap::new(),
             locks: HashMap::new(),
-            dirty_meta_rebuilds: std::collections::HashSet::new(),
+            dirty_meta_rebuilds: path_std_collections::HashSet::new(),
             mode: SessionPersistenceMode::Ephemeral,
         })
     }
@@ -1060,7 +1062,7 @@ fn validate_ephemeral_membership_overlay(
     session_id: &str,
     events: &[PersistedSessionEvent],
 ) -> Result<(), SessionStoreError> {
-    let mut loaded = std::collections::HashSet::new();
+    let mut loaded = path_std_collections::HashSet::new();
     for (index, record) in events.iter().enumerate() {
         if record.seq.get() != index as u64 {
             return Err(SessionStoreError::InvalidEvent {

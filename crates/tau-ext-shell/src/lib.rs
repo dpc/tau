@@ -24,6 +24,11 @@ use tau_proto::{
 };
 use tracing::{debug, trace};
 
+use crate::tools::{shell as path_crate_tools_shell, world as path_crate_tools_world};
+use crate::{
+    dir_lock as path_crate_dir_lock, display as path_crate_display, tools as path_crate_tools,
+};
+
 mod agents;
 mod argument;
 mod config;
@@ -1130,8 +1135,8 @@ fn rewrite_invoke_for_cwd(
         return invoke;
     }
     let field = match invoke.tool_name.as_str() {
-        SHELL_TOOL_NAME => crate::tools::ShellSurface::Generic.directory_argument(),
-        GPT_SHELL_TOOL_NAME => crate::tools::ShellSurface::ChatGpt.directory_argument(),
+        SHELL_TOOL_NAME => path_crate_tools::ShellSurface::Generic.directory_argument(),
+        GPT_SHELL_TOOL_NAME => path_crate_tools::ShellSurface::ChatGpt.directory_argument(),
         READ_TOOL_NAME | READ_IMAGE_TOOL_NAME | EDIT_TOOL_NAME | FIND_TOOL_NAME
         | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
         DIR_LOCK_TOOL_NAME => "directory",
@@ -1228,14 +1233,14 @@ fn schedule_tool_started(
     let workdir_snapshot = cwd_state.snapshot(&invoke.agent_id).map_err(|message| {
         Box::new((
             wire_invoke.clone(),
-            crate::display::ToolFailure::new(message),
+            path_crate_display::ToolFailure::new(message),
         ))
     })?;
     if matches!(workdir_snapshot, WorkdirSnapshot::Invalid) && invoke.tool_name != WORKDIR_TOOL_NAME
     {
         return Err(Box::new((
             wire_invoke,
-            crate::display::ToolFailure::new(
+            path_crate_display::ToolFailure::new(
                 "remembered workdir metadata is invalid; repair it with an absolute workdir path",
             ),
         )));
@@ -1243,7 +1248,7 @@ fn schedule_tool_started(
     if matches!(workdir_snapshot, WorkdirSnapshot::ReplayFailed) {
         return Err(Box::new((
             wire_invoke,
-            crate::display::ToolFailure::new(
+            path_crate_display::ToolFailure::new(
                 "workdir replay failed for this agent; reload the agent before retrying",
             ),
         )));
@@ -1256,7 +1261,7 @@ fn schedule_tool_started(
         {
             return Err(Box::new((
                 wire_invoke,
-                crate::display::ToolFailure::new(
+                path_crate_display::ToolFailure::new(
                     "remembered workdir metadata is invalid; repair it with an absolute workdir path",
                 ),
             )));
@@ -1275,7 +1280,7 @@ fn schedule_tool_started(
             WorkdirSnapshot::Invalid => None,
             WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
         };
-        let path = crate::tools::workdir::target_dir(&invoke.arguments, base)
+        let path = path_crate_tools::workdir::target_dir(&invoke.arguments, base)
             .map_err(|failure| Box::new((wire_invoke.clone(), failure)))?;
         cwd_state
             .start_pending_workdir_result(
@@ -1287,7 +1292,7 @@ fn schedule_tool_started(
             .map_err(|_| {
                 Box::new((
                     wire_invoke.clone(),
-                    crate::display::ToolFailure::new(
+                    path_crate_display::ToolFailure::new(
                         "another workdir change is already pending for this agent and shell instance",
                     ),
                 ))
@@ -1313,7 +1318,7 @@ fn schedule_tool_started(
             cwd_state.take_pending_workdir_by_call(&wire_invoke.call_id);
             return Err(Box::new((
                 wire_invoke,
-                crate::display::ToolFailure::new("failed to request workdir metadata commit"),
+                path_crate_display::ToolFailure::new("failed to request workdir metadata commit"),
             )));
         }
         return Ok(());
@@ -1381,7 +1386,7 @@ fn schedule_tool_started(
             cwd_state_for_error.take_pending_workdir_by_call(&invoke_for_error.call_id);
             Box::new((
                 invoke_for_error,
-                crate::display::ToolFailure::new(error.message),
+                path_crate_display::ToolFailure::new(error.message),
             ))
         })
 }
@@ -1436,7 +1441,7 @@ fn schedule_ui_shell_command(
             if shutdown_generation.load(Ordering::SeqCst) != scheduled_generation {
                 let _ = cancel_tx.send(());
             }
-            crate::tools::shell::dispatch_user_shell_command(
+            path_crate_tools::shell::dispatch_user_shell_command(
                 cmd,
                 shell_config,
                 &tx_for_job,
@@ -1595,7 +1600,7 @@ fn dispatch_locked_tool_invoke(
         )
     } {
         Ok(guard) => guard,
-        Err(crate::dir_lock::LockAcquireError::NotCovered) => {
+        Err(path_crate_dir_lock::LockAcquireError::NotCovered) => {
             dispatch_tool_invoke(
                 invoke,
                 ToolDispatchContext {
@@ -1611,7 +1616,7 @@ fn dispatch_locked_tool_invoke(
             );
             return;
         }
-        Err(crate::dir_lock::LockAcquireError::Cancelled) => {
+        Err(path_crate_dir_lock::LockAcquireError::Cancelled) => {
             let _ = tx.report_tool_terminal(Event::ToolCancelled(ToolCancelled {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
@@ -1619,14 +1624,14 @@ fn dispatch_locked_tool_invoke(
             }));
             return;
         }
-        Err(crate::dir_lock::LockAcquireError::Abandoned(lock)) => {
+        Err(path_crate_dir_lock::LockAcquireError::Abandoned(lock)) => {
             send_tool_failure(invoke, lock.tool_failure(), &tx);
             return;
         }
-        Err(crate::dir_lock::LockAcquireError::SelfConflict { dir }) => {
+        Err(path_crate_dir_lock::LockAcquireError::SelfConflict { dir }) => {
             send_tool_failure(
                 invoke,
-                crate::display::ToolFailure::new(format!(
+                path_crate_display::ToolFailure::new(format!(
                     "automatic directory lock is outside your manual lock coverage: {}",
                     dir.display()
                 )),
@@ -1634,10 +1639,10 @@ fn dispatch_locked_tool_invoke(
             );
             return;
         }
-        Err(crate::dir_lock::LockAcquireError::Backend(message)) => {
+        Err(path_crate_dir_lock::LockAcquireError::Backend(message)) => {
             send_tool_failure(
                 invoke,
-                crate::display::ToolFailure::new(format!("dir_lock backend error: {message}")),
+                path_crate_display::ToolFailure::new(format!("dir_lock backend error: {message}")),
                 &tx,
             );
             return;
@@ -1782,7 +1787,7 @@ fn dispatch_tool_invoke(
     } = context;
     if invoke.tool_name == WORKDIR_TOOL_NAME {
         if cbor_optional_text(&invoke.arguments, "path").is_none() {
-            let output = crate::tools::workdir::status_output(match &workdir_snapshot {
+            let output = path_crate_tools::workdir::status_output(match &workdir_snapshot {
                 WorkdirSnapshot::Valid(path) => Some(path.as_path()),
                 WorkdirSnapshot::Invalid => None,
                 WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
@@ -1835,7 +1840,7 @@ fn dispatch_tool_invoke(
         crate::shell_output_spool::note_call();
     }
     let vcr_config = tau_vcr::VcrConfig::from_env();
-    let world = match crate::tools::world::ShellWorld::for_tool_in_dir(
+    let world = match path_crate_tools_world::ShellWorld::for_tool_in_dir(
         invoke.tool_name.as_str(),
         invoke.call_id.as_str(),
         &invoke.arguments,
@@ -1910,7 +1915,7 @@ fn dispatch_cancellable_non_shell_tool(
     tx: &Output,
     running_calls: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_wait_duration_seconds: Option<u64>,
-    world: crate::tools::world::ShellWorld,
+    world: path_crate_tools::world::ShellWorld,
 ) {
     let (cancel_tx, cancel_rx) = mpsc::channel();
     running_calls
@@ -1938,13 +1943,13 @@ fn dispatch_cancellable_non_shell_tool(
         .remove(&call_id);
 
     match outcome {
-        crate::tools::CancellableToolOutcome::Finished(events) => {
+        path_crate_tools::CancellableToolOutcome::Finished(events) => {
             for event in events {
                 let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
                 let _ = tx.report_tool_terminal(event);
             }
         }
-        crate::tools::CancellableToolOutcome::Cancelled => {
+        path_crate_tools::CancellableToolOutcome::Cancelled => {
             let event = Event::ToolCancelled(ToolCancelled {
                 call_id,
                 tool_name,
@@ -1975,7 +1980,7 @@ struct CancellableShellDispatch<'a> {
     /// guard.
     enforce_ro_bind: bool,
     /// Tool execution world carrying the cwd and recorded side effects.
-    world: crate::tools::world::ShellWorld,
+    world: path_crate_tools::world::ShellWorld,
 }
 
 fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
@@ -2005,14 +2010,14 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         tool_name: invoke.tool_name.clone(),
         message: None,
         progress: None,
-        display: Some(crate::tools::shell::initial_display(
+        display: Some(path_crate_tools::shell::initial_display(
             &invoke.arguments,
             shell_command_mode,
         )),
     });
-    let result = crate::tools::shell::run_command_cancellable_for_tool(
-        crate::tools::shell::ShellInvocation {
-            surface: crate::tools::ShellSurface::for_tool_name(invoke.tool_name.as_str())
+    let result = path_crate_tools::shell::run_command_cancellable_for_tool(
+        path_crate_tools::shell::ShellInvocation {
+            surface: path_crate_tools::ShellSurface::for_tool_name(invoke.tool_name.as_str())
                 .expect("shell dispatch accepts only known shell tools"),
             call_id: invoke.call_id.as_str(),
             arguments: &invoke.arguments,
@@ -2028,7 +2033,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         (Ok(_), Err(failure)) | (Err(failure), Ok(())) | (Err(failure), Err(_)) => Err(failure),
     };
     let event = match outcome {
-        Ok(crate::tools::shell::CommandOutcome::Finished(output)) => {
+        Ok(path_crate_tools_shell::CommandOutcome::Finished(output)) => {
             debug!(call_id = %invoke.call_id, tool_name = %invoke.tool_name, "cancellable shell call finished");
             Event::ToolResult(ToolResult {
                 call_id: invoke.call_id.clone(),
@@ -2041,7 +2046,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
                 originator: invoke.originator.clone(),
             })
         }
-        Ok(crate::tools::shell::CommandOutcome::Cancelled) => {
+        Ok(path_crate_tools_shell::CommandOutcome::Cancelled) => {
             debug!(call_id = %invoke.call_id, tool_name = %invoke.tool_name, "cancellable shell call cancelled");
             Event::ToolCancelled(ToolCancelled {
                 call_id: invoke.call_id.clone(),

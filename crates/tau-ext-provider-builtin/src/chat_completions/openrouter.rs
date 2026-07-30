@@ -1,5 +1,9 @@
 //! OpenRouter profile and bounded discovery/cache behavior.
 
+use std::time as path_std_time;
+
+use tokio::runtime as path_tokio_runtime;
+
 #[cfg(test)]
 mod tests;
 
@@ -12,7 +16,7 @@ use tau_proto::ModelName;
 
 use super::{ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider};
 
-const OPENROUTER_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const OPENROUTER_DISCOVERY_TIMEOUT: std::time::Duration = path_std_time::Duration::from_secs(30);
 const MAX_OPENROUTER_MODELS_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// OpenRouter's wire representation for one discoverable model.
@@ -145,7 +149,7 @@ fn fetch_openrouter_models_from(
     url: &str,
     cache_path: Option<&Path>,
 ) -> Result<Vec<ChatCompletionsModel>, Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| OpenRouterDiscoveryError::Runtime)?;

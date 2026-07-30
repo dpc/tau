@@ -1,5 +1,7 @@
 //! Chat Completions extension ownership regression tests.
 
+use std::{io as path_std_io, time as path_std_time};
+
 use super::sampling::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
 use super::*;
 
@@ -152,7 +154,7 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
 fn successful_sampling_preserves_delta_and_stats_order() {
     let prompt = crate::openai_tests::prompt();
     let apid = prompt.agent_prompt_id.clone();
-    let started_at = std::time::Instant::now();
+    let started_at = path_std_time::Instant::now();
     let mut sampler = ResponseSampler::new();
     sampler.started_at = started_at;
     sampler.latest_items = vec![assistant_message(0, "hel")];
@@ -276,7 +278,7 @@ fn stats_only_tool_bytes_emit_without_text_delta() {
 #[test]
 fn due_zero_bytes_then_first_bytes_after_idle_preserve_cadence() {
     let prompt = crate::openai_tests::prompt();
-    let started_at = std::time::Instant::now();
+    let started_at = path_std_time::Instant::now();
     let mut sampler = ResponseSampler::new();
     sampler.started_at = started_at;
     let mut bytes = Vec::new();
@@ -375,7 +377,7 @@ fn assistant_message(
 }
 
 fn decode_frames(bytes: &[u8]) -> Vec<tau_proto::HarnessInputMessage> {
-    let mut reader = tau_proto::HarnessInputReader::new(std::io::BufReader::new(bytes));
+    let mut reader = tau_proto::HarnessInputReader::new(path_std_io::BufReader::new(bytes));
     let mut frames = Vec::new();
     while let Some(frame) = reader.read_message().expect("decode frame") {
         frames.push(frame);

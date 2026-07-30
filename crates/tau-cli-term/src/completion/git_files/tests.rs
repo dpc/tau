@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::atomic as path_std_sync_atomic;
+use std::{process as path_std_process, time as path_std_time};
 
 use super::*;
 
@@ -42,19 +44,19 @@ fn dotslash_display_path_keeps_local_prefix_and_allows_parent_paths() {
 /// repository command cannot wedge prompt completion.
 #[test]
 fn git_bounded_stdout_kills_child_on_overflow() {
-    let mut command = std::process::Command::new("sh");
+    let mut command = path_std_process::Command::new("sh");
     command
         .arg("-c")
         .arg("yes git-overflow")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
 
-    let start = std::time::Instant::now();
+    let start = path_std_time::Instant::now();
     let error = crate::run_with_bounded_stdout(
         &mut command,
         None,
         1024,
-        std::time::Duration::from_secs(5),
+        path_std_time::Duration::from_secs(5),
         crate::ProcessOwnership::ProcessGroup,
     )
     .expect_err("over-limit stdout should fail");
@@ -71,7 +73,7 @@ fn git_repo_files_caches_negative_result_for_cwd() {
     if let Ok(mut cache) = CACHE.lock() {
         *cache = None;
     }
-    ENUMERATE_GIT_FILES_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    ENUMERATE_GIT_FILES_CALLS.store(0, path_std_sync_atomic::Ordering::SeqCst);
 
     assert!(git_repo_files(dir.path()).is_none());
 

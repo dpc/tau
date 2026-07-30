@@ -1,6 +1,6 @@
 //! Opaque identities and content-free references for runtime observations.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de as path_serde_de};
 
 /// Opaque, non-ordering 128-bit identity allocated at an observation point.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -55,19 +55,19 @@ impl<'de> Deserialize<'de> for ObservationId {
     {
         let value = String::deserialize(deserializer)?;
         if value.len() != 32 {
-            return Err(serde::de::Error::custom(
+            return Err(path_serde_de::Error::custom(
                 "observation id must contain 32 lowercase hexadecimal digits",
             ));
         }
         let mut bytes = [0_u8; 16];
         for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high = decode_hex(pair[0]).ok_or_else(|| {
-                serde::de::Error::custom(
+                path_serde_de::Error::custom(
                     "observation id must contain 32 lowercase hexadecimal digits",
                 )
             })?;
             let low = decode_hex(pair[1]).ok_or_else(|| {
-                serde::de::Error::custom(
+                path_serde_de::Error::custom(
                     "observation id must contain 32 lowercase hexadecimal digits",
                 )
             })?;

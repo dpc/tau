@@ -1,8 +1,8 @@
 //! Harness-owned secret loading and per-extension resolution.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt;
 use std::path::{Path, PathBuf};
+use std::{fmt, io as path_std_io};
 
 use tau_config::settings::ExtensionSecretEntry;
 use tau_proto::SecretValue;
@@ -139,7 +139,7 @@ fn read_file_secret(state_dir: &Path, name: &str) -> Result<Option<String>, Secr
             let value = text.trim().to_owned();
             Ok((!value.is_empty()).then_some(value))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(SecretsError::Io { path, source }),
     }
 }

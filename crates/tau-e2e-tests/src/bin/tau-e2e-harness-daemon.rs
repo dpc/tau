@@ -1,6 +1,7 @@
 //! Test-only process wrapper for a hermetic deterministic harness daemon.
 
 use std::collections::BTreeSet;
+use std::ffi as path_std_ffi;
 use std::path::PathBuf;
 
 fn main() {
@@ -14,7 +15,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let test_dummy = args
         .last()
-        .is_some_and(|arg| arg == std::ffi::OsStr::new("--test-dummy"));
+        .is_some_and(|arg| arg == path_std_ffi::OsStr::new("--test-dummy"));
     if test_dummy {
         args.pop();
     }

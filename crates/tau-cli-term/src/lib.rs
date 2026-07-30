@@ -10,6 +10,8 @@
 //! The ownership split and subprocess/editor contracts are summarized in
 //! `ARCH-tau-cli-term`.
 
+use std::{ffi as path_std_ffi, process as path_std_process, time as path_std_time};
+
 mod bounded_command;
 pub mod completion;
 pub mod resolve;
@@ -44,10 +46,10 @@ const PROMPT_TRAILER_MARKER: &str =
 // docs/cli-keybindings.md in sync with these values.
 const PROMPT_COMMAND_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 const COMPLETION_COMMAND_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
-const COMPLETION_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const PROMPT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const COMPLETION_COMMAND_TIMEOUT: std::time::Duration = path_std_time::Duration::from_secs(10);
+const PROMPT_COMMAND_TIMEOUT: std::time::Duration = path_std_time::Duration::from_secs(60 * 60);
 const AGENT_PICKER_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
-const AGENT_PICKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const AGENT_PICKER_TIMEOUT: std::time::Duration = path_std_time::Duration::from_secs(5 * 60);
 // Keep the first ten fields synchronized with docs/list-agents.md#output. The
 // final three source fields are picker-only cost/work status; the presentation
 // field is removed after fzf returns the complete input row.
@@ -384,7 +386,7 @@ impl HighTerm {
     /// error.
     pub fn pick_agent_row_with_fzf(&self, rows: &str) -> Result<Option<String>, String> {
         self.pick_agent_row_with_command(
-            std::ffi::OsStr::new("fzf"),
+            path_std_ffi::OsStr::new("fzf"),
             rows,
             AGENT_PICKER_TIMEOUT,
             ProcessOwnership::ForegroundProcessGroup,
@@ -772,11 +774,11 @@ fn run_agent_fzf_command_with_ownership(
     ownership: ProcessOwnership,
     after_spawn: impl FnOnce() -> Result<(), String>,
 ) -> Result<Option<String>, String> {
-    let mut command = std::process::Command::new(program);
+    let mut command = path_std_process::Command::new(program);
     command
         .args(AGENT_PICKER_FZF_ARGS)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
     let output = run_with_bounded_stdout_after_spawn(
         &mut command,
         Some(rows.as_bytes()),
@@ -938,12 +940,12 @@ fn run_completion_command(
     term.pause_for_external()
         .map_err(|e| format!("could not release terminal: {e}"))?;
     let _guard = ExternalResumeGuard::new(|| term.resume_after_external());
-    let mut command_builder = std::process::Command::new(program);
+    let mut command_builder = path_std_process::Command::new(program);
     command_builder
         .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdin(path_std_process::Stdio::null())
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
     let output = run_with_bounded_stdout(
         &mut command_builder,
         None,
@@ -1274,7 +1276,7 @@ fn prompt_shell_command_builder(
     external_editor: Option<&str>,
     history_picker: Option<&PromptHistoryPicker>,
 ) -> std::process::Command {
-    let mut command_builder = std::process::Command::new("sh");
+    let mut command_builder = path_std_process::Command::new("sh");
     command_builder
         .arg("-c")
         .arg(command)
@@ -1305,9 +1307,9 @@ fn run_prompt_edit_command(
     command_builder: &mut std::process::Command,
 ) -> Result<Option<PromptShellCommandOutput>, String> {
     command_builder
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
+        .stdin(path_std_process::Stdio::inherit())
+        .stdout(path_std_process::Stdio::inherit())
+        .stderr(path_std_process::Stdio::inherit());
     let status = run_with_inherited_stdio(
         command_builder,
         PROMPT_COMMAND_TIMEOUT,
@@ -1322,13 +1324,13 @@ fn run_prompt_capture_command(
     history_picker: Option<&PromptHistoryPicker>,
 ) -> Result<Option<PromptShellCommandOutput>, String> {
     command_builder.stdin(if history_picker.is_some() {
-        std::process::Stdio::piped()
+        path_std_process::Stdio::piped()
     } else {
-        std::process::Stdio::null()
+        path_std_process::Stdio::null()
     });
     command_builder
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(path_std_process::Stdio::piped())
+        .stderr(path_std_process::Stdio::null());
     let stdin_input = history_picker.map(|history_picker| history_picker.rows.as_bytes());
     let output = run_with_bounded_stdout(
         command_builder,

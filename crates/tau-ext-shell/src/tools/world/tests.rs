@@ -1,6 +1,9 @@
+use std::process as path_std_process;
+
 use tau_proto::CborValue;
 
 use super::*;
+use crate::tools as path_crate_tools;
 
 fn ls_args(path: &std::path::Path) -> CborValue {
     CborValue::Map(vec![(
@@ -16,7 +19,7 @@ fn ls_args(path: &std::path::Path) -> CborValue {
 fn read_file_limited_rejects_fifo_without_blocking() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
     let fifo_path = tempdir.path().join("pipe");
-    let status = std::process::Command::new("mkfifo")
+    let status = path_std_process::Command::new("mkfifo")
         .arg(&fifo_path)
         .status()
         .expect("run mkfifo");
@@ -160,7 +163,7 @@ fn ls_vcr_records_world_ops_and_replays_through_tool_logic() {
         )),
     )
     .expect("recording world");
-    let recorded = crate::tools::ls::run_ls(&args, &mut recording).expect("recorded ls");
+    let recorded = path_crate_tools::ls::run_ls(&args, &mut recording).expect("recorded ls");
     recording.finish().expect("record cassette");
     std::fs::remove_file(real_dir.path().join("beta")).expect("remove live file");
     std::fs::remove_dir(real_dir.path().join("alpha")).expect("remove live dir");
@@ -175,7 +178,7 @@ fn ls_vcr_records_world_ops_and_replays_through_tool_logic() {
         )),
     )
     .expect("replay world");
-    let replayed = crate::tools::ls::run_ls(&args, &mut replay).expect("replayed ls");
+    let replayed = path_crate_tools::ls::run_ls(&args, &mut replay).expect("replayed ls");
     replay.finish().expect("consume replay ops");
 
     assert_eq!(replayed.result, recorded.result);
@@ -215,7 +218,7 @@ fn read_vcr_replays_file_bytes_through_read_logic() {
         )),
     )
     .expect("recording world");
-    let recorded = crate::tools::read::read_file(&args, &mut recording).expect("recorded read");
+    let recorded = path_crate_tools::read::read_file(&args, &mut recording).expect("recorded read");
     recording.finish().expect("record cassette");
     std::fs::write(&file, b"changed").expect("change live file");
 
@@ -229,7 +232,7 @@ fn read_vcr_replays_file_bytes_through_read_logic() {
         )),
     )
     .expect("replay world");
-    let replayed = crate::tools::read::read_file(&args, &mut replay).expect("replayed read");
+    let replayed = path_crate_tools::read::read_file(&args, &mut replay).expect("replayed read");
     replay.finish().expect("consume replay ops");
 
     assert_eq!(replayed.result, recorded.result);
@@ -283,7 +286,7 @@ fn edit_vcr_replay_asserts_write_without_mutating_live_file() {
         )),
     )
     .expect("recording world");
-    let recorded = crate::tools::edit::edit_file(&args, &mut recording).expect("recorded edit");
+    let recorded = path_crate_tools::edit::edit_file(&args, &mut recording).expect("recorded edit");
     recording.finish().expect("record cassette");
     assert_eq!(
         std::fs::read(&file).expect("read recorded file"),
@@ -301,7 +304,7 @@ fn edit_vcr_replay_asserts_write_without_mutating_live_file() {
         )),
     )
     .expect("replay world");
-    let replayed = crate::tools::edit::edit_file(&args, &mut replay).expect("replayed edit");
+    let replayed = path_crate_tools::edit::edit_file(&args, &mut replay).expect("replayed edit");
     replay.finish().expect("consume replay ops");
 
     assert_eq!(replayed.result, recorded.result);
@@ -338,7 +341,7 @@ fn apply_patch_vcr_replay_asserts_move_write_and_remove_without_mutating_live_fi
         )),
     )
     .expect("recording world");
-    let recorded = crate::tools::apply_patch::apply_patch(&args, &mut recording)
+    let recorded = path_crate_tools::apply_patch::apply_patch(&args, &mut recording)
         .expect("recorded apply_patch");
     recording.finish().expect("record cassette");
     assert!(!source.exists());
@@ -359,8 +362,8 @@ fn apply_patch_vcr_replay_asserts_move_write_and_remove_without_mutating_live_fi
         )),
     )
     .expect("replay world");
-    let replayed =
-        crate::tools::apply_patch::apply_patch(&args, &mut replay).expect("replayed apply_patch");
+    let replayed = path_crate_tools::apply_patch::apply_patch(&args, &mut replay)
+        .expect("replayed apply_patch");
     replay.finish().expect("consume replay ops");
 
     assert_eq!(replayed.result, recorded.result);
@@ -410,7 +413,8 @@ fn apply_patch_vcr_relative_paths_do_not_record_cwd_absolute_paths() {
         )),
     )
     .expect("recording world");
-    crate::tools::apply_patch::apply_patch(&args, &mut recording).expect("recorded apply_patch");
+    path_crate_tools::apply_patch::apply_patch(&args, &mut recording)
+        .expect("recorded apply_patch");
     recording.finish().expect("record cassette");
 
     let cassette = std::fs::read_to_string(cassette_dir.path().join("call_relative_patch.yaml"))

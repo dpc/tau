@@ -1,3 +1,5 @@
+use std::{fs as path_std_fs, time as path_std_time};
+
 use super::*;
 
 const TOOL_VERIFICATION_ROOT: &str = "tau-tool-verification";
@@ -589,8 +591,8 @@ fn set_skill_mtime(path: &Path, seconds_since_epoch: u64) {
         .write(true)
         .open(path)
         .expect("open skill file");
-    let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds_since_epoch);
-    file.set_times(std::fs::FileTimes::new().set_modified(modified))
+    let modified = std::time::UNIX_EPOCH + path_std_time::Duration::from_secs(seconds_since_epoch);
+    file.set_times(path_std_fs::FileTimes::new().set_modified(modified))
         .expect("set modified time");
 }
 

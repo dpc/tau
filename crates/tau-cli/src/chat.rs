@@ -1,6 +1,13 @@
 //! Interactive chat as a socket client of the harness daemon: input
 //! loop, draft debouncer, and the threading glue that joins them.
 
+use std::sync::atomic as path_std_sync_atomic;
+use std::{cell as path_std_cell, sync as path_std_sync};
+
+use tau_config::settings as path_tau_config_settings;
+
+use crate::{list_agents as path_crate_list_agents, theme as path_crate_theme};
+
 #[cfg(test)]
 mod agent_picker_tests;
 #[cfg(test)]
@@ -148,7 +155,7 @@ type WriterHandle = Arc<Mutex<UiWriter>>;
 const RENDERER_QUEUE_MAX_ITEMS: usize = 1_024;
 const RENDERER_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 static LAST_QUEUE_STALL_WARNING: std::sync::OnceLock<Mutex<Option<Instant>>> =
-    std::sync::OnceLock::new();
+    path_std_sync::OnceLock::new();
 
 fn admit_queue_stall_warning(now: Instant) -> bool {
     let mut last = LAST_QUEUE_STALL_WARNING
@@ -551,8 +558,8 @@ fn parse_agent_picker_command(
 ) -> Option<Result<crate::list_agents::AgentPickerFilter, &'static str>> {
     let mut args = text.split_whitespace();
     let filter = match args.next()? {
-        ":pick-agent" => crate::list_agents::AgentPickerFilter::Active,
-        ":pick-agent-all" => crate::list_agents::AgentPickerFilter::All,
+        ":pick-agent" => path_crate_list_agents::AgentPickerFilter::Active,
+        ":pick-agent-all" => path_crate_list_agents::AgentPickerFilter::All,
         _ => return None,
     };
     Some(if args.next().is_none() {
@@ -843,14 +850,14 @@ pub(crate) fn run_chat(
     // Each local command captures a finite remote admission watermark. The
     // renderer drains that prefix before the local command, then services later
     // remote arrivals; socket disconnect stays at the FIFO tail.
-    let remote_admitted = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let remote_admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(0));
     let renderer_arbiter = Arc::new(Mutex::new(()));
     let (event_tx, event_rx) =
         LocalRendererSender::channel(remote_admitted.clone(), renderer_arbiter.clone());
     let (remote_tx, remote_rx) = mpsc::sync_channel::<RendererCmd>(RENDERER_QUEUE_MAX_ITEMS);
     let renderer_byte_budget = Arc::new(RendererByteBudget::new());
     let socket_renderer_byte_budget = renderer_byte_budget.clone();
-    let queued_remote_items = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let queued_remote_items = Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
     let socket_queued_remote_items = queued_remote_items.clone();
     let socket_remote_admitted = remote_admitted.clone();
     let socket_renderer_arbiter = renderer_arbiter.clone();
@@ -863,7 +870,7 @@ pub(crate) fn run_chat(
     let local_disconnect_started = Arc::new(AtomicBool::new(false));
     let socket_local_disconnect_started = local_disconnect_started.clone();
     let socket_reader = std::thread::spawn(move || {
-        let next_delivery_id = std::cell::Cell::new(1_u64);
+        let next_delivery_id = path_std_cell::Cell::new(1_u64);
         let allocate_delivery_id = || {
             let delivery_id = next_delivery_id.get();
             next_delivery_id.set(delivery_id.saturating_add(1));
@@ -1025,7 +1032,7 @@ pub(crate) fn run_chat(
     // falling back to defaults would leave the user with broken
     // keybindings or unreadable colors and no clue why. Refuse to
     // start the TUI instead.
-    let dirs = tau_config::settings::TauDirs::default();
+    let dirs = path_tau_config_settings::TauDirs::default();
     let settings = tau_config::settings::load_cli_settings_in(&dirs)
         .map_err(|error| CliError::Participant(format!("cli.yaml failed to parse:\n{error}")))?;
     let theme = crate::theme::select_theme(&dirs, settings.theme.clone())
@@ -1055,7 +1062,7 @@ pub(crate) fn run_chat(
         .iter()
         .map(|(key, action)| (key.clone(), encode_binding_action(action)));
     let cli_state =
-        tau_config::settings::CliState::load_with_default(&dirs, settings.default_state());
+        path_tau_config_settings::CliState::load_with_default(&dirs, settings.default_state());
     let prompt_history = PromptHistoryStore::new(&dirs);
     let input_history = match prompt_history.load() {
         Ok(history) => history,
@@ -1488,7 +1495,7 @@ enum RendererCmd {
 }
 
 struct TerminalInputLoopCtx {
-    fast_service_tier_state: Arc<std::sync::atomic::AtomicBool>,
+    fast_service_tier_state: Arc<path_std_sync::atomic::AtomicBool>,
     current_role_state: Arc<Mutex<Option<String>>>,
     routing: InputRoutingState,
     roles_available: Arc<Mutex<Vec<String>>>,
@@ -1499,7 +1506,7 @@ struct TerminalInputLoopCtx {
     cwd: std::path::PathBuf,
     home_dir: Option<std::path::PathBuf>,
     prompt_symbol: String,
-    agent_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    agent_in_progress: Arc<path_std_sync::atomic::AtomicBool>,
     remote_disconnected: Arc<AtomicBool>,
     renderer_tx: LocalRendererSender,
     active_session_state: Arc<Mutex<tau_proto::SessionId>>,
@@ -2114,8 +2121,8 @@ impl<'a> TerminalInputSession<'a> {
             "cycle-role-group" => self.cycle_role_group(),
             "agent-previous" => self.switch_agent_by_delta(-1),
             "agent-next" => self.switch_agent_by_delta(1),
-            "agent-pick" => self.pick_agent(crate::list_agents::AgentPickerFilter::Active),
-            "agent-pick-all" => self.pick_agent(crate::list_agents::AgentPickerFilter::All),
+            "agent-pick" => self.pick_agent(path_crate_list_agents::AgentPickerFilter::Active),
+            "agent-pick-all" => self.pick_agent(path_crate_list_agents::AgentPickerFilter::All),
             _ => self
                 .output
                 .system_info(&format!("binding: unknown application action `{action}`")),
@@ -2510,7 +2517,7 @@ impl<'a> TerminalInputSession<'a> {
         if name.is_empty() {
             let names = crate::theme::available_theme_choices(&self.ctx.dirs)
                 .into_iter()
-                .map(crate::theme::ThemeChoice::into_listing_text)
+                .map(path_crate_theme::ThemeChoice::into_listing_text)
                 .collect::<Vec<_>>()
                 .join(", ");
             self.output
@@ -2833,7 +2840,7 @@ impl<'a> TerminalInputSession<'a> {
         let selected_agent = self.ctx.routing.selected_agent_id();
         self.ctx
             .agent_in_progress
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+            .store(true, path_std_sync_atomic::Ordering::Relaxed);
         let event = if let Some(target_agent_id) = selected_agent.map(|agent_id| {
             tau_proto::AgentId::parse(&agent_id).expect("UI stores valid agent ids")
         }) {
@@ -2888,7 +2895,7 @@ impl<'a> TerminalInputSession<'a> {
             && self
                 .ctx
                 .agent_in_progress
-                .load(std::sync::atomic::Ordering::Relaxed)
+                .load(path_std_sync_atomic::Ordering::Relaxed)
         {
             self.output.system_info(EOF_DURING_AGENT_NOTICE);
             return None;
@@ -2932,7 +2939,7 @@ impl<'a> TerminalInputSession<'a> {
         let enabled = self
             .ctx
             .fast_service_tier_state
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(path_std_sync_atomic::Ordering::Relaxed);
         let service_tier = if enabled {
             None
         } else {

@@ -1,0 +1,15 @@
+id: limit-rust-symbol-path-depth
+language: Rust
+severity: warning
+message: Long symbol paths obscure the reference; use a local import or alias, or refer to the symbol more directly.
+rule:
+  all:
+    - any:
+        - pattern: $ROOT::$SECOND::$THIRD::$SYMBOL
+        - pattern:
+            context: type __AstGrepType = $ROOT::$SECOND::$THIRD::$SYMBOL;
+            selector: scoped_type_identifier
+    - not:
+        inside:
+          kind: use_declaration
+          stopBy: end

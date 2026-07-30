@@ -8,6 +8,7 @@
 //! budget before they have actually started.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time as path_std_time;
 use std::time::Instant;
 
 use tau_proto::{AgentId, BackgroundSupport, ConnectionId, ToolCallId, ToolName, ToolType};
@@ -305,7 +306,7 @@ impl ToolTurnMachine {
                 BackgroundSupport::MinForegroundSeconds(seconds) => (
                     true,
                     false,
-                    Some(now + std::time::Duration::from_secs(seconds)),
+                    Some(now + path_std_time::Duration::from_secs(seconds)),
                     ForegroundAction::None,
                 ),
                 BackgroundSupport::Never => (true, false, None, ForegroundAction::None),

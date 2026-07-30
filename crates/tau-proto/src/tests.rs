@@ -1,3 +1,7 @@
+use std::{collections as path_std_collections, io as path_std_io, path as path_std_path};
+
+use ciborium::value as path_ciborium_value;
+
 use super::*;
 
 fn test_session_id(value: impl Into<String>) -> SessionId {
@@ -2368,7 +2372,7 @@ fn message_reports_are_transient_and_convert_to_canonical_facts() {
 #[test]
 fn first_party_event_wire_tags_match_event_names_and_persistence() {
     let events = representative_events();
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = path_std_collections::BTreeSet::new();
     for event in events {
         if matches!(event, Event::ExtensionEvent(_)) {
             continue;
@@ -3151,7 +3155,7 @@ fn multiple_directional_messages_can_share_one_stream() {
     writer.flush().expect("stream should flush");
 
     let bytes = writer.into_inner();
-    let mut reader = HarnessOutputReader::new(std::io::Cursor::new(bytes));
+    let mut reader = HarnessOutputReader::new(path_std_io::Cursor::new(bytes));
     let mut decoded = Vec::new();
     for _ in 0..messages.len() {
         decoded.push(
@@ -3185,7 +3189,7 @@ fn directional_message_codec_reports_actual_item_sizes() {
         bytes.len() as u64
     );
 
-    let mut reader = HarnessOutputReader::new(std::io::Cursor::new(bytes));
+    let mut reader = HarnessOutputReader::new(path_std_io::Cursor::new(bytes));
     let decoded = messages
         .iter()
         .map(|_| {
@@ -3564,8 +3568,8 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
             .expect("test extension name must satisfy the identifier grammar"),
         tool_prefix: None,
         config: CborValue::Null,
-        state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
-        secrets: std::collections::BTreeMap::new(),
+        state_dir: Some(path_std_path::PathBuf::from("/tmp/tau/state/ext/demo")),
+        secrets: path_std_collections::BTreeMap::new(),
     };
     let json = serde_json::to_value(&with_state).expect("serialize configure");
     assert_eq!(
@@ -3581,7 +3585,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
         tool_prefix: None,
         config: CborValue::Null,
         state_dir: None,
-        secrets: std::collections::BTreeMap::new(),
+        secrets: path_std_collections::BTreeMap::new(),
     })
     .expect("serialize configure without state dir");
     assert!(without_state.get("state_dir").is_none());
@@ -3593,7 +3597,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
 fn configure_secrets_round_trip_and_debug_redacts_values() {
     // Secret values travel only to explicitly configured extensions and must not
     // leak through derived protocol debug output.
-    let mut secrets = std::collections::BTreeMap::new();
+    let mut secrets = path_std_collections::BTreeMap::new();
     secrets.insert("mail_password".to_owned(), SecretValue::new("super-secret"));
     let configure = Configure {
         instance_name: crate::ExtensionName::parse("test-extension")
@@ -5604,7 +5608,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
 
     fn remove_cbor_field(value: &mut ciborium::value::Value, field: &str) -> bool {
         match value {
-            ciborium::value::Value::Map(entries) => {
+            path_ciborium_value::Value::Map(entries) => {
                 let original_len = entries.len();
                 entries.retain(
                     |(key, _)| !matches!(key, ciborium::value::Value::Text(text) if text == field),
@@ -5615,7 +5619,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
                         .iter_mut()
                         .any(|(_, value)| remove_cbor_field(value, field))
             }
-            ciborium::value::Value::Array(values) => values
+            path_ciborium_value::Value::Array(values) => values
                 .iter_mut()
                 .any(|value| remove_cbor_field(value, field)),
             _ => false,
@@ -5624,7 +5628,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
 
     fn has_cbor_text_field(value: &ciborium::value::Value, field: &str, expected: &str) -> bool {
         match value {
-            ciborium::value::Value::Map(entries) => {
+            path_ciborium_value::Value::Map(entries) => {
                 entries.iter().any(|(key, value)| {
                     matches!(
                         (key, value),
@@ -5637,7 +5641,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
                     .iter()
                     .any(|(_, value)| has_cbor_text_field(value, field, expected))
             }
-            ciborium::value::Value::Array(values) => values
+            path_ciborium_value::Value::Array(values) => values
                 .iter()
                 .any(|value| has_cbor_text_field(value, field, expected)),
             _ => false,
@@ -5853,7 +5857,7 @@ fn streaming_reader_rejects_oversized_protocol_message() {
         .write_message(&message)
         .expect("encode oversized fixture");
 
-    let error = HarnessInputReader::new(std::io::Cursor::new(encoded))
+    let error = HarnessInputReader::new(path_std_io::Cursor::new(encoded))
         .read_message()
         .expect_err("oversized frame must fail");
     assert!(error.to_string().contains("protocol message exceeds"));

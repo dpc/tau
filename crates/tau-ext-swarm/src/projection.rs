@@ -5,6 +5,7 @@ use tau_swarm_api::{
     SessionSnapshot, UpdatePublication,
 };
 use tau_swarm_client::{ChangeBatch, PublicationRevision, RevisionedSnapshot};
+use tau_swarm_client_api::v2 as path_tau_swarm_client_api_v2;
 
 /// Coherent, bounded in-memory projection of the current Tau session.
 #[derive(Debug)]
@@ -292,7 +293,7 @@ fn change_logical_bytes(change: &SessionChange) -> Result<usize, &'static str> {
 fn change_encoded_len(change: SessionChange) -> Result<usize, &'static str> {
     let wire = tau_swarm_client_api::SubmitChangeRequest {
         sequence: 0,
-        change: tau_swarm_client_api::v2::SessionChange::from(change),
+        change: path_tau_swarm_client_api_v2::SessionChange::from(change),
     };
     bincode::encode_to_vec(wire, bincode::config::standard())
         .map(|encoded| encoded.len())

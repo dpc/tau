@@ -1,5 +1,7 @@
 //! Content-free provider accounting and recorded-at wall timing projection.
 
+use std::collections::btree_map as path_std_collections_btree_map;
+
 mod agent_summary;
 mod provider_prompt;
 mod provider_prompt_record;
@@ -102,7 +104,7 @@ fn collect_agent(
                     continue;
                 }
                 let accepted = match prompts.entry(prompt_id.clone()) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
+                    path_std_collections_btree_map::Entry::Vacant(entry) => {
                         entry.insert(ProviderPrompt::new(
                             record.recorded_at,
                             clock_regressions,
@@ -110,7 +112,7 @@ fn collect_agent(
                         ));
                         true
                     }
-                    std::collections::btree_map::Entry::Occupied(_) => false,
+                    path_std_collections_btree_map::Entry::Occupied(_) => false,
                 };
                 (prompt_id, accepted, "agent.prompt_started")
             }

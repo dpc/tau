@@ -6,6 +6,8 @@
 //! records, and private local socket support for gateway-side sidecar heartbeat
 //! and registration-lease bookkeeping and outbound sends.
 
+use std::io as path_std_io;
+
 mod routing;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -925,7 +927,7 @@ impl GatewayDurableState {
                 state.recent_update_ids.truncate(RECENT_UPDATE_LIMIT);
                 Ok(state)
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
+            Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => Ok(Self {
                 stream_hash: stream_hash.to_owned(),
                 ..Self::default()
             }),
@@ -1900,8 +1902,8 @@ fn read_gateway_socket_request(
                 }
             }
             Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    || error.kind() == std::io::ErrorKind::TimedOut =>
+                if error.kind() == path_std_io::ErrorKind::WouldBlock
+                    || error.kind() == path_std_io::ErrorKind::TimedOut =>
             {
                 if request.is_empty() {
                     return Ok(None);
@@ -1980,7 +1982,7 @@ fn remove_inactive_socket(path: &Path) -> Result<(), String> {
             "refusing to replace active Telegram gateway socket {}",
             path.display()
         )),
-        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+        Err(error) if error.kind() == path_std_io::ErrorKind::ConnectionRefused => {
             fs::remove_file(path)
                 .map_err(|error| format!("removing stale Telegram gateway socket: {error}"))
         }

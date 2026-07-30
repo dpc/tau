@@ -1,0 +1,26 @@
+id: limit-rust-symbol-path-depth
+snapshots:
+  foo::deeply::nested::module::Something:
+    labels:
+    - source: foo::deeply::nested::module::Something
+      style: primary
+      start: 0
+      end: 38
+  foo::sub::bar::Something:
+    labels:
+    - source: foo::sub::bar::Something
+      style: primary
+      start: 0
+      end: 24
+  foo::sub::bar::function():
+    labels:
+    - source: foo::sub::bar::function
+      style: primary
+      start: 0
+      end: 23
+  type Value = foo::sub::bar::Something;:
+    labels:
+    - source: foo::sub::bar::Something
+      style: primary
+      start: 13
+      end: 37

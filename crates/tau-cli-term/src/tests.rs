@@ -1,3 +1,5 @@
+use std::{cell as path_std_cell, rc as path_std_rc, sync as path_std_sync, time as path_std_time};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::*;
@@ -9,7 +11,7 @@ fn new_test_term_with_data_and_bindings(
     HighTerm,
     TermHandle,
     CompletionData,
-    std::sync::mpsc::Sender<TestRawEvent>,
+    path_std_sync::mpsc::Sender<TestRawEvent>,
 ) {
     let (raw_term, handle, input_tx) = tau_cli_term_raw::Term::new_virtual(
         80,
@@ -29,24 +31,28 @@ fn new_test_term_with_data(
     HighTerm,
     TermHandle,
     CompletionData,
-    std::sync::mpsc::Sender<TestRawEvent>,
+    path_std_sync::mpsc::Sender<TestRawEvent>,
 ) {
     new_test_term_with_data_and_bindings(commands, std::iter::empty::<(String, String)>())
 }
 
 fn new_test_term(
     commands: Vec<CommandCompletion>,
-) -> (HighTerm, TermHandle, std::sync::mpsc::Sender<TestRawEvent>) {
+) -> (
+    HighTerm,
+    TermHandle,
+    path_std_sync::mpsc::Sender<TestRawEvent>,
+) {
     let (term, handle, _completion_data, input_tx) = new_test_term_with_data(commands);
     (term, handle, input_tx)
 }
 
-fn send_key(input_tx: &std::sync::mpsc::Sender<TestRawEvent>, code: KeyCode) {
+fn send_key(input_tx: &path_std_sync::mpsc::Sender<TestRawEvent>, code: KeyCode) {
     send_key_with_modifiers(input_tx, code, KeyModifiers::NONE);
 }
 
 fn send_key_with_modifiers(
-    input_tx: &std::sync::mpsc::Sender<TestRawEvent>,
+    input_tx: &path_std_sync::mpsc::Sender<TestRawEvent>,
     code: KeyCode,
     modifiers: KeyModifiers,
 ) {
@@ -55,14 +61,14 @@ fn send_key_with_modifiers(
         .expect("send key");
 }
 
-fn send_submit(input_tx: &std::sync::mpsc::Sender<TestRawEvent>) {
+fn send_submit(input_tx: &path_std_sync::mpsc::Sender<TestRawEvent>) {
     send_key_with_modifiers(input_tx, KeyCode::Enter, KeyModifiers::CONTROL);
 }
 
 fn submit(
     term: &mut HighTerm,
     handle: &TermHandle,
-    input_tx: &std::sync::mpsc::Sender<TestRawEvent>,
+    input_tx: &path_std_sync::mpsc::Sender<TestRawEvent>,
     line: &str,
 ) {
     handle.set_buffer(line.to_owned(), line.len());
@@ -73,7 +79,11 @@ fn submit(
     ));
 }
 
-fn type_text(term: &mut HighTerm, input_tx: &std::sync::mpsc::Sender<TestRawEvent>, text: &str) {
+fn type_text(
+    term: &mut HighTerm,
+    input_tx: &path_std_sync::mpsc::Sender<TestRawEvent>,
+    text: &str,
+) {
     for ch in text.chars() {
         send_key(input_tx, KeyCode::Char(ch));
         assert!(matches!(
@@ -83,7 +93,11 @@ fn type_text(term: &mut HighTerm, input_tx: &std::sync::mpsc::Sender<TestRawEven
     }
 }
 
-fn submit_typed(term: &mut HighTerm, input_tx: &std::sync::mpsc::Sender<TestRawEvent>, line: &str) {
+fn submit_typed(
+    term: &mut HighTerm,
+    input_tx: &path_std_sync::mpsc::Sender<TestRawEvent>,
+    line: &str,
+) {
     type_text(term, input_tx, line);
     send_submit(input_tx);
     assert!(matches!(
@@ -929,7 +943,7 @@ fn fake_fzf(script: &str) -> tempfile::TempPath {
 }
 
 #[cfg(unix)]
-static AGENT_FZF_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static AGENT_FZF_TEST_LOCK: std::sync::Mutex<()> = path_std_sync::Mutex::new(());
 
 /// The direct picker passes rows through stdin and returns the exact selected
 /// row without requiring a real `fzf` binary in CI.
@@ -1041,16 +1055,16 @@ fn agent_picker_timeout_resumes_terminal_and_kills_descendants() {
         pid_file.display()
     ));
     let (term, _handle, _input_tx) = new_test_term(vec![]);
-    let terminal_paused = std::rc::Rc::new(std::cell::Cell::new(false));
+    let terminal_paused = path_std_rc::Rc::new(path_std_cell::Cell::new(false));
     let pause_state = terminal_paused.clone();
     let resume_state = terminal_paused.clone();
-    let started = std::time::Instant::now();
+    let started = path_std_time::Instant::now();
 
     let error = term
         .pick_agent_row_with_command_and_terminal(
             program.as_os_str(),
             "agent-1\tlive\tidle\tactive\tdurable\tavailable\trole\t-\t1\tname\t$.00\tworking\ttitle\n",
-            std::time::Duration::from_millis(100),
+            path_std_time::Duration::from_millis(100),
             ProcessOwnership::ProcessGroup,
             AgentPickerHooks {
                 pause: move || {
@@ -1063,9 +1077,9 @@ fn agent_picker_timeout_resumes_terminal_and_kills_descendants() {
                 },
                 after_spawn: || {
                     let readiness_deadline =
-                        std::time::Instant::now() + std::time::Duration::from_secs(2);
+                        path_std_time::Instant::now() + path_std_time::Duration::from_secs(2);
                     while !pid_file.exists() {
-                        if readiness_deadline <= std::time::Instant::now() {
+                        if readiness_deadline <= path_std_time::Instant::now() {
                             return Err("fake fzf did not publish descendant pid".to_owned());
                         }
                         std::thread::yield_now();

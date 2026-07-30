@@ -3,8 +3,8 @@ use std::io::{BufRead, BufReader, BufReader as IoBufReader, BufWriter};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::sync::{Condvar, Mutex, mpsc};
-use std::thread;
 use std::time::Duration;
+use std::{io as path_std_io, thread};
 
 use tau_proto::{
     ConfigError, Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
@@ -233,7 +233,7 @@ impl RedirectServer {
                     }
                     match listener.accept() {
                         Ok(connection) => break connection,
-                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        Err(err) if err.kind() == path_std_io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(5));
                         }
                         Err(err) => panic!("accept: {err}"),
@@ -248,7 +248,7 @@ impl RedirectServer {
                         break;
                     }
                 }
-                std::io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+                path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
             }
             request_count
         });
@@ -1295,7 +1295,7 @@ fn http_error_body_redacts_endpoint_query_secrets() {
             response_body.len(),
             response_body
         );
-        std::io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+        path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
     });
 
     let err = HttpExaSearcher::new(endpoint)
@@ -1375,7 +1375,7 @@ fn jsonrpc_error_message_redacts_endpoint_query_secrets() {
             response_body.len(),
             response_body
         );
-        std::io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+        path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
     });
 
     let err = HttpExaSearcher::new(endpoint)
@@ -1428,7 +1428,7 @@ fn parallel_jsonrpc_error_message_redacts_endpoint_query_secrets() {
             response_body.len(),
             response_body
         );
-        std::io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+        path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
     });
 
     let err = HttpParallelClient::new(endpoint)
@@ -1540,7 +1540,7 @@ fn parallel_http_client_posts_tools_call_without_authorization_header() {
             response_body.len(),
             response_body
         );
-        std::io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+        path_std_io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
         (headers, String::from_utf8(body).expect("utf8"))
     });
 

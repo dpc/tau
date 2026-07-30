@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::fmt;
+use std::{collections as path_std_collections, fmt};
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use tau_proto::{
@@ -351,7 +351,7 @@ pub fn validate_tool_examples(tool: &ToolSpec) -> Result<(), ToolRegistrationErr
         ));
     }
 
-    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_ids = path_std_collections::HashSet::new();
     for example in &tool.examples {
         validate_tool_example(tool, example, &mut seen_ids)?;
     }
@@ -863,7 +863,7 @@ impl<'de> Visitor<'de> for ValueNoDuplicateKeysVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = path_std_collections::HashSet::new();
         let mut values = serde_json::Map::new();
         while let Some(key) = map.next_key::<String>()? {
             if !seen.insert(key.clone()) {

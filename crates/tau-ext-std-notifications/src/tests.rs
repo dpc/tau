@@ -1,3 +1,4 @@
+use std::collections as path_std_collections;
 use std::io::{Cursor, Write};
 use std::sync::{Arc, Mutex, Once};
 
@@ -276,7 +277,7 @@ fn configure_frame(config: tau_proto::CborValue) -> HarnessOutputMessage {
             .expect("test extension name must satisfy the identifier grammar"),
         config,
         state_dir: None,
-        secrets: std::collections::BTreeMap::new(),
+        secrets: path_std_collections::BTreeMap::new(),
     })
 }
 

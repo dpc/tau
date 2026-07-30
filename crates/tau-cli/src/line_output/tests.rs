@@ -1,3 +1,5 @@
+use std::io as path_std_io;
+
 use super::{escape_field, stream_output, write_output};
 
 /// Line-oriented identifiers escape record separators and terminal controls.
@@ -14,8 +16,8 @@ fn hostile_field_stays_on_one_ansi_control_safe_line() {
 #[test]
 fn streamed_broken_pipe_is_success() {
     stream_output(&mut std::io::sink(), |_| {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
+        Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::BrokenPipe,
             "closed pipeline",
         ))
     })
@@ -30,8 +32,8 @@ fn broken_pipe_is_success() {
 
     impl std::io::Write for BrokenPipe {
         fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
+            Err(path_std_io::Error::new(
+                path_std_io::ErrorKind::BrokenPipe,
                 "closed pipeline",
             ))
         }

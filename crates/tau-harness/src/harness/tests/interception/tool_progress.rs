@@ -1,4 +1,5 @@
 use super::*;
+use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
 /// Construct one progress payload with easily asserted content.
 fn progress_payload(call_id: &str, message: &str) -> tau_proto::ToolProgress {
@@ -33,7 +34,7 @@ fn committed_progress(
     call_id: &str,
 ) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
-    let mut seq = crate::event_log::EventLogSeq::new(0);
+    let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = harness.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         let matches_call = match &entry.event {
@@ -217,7 +218,7 @@ fn pre_ready_progress_report_preserves_retained_byte_accounting() {
         .entries
         .get_mut("tool-owner")
         .expect("tool owner")
-        .state = crate::extension::ExtensionState::Handshaking;
+        .state = path_crate_extension::ExtensionState::Handshaking;
     seed_routed_call(&mut harness, "call-retained", "tool-owner");
     let report = progress_report("call-retained", "retained");
     let expected_bytes = Harness::encoded_emit_size(&report, false);
