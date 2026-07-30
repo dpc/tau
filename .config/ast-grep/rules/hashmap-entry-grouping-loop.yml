@@ -1,9 +1,0 @@
-id: hashmap-entry-grouping-loop
-language: rust
-severity: warning
-rule:
-  any:
-    - pattern: $MAP.entry($KEY).or_insert(Vec::new())
-    - pattern: $MAP.entry($KEY).or_insert(HashSet::new())
-    - pattern: $MAP.entry($KEY).or_insert(String::new())
-message: Eager entry allocation runs even when the key exists; use `or_default()` or `or_insert_with(...)`.
