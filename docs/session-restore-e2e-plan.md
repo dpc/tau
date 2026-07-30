@@ -59,7 +59,7 @@ rerun. These are distinct recovery cases.
 The deterministic fake-provider suite already proves a clean, quiescent
 same-agent resume and preservation of its provider lane cursor. The Unix
 `core_resume` gate runs the exact `tau` binary under a PTY and proves one
-completed dummy-tool row remains terminal after `tau -r`; its replay-aware side
+completed dummy-tool row remains terminal after `tau resume`; its replay-aware side
 observer and typed stores also prove stable identity and prefix durability.
 `core_shell_resume` separately proves reconstruction of production core-shell
 per-agent workdir state.
@@ -109,7 +109,7 @@ Use the cheapest boundary that proves each claim:
 5. **Fake-provider trace and cursor.** Require exact lane/action consumption.
    Zero matches before intentional post-resume activation proves replay did not
    wake the provider.
-6. **Spawned public PTY, narrowly.** Add one later `tau -r` scenario for terminal
+6. **Spawned public PTY, narrowly.** Add one later `tau resume` scenario for terminal
    selection and transcript presentation. Pair every VT assertion with the side
    observer and stores; pixels alone are not lifecycle evidence.
 7. **`tau dev tmux`, exploratory only.** Use it for a final real-like manual
@@ -500,7 +500,7 @@ belongs to that worker; the uncertain worker remains unfinished and undispatched
 The Unix-only spawned-PTY gate is based on S1. It creates and completes the
 main/worker pair in headless Boot A, where exact
 `ctx_id` lane bindings are available. Boot B runs the exact universal
-`tau -r <session-id>` against the same private config, stores, and checkpointed
+`tau resume <session-id>` against the same private config, stores, and checkpointed
 agent-to-lane bindings. This avoids asking the public terminal's initial
 no-`ctx_id` prompt to select among multiple unbound lanes.
 
@@ -531,7 +531,7 @@ and worker, inspect `:agent`, select each with `:agent switch <agent-id>`, and
 send one follow-up. From a separate shell pointed at the scratch runtime, the
 external roster command is `tau agent list <session-id>`.
 
-The current helper cannot pass `-r` to its child Tau, and its tmux session ends
+The current helper cannot pass `tau resume SESSION` to its child Tau, and its tmux session ends
 when Tau exits. Do not claim a manual cold resume through this helper. The
 spawned-PTY gate above owns real-UI cold-resume acceptance. A manual tmux cold
 resume remains blocked until the helper gains a tested resume/argument boundary.

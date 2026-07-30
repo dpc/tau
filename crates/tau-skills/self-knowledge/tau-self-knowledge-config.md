@@ -18,7 +18,7 @@ punctuation, non-UTF-8 values, and unknown names fail startup. Duplicate names
 are harmless. These enables apply after config and before ordered CLI extension
 overrides, so a later `--disable-extension NAME` wins.
 Unset, empty, and space/tab-only values are no-ops. Leading, trailing, and
-consecutive commas are errors. `--attach` and the outer `tau dev tmux` helper
+consecutive commas are errors. `tau attach` and the outer `tau dev tmux` helper
 reject nonempty values because they cannot apply them to their target harness.
 
 Use the same literal with systemd

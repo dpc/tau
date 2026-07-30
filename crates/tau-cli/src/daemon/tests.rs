@@ -2,6 +2,117 @@ use tau_config::settings as path_tau_config_settings;
 
 use super::*;
 
+/// One available row bypasses a picker even when newer rows are locked.
+#[test]
+fn one_unlocked_resume_row_is_selected_deterministically() {
+    assert_eq!(
+        sole_unlocked_resume_index([true, true, false, true]).expect("selection succeeds"),
+        Some(2)
+    );
+}
+
+/// All-locked rows produce an actionable error instead of looking like a
+/// cancelled picker or an absent persisted session.
+#[test]
+fn all_locked_resume_rows_report_attach_action() {
+    let error = sole_unlocked_resume_index([true, true]).expect_err("all rows are locked");
+    assert!(error.to_string().contains("tau attach SESSION"));
+}
+
+/// Several available rows preserve interactive selection.
+#[test]
+fn several_unlocked_resume_rows_require_picker() {
+    assert_eq!(
+        sole_unlocked_resume_index([false, true, false]).expect("selection succeeds"),
+        None
+    );
+}
+
+/// The display cap must not hide every selectable target when the newest rows
+/// are all owned by running harnesses.
+#[test]
+fn resume_picker_preserves_unlocked_row_beyond_display_cap() {
+    let mut locked = vec![true; RESUME_PICKER_LIMIT + 2];
+    locked[RESUME_PICKER_LIMIT + 1] = false;
+
+    let visible = visible_resume_indices(locked);
+
+    assert_eq!(visible.len(), RESUME_PICKER_LIMIT);
+    assert_eq!(visible[RESUME_PICKER_LIMIT - 1], RESUME_PICKER_LIMIT + 1);
+}
+
+/// Resume stderr setup must remain path-free until the harness reports
+/// lock-held readiness, so a deleted selection is not recreated by logging.
+#[test]
+fn resumed_daemon_output_defers_session_log_creation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_dir = temp.path().join("session-1");
+    let output = daemon_output_for_session_in(
+        temp.path(),
+        "session-1",
+        HarnessStorageMode::Durable,
+        SessionLaunchStatus::Resumed,
+    )
+    .expect("resolve resumed output");
+
+    assert!(output.deferred_harness_log.is_some());
+    assert!(!session_dir.exists());
+}
+
+/// The resumed relay appends diagnostics to the lock-held file created by the
+/// child rather than replacing or truncating it.
+#[cfg(unix)]
+#[test]
+fn resumed_stderr_relay_appends_to_child_created_log() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let harness_log = temp.path().join("session/logs/tau-harness.log");
+    std::fs::create_dir_all(harness_log.parent().expect("log parent")).expect("create log parent");
+    std::fs::write(&harness_log, "child-ready\n").expect("create child log");
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("printf 'resumed diagnostic\\n' >&2")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn diagnostic child");
+    let stderr = child.stderr.take().expect("child stderr");
+
+    relay_stderr_after_lock_held_log(stderr, harness_log.clone());
+    child.wait().expect("wait for child");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        let contents = std::fs::read_to_string(&harness_log).expect("read log");
+        if contents.contains("resumed diagnostic") {
+            assert!(contents.starts_with("child-ready\n"));
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("relay did not append resumed diagnostics");
+}
+
+/// A child exit and cleanup before the relay opens the lock-held file must not
+/// recreate either the log or its deleted session directory.
+#[cfg(unix)]
+#[test]
+fn resumed_stderr_relay_does_not_recreate_deleted_session() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_dir = temp.path().join("session");
+    let harness_log = session_dir.join("logs/tau-harness.log");
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("printf 'failed resume\\n' >&2")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn diagnostic child");
+    let stderr = child.stderr.take().expect("child stderr");
+
+    relay_stderr_after_lock_held_log(stderr, harness_log);
+    child.wait().expect("wait for child");
+    std::thread::sleep(Duration::from_millis(100));
+
+    assert!(!session_dir.exists());
+}
+
 /// Once a connected client closes its taken input pipe, dropping the owned
 /// handle waits for normal lifecycle cleanup before forced termination.
 #[cfg(unix)]
@@ -39,6 +150,48 @@ fn owned_daemon_drop_allows_disconnect_cleanup() {
         marker.exists(),
         "child must observe EOF and finish cleanup before forced termination"
     );
+}
+
+/// A prompt-style client whose owned child withholds admission returns on its
+/// deadline, closes the initial UI input, and lets normal daemon drop reap it.
+#[cfg(unix)]
+#[test]
+fn owned_daemon_withheld_admission_times_out_and_cleans_up() {
+    let temp = tempfile::TempDir::new().expect("temporary directory");
+    let marker = temp.path().join("clean-exit");
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("cat >/dev/null; : > \"$1\"")
+        .arg("tau-admission-timeout-test")
+        .arg(&marker)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn pipe-waiting child");
+    let initial_ui = InitialUiStdio {
+        stdin: child.stdin.take().expect("child stdin"),
+        stdout: child.stdout.take().expect("child stdout"),
+    };
+    let mut handle = DaemonHandle::Owned {
+        child: Some(child),
+        harness_path: temp.path().join("unused"),
+        initial_ui: Some(initial_ui),
+        cleanup_runtime_pair_after_reap: false,
+    };
+    let expected = tau_proto::SessionId::parse("session-1").expect("valid session");
+
+    let error = match crate::ui_client::connect_daemon_ui_client_with_timeout(
+        &mut handle,
+        "timeout-test",
+        Some(&expected),
+        Duration::from_millis(10),
+    ) {
+        Ok(_) => panic!("withheld admission must time out"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    drop(handle);
+    assert!(marker.exists());
 }
 
 /// A child that does not exit after transport closure is still reaped once the

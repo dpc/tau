@@ -90,7 +90,7 @@ dummy-tool public-UI boundary.
 It runs the exact built universal `tau` under a fixed real PTY, while the fake
 provider and built-in test dummy remain supervised subprocesses. Boot A reaches a
 durable terminal dummy result and is fully reaped; Boot B uses explicit
-`tau -r <session-id>`. A bounded VT model is authoritative for the user-visible
+`tau resume <session-id>`. A bounded VT model is authoritative for the user-visible
 terminal row, a replay-aware side UI peer is authoritative for delivery ordering
 and replay boundaries, and typed `SessionStore`/`AgentStore` reads are
 authoritative for membership and transcript prefix/suffix integrity.
@@ -98,7 +98,7 @@ authoritative for membership and transcript prefix/suffix integrity.
 S8 adds a separate topology under that same target. A test-only headless daemon
 first completes the production `agent_start` main/worker flow with exact
 `ctx_id` lane bindings. After bounded process-group and socket cleanup, only
-Boot B runs the exact universal `tau -r <session-id>` under the PTY against the
+Boot B runs the exact universal `tau resume <session-id>` under the PTY against the
 same private config, stores, and fake-provider checkpoint. Stable typed agent IDs
 drive explicit terminal switches. The VT model is authoritative only for
 transcript selection, the completed `agent_start` row remaining terminal, and

@@ -14,8 +14,11 @@ pub(crate) fn run_print_tools(
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<(), CliError> {
     let session_id = mint_short_id("print-tools");
-    let output =
-        daemon_output_for_session(&session_id, tau_harness::HarnessStorageMode::MemoryOnly)?;
+    let output = daemon_output_for_session(
+        &session_id,
+        tau_harness::HarnessStorageMode::MemoryOnly,
+        tau_harness::SessionLaunchStatus::New,
+    )?;
     let mut daemon = resolve_daemon(
         false,
         &session_id,

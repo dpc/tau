@@ -127,7 +127,7 @@ pub struct ServeOptions {
     pub max_clients: Option<usize>,
     /// When set, the daemon exits as soon as the last attached UI
     /// socket disconnects. When clear, the daemon keeps running with
-    /// no attached UIs — a later `tau --attach` can pick up the
+    /// no attached UIs — a later `tau attach SESSION` can pick up the
     /// session. The `ui_detach_request` message flips this at runtime.
     ///
     /// Default `false`: daemon is long-lived unless explicitly told
@@ -1285,6 +1285,7 @@ fn connect_daemon_helper(
         client_name: tau_proto::ExtensionName::parse(client_name)
             .expect("validated daemon client name must remain canonical"),
         client_kind: ClientKind::Ui,
+        expected_session_id: None,
         capabilities: Default::default(),
     }))?;
     Ok(peer)

@@ -1,9 +1,10 @@
 //! Harness daemon lifecycle: discovery, spawning, and initial UI wiring.
 
 use std::fs::OpenOptions;
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use tau_cli_picker::{PickerError, PickerItem, pick};
@@ -104,7 +105,7 @@ impl Drop for DaemonHandle {
         }
         // Attached, or Owned-after-leak: do nothing. The daemon keeps
         // running so other UIs can still use it, or this same UI can
-        // `tau -a` back in later.
+        // `tau attach SESSION` back in later.
     }
 }
 
@@ -135,41 +136,76 @@ fn stop_owned_daemon(
     let _ = child.wait();
 }
 
-/// Resolves the session id for one `tau` invocation.
-///
-/// - `None` → mint `<basename(cwd)>-<rand6>`.
-/// - `Some("")` (bare `-r`) → interactively pick among recent sessions whose
-///   metadata matches cwd; if none, mint fresh.
-/// - `Some(id)` → resume that explicit id; error if it does not exist.
-pub(crate) fn resolve_run_session_id(
-    resume: Option<&str>,
-) -> Result<(tau_proto::SessionId, SessionLaunchStatus), CliError> {
-    let cwd = std::env::current_dir()?;
-    match resume {
-        None => Ok((mint_session_id(&cwd), SessionLaunchStatus::New)),
-        Some("") => match pick_resume_session(&cwd)? {
-            Some(id) => Ok((id, SessionLaunchStatus::Resumed)),
-            None => Ok((mint_session_id(&cwd), SessionLaunchStatus::New)),
-        },
-        Some(id) => {
-            let id = tau_proto::SessionId::parse(id).map_err(|error| {
-                CliError::Participant(format!("invalid session id `{id}`: {error}"))
-            })?;
-            if session_exists(&id)? {
-                Ok((id, SessionLaunchStatus::Resumed))
-            } else {
-                Err(CliError::SessionNotFound(id.to_string()))
-            }
-        }
+/// Resolves an explicit or interactively selected persisted session.
+pub(crate) fn resolve_resume_session_id(
+    requested: Option<&tau_proto::SessionId>,
+) -> Result<tau_proto::SessionId, CliError> {
+    if let Some(id) = requested {
+        return if session_exists(id)? {
+            Ok(id.clone())
+        } else {
+            Err(CliError::SessionNotFound(id.to_string()))
+        };
     }
+    pick_resume_session()?.ok_or_else(|| {
+        CliError::Participant("no resumable session selected; pass `tau resume SESSION`".to_owned())
+    })
 }
 
 fn session_exists(id: &tau_proto::SessionId) -> Result<bool, CliError> {
     let sessions_dir = tau_session_inspect::default_sessions_dir();
     let metas = tau_harness::list_session_metas(&sessions_dir)?;
-    Ok(metas
-        .into_iter()
-        .any(|(session_id, _)| session_id.as_str() == id.as_str()))
+    Ok(metas.into_iter().any(|(session_id, _)| session_id == *id))
+}
+
+/// Resolves an explicit or interactively selected running session.
+pub(crate) fn resolve_attach_session_id(
+    requested: Option<&tau_proto::SessionId>,
+) -> Result<tau_proto::SessionId, CliError> {
+    if let Some(id) = requested {
+        return match runtime_dir::find_harness_for_session(id.as_str()).map_err(|error| {
+            CliError::Participant(format!("cannot select attach target: {error}"))
+        })? {
+            Some(_) => Ok(id.clone()),
+            None => Err(CliError::Participant(format!(
+                "session `{id}` is not running; use `tau resume {id}` to start it"
+            ))),
+        };
+    }
+
+    let sessions = runtime_dir::list_running_sessions()
+        .map_err(|error| CliError::Participant(format!("cannot list attach targets: {error}")))?;
+    if sessions.is_empty() {
+        return Err(CliError::Participant(
+            "no running sessions are available to attach".to_owned(),
+        ));
+    }
+    if !io::IsTerminal::is_terminal(&io::stdin()) {
+        return Err(CliError::Participant(
+            "cannot choose an attach target without an interactive terminal; pass `tau attach SESSION`"
+                .to_owned(),
+        ));
+    }
+    let items = sessions
+        .iter()
+        .map(|session| {
+            PickerItem::enabled(format!(
+                "{}  {}",
+                session.session_id,
+                session.project_root.display()
+            ))
+        })
+        .collect::<Vec<_>>();
+    let selection = match pick("Attach session", &items) {
+        Ok(selection) => selection,
+        Err(PickerError::Cancelled) => {
+            return Err(CliError::Participant(
+                "no running session selected; pass `tau attach SESSION`".to_owned(),
+            ));
+        }
+        Err(error) => return Err(CliError::Participant(error.to_string())),
+    };
+    Ok(sessions[selection].session_id.clone())
 }
 
 pub(crate) fn mint_session_id(cwd: &Path) -> tau_proto::SessionId {
@@ -200,18 +236,20 @@ fn sanitize_session_id_prefix(prefix: &str) -> String {
     }
 }
 
-fn pick_resume_session(_cwd: &Path) -> Result<Option<tau_proto::SessionId>, CliError> {
+fn pick_resume_session() -> Result<Option<tau_proto::SessionId>, CliError> {
     let sessions_dir = tau_session_inspect::default_sessions_dir();
     let mut metas = tau_harness::list_session_metas(&sessions_dir)?;
     metas.sort_by_key(|(_, meta)| std::cmp::Reverse(meta.last_touched));
-    metas.truncate(RESUME_PICKER_LIMIT);
     if metas.is_empty() {
-        return Ok(None);
+        return Err(CliError::Participant(
+            "no persisted sessions are available to resume".to_owned(),
+        ));
     }
-    if metas.len() == 1 || !io::IsTerminal::is_terminal(&io::stdin()) {
-        return Ok(metas.first().map(|(sid, _)| sid.clone()));
+    if !io::IsTerminal::is_terminal(&io::stdin()) {
+        return Err(CliError::Participant(
+            "cannot choose a resume target without an interactive terminal; pass `tau resume SESSION`".to_owned(),
+        ));
     }
-
     let rows = metas
         .into_iter()
         .map(|(sid, _meta)| {
@@ -230,19 +268,14 @@ fn pick_resume_session(_cwd: &Path) -> Result<Option<tau_proto::SessionId>, CliE
             (id, item, locked)
         })
         .collect::<Vec<_>>();
-    if rows.iter().all(|(_, _, locked)| *locked) {
-        return Ok(None);
+    if let Some(only) = sole_unlocked_resume_index(rows.iter().map(|(_, _, locked)| *locked))? {
+        return Ok(Some(rows[only].0.clone()));
     }
-    let default = rows
+    let visible = visible_resume_indices(rows.iter().map(|(_, _, locked)| *locked));
+    let items = visible
         .iter()
-        .position(|(_, _, locked)| !*locked)
-        .unwrap_or_default();
-    if rows.iter().filter(|(_, _, locked)| !*locked).count() == 1 {
-        return Ok(Some(rows[default].0.clone()));
-    }
-    let items = rows
-        .iter()
-        .map(|(_, item, locked)| {
+        .map(|index| {
+            let (_, item, locked) = &rows[*index];
             if *locked {
                 PickerItem::disabled(item)
             } else {
@@ -255,11 +288,46 @@ fn pick_resume_session(_cwd: &Path) -> Result<Option<tau_proto::SessionId>, CliE
         Err(PickerError::Cancelled) => return Ok(None),
         Err(e) => return Err(CliError::Participant(e.to_string())),
     };
-    Ok(Some(rows[selection].0.clone()))
+    Ok(Some(rows[visible[selection]].0.clone()))
+}
+
+/// Returns the only unlocked row, requests a picker for several unlocked rows,
+/// or reports that every persisted target is already owned.
+fn sole_unlocked_resume_index(
+    locked: impl IntoIterator<Item = bool>,
+) -> Result<Option<usize>, CliError> {
+    let mut unlocked = locked
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, locked)| (!locked).then_some(index));
+    let Some(first) = unlocked.next() else {
+        return Err(CliError::Participant(
+            "all persisted sessions are currently locked by running harnesses; use `tau attach \
+             SESSION` for a running target"
+                .to_owned(),
+        ));
+    };
+    Ok(unlocked.next().is_none().then_some(first))
+}
+
+/// Caps the picker while preserving at least one selectable row when an
+/// unlocked target falls beyond the newest rows.
+fn visible_resume_indices(locked: impl IntoIterator<Item = bool>) -> Vec<usize> {
+    let locked = locked.into_iter().collect::<Vec<_>>();
+    let mut visible = (0..locked.len().min(RESUME_PICKER_LIMIT)).collect::<Vec<_>>();
+    if visible.iter().all(|index| locked[*index])
+        && let Some(first_unlocked) = locked.iter().position(|locked| !*locked)
+        && let Some(last) = visible.last_mut()
+    {
+        *last = first_unlocked;
+    }
+    visible
 }
 
 pub(crate) struct DaemonOutput {
     pub(crate) stderr: Stdio,
+    /// Durable log target deferred until resumed startup proves ownership.
+    deferred_harness_log: Option<PathBuf>,
 }
 
 /// Maps the public session-only ephemeral flag without changing its semantics.
@@ -274,10 +342,27 @@ pub(crate) const fn storage_mode_from_ephemeral(ephemeral: bool) -> HarnessStora
 pub(crate) fn daemon_output_for_session(
     session_id: &str,
     storage_mode: HarnessStorageMode,
+    session_status: SessionLaunchStatus,
+) -> Result<DaemonOutput, CliError> {
+    daemon_output_for_session_in(
+        &tau_session_inspect::default_sessions_dir(),
+        session_id,
+        storage_mode,
+        session_status,
+    )
+}
+
+/// Resolves child stderr policy under an explicit sessions root.
+fn daemon_output_for_session_in(
+    sessions_dir: &Path,
+    session_id: &str,
+    storage_mode: HarnessStorageMode,
+    session_status: SessionLaunchStatus,
 ) -> Result<DaemonOutput, CliError> {
     if !matches!(storage_mode, HarnessStorageMode::Durable) {
         return Ok(DaemonOutput {
             stderr: Stdio::null(),
+            deferred_harness_log: None,
         });
     }
     // Route the daemon's stderr (where its tracing subscriber writes) into the
@@ -285,8 +370,13 @@ pub(crate) fn daemon_output_for_session(
     // `<session>/logs/`. The CLI's own tracing still goes to `ui.log`; the two
     // streams are intentionally separated so a session post-mortem doesn't need
     // to pull from two places.
-    let sessions_dir = tau_session_inspect::default_sessions_dir();
-    let harness_log = tau_harness::harness_log_path(&sessions_dir, session_id);
+    let harness_log = tau_harness::harness_log_path(sessions_dir, session_id);
+    if matches!(session_status, SessionLaunchStatus::Resumed) {
+        return Ok(DaemonOutput {
+            stderr: Stdio::piped(),
+            deferred_harness_log: Some(harness_log),
+        });
+    }
     if let Some(parent) = harness_log.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -295,7 +385,10 @@ pub(crate) fn daemon_output_for_session(
         .append(true)
         .open(&harness_log)
         .map(Stdio::from)?;
-    Ok(DaemonOutput { stderr })
+    Ok(DaemonOutput {
+        stderr,
+        deferred_harness_log: None,
+    })
 }
 
 pub(crate) struct DaemonCliOverrides<'a> {
@@ -316,11 +409,13 @@ pub(crate) fn resolve_daemon(
     storage_mode: HarnessStorageMode,
 ) -> Result<DaemonHandle, CliError> {
     tracing::debug!(target: "tau_cli::startup", attach, session_id, "resolving harness daemon");
-    let project_root = std::env::current_dir()?;
     if attach {
-        tracing::debug!(target: "tau_cli::startup", project_root = %project_root.display(), "looking for existing harness daemon");
-        let harness_path =
-            runtime_dir::find_harness_for_dir(&project_root).ok_or(CliError::NoRunningDaemon)?;
+        tracing::debug!(target: "tau_cli::startup", session_id, "looking for existing harness daemon");
+        let harness_path = runtime_dir::find_harness_for_session(session_id)
+            .map_err(|error| CliError::Participant(format!("cannot select attach target: {error}")))?
+            .ok_or_else(|| CliError::Participant(format!(
+                "session `{session_id}` is not running; use `tau resume {session_id}` to start it"
+            )))?;
         tracing::debug!(target: "tau_cli::startup", harness_path = %harness_path.display(), "attached harness daemon resolved");
         return Ok(DaemonHandle::Attached { harness_path });
     }
@@ -348,6 +443,10 @@ fn start_daemon(
     storage_mode: HarnessStorageMode,
 ) -> Result<DaemonHandle, CliError> {
     let tau_binary = std::env::current_exe()?;
+    let DaemonOutput {
+        stderr,
+        deferred_harness_log,
+    } = output;
     tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
 
     let mut command = build_daemon_command(DaemonCommandSpec {
@@ -355,7 +454,7 @@ fn start_daemon(
         session_id,
         session_status,
         stdout: Stdio::piped(),
-        stderr: output.stderr,
+        stderr,
         stdin: Stdio::piped(),
         startup_role,
         cli_overrides,
@@ -368,6 +467,13 @@ fn start_daemon(
 
     tracing::debug!(target: "tau_cli::startup", pid = child.id(), "harness daemon spawned");
     let harness_path = runtime_dir::harness_path_for_process(child.id(), &runtime_instance_id);
+    if let Some(harness_log) = deferred_harness_log {
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| CliError::Participant("missing harness stderr pipe".to_owned()))?;
+        relay_stderr_after_lock_held_log(stderr, harness_log);
+    }
     let stdin = child
         .stdin
         .take()
@@ -382,6 +488,64 @@ fn start_daemon(
         initial_ui: Some(InitialUiStdio { stdin, stdout }),
         cleanup_runtime_pair_after_reap: matches!(storage_mode, HarnessStorageMode::MemoryOnly),
     })
+}
+
+/// Drains resumed stderr immediately, then appends only after the child creates
+/// its log while retaining the session lock. Opening without `create` ensures a
+/// child exit plus cleanup race cannot recreate a deleted session.
+fn relay_stderr_after_lock_held_log(mut stderr: std::process::ChildStderr, harness_log: PathBuf) {
+    std::thread::spawn(move || {
+        let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(16);
+        std::thread::spawn(move || {
+            let mut buffer = vec![0_u8; 8 * 1024];
+            loop {
+                match stderr.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if sender.send(buffer[..read].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let temporary_path = std::env::temp_dir().join(format!(
+            "tau-resume-stderr-{}-{}",
+            std::process::id(),
+            mint_short_id("relay")
+        ));
+        let Ok(mut temporary) = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&temporary_path)
+        else {
+            return;
+        };
+        let mut target: Option<std::fs::File> = None;
+        loop {
+            if target.is_none() {
+                let opened = OpenOptions::new().append(true).open(&harness_log).ok();
+                if let Some(mut opened) = opened {
+                    let _ = temporary.seek(SeekFrom::Start(0));
+                    let _ = io::copy(&mut temporary, &mut opened);
+                    target = Some(opened);
+                }
+            }
+            match receiver.recv_timeout(Duration::from_millis(20)) {
+                Ok(bytes) => {
+                    if let Some(target) = target.as_mut() {
+                        let _ = target.write_all(&bytes);
+                    } else {
+                        let _ = temporary.write_all(&bytes);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let _ = std::fs::remove_file(temporary_path);
+    });
 }
 
 /// Assigns one random runtime identity to both sides of a CLI-managed spawn.

@@ -1427,7 +1427,7 @@ impl AgentStore {
 /// `meta.json` that *exists* but fails to parse is also skipped, but
 /// emits a warning to stderr so a corrupt sidecar does not become
 /// invisible to operators. The goal is best-effort discovery for
-/// `-r` resumption, not strict listing.
+/// `tau resume` discovery, not strict listing.
 pub fn list_agent_metas(agents_dir: &Path) -> io::Result<Vec<(AgentId, AgentMeta)>> {
     crate::list_agent_entries(agents_dir).map(|entries| {
         entries

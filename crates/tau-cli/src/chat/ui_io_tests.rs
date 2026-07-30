@@ -6,6 +6,61 @@ use tau_proto::HarnessOutputWriter;
 
 use super::*;
 
+/// Admission retains buffered bytes so an acknowledgement coalesced with a
+/// later disconnect is still visible to the long-lived reader.
+#[test]
+fn ui_session_admission_preserves_coalesced_followup() {
+    let (client, server) = UnixStream::pair().expect("socket pair");
+    let expected = tau_proto::SessionId::parse("session-1").expect("valid session id");
+    let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(server));
+    writer
+        .write_message(&HarnessOutputMessage::UiSessionAccepted(
+            tau_proto::UiSessionAccepted {
+                session_id: expected.clone(),
+            },
+        ))
+        .expect("write admission");
+    writer
+        .write_message(&HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("after admission".to_owned()),
+        }))
+        .expect("write disconnect");
+    writer.flush().expect("flush coalesced messages");
+
+    let mut reader =
+        await_ui_session_admission(Box::new(client), expected, None, Duration::from_secs(1))
+            .expect("admission succeeds");
+    let followup = reader
+        .read_message()
+        .expect("read followup")
+        .expect("followup exists");
+    assert!(matches!(
+        followup,
+        HarnessOutputMessage::Disconnect(disconnect)
+            if disconnect.reason.as_deref() == Some("after admission")
+    ));
+}
+
+/// A peer that withholds admission cannot block startup indefinitely; timeout
+/// also shuts down an attached socket so the reader thread can exit.
+#[test]
+fn ui_session_admission_times_out_and_shuts_down_socket() {
+    let (client, mut server) = UnixStream::pair().expect("socket pair");
+    let shutdown = client.try_clone().expect("clone client");
+    let error = match await_ui_session_admission(
+        Box::new(client),
+        tau_proto::SessionId::parse("session-1").expect("valid session id"),
+        Some(&shutdown),
+        Duration::from_millis(10),
+    ) {
+        Ok(_) => panic!("withheld admission must time out"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("timed out"));
+    let mut byte = [0_u8; 1];
+    assert_eq!(server.read(&mut byte).expect("read shutdown EOF"), 0);
+}
+
 /// The byte budget blocks admission at its exact cap and resumes after
 /// dequeue releases bytes.
 #[test]

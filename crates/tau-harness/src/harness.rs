@@ -4,6 +4,7 @@
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::fs::OpenOptions;
 use std::num::NonZeroUsize;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -3467,6 +3468,11 @@ impl Harness {
         let mut store = store;
         if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             let _ = store.lock_and_load_existing_session(eager_session_id)?;
+            Self::create_resumed_harness_log_after_lock(
+                &sessions_dir,
+                eager_session_id,
+                storage_mode,
+            )?;
         } else {
             let _ = store.lock_and_load_session(eager_session_id)?;
         }
@@ -3518,7 +3524,7 @@ impl Harness {
             // so the session dir stays self-contained: `events.cbor` +
             // `events.jsonl` + `meta.json` + `lock`.
             let _ = harness.enable_debug_log(&sessions_dir.join(eager_session_id))?;
-            // Record metadata so `-r` can find this session even before it has
+            // Record metadata so `tau resume` can find this session before it has
             // membership entries. Also acquires the flock on
             // `<sessions_dir>/<eager_session_id>/lock`.
             harness.store.record_session_meta(eager_session_id)?;
@@ -3931,6 +3937,12 @@ impl Harness {
             let _ = parts
                 .store
                 .lock_and_load_existing_session(&parts.eager_session_id)?;
+            let sessions_dir = parts.store.sessions_dir().to_path_buf();
+            Self::create_resumed_harness_log_after_lock(
+                &sessions_dir,
+                &parts.eager_session_id,
+                parts.launch.storage_mode,
+            )?;
         } else {
             let _ = parts.store.lock_and_load_session(&parts.eager_session_id)?;
         }
@@ -3975,6 +3987,29 @@ impl Harness {
         }))
     }
 
+    /// Creates the relay target while the session store retains resume
+    /// ownership. The parent CLI subsequently opens this file without `create`.
+    fn create_resumed_harness_log_after_lock(
+        sessions_dir: &Path,
+        session_id: &str,
+        storage_mode: crate::HarnessStorageMode,
+    ) -> Result<(), HarnessError> {
+        if !storage_mode.is_durable() {
+            return Ok(());
+        }
+        let harness_log = crate::harness_log_path(sessions_dir, session_id);
+        if let Some(parent) = harness_log.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        drop(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(harness_log)?,
+        );
+        Ok(())
+    }
+
     fn prepare_initial_session_storage(
         &mut self,
         sessions_dir: &Path,
@@ -3986,7 +4021,7 @@ impl Harness {
         }
         let _ = self.enable_debug_log(&sessions_dir.join(eager_session_id))?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "debug event log enabled");
-        // Record metadata so `-r` can find this session even before it has
+        // Record metadata so `tau resume` can find this session before it has
         // membership entries. Also acquires the flock on
         // `<sessions_dir>/<eager_session_id>/lock`.
         self.store.record_session_meta(eager_session_id)?;

@@ -11,7 +11,9 @@ advertise: false
 
 Tau runs as a daemon-centered system.
 
-Typically, a UI process starts (or attaches to) a harness daemon for the current project/session. The UI sends user input and renders streamed events, while the harness owns orchestration.
+Typically, a UI process starts a new harness, uses `tau attach [SESSION]` for a
+running target, or uses `tau resume [SESSION]` for persisted state. The UI sends
+user input and renders streamed events, while the harness owns orchestration.
 
 The harness process:
 

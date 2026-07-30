@@ -105,7 +105,7 @@ target/debug/tau agent list <session-id>
 
 Record only agent/session IDs and lifecycle, selection, and completion outcomes;
 do not retain provider wording or copied authentication state. The helper cannot
-pass `-r` to its child Tau, and its tmux session ends when Tau exits. It therefore
+pass `tau resume SESSION` to its child Tau, and its tmux session ends when Tau exits. It therefore
 does **not** test manual cold resume. The Unix spawned-PTY `core_resume` gate owns
 public-terminal cold-resume acceptance until the helper gains a tested resume
 argument boundary.
@@ -213,7 +213,7 @@ event log, extension stderr, and bounded semantic provider trace.
 
 The Unix-only `core_resume` target additionally launches the exact universal
 Tau binary under a fixed PTY for a fresh boot and explicit
-`tau -r <session-id>` boot. Its VT model checks the completed dummy row is always
+`tau resume <session-id>` boot. Its VT model checks the completed dummy row is always
 terminal throughout Boot B historical restoration and the fresh resumed turn;
 Boot A is allowed to show the ordinary live pending state before completion.
 A second gate creates and completes the production `agent_start` main/worker pair

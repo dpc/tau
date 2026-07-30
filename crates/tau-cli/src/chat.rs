@@ -815,6 +815,7 @@ pub(crate) fn run_chat(
         Some(daemon_output_for_session(
             session_id.as_str(),
             storage_mode_from_ephemeral(ephemeral),
+            session_status,
         )?)
     };
     let mut daemon = resolve_daemon(
@@ -844,13 +845,14 @@ pub(crate) fn run_chat(
             Some(session_id),
         ),
     )?;
-    verify_ui_session_admission(&mut read_stream, session_id)?;
-    tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "verified UI session admission");
-    send_handshake_frame(
-        &writer,
-        &mut read_stream,
-        &crate::ui_client::chat_subscribe_message(),
+    let socket_reader_input = await_ui_session_admission(
+        read_stream,
+        session_id.clone(),
+        socket_shutdown_stream.as_ref(),
+        UI_SESSION_ADMISSION_TIMEOUT,
     )?;
+    tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "verified UI session admission");
+    send_frame(&writer, &crate::ui_client::chat_subscribe_message())?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent subscribe");
 
     // The socket reader feeds a bounded remote FIFO. Local renderer commands
@@ -927,7 +929,7 @@ pub(crate) fn run_chat(
                 );
             }
         };
-        let mut reader = PeerInputReader::new(BufReader::new(read_stream));
+        let mut reader = socket_reader_input;
         loop {
             let delivery_id = allocate_delivery_id();
             let read_started = Instant::now();
@@ -1346,39 +1348,22 @@ pub(crate) fn run_chat(
     Ok(())
 }
 
-/// Waits for the harness to confirm that UI admission bound the requested
-/// session before the terminal renderer starts.
-fn verify_ui_session_admission(
-    read_stream: &mut Box<dyn Read + Send>,
-    expected_session_id: &tau_proto::SessionId,
-) -> Result<(), CliError> {
-    let mut reader = PeerInputReader::new(BufReader::new(read_stream));
-    match reader.read_message() {
-        Ok(Some(HarnessOutputMessage::UiSessionAccepted(accepted)))
-            if accepted.session_id == *expected_session_id =>
-        {
-            Ok(())
-        }
-        Ok(Some(HarnessOutputMessage::UiSessionAccepted(accepted))) => {
-            Err(CliError::DaemonExited(format!(
-                "session target mismatch: requested `{expected_session_id}`, but the connected \
-                 harness admitted `{}`",
-                accepted.session_id
-            )))
-        }
-        Ok(Some(HarnessOutputMessage::Disconnect(disconnect))) => {
-            Err(CliError::DaemonExited(disconnect.reason.unwrap_or_else(
-                || "harness rejected UI session admission".to_owned(),
-            )))
-        }
-        Ok(Some(other)) => Err(CliError::DaemonExited(format!(
-            "harness sent {other:?} before UI session admission"
-        ))),
-        Ok(None) => Err(CliError::DaemonExited(
-            "harness closed before confirming UI session admission".to_owned(),
-        )),
-        Err(error) => Err(CliError::Io(io::Error::other(error))),
-    }
+/// Performs the blocking admission read on an owned thread, retaining its
+/// buffered reader for normal delivery and bounding a peer that withholds ACK.
+fn await_ui_session_admission(
+    read_stream: Box<dyn Read + Send>,
+    expected_session_id: tau_proto::SessionId,
+    shutdown_stream: Option<&UnixStream>,
+    timeout: Duration,
+) -> Result<crate::ui_client::UiInputReader, CliError> {
+    let reader = PeerInputReader::new(BufReader::new(read_stream));
+    crate::ui_client::await_ui_session_admission(
+        reader,
+        expected_session_id,
+        shutdown_stream.and_then(|stream| stream.try_clone().ok()),
+        timeout,
+    )
+    .map_err(CliError::Io)
 }
 
 /// How the input loop ended. Controls daemon disposition on exit.
@@ -3893,3 +3878,4 @@ fn send_shell_command(
 
 #[cfg(test)]
 mod role_cycle_tests;
+const UI_SESSION_ADMISSION_TIMEOUT: Duration = crate::ui_client::UI_SESSION_ADMISSION_TIMEOUT;

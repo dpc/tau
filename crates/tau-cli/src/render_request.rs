@@ -50,7 +50,8 @@ fn connect_render_client(
     daemon: &mut DaemonHandle,
     client_name: &'static str,
 ) -> Result<(UiInputReader, UiOutputWriter), CliError> {
-    let (reader, mut writer) = crate::ui_client::connect_daemon_ui_client(daemon, client_name)?;
+    let (reader, mut writer) =
+        crate::ui_client::connect_daemon_ui_client(daemon, client_name, None)?;
     crate::ui_client::subscribe(
         &mut writer,
         vec![EventSelector::Exact(EventName::SESSION_REPLAY_COMPLETE)],

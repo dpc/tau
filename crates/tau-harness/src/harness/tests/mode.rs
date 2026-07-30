@@ -1,3 +1,5 @@
+use tau_core::SessionStore;
+
 use super::*;
 use crate::{
     event as path_crate_event, event_log as path_crate_event_log, harness as path_crate_harness,
@@ -1394,6 +1396,10 @@ fn resumed_startup_publishes_resume_session_started() {
     // treated as a brand-new harness session.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
+    let mut store = SessionStore::open_lazy(tau_config::settings::sessions_dir_of(&sp))
+        .expect("open session store");
+    store.record_session_meta("s1").expect("seed session");
+    drop(store);
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("start");
 

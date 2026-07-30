@@ -241,7 +241,7 @@ impl GateFixture {
             command.arg("--enable-extension").arg(extension);
         }
         if let Some(session_id) = resume {
-            command.arg("-r").arg(session_id);
+            command.arg("resume").arg(session_id);
         }
         command
     }

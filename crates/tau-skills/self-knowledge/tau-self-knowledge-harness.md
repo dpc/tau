@@ -47,9 +47,22 @@ CLI-managed daemon spawns explicitly remove `LISTEN_FDS`, `LISTEN_PID`, `LISTEN_
 
 ## Attach mode
 
-`tau --attach` does not start a new harness. It discovers an existing runtime-dir daemon for the current project and opens a Unix socket connection to that daemon.
+`tau attach [SESSION]` does not start a new harness. An explicit target resolves
+the live daemon advertising that session; omission opens the running-session
+picker. UI admission binds the expected session and rejects a stale or replaced
+socket whose harness reports another identity.
 
-Attach mode depends on runtime markers being accurate. If no matching daemon exists, attach fails instead of silently starting a new one.
+Runtime discovery confirms marker identity through the live harness. If no
+matching daemon exists, attach fails instead of silently starting a new one.
+
+## Resume mode
+
+`tau resume [SESSION]` starts a new harness for persisted state. An explicit
+target must still exist after the child holds its session lock; a deleted target
+fails without recreating an empty session. With no target, Tau auto-selects the
+sole unlocked session, opens a picker with locked rows disabled when several
+sessions are eligible, or reports that every persisted target is locked and
+suggests `tau attach SESSION`.
 
 ## Foreground daemon APIs
 

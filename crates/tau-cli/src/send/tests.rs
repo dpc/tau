@@ -151,7 +151,7 @@ fn headless_tree_result_reads_one_multiline_notice() {
     let (writer_stream, _discard_stream) =
         path_std_os_unix_net::UnixStream::pair().expect("writer stream pair");
     let (mut reader, _writer) =
-        crate::ui_client::connect_ui_streams(reader_stream, writer_stream, "tree-test")
+        crate::ui_client::connect_ui_streams(reader_stream, writer_stream, "tree-test", None)
             .expect("connect UI streams");
     let mut harness_writer = tau_proto::HarnessOutputWriter::new(&mut harness_stream);
     harness_writer

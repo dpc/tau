@@ -141,9 +141,8 @@ use super::tool_render::{
 
 #[test]
 fn dev_print_prompt_uses_shared_role_flag() {
-    // Diagnostics share the same harness-selection args as normal `tau`, so a
-    // role can be supplied before or after the hidden dev subcommand.
-    let cli = path_super_cli::Cli::parse_from(["tau", "dev", "print-prompt", "--role", "engineer"]);
+    // Diagnostics share root-owned harness selection with normal startup.
+    let cli = path_super_cli::Cli::parse_from(["tau", "--role", "engineer", "dev", "print-prompt"]);
     assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
     assert!(matches!(
         cli.command,
@@ -161,8 +160,6 @@ fn dev_print_prompt_uses_shared_role_flag() {
 fn run_parses_ephemeral_flag() {
     let cli = path_super_cli::Cli::parse_from(["tau", "--ephemeral"]);
     assert!(cli.run.ephemeral);
-    assert!(!cli.run.attach);
-    assert!(cli.run.resume.is_none());
     assert!(cli.command.is_none());
 }
 
@@ -171,10 +168,9 @@ fn run_parses_ephemeral_flag() {
 /// session-persistence boundary.
 #[test]
 fn run_rejects_ephemeral_with_attach_or_resume() {
-    assert!(super::reject_ephemeral_incompatible(true, true, None).is_err());
-    assert!(super::reject_ephemeral_incompatible(true, false, Some("")).is_err());
-    assert!(super::reject_ephemeral_incompatible(true, false, Some("s1")).is_err());
-    assert!(super::reject_ephemeral_incompatible(true, false, None).is_ok());
+    assert!(super::reject_ephemeral_incompatible(true, &super::StartupMode::Attach(None)).is_err());
+    assert!(super::reject_ephemeral_incompatible(true, &super::StartupMode::Resume(None)).is_err());
+    assert!(super::reject_ephemeral_incompatible(true, &super::StartupMode::New).is_ok());
 }
 
 #[test]
@@ -582,43 +578,6 @@ fn session_show_and_stats_reject_invalid_ids_with_missing_roots() {
     }
 }
 
-/// Attach reports whether runtime metadata is absent, malformed, or carries an
-/// invalid controlled identifier.
-#[test]
-fn attach_session_id_diagnostics_preserve_metadata_failure_kind() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let harness_path = temp.path().join("harness");
-    let metadata_path = tau_harness::runtime_dir::metadata_path(&harness_path);
-
-    let missing = super::read_attached_session_id(&harness_path)
-        .expect_err("missing metadata must fail")
-        .to_string();
-    assert!(missing.contains("No such file"));
-
-    std::fs::write(&metadata_path, b"{").expect("malformed metadata");
-    let malformed = super::read_attached_session_id(&harness_path)
-        .expect_err("malformed metadata must fail")
-        .to_string();
-    assert!(malformed.contains("malformed daemon metadata"));
-
-    std::fs::write(
-        &metadata_path,
-        serde_json::json!({
-            "version": 1,
-            "pid": std::process::id(),
-            "project_root": null,
-            "session_id": "bad.id",
-            "peer_entrypoint": false
-        })
-        .to_string(),
-    )
-    .expect("invalid-id metadata");
-    let invalid = super::read_attached_session_id(&harness_path)
-        .expect_err("invalid metadata session id must fail")
-        .to_string();
-    assert!(invalid.contains("invalid daemon session id"));
-}
-
 /// Session-list filtering canonicalizes symlink aliases during parsing and
 /// composes independently with structured output.
 #[test]
@@ -811,7 +770,7 @@ fn harness_config_overrides_reject_attach_only_paths() {
         raw_value: "3".to_owned(),
     }];
 
-    let err = super::reject_harness_config_overrides(&overrides, "--attach")
+    let err = super::reject_harness_config_overrides(&overrides, "attach")
         .expect_err("attach cannot apply overrides");
     assert!(err.to_string().contains("starting a new harness instance"));
 }

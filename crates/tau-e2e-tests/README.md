@@ -33,7 +33,7 @@ once across two cold resumes, and startup rejection of invalid
 scenario config.
 The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
 under a real PTY twice. It completes `restart_test_dummy`, reaps Boot A, resumes
-with explicit `tau -r <session-id>`, and checks the actual VT projection never
+with explicit `tau resume <session-id>`, and checks the actual VT projection never
 repaints the completed row as pending. A replay-aware side UI observer and typed
 CBOR `SessionStore`/`AgentStore` snapshots independently prove replay boundaries,
 stable identity, unchanged durable prefix, and one fresh same-agent prompt.

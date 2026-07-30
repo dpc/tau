@@ -39,6 +39,12 @@ pub enum SessionPersistenceMode {
     Ephemeral,
 }
 
+#[derive(Clone, Copy)]
+enum SessionLockPolicy {
+    Create,
+    Existing,
+}
+
 impl SessionPersistenceMode {
     /// Returns true when session events and sidecars should be written to disk.
     #[must_use]
@@ -127,7 +133,10 @@ pub enum SessionStoreError {
     /// Another process holds the exclusive lock for this object.
     Locked { path: PathBuf, holder: String },
     /// A requested persisted session does not exist.
-    SessionNotFound { session_id: SessionId },
+    SessionNotFound {
+        /// Requested persisted session identity.
+        session_id: SessionId,
+    },
     /// A session directory could not be converted to UTF-8.
     InvalidSessionDir { path: PathBuf },
     /// A session id is not safe to use as one store directory name.
@@ -505,84 +514,49 @@ impl SessionStore {
         Ok(())
     }
 
-    fn ensure_locked(&mut self, session_id: &str) -> Result<bool, SessionStoreError> {
+    fn ensure_locked(
+        &mut self,
+        session_id: &SessionId,
+        policy: SessionLockPolicy,
+    ) -> Result<bool, SessionStoreError> {
         if self.mode.is_ephemeral() {
+            return match policy {
+                SessionLockPolicy::Create => Ok(false),
+                SessionLockPolicy::Existing => Err(SessionStoreError::SessionNotFound {
+                    session_id: session_id.clone(),
+                }),
+            };
+        }
+        if self.locks.contains_key(session_id) {
             return Ok(false);
         }
-        let sid = validate_session_id(session_id)?;
-        if self.locks.contains_key(&sid) {
-            return Ok(false);
-        }
-        let session_dir = self.session_dir(&sid);
-        let created_directories = missing_directories(&session_dir);
-        fs::create_dir_all(&session_dir).map_err(|source| {
-            SessionStoreError::CreateParentDirectory {
-                path: session_dir.clone(),
-                source,
-            }
-        })?;
-        self.framed_appends
-            .note_created_directories(created_directories);
-        let lock_path = session_dir.join("lock");
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|source| SessionStoreError::Open {
-                path: lock_path.clone(),
-                source,
+        let session_dir = self.session_dir(session_id);
+        if matches!(policy, SessionLockPolicy::Create) {
+            let created_directories = missing_directories(&session_dir);
+            fs::create_dir_all(&session_dir).map_err(|source| {
+                SessionStoreError::CreateParentDirectory {
+                    path: session_dir.clone(),
+                    source,
+                }
             })?;
-        if FileExt::try_lock_exclusive(&file).is_err() {
-            let mut holder = String::new();
-            let _ = file.read_to_string(&mut holder);
-            return Err(SessionStoreError::Locked {
-                path: lock_path,
-                holder,
-            });
+            self.framed_appends
+                .note_created_directories(created_directories);
         }
-        if let Some(root) = self.pending_root_boundary.take() {
-            self.framed_appends.note_directory_boundary_chain(&root);
-        }
-        self.framed_appends.note_directory_boundary(&session_dir);
-        file.set_len(0).map_err(|source| SessionStoreError::Write {
-            path: lock_path.clone(),
-            source,
-        })?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|source| SessionStoreError::Write {
-                path: lock_path.clone(),
-                source,
-            })?;
-        writeln!(&mut file, "pid={} start={}", std::process::id(), unix_now()).map_err(
-            |source| SessionStoreError::Write {
-                path: lock_path,
-                source,
-            },
-        )?;
-        self.locks.insert(sid, file);
-        Ok(true)
-    }
-
-    /// Acquires an existing session's writer lock without creating any session
-    /// path, then revalidates its persisted metadata while retaining the lock.
-    fn ensure_existing_locked(&mut self, session_id: &str) -> Result<bool, SessionStoreError> {
-        if self.mode.is_ephemeral() {
-            return Err(SessionStoreError::SessionNotFound {
-                session_id: validate_session_id(session_id)?,
-            });
-        }
-        let sid = validate_session_id(session_id)?;
-        if self.locks.contains_key(&sid) {
-            return Ok(false);
-        }
-        let session_dir = self.session_dir(&sid);
         let lock_path = session_dir.join("lock");
-        let mut file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).truncate(false);
+        if matches!(policy, SessionLockPolicy::Create) {
+            options.create(true);
+        }
+        let mut file = match options.open(&lock_path) {
             Ok(file) => file,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {
-                return Err(SessionStoreError::SessionNotFound { session_id: sid });
+            Err(source)
+                if matches!(policy, SessionLockPolicy::Existing)
+                    && source.kind() == io::ErrorKind::NotFound =>
+            {
+                return Err(SessionStoreError::SessionNotFound {
+                    session_id: session_id.clone(),
+                });
             }
             Err(source) => {
                 return Err(SessionStoreError::Open {
@@ -599,17 +573,29 @@ impl SessionStore {
                 holder,
             });
         }
-        let meta_path = session_dir.join("meta.json");
-        match read_meta(&meta_path) {
-            Ok(_) => {}
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {
-                return Err(SessionStoreError::SessionNotFound { session_id: sid });
+        match policy {
+            SessionLockPolicy::Create => {
+                if let Some(root) = self.pending_root_boundary.take() {
+                    self.framed_appends.note_directory_boundary_chain(&root);
+                }
+                self.framed_appends.note_directory_boundary(&session_dir);
             }
-            Err(source) => {
-                return Err(SessionStoreError::Read {
-                    path: meta_path,
-                    source,
-                });
+            SessionLockPolicy::Existing => {
+                let meta_path = session_dir.join("meta.json");
+                match read_meta(&meta_path) {
+                    Ok(_) => {}
+                    Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                        return Err(SessionStoreError::SessionNotFound {
+                            session_id: session_id.clone(),
+                        });
+                    }
+                    Err(source) => {
+                        return Err(SessionStoreError::Read {
+                            path: meta_path,
+                            source,
+                        });
+                    }
+                }
             }
         }
         file.set_len(0).map_err(|source| SessionStoreError::Write {
@@ -627,7 +613,7 @@ impl SessionStore {
                 source,
             },
         )?;
-        self.locks.insert(sid, file);
+        self.locks.insert(session_id.clone(), file);
         Ok(true)
     }
 
@@ -978,9 +964,18 @@ impl SessionStore {
         session_id: &str,
     ) -> Result<Option<&SessionMembership>, SessionStoreError> {
         let session_id = validate_session_id(session_id)?;
-        if self.ensure_locked(session_id.as_str())? {
+        if self.ensure_locked(&session_id, SessionLockPolicy::Create)? {
             self.sessions.remove(&session_id);
         }
+        self.load_locked_session(session_id)
+    }
+
+    /// Loads membership after the caller has selected and retained the
+    /// appropriate creating or existing-only lock policy.
+    fn load_locked_session(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<Option<&SessionMembership>, SessionStoreError> {
         if self.dirty_meta_rebuilds.contains(&session_id) {
             let meta_path = self.session_dir(&session_id).join("meta.json");
             match fs::remove_file(&meta_path) {
@@ -1063,10 +1058,10 @@ impl SessionStore {
         session_id: &str,
     ) -> Result<Option<&SessionMembership>, SessionStoreError> {
         let session_id = validate_session_id(session_id)?;
-        if self.ensure_existing_locked(session_id.as_str())? {
+        if self.ensure_locked(&session_id, SessionLockPolicy::Existing)? {
             self.sessions.remove(&session_id);
         }
-        self.lock_and_load_session(session_id.as_str())
+        self.load_locked_session(session_id)
     }
 
     /// Returns one already-loaded session membership view.

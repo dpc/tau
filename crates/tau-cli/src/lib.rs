@@ -43,10 +43,10 @@ mod watch_activity;
 use std::sync::{Mutex, MutexGuard};
 use std::{fmt, io};
 
-use tau_harness::{SessionLaunchStatus, runtime_dir};
+use tau_harness::SessionLaunchStatus;
 
 use crate::chat::run_chat;
-use crate::daemon::resolve_run_session_id;
+use crate::daemon::resolve_resume_session_id;
 
 /// Single shared message for mutex-poison panics: every mutex in this
 /// crate is held only for short, infallible critical sections, so poison
@@ -123,10 +123,9 @@ impl fmt::Display for CliError {
             Self::Harness(source) => write!(f, "harness error: {source}"),
             Self::Inspect(source) => write!(f, "inspect error: {source}"),
             Self::DaemonExited(msg) => write!(f, "harness daemon exited: {msg}"),
-            Self::NoRunningDaemon => f.write_str(
-                "no harness daemon running for this project — \
-                 drop `--attach` to spawn one",
-            ),
+            Self::NoRunningDaemon => {
+                f.write_str("no running session is available; start one with `tau`")
+            }
             Self::Participant(msg) => write!(f, "participant error: {msg}"),
             Self::PromptStdin(error) => error.fmt(f),
             Self::SessionNotFound(id) => write!(f, "session not found: `{id}`"),
@@ -466,18 +465,18 @@ fn reject_attach_startup_overrides(
 ) -> Result<(), CliError> {
     if startup_role.is_some() && !prompt_stdin {
         return Err(CliError::Participant(
-            "--attach cannot apply --role to an already-running interactive daemon; use --prompt-stdin if you want --role for the submitted prompt".to_owned(),
+            "`tau attach` cannot apply --role to an already-running interactive daemon; use --prompt-stdin if you want --role for the submitted prompt".to_owned(),
         ));
     }
     if !role_cli_overrides.is_empty() {
         return Err(CliError::Participant(
-            "--attach cannot apply role enable/disable overrides to an already-running daemon"
+            "`tau attach` cannot apply role enable/disable overrides to an already-running daemon"
                 .to_owned(),
         ));
     }
     if !extension_cli_overrides.is_empty() {
         return Err(CliError::Participant(
-            "--attach cannot apply extension enable/disable overrides to an already-running daemon"
+            "`tau attach` cannot apply extension enable/disable overrides to an already-running daemon"
                 .to_owned(),
         ));
     }
@@ -489,25 +488,24 @@ fn reject_attach_extension_environment(environment_names: &[String]) -> Result<(
         return Ok(());
     }
     Err(CliError::Participant(format!(
-        "--attach cannot apply {} to an already-running daemon",
+        "`tau attach` cannot apply {} to an already-running daemon",
         tau_config::settings::TAU_ENABLE_EXTENSIONS_ENV
     )))
 }
 
 fn reject_ephemeral_incompatible(
     ephemeral: bool,
-    attach: bool,
-    resume: Option<&str>,
+    startup_mode: &StartupMode,
 ) -> Result<(), CliError> {
-    if ephemeral && attach {
-        return Err(CliError::Participant(
-            "--ephemeral cannot be combined with --attach".to_owned(),
-        ));
-    }
-    if ephemeral && resume.is_some() {
-        return Err(CliError::Participant(
-            "--ephemeral cannot be combined with --resume".to_owned(),
-        ));
+    if ephemeral {
+        let command = match startup_mode {
+            StartupMode::New => return Ok(()),
+            StartupMode::Attach(_) => "attach",
+            StartupMode::Resume(_) => "resume",
+        };
+        return Err(CliError::Participant(format!(
+            "--ephemeral cannot be combined with `tau {command}`"
+        )));
     }
     Ok(())
 }
@@ -590,6 +588,26 @@ pub enum ComponentLogging {
     RunnerManaged,
 }
 
+/// Target semantics selected by the public session-startup command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StartupMode {
+    /// Mint and own a fresh session.
+    New,
+    /// Attach to an existing live session, selecting interactively when absent.
+    Attach(Option<tau_proto::SessionId>),
+    /// Resume persisted state, selecting interactively when absent.
+    Resume(Option<tau_proto::SessionId>),
+}
+
+/// A startup request or one of the non-startup CLI commands.
+enum DispatchCommand {
+    Startup {
+        args: cli::RunArgs,
+        mode: StartupMode,
+    },
+    Other(cli::Command),
+}
+
 pub struct Component {
     /// Name accepted by the `tau component <name>` dispatcher.
     pub name: &'static str,
@@ -630,17 +648,35 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         }
 
         reject_legacy_config_path(run.config.as_deref())?;
-        let command = command.unwrap_or(cli::Command::Run(run));
+        let command = match command {
+            Some(cli::Command::Run(args)) => DispatchCommand::Startup {
+                args,
+                mode: StartupMode::New,
+            },
+            Some(cli::Command::Attach { session }) => DispatchCommand::Startup {
+                args: run,
+                mode: StartupMode::Attach(session),
+            },
+            Some(cli::Command::Resume { session }) => DispatchCommand::Startup {
+                args: run,
+                mode: StartupMode::Resume(session),
+            },
+            Some(command) => DispatchCommand::Other(command),
+            None => DispatchCommand::Startup {
+                args: run,
+                mode: StartupMode::New,
+            },
+        };
         let reads_extension_environment = match &command {
-            cli::Command::Run(_) => true,
-            cli::Command::Dev {
+            DispatchCommand::Startup { .. } => true,
+            DispatchCommand::Other(cli::Command::Dev {
                 command:
                     cli::DevCommand::PrintPrompt { .. }
                     | cli::DevCommand::PrintSystemPrompt
                     | cli::DevCommand::PrintTools
                     | cli::DevCommand::Tmux { .. },
-            } => true,
-            cli::Command::Component { name, .. } => name == "harness",
+            }) => true,
+            DispatchCommand::Other(cli::Command::Component { name, .. }) => name == "harness",
             _ => false,
         };
         let environment_extension_names = if reads_extension_environment {
@@ -652,18 +688,21 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             Vec::new()
         };
         match &command {
-            cli::Command::Run(run) if run.attach => {
-                reject_harness_config_overrides(&harness_config_overrides, "--attach")?;
+            DispatchCommand::Startup {
+                mode: StartupMode::Attach(_),
+                ..
+            } => {
+                reject_harness_config_overrides(&harness_config_overrides, "attach")?;
                 reject_attach_extension_environment(&environment_extension_names)?;
             }
-            cli::Command::Run(_)
-            | cli::Command::Dev {
+            DispatchCommand::Startup { .. }
+            | DispatchCommand::Other(cli::Command::Dev {
                 command:
                     cli::DevCommand::PrintPrompt { .. }
                     | cli::DevCommand::PrintSystemPrompt
                     | cli::DevCommand::PrintTools,
-            } => {}
-            cli::Command::Session { command } => {
+            }) => {}
+            DispatchCommand::Other(cli::Command::Session { command }) => {
                 let command_name = match command {
                     cli::SessionCommand::List(_) => "session list",
                     cli::SessionCommand::Show { .. } => "session show",
@@ -671,27 +710,27 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 };
                 reject_harness_config_overrides(&harness_config_overrides, command_name)?;
             }
-            cli::Command::Agent { command } => {
+            DispatchCommand::Other(cli::Command::Agent { command }) => {
                 let command_name = match command {
                     cli::AgentCommand::List(_) => "agent list",
                     cli::AgentCommand::Trace(_) => "agent trace",
                 };
                 reject_harness_config_overrides(&harness_config_overrides, command_name)?;
             }
-            cli::Command::Init { .. } => {
+            DispatchCommand::Other(cli::Command::Init { .. }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "init")?;
             }
-            cli::Command::Provider { .. } => {
+            DispatchCommand::Other(cli::Command::Provider { .. }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "provider")?;
             }
-            cli::Command::Dev {
+            DispatchCommand::Other(cli::Command::Dev {
                 command: cli::DevCommand::Send { .. },
-            } => {
+            }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "dev send")?;
             }
-            cli::Command::Dev {
+            DispatchCommand::Other(cli::Command::Dev {
                 command: cli::DevCommand::Tmux { .. },
-            } => {
+            }) => {
                 reject_dev_tmux_startup_overrides(
                     harness.role.as_deref(),
                     &role_cli_overrides,
@@ -699,22 +738,27 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     &harness_config_overrides,
                 )?;
             }
-            cli::Command::Dev {
+            DispatchCommand::Other(cli::Command::Dev {
                 command: cli::DevCommand::DumpInitialPrompt { .. },
-            } => {
+            }) => {
                 reject_harness_config_overrides(
                     &harness_config_overrides,
                     "dev dump-initial-prompt",
                 )?;
             }
-            cli::Command::Component { .. } => {
+            DispatchCommand::Other(cli::Command::Component { .. }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "component")?;
+            }
+            DispatchCommand::Other(cli::Command::Run(_))
+            | DispatchCommand::Other(cli::Command::Attach { .. })
+            | DispatchCommand::Other(cli::Command::Resume { .. }) => {
+                unreachable!("startup variants normalize to DispatchCommand::Startup")
             }
         }
 
-        if let cli::Command::Dev {
+        if let DispatchCommand::Other(cli::Command::Dev {
             command: cli::DevCommand::Tmux { command },
-        } = command
+        }) = command
         {
             return dev_tmux::run(command);
         }
@@ -735,16 +779,18 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             .map_err(|error| CliError::Participant(error.to_string()))?;
         }
         match command {
-            cli::Command::Run(cli::RunArgs {
-                resume,
-                config,
-                prompt_stdin,
-                attach,
-                ephemeral,
-            }) => {
+            DispatchCommand::Startup {
+                args:
+                    cli::RunArgs {
+                        config,
+                        prompt_stdin,
+                        ephemeral,
+                    },
+                mode: startup_mode,
+            } => {
                 reject_legacy_config_path(config.as_deref())?;
-                reject_ephemeral_incompatible(ephemeral, attach, resume.as_deref())?;
-                if attach {
+                reject_ephemeral_incompatible(ephemeral, &startup_mode)?;
+                if matches!(startup_mode, StartupMode::Attach(_)) {
                     reject_attach_startup_overrides(
                         prompt_stdin,
                         harness.role.as_deref(),
@@ -752,24 +798,24 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         &extension_cli_overrides,
                     )?;
                 }
-                let (session_id, session_status) = if attach {
-                    reject_harness_config_overrides(&harness_config_overrides, "--attach")?;
-                    let cwd = std::env::current_dir()?;
-                    let harness_path =
-                        runtime_dir::find_harness_for_dir(&cwd).ok_or(CliError::NoRunningDaemon)?;
-                    let daemon_session_id = read_attached_session_id(&harness_path)?;
-                    if let Some(requested) = resume.as_deref().filter(|s| !s.is_empty())
-                        && requested != daemon_session_id.as_str()
-                    {
-                        return Err(CliError::Participant(format!(
-                            "--attach: daemon is bound to session `{daemon_session_id}`, \
-                             cannot resume `{requested}` (start a fresh daemon for that)"
-                        )));
+                let (session_id, session_status) = match &startup_mode {
+                    StartupMode::Attach(session) => {
+                        reject_harness_config_overrides(&harness_config_overrides, "attach")?;
+                        (
+                            crate::daemon::resolve_attach_session_id(session.as_ref())?,
+                            SessionLaunchStatus::Resumed,
+                        )
                     }
-                    (daemon_session_id, SessionLaunchStatus::Resumed)
-                } else {
-                    resolve_run_session_id(resume.as_deref())?
+                    StartupMode::Resume(session) => (
+                        resolve_resume_session_id(session.as_ref())?,
+                        SessionLaunchStatus::Resumed,
+                    ),
+                    StartupMode::New => (
+                        crate::daemon::mint_session_id(&std::env::current_dir()?),
+                        SessionLaunchStatus::New,
+                    ),
                 };
+                let attach = matches!(startup_mode, StartupMode::Attach(_));
                 if prompt_stdin {
                     prompt_stdin::run_prompt_stdin(
                         &session_id,
@@ -801,20 +847,20 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 }
             }
 
-            cli::Command::Session {
+            DispatchCommand::Other(cli::Command::Session {
                 command: cli::SessionCommand::List(args),
-            } => {
+            }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "session list")?;
                 list_sessions::run(&args)
             }
 
-            cli::Command::Session {
+            DispatchCommand::Other(cli::Command::Session {
                 command:
                     cli::SessionCommand::Show {
                         session_id,
                         sessions_dir,
                     },
-            } => {
+            }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "session show")?;
                 for line in tau_session_inspect::session_lines(sessions_dir, &session_id)? {
                     println!("{line}");
@@ -822,13 +868,13 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 Ok(())
             }
 
-            cli::Command::Session {
+            DispatchCommand::Other(cli::Command::Session {
                 command:
                     cli::SessionCommand::Stats {
                         session,
                         sessions_dir,
                     },
-            } => {
+            }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "session stats")?;
                 let stats = tau_session_inspect::read_session_stats(&sessions_dir, &session)?
                     .ok_or_else(|| {
@@ -841,15 +887,15 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 Ok(())
             }
 
-            cli::Command::Agent {
+            DispatchCommand::Other(cli::Command::Agent {
                 command: cli::AgentCommand::List(args),
-            } => {
+            }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "agent list")?;
                 list_agents::run(&args)
             }
-            cli::Command::Agent {
+            DispatchCommand::Other(cli::Command::Agent {
                 command: cli::AgentCommand::Trace(args),
-            } => {
+            }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "agent trace")?;
                 let mode = match args.mode {
                     cli::AgentTraceMode::Lite => tau_session_inspect::AgentTraceMode::Lite,
@@ -886,18 +932,18 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 line_output::stream_stdout(|writer| output.copy_to(writer).map(|_| ()))
             }
 
-            cli::Command::Init { force } => {
+            DispatchCommand::Other(cli::Command::Init { force }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "init")?;
                 run_init(force)
             }
 
-            cli::Command::Provider { args } => {
+            DispatchCommand::Other(cli::Command::Provider { args }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "provider")?;
                 tau_ext_provider_builtin::run_provider_cli(&args)
                     .map_err(|e| CliError::Participant(e.to_string()))
             }
 
-            cli::Command::Dev { command } => match command {
+            DispatchCommand::Other(cli::Command::Dev { command }) => match command {
                 cli::DevCommand::Send { session_id, line } => {
                     reject_harness_config_overrides(&harness_config_overrides, "dev send")?;
                     send::run_send(&session_id, &line.join(" "))
@@ -949,10 +995,10 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 }
             },
 
-            cli::Command::Component {
+            DispatchCommand::Other(cli::Command::Component {
                 name,
                 initial_ui_stdio,
-            } => {
+            }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "component")?;
                 if initial_ui_stdio && name != "harness" {
                     return Err(CliError::Participant(
@@ -1004,6 +1050,11 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 }
                 (component.runner)().map_err(|e| CliError::Participant(e.to_string()))
             }
+            DispatchCommand::Other(
+                cli::Command::Run(_) | cli::Command::Attach { .. } | cli::Command::Resume { .. },
+            ) => {
+                unreachable!("startup variants normalize to DispatchCommand::Startup")
+            }
         }
     };
 
@@ -1014,12 +1065,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             ExitCode::FAILURE
         }
     }
-}
-
-fn read_attached_session_id(path: &std::path::Path) -> Result<tau_proto::SessionId, CliError> {
-    runtime_dir::read_session_id(path).map_err(|error| {
-        CliError::Participant(format!("failed to read running daemon session id: {error}"))
-    })
 }
 
 // ---------------------------------------------------------------------------

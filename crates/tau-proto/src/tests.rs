@@ -3648,6 +3648,59 @@ fn directional_message_wire_form_uses_flat_message_tag() {
     assert!(output_json.get("payload").is_some());
 }
 
+/// UI session admission fields retain their exact optional Hello shape and
+/// acknowledgement tag across JSON wire round trips.
+#[test]
+fn ui_session_admission_wire_round_trip() {
+    let expected = SessionId::parse("session-1").expect("valid session id");
+    let hello = HarnessInputMessage::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        client_name: test_extension_name("ui"),
+        client_kind: ClientKind::Ui,
+        expected_session_id: Some(expected.clone()),
+        capabilities: Vec::new(),
+    });
+    let hello_json = serde_json::to_value(&hello).expect("serialize hello");
+    assert_eq!(
+        hello_json["payload"]["expected_session_id"],
+        serde_json::json!("session-1")
+    );
+    assert_eq!(
+        serde_json::from_value::<HarnessInputMessage>(hello_json).expect("decode hello"),
+        hello
+    );
+
+    let absent = serde_json::json!({
+        "message": "hello",
+        "payload": {
+            "protocol_version": PROTOCOL_VERSION,
+            "client_name": "ui",
+            "client_kind": "ui"
+        }
+    });
+    let HarnessInputMessage::Hello(absent) =
+        serde_json::from_value(absent).expect("decode legacy absent field")
+    else {
+        panic!("expected hello");
+    };
+    assert!(absent.expected_session_id.is_none());
+
+    let accepted = HarnessOutputMessage::UiSessionAccepted(UiSessionAccepted {
+        session_id: expected,
+    });
+    let accepted_json = serde_json::to_value(&accepted).expect("serialize acknowledgement");
+    assert_eq!(accepted_json["message"], "ui_session_accepted");
+    assert_eq!(
+        accepted_json["payload"]["session_id"],
+        serde_json::json!("session-1")
+    );
+    assert_eq!(
+        serde_json::from_value::<HarnessOutputMessage>(accepted_json)
+            .expect("decode acknowledgement"),
+        accepted
+    );
+}
+
 /// Ensures events serialize with dotted event names as the wire tag.
 #[test]
 fn event_wire_form_uses_dotted_event_tag() {

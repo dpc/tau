@@ -1,7 +1,7 @@
 use std::io::{BufReader, BufWriter};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tau_proto::{
     ClientKind, HarnessInputMessage, HarnessOutputMessage, Hello, PROTOCOL_VERSION,
@@ -147,6 +147,58 @@ fn resumed_harness_process_does_not_recreate_deleted_session() {
 
     let status = child.wait().expect("wait child");
     assert!(!status.success());
+}
+
+/// The configured harness path used by the public component creates the
+/// resumed stderr relay target only after it has acquired the existing lock.
+#[test]
+fn resumed_configured_harness_process_creates_relay_log() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_home = temp.path().join("config");
+    let state_home = temp.path().join("state");
+    let runtime_dir = temp.path().join("runtime");
+    let tau_config_dir = config_home.join("tau");
+    let session_dir = state_home.join("tau/sessions/resumed-session");
+    std::fs::create_dir_all(&tau_config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&session_dir).expect("mkdir selected session");
+    std::fs::create_dir_all(&runtime_dir).expect("mkdir runtime");
+    std::fs::write(session_dir.join("lock"), b"").expect("write session lock");
+    std::fs::write(
+        session_dir.join("meta.json"),
+        br#"{"created_at":1,"last_touched":1}"#,
+    )
+    .expect("write session metadata");
+
+    let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
+    let mut child = Command::new(tau_bin)
+        .arg("component")
+        .arg("harness")
+        .arg("--initial-ui-stdio")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_STATE_HOME", &state_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("TAU_SESSION_ID", "resumed-session")
+        .env("TAU_SESSION_STATUS", "resumed")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn resumed tau harness");
+    let harness_log = session_dir.join("logs/tau-harness.log");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !harness_log.exists() {
+        if child.try_wait().expect("query child").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        harness_log.exists(),
+        "configured resume must create the parent relay target"
+    );
 }
 
 /// A real harness process must reject an attach handshake whose expected

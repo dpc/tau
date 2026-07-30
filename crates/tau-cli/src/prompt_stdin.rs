@@ -47,6 +47,7 @@ pub(crate) fn run_prompt_stdin(
         Some(daemon_output_for_session(
             session_id.as_str(),
             storage_mode_from_ephemeral(ephemeral),
+            session_status,
         )?)
     };
     let mut daemon = resolve_daemon(
@@ -58,7 +59,7 @@ pub(crate) fn run_prompt_stdin(
         cli_overrides,
         storage_mode_from_ephemeral(ephemeral),
     )?;
-    let (reader, mut writer) = connect_prompt_stdin_client(&mut daemon)?;
+    let (reader, mut writer) = connect_prompt_stdin_client(&mut daemon, session_id)?;
     let messages = spawn_prompt_stdin_reader(reader);
     let result = (|| {
         let role = prompt_stdin_role(startup_role);
@@ -99,9 +100,10 @@ fn prompt_stdin_role(startup_role: Option<&str>) -> &str {
 
 fn connect_prompt_stdin_client(
     daemon: &mut DaemonHandle,
+    session_id: &tau_proto::SessionId,
 ) -> io::Result<(OneShotReader, OneShotWriter)> {
     let (reader, mut writer) =
-        crate::ui_client::connect_daemon_ui_client(daemon, "tau-prompt-stdin")?;
+        crate::ui_client::connect_daemon_ui_client(daemon, "tau-prompt-stdin", Some(session_id))?;
     subscribe_to_prompt_stdin_events(&mut writer)?;
     Ok((reader, writer))
 }

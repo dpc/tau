@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use tau_proto::SessionId;
 use tau_session_inspect::{default_agents_dir, default_session_id, default_sessions_dir};
 
 #[cfg(test)]
@@ -36,13 +37,12 @@ pub struct HarnessArgs {
     pub extension_overrides: ExtensionOverrideArgs,
 
     /// Select the startup/rendered role.
-    #[arg(long = "role", global = true)]
+    #[arg(long = "role")]
     pub role: Option<String>,
 
     /// Override one harness config key after all config files are loaded.
     #[arg(
         long = "harness-config",
-        global = true,
         value_name = "KEY=VALUE",
         require_equals = true
     )]
@@ -52,15 +52,15 @@ pub struct HarnessArgs {
 #[derive(Args)]
 pub struct RoleOverrideArgs {
     /// Enable a configured role after all config files are loaded.
-    #[arg(long = "enable-role", global = true)]
+    #[arg(long = "enable-role")]
     pub enable_role: Vec<String>,
 
     /// Disable a configured role after all config files are loaded.
-    #[arg(long = "disable-role", global = true)]
+    #[arg(long = "disable-role")]
     pub disable_role: Vec<String>,
 
     /// Disable every configured role before later CLI role overrides.
-    #[arg(long = "disable-roles-all", global = true, action = clap::ArgAction::Count)]
+    #[arg(long = "disable-roles-all", action = clap::ArgAction::Count)]
     pub disable_roles_all: u8,
 }
 
@@ -69,11 +69,11 @@ pub struct ExtensionOverrideArgs {
     /// Enable non-test configured extensions before later CLI extension
     /// overrides. The built-in test-dummy fixture still requires explicit
     /// `--enable-extension test-dummy`.
-    #[arg(long = "enable-extensions-all", global = true, action = clap::ArgAction::Count)]
+    #[arg(long = "enable-extensions-all", action = clap::ArgAction::Count)]
     pub enable_extensions_all: u8,
 
     /// Disable every configured extension before later CLI extension overrides.
-    #[arg(long = "disable-extensions-all", global = true, action = clap::ArgAction::Count)]
+    #[arg(long = "disable-extensions-all", action = clap::ArgAction::Count)]
     pub disable_extensions_all: u8,
 
     /// Enable a configured extension after all config files are loaded.
@@ -82,25 +82,17 @@ pub struct ExtensionOverrideArgs {
     /// configured names before ordered CLI overrides. Space/tab around
     /// names is allowed; malformed or unknown names fail startup. CLI
     /// enable/disable flags win.
-    #[arg(long = "enable-extension", global = true)]
+    #[arg(long = "enable-extension")]
     pub enable_extension: Vec<String>,
 
     /// Disable a configured extension after all config files are loaded.
-    #[arg(long = "disable-extension", global = true)]
+    #[arg(long = "disable-extension")]
     pub disable_extension: Vec<String>,
 }
 
 #[derive(Args)]
+/// Options shared by new, attach, and resume session startup.
 pub struct RunArgs {
-    /// Resume an existing session.
-    ///
-    /// Bare `-r` resumes the most recent session whose metadata matches
-    /// the current working directory. `-r <id>` resumes that
-    /// specific session id. Without `-r`, a fresh session id is minted
-    /// (`<basename(cwd)>-<rand6>`).
-    #[arg(short = 'r', long = "resume", num_args = 0..=1, default_missing_value = "")]
-    pub resume: Option<String>,
-
     /// Deprecated legacy extension config path; use `--harness-config`
     /// overrides instead.
     #[arg(long, hide = true)]
@@ -110,11 +102,6 @@ pub struct RunArgs {
     #[arg(long = "prompt-stdin")]
     pub prompt_stdin: bool,
 
-    /// Attach to an existing harness daemon for this project instead of
-    /// spawning a new one. Errors if no daemon is running.
-    #[arg(short = 'a', long)]
-    pub attach: bool,
-
     /// Run without writing session membership, session metadata, session debug
     /// events, per-session logs, session-scoped extension data, or the terminal
     /// UI log to disk.
@@ -122,7 +109,6 @@ pub struct RunArgs {
     /// Agent transcripts, provider state, credentials, user/cache extension
     /// data, runtime sockets, and configuration state keep their normal
     /// persistence behavior.
-    /// Cannot be combined with --resume or --attach.
     #[arg(long)]
     pub ephemeral: bool,
 }
@@ -131,13 +117,22 @@ pub struct RunArgs {
 pub enum Command {
     /// Run an interactive agent session.
     ///
-    /// By default, `tau` spawns a new harness daemon and attaches to it
-    /// for the duration of the session. Pass `--attach` (or `-a`) to
-    /// connect to an already-running daemon for the current project
-    /// instead — useful for a second UI, or for reconnecting after
-    /// `:detach`.
+    /// `tau` spawns a new harness daemon and attaches for this process.
     #[command(hide = true)]
     Run(RunArgs),
+
+    /// Attach to a running session without taking daemon ownership.
+    Attach {
+        /// Running session id; omit to choose interactively.
+        session: Option<SessionId>,
+    },
+
+    /// Resume a persisted session in a new harness daemon.
+    Resume {
+        /// Persisted session id; omission auto-selects the sole unlocked
+        /// target, otherwise shows the eligible-session picker.
+        session: Option<SessionId>,
+    },
 
     /// Inspect sessions.
     Session {

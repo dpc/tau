@@ -115,7 +115,7 @@ is done.
   receive a content-free authorization error. Configured extensions are silently
   denied without a response, warning, or disconnection.
 - **`ui_detach_request`** — An attached local UI asks the daemon to remain
-  running after that UI disconnects, so a later `tau --attach` can reconnect.
+  running after that UI disconnects, so a later `tau attach SESSION` can reconnect.
   The payload is empty. The harness consumes the request as direct
   connection-control input; it is not published, intercepted, subscribed, or
   replayed. Other client origins and configured extensions are silently denied.

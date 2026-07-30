@@ -4,6 +4,8 @@ use tau_proto::{
 };
 
 use super::*;
+use crate::journal_sync::SyncTargetKind;
+use crate::record_log::AppendFault;
 
 /// Resume admission must fail without recreating any path when the selected
 /// persisted session disappeared before its writer lock was acquired.
@@ -55,8 +57,6 @@ fn lock_existing_session_retains_exclusive_lock() {
 
     assert!(matches!(error, SessionStoreError::Locked { .. }));
 }
-use crate::journal_sync::SyncTargetKind;
-use crate::record_log::AppendFault;
 
 /// Builds one fold-changing durable membership fact.
 fn loaded_event(session_id: &str, agent_id: &str) -> Event {

@@ -1,10 +1,12 @@
 //! Shared UI socket client helpers.
 
 use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::net::Shutdown;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::time as path_std_time;
 use std::time::Duration;
 
@@ -17,14 +19,24 @@ use crate::daemon::DaemonHandle;
 
 pub(crate) type UiInputReader = PeerInputReader<BufReader<Box<dyn Read + Send>>>;
 pub(crate) type UiOutputWriter = PeerOutputWriter<BufWriter<Box<dyn Write + Send>>>;
+pub(crate) const UI_SESSION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn connect_ui_client(
     socket_path: &Path,
     client_name: impl AsRef<str>,
+    expected_session_id: Option<&tau_proto::SessionId>,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
     let stream = UnixStream::connect(socket_path)?;
     let read_stream = stream.try_clone()?;
-    connect_ui_streams(read_stream, stream, client_name)
+    let shutdown_stream = stream.try_clone()?;
+    connect_ui_streams_with_shutdown(
+        read_stream,
+        stream,
+        client_name,
+        expected_session_id,
+        Some(shutdown_stream),
+        UI_SESSION_ADMISSION_TIMEOUT,
+    )
 }
 
 pub(crate) fn connect_ui_client_until(
@@ -52,6 +64,7 @@ pub(crate) fn connect_ui_client_until(
         },
         DeadlineUnixWriter { stream, deadline },
         client_name,
+        None,
     )
 }
 
@@ -119,6 +132,29 @@ pub(crate) fn connect_ui_streams<R, W>(
     reader: R,
     writer: W,
     client_name: impl AsRef<str>,
+    expected_session_id: Option<&tau_proto::SessionId>,
+) -> io::Result<(UiInputReader, UiOutputWriter)>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    connect_ui_streams_with_shutdown(
+        reader,
+        writer,
+        client_name,
+        expected_session_id,
+        None,
+        UI_SESSION_ADMISSION_TIMEOUT,
+    )
+}
+
+fn connect_ui_streams_with_shutdown<R, W>(
+    reader: R,
+    writer: W,
+    client_name: impl AsRef<str>,
+    expected_session_id: Option<&tau_proto::SessionId>,
+    shutdown_stream: Option<UnixStream>,
+    admission_timeout: Duration,
 ) -> io::Result<(UiInputReader, UiOutputWriter)>
 where
     R: Read + Send + 'static,
@@ -126,19 +162,82 @@ where
 {
     let mut writer =
         PeerOutputWriter::new(BufWriter::new(Box::new(writer) as Box<dyn Write + Send>));
-    send_hello(&mut writer, client_name)?;
+    send_hello(&mut writer, client_name, expected_session_id)?;
     let reader = PeerInputReader::new(BufReader::new(Box::new(reader) as Box<dyn Read + Send>));
+    let reader = match expected_session_id {
+        Some(expected_session_id) => await_ui_session_admission(
+            reader,
+            expected_session_id.clone(),
+            shutdown_stream,
+            admission_timeout,
+        )?,
+        None => reader,
+    };
     Ok((reader, writer))
+}
+
+/// Performs admission on an owned thread so every UI client has a bounded
+/// handshake while retaining any bytes already buffered after the ACK.
+pub(crate) fn await_ui_session_admission(
+    mut reader: UiInputReader,
+    expected_session_id: tau_proto::SessionId,
+    shutdown_stream: Option<UnixStream>,
+    timeout: Duration,
+) -> io::Result<UiInputReader> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = verify_ui_session_admission(&mut reader, &expected_session_id);
+        let _ = sender.send((reader, result));
+    });
+    match receiver.recv_timeout(timeout) {
+        Ok((reader, Ok(()))) => Ok(reader),
+        Ok((_reader, Err(error))) => Err(error),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            if let Some(stream) = shutdown_stream {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out waiting for UI session admission",
+            ))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "UI session admission reader exited unexpectedly",
+        )),
+    }
 }
 
 pub(crate) fn connect_daemon_ui_client(
     daemon: &mut DaemonHandle,
     client_name: impl AsRef<str>,
+    expected_session_id: Option<&tau_proto::SessionId>,
+) -> io::Result<(UiInputReader, UiOutputWriter)> {
+    connect_daemon_ui_client_with_timeout(
+        daemon,
+        client_name,
+        expected_session_id,
+        UI_SESSION_ADMISSION_TIMEOUT,
+    )
+}
+
+pub(crate) fn connect_daemon_ui_client_with_timeout(
+    daemon: &mut DaemonHandle,
+    client_name: impl AsRef<str>,
+    expected_session_id: Option<&tau_proto::SessionId>,
+    admission_timeout: Duration,
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
     if let Some(initial_ui) = daemon.take_initial_ui_stdio() {
-        connect_ui_streams(initial_ui.stdout, initial_ui.stdin, client_name)
+        connect_ui_streams_with_shutdown(
+            initial_ui.stdout,
+            initial_ui.stdin,
+            client_name,
+            expected_session_id,
+            None,
+            admission_timeout,
+        )
     } else {
-        connect_ui_client(&daemon.socket_path(), client_name)
+        connect_ui_client(&daemon.socket_path(), client_name, expected_session_id)
     }
 }
 
@@ -149,7 +248,7 @@ pub(crate) fn connect_ui_writer(
     let stream = UnixStream::connect(socket_path)?;
     let mut writer =
         PeerOutputWriter::new(BufWriter::new(Box::new(stream) as Box<dyn Write + Send>));
-    send_hello(&mut writer, client_name)?;
+    send_hello(&mut writer, client_name, None)?;
     Ok(writer)
 }
 
@@ -288,10 +387,43 @@ pub(crate) fn chat_subscribe_message() -> HarnessInputMessage {
 pub(crate) fn send_hello(
     writer: &mut UiOutputWriter,
     client_name: impl AsRef<str>,
+    expected_session_id: Option<&tau_proto::SessionId>,
 ) -> io::Result<()> {
     let client_name = tau_proto::ExtensionName::parse(client_name.as_ref().to_owned())
         .map_err(io::Error::other)?;
-    send_message(writer, &hello_message(client_name, None))
+    send_message(writer, &hello_message(client_name, expected_session_id))
+}
+
+/// Validates the harness acknowledgement for one expected UI session.
+pub(crate) fn verify_ui_session_admission<R: Read>(
+    reader: &mut PeerInputReader<R>,
+    expected_session_id: &tau_proto::SessionId,
+) -> io::Result<()> {
+    match reader.read_message().map_err(io::Error::other)? {
+        Some(tau_proto::HarnessOutputMessage::UiSessionAccepted(accepted))
+            if accepted.session_id == *expected_session_id =>
+        {
+            Ok(())
+        }
+        Some(tau_proto::HarnessOutputMessage::UiSessionAccepted(accepted)) => {
+            Err(io::Error::other(format!(
+                "session target mismatch: requested `{expected_session_id}`, but the connected \
+                 harness admitted `{}`",
+                accepted.session_id
+            )))
+        }
+        Some(tau_proto::HarnessOutputMessage::Disconnect(disconnect)) => {
+            Err(io::Error::other(disconnect.reason.unwrap_or_else(|| {
+                "harness rejected UI session admission".to_owned()
+            })))
+        }
+        Some(other) => Err(io::Error::other(format!(
+            "harness sent {other:?} before UI session admission"
+        ))),
+        None => Err(io::Error::other(
+            "harness closed before confirming UI session admission",
+        )),
+    }
 }
 
 pub(crate) fn subscribe(

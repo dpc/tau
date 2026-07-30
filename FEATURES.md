@@ -32,6 +32,11 @@ transcripts survive restarts and retain alternate branches when you rewind.
 Sessions and agents can also be made ephemeral independently when their state
 should exist only for the lifetime of the daemon.
 
+Use `tau attach [SESSION]` for a running target and `tau resume [SESSION]` for
+persisted state; omission opens target selection. See the
+[session startup guide](docs/session-startup.md) for identity, locking, and
+root-option semantics.
+
 See the [CLI keybinding guide](docs/cli-keybindings.md) for editing and shell
 actions, and [`tau-cli`'s architecture](crates/tau-cli/specs/ARCH-tau-cli.md)
 for the UI's component boundary.
