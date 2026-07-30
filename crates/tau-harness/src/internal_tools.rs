@@ -409,7 +409,7 @@ impl<'a> InternalToolHost<'a> {
             .clone();
         let pending = self.harness.pending_tools.get(&started.call_id)?.clone();
         let call = AgentToolCall {
-            call_ref: None,
+            call_ref: self.harness.wait_tool_call_ref(&started.call_id),
             id: started.call_id.clone(),
             name: pending.internal_name,
             tool_type: pending.tool_type,
@@ -427,7 +427,7 @@ impl<'a> InternalToolHost<'a> {
         let cid = self.harness.tool_agents.get(&started.call_id)?.clone();
         let pending = self.harness.pending_tools.get(&started.call_id)?.clone();
         let call = AgentToolCall {
-            call_ref: None,
+            call_ref: self.harness.wait_tool_call_ref(&started.call_id),
             id: started.call_id.clone(),
             name: pending.internal_name,
             tool_type: pending.tool_type,

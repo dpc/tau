@@ -20784,6 +20784,191 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// A provider wait dispatched through the scheduler after its background target
+/// completed must retain durable correlation without duplicating source output.
+///
+/// This protects `SPEC-durable-tool-observation-correlation`.
+#[test]
+fn scheduler_wait_for_completed_background_call_retains_durable_correlation() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _tool_events = connect_ready_configured_extension(
+        &mut h,
+        "conn-completed-wait-correlation",
+        "configured-conn-completed-wait-correlation",
+        tau_proto::ClientKind::Tool,
+    );
+    h.registry.register(
+        &crate::test_connection_id("conn-completed-wait-correlation"),
+        instant_background_test_tool_spec("completed_wait_source"),
+    );
+
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let source_call_id = ToolCallId::from("completed-wait-source");
+    start_background_tool_and_finish_placeholder_turn(
+        &mut h,
+        &cid,
+        source_call_id.as_str(),
+        "completed_wait_source",
+    );
+    h.handle_extension_event_inner(
+        &crate::test_connection_id("conn-completed-wait-correlation"),
+        Event::ToolResultReported(final_tool_result(
+            source_call_id.as_str(),
+            "completed_wait_source",
+            "source-owned output",
+        )),
+    )
+    .expect("complete background source");
+
+    let records = h
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent records");
+    let source_terminal = records
+        .iter()
+        .find_map(|record| {
+            matches!(&record.event, Event::ToolBackgroundResult(result)
+                if result.call_id == source_call_id)
+            .then_some(record.observation_id)
+        })
+        .expect("source terminal observation");
+    let source_call = h
+        .wait_tool_call_ref(&source_call_id)
+        .expect("source call reference");
+
+    let wait_call_id = ToolCallId::from("wait-for-completed-source");
+    let completion_prompt = active_prompt_for(&h, &cid);
+    let completion_prompt = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_prompt_id == completion_prompt => {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("background completion prompt");
+    h.handle_provider_response_finished(provider_tool_response(
+        &completion_prompt,
+        wait_call_id.as_str(),
+        "wait",
+        CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(source_call_id.to_string()),
+        )]),
+    ))
+    .expect("dispatch provider wait");
+
+    let wait_results = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::ToolResult(result) if result.call_id == wait_call_id => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(wait_results.len(), 1);
+    assert_eq!(
+        wait_results[0].result,
+        CborValue::Text("source-owned output".to_owned())
+    );
+
+    let records = h
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent records");
+    let wait_call = records
+        .iter()
+        .find_map(|record| {
+            match &record.event {
+            Event::ProviderResponseFinished(response)
+                if response.output_items.iter().any(|item| {
+                    matches!(item, ContextItem::ToolCall(call) if call.call_id == wait_call_id)
+                }) =>
+            {
+                Some(tau_proto::ToolCallRef {
+                    declaration: record.observation_id,
+                    item_index: 0,
+                })
+            }
+            _ => None,
+        }
+        })
+        .expect("persisted wait declaration");
+    let observed = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentToolWaitObserved(observed) => Some((record.observation_id, observed)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(observed.len(), 1);
+    let wait_observation = observed[0].0;
+    assert_eq!(observed[0].1.wait_call, wait_call);
+    assert_eq!(
+        observed[0].1.mode,
+        tau_proto::ToolWaitMode::Exact {
+            target: source_call
+        }
+    );
+    let settled = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentToolWaitSettled(settled) if settled.wait_call == wait_call => Some(settled),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(settled.len(), 1);
+    let settled = settled[0];
+    assert_eq!(settled.wait_observation, wait_observation);
+    assert_eq!(settled.wait_call, wait_call);
+    assert_eq!(settled.registration, None);
+    assert!(matches!(
+        settled.outcome,
+        tau_proto::ToolWaitOutcome::CompletionDelivered {
+            source_call: delivered_source,
+            source_terminal: terminal,
+            source_phase: tau_proto::ToolSourcePhase::Background,
+            envelope: tau_proto::ToolOutputEnvelope::Identity,
+        } if delivered_source == source_call && terminal == source_terminal
+    ));
+
+    let mut trace = tau_session_inspect::prepare_agent_trace(
+        &state.join("agents"),
+        &crate::parse_agent_id(&agent_id),
+        tau_session_inspect::DescendantSelection::RootOnly,
+        tau_session_inspect::AgentTraceFormat::AgentToolsJsonl(
+            tau_session_inspect::AgentTraceMode::Full,
+        ),
+    )
+    .expect("prepare compact trace");
+    let mut trace_bytes = Vec::new();
+    trace.copy_to(&mut trace_bytes).expect("read compact trace");
+    let trace_records = String::from_utf8(trace_bytes)
+        .expect("UTF-8 trace")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("trace record"))
+        .collect::<Vec<_>>();
+    let wait_record = trace_records
+        .iter()
+        .find(|record| record["call_id"] == wait_call_id.as_str())
+        .expect("wait call trace record");
+    assert!(wait_record.get("output").is_none());
+    assert!(wait_record.get("output_bytes").is_none());
+    let settlement_record = trace_records
+        .iter()
+        .find(|record| {
+            record["relationship"] == "wait_settlement"
+                && record["wait_call"]["declaration"] == wait_call.declaration.to_string()
+                && record["wait_call"]["item_index"] == wait_call.item_index
+        })
+        .expect("wait settlement trace record");
+    assert_eq!(settlement_record["output_ref"], source_terminal.to_string());
+}
+
 /// Agent-to-agent messages are real input for the recipient. If the recipient
 /// is blocked in `wait`, the wait must return immediately so the hidden message
 /// can be folded into the next prompt instead of being stuck behind a passive
