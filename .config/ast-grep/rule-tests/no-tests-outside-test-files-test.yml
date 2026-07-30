@@ -1,0 +1,103 @@
+id: no-tests-outside-test-files
+valid:
+  - |
+      /// ```
+      /// assert_eq!(answer(), 42);
+      /// ```
+      pub fn answer() -> u8 { 42 }
+  - |
+      #[cfg(test)]
+      mod tests;
+  - |
+      #[cfg(test)]
+      fn test_helper() {}
+  - |
+      #[cfg(any(test, feature = "test-support"))]
+      pub fn test_build_support() {}
+  - |
+      #[cfg(test)]
+      const TEST_TIMEOUT: u64 = 1;
+  - |
+      #[runtime::test]
+      mod fixture;
+      fn unrelated_function() {}
+  - |
+      #[fixture]
+      fn reusable_fixture() {}
+  - |
+      #[serial]
+      fn serialization_helper() {}
+invalid:
+  - |
+      #[test]
+      fn answers() {}
+  - |
+      #[test]
+      #[should_panic]
+      fn rejects_invalid_input() {}
+  - |
+      #[tokio::test]
+      async fn answers_async() {}
+  - |
+      #[tokio::test(flavor = "multi_thread")]
+      async fn answers_on_runtime() {}
+  - |
+      #[async_std::test]
+      async fn answers_with_supported_runtime() {}
+  - |
+      #[runtime::flavor::test]
+      async fn answers_with_nested_runtime_path() {}
+  - |
+      #[::tokio::test]
+      async fn answers_with_absolute_runtime_path() {}
+  - |
+      #[r#runtime::r#test]
+      async fn answers_with_raw_identifier_path() {}
+  - |
+      #[test]
+      // This test documents why comments must not detach its attribute.
+      fn comment_separated_test() {}
+  - |
+      #[test]
+      /* Keep block comments transparent to attribute attachment. */
+      fn block_comment_separated_test() {}
+  - |
+      # /* Preserve lexical comments between attribute delimiters. */ [test]
+      fn internally_commented_builtin_attribute() {}
+  - |
+      #[tokio /* Preserve lexical comments inside paths. */ :: test]
+      async fn internally_commented_path_attribute() {}
+  - |
+      #[rstest]
+      #[case(1)]
+      fn parameterized_with_rstest(#[case] value: u8) {}
+  - |
+      #[rstest::rstest]
+      fn namespace_qualified_rstest() {}
+  - |
+      #[test_case(1; "one")]
+      fn generated_test_case(value: u8) {}
+  - |
+      #[test_case::test_case(2)]
+      fn namespace_qualified_test_case(value: u8) {}
+  - |
+      #[parameterized(value = { 1, 2 })]
+      fn parameterized_test(value: u8) {}
+  - |
+      #[test_with::test_with("fixture.txt")]
+      fn data_driven_test(path: &str) {}
+  - |
+      #[wasm_bindgen_test]
+      fn browser_test() {}
+  - |
+      #[quickcheck_macros::quickcheck]
+      fn property_test(value: u8) -> bool { value == value }
+  - |
+      #[test_strategy::proptest]
+      fn generated_property_test(value: u8) {}
+  - |
+      #[test_matrix::test_matrix([1, 2])]
+      fn matrix_generated_test(value: u8) {}
+  - |
+      #[test_each_file::test_each_path("fixtures/*.txt")]
+      fn file_generated_test(path: &std::path::Path) {}

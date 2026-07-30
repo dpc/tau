@@ -1,0 +1,39 @@
+id: no-tests-outside-test-files
+language: rust
+severity: error
+note: >-
+  Matches function attributes whose terminal identifier independently registers or generates a test: `test`, `rstest`, `test_case`, `parameterized`, `test_with`, `wasm_bindgen_test`, `quickcheck`, `proptest`, `test_matrix`, and `test_each_path`. Companion attributes such as `serial`, `fixture`, `case`, and `should_panic` do not independently create tests and are intentionally excluded. Macro-invocation test DSLs are outside this function-attribute rule.
+message: Rust test functions belong in `tests.rs`, `*_tests.rs`, or `tests/**/*.rs`; move this test to one of those standalone test files.
+ignores:
+  - "**/tests.rs"
+  - "**/*_tests.rs"
+  - "**/tests/**/*.rs"
+utils:
+  test-attribute:
+    kind: attribute_item
+    has:
+      kind: attribute
+      stopBy: neighbor
+      any:
+        - has:
+            kind: identifier
+            regex: '^(?:r#)?(?:test|rstest|test_case|parameterized|test_with|wasm_bindgen_test|quickcheck|proptest|test_matrix|test_each_path)$'
+            stopBy: neighbor
+        - has:
+            kind: scoped_identifier
+            stopBy: neighbor
+            has:
+              kind: identifier
+              field: name
+              regex: '^(?:r#)?(?:test|rstest|test_case|parameterized|test_with|wasm_bindgen_test|quickcheck|proptest|test_matrix|test_each_path)$'
+              stopBy: neighbor
+rule:
+  kind: function_item
+  follows:
+    matches: test-attribute
+    stopBy:
+      not:
+        any:
+          - kind: attribute_item
+          - kind: line_comment
+          - kind: block_comment

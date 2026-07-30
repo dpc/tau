@@ -2,8 +2,16 @@
 set -eou pipefail
 
 function job_lint() {
-  selfci step start "ast-grep"
+  selfci step start "ast-grep rule tests"
+  if ! ast-grep test --config sgconfig.yml; then
+    selfci step fail
+  fi
+
+  selfci step start "ast-grep scan"
   if ! ast-grep scan --error --config sgconfig.yml; then
+    selfci step fail
+  fi
+  if ! .config/ast-grep/test-path-filters.sh; then
     selfci step fail
   fi
 

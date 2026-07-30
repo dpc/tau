@@ -1,0 +1,522 @@
+id: no-tests-outside-test-files
+snapshots:
+  ? |
+    # /* Preserve lexical comments between attribute delimiters. */ [test]
+    fn internally_commented_builtin_attribute() {}
+  : labels:
+    - source: fn internally_commented_builtin_attribute() {}
+      style: primary
+      start: 71
+      end: 117
+    - source: test
+      style: secondary
+      start: 65
+      end: 69
+    - source: test
+      style: secondary
+      start: 65
+      end: 69
+    - source: '# /* Preserve lexical comments between attribute delimiters. */ [test]'
+      style: secondary
+      start: 0
+      end: 70
+  ? |
+    #[::tokio::test]
+    async fn answers_with_absolute_runtime_path() {}
+  : labels:
+    - source: async fn answers_with_absolute_runtime_path() {}
+      style: primary
+      start: 17
+      end: 65
+    - source: test
+      style: secondary
+      start: 11
+      end: 15
+    - source: ::tokio::test
+      style: secondary
+      start: 2
+      end: 15
+    - source: ::tokio::test
+      style: secondary
+      start: 2
+      end: 15
+    - source: '#[::tokio::test]'
+      style: secondary
+      start: 0
+      end: 16
+  ? |
+    #[async_std::test]
+    async fn answers_with_supported_runtime() {}
+  : labels:
+    - source: async fn answers_with_supported_runtime() {}
+      style: primary
+      start: 19
+      end: 63
+    - source: test
+      style: secondary
+      start: 13
+      end: 17
+    - source: async_std::test
+      style: secondary
+      start: 2
+      end: 17
+    - source: async_std::test
+      style: secondary
+      start: 2
+      end: 17
+    - source: '#[async_std::test]'
+      style: secondary
+      start: 0
+      end: 18
+  ? |
+    #[parameterized(value = { 1, 2 })]
+    fn parameterized_test(value: u8) {}
+  : labels:
+    - source: 'fn parameterized_test(value: u8) {}'
+      style: primary
+      start: 35
+      end: 70
+    - source: parameterized
+      style: secondary
+      start: 2
+      end: 15
+    - source: parameterized(value = { 1, 2 })
+      style: secondary
+      start: 2
+      end: 33
+    - source: '#[parameterized(value = { 1, 2 })]'
+      style: secondary
+      start: 0
+      end: 34
+  ? |
+    #[quickcheck_macros::quickcheck]
+    fn property_test(value: u8) -> bool { value == value }
+  : labels:
+    - source: 'fn property_test(value: u8) -> bool { value == value }'
+      style: primary
+      start: 33
+      end: 87
+    - source: quickcheck
+      style: secondary
+      start: 21
+      end: 31
+    - source: quickcheck_macros::quickcheck
+      style: secondary
+      start: 2
+      end: 31
+    - source: quickcheck_macros::quickcheck
+      style: secondary
+      start: 2
+      end: 31
+    - source: '#[quickcheck_macros::quickcheck]'
+      style: secondary
+      start: 0
+      end: 32
+  ? |
+    #[r#runtime::r#test]
+    async fn answers_with_raw_identifier_path() {}
+  : labels:
+    - source: async fn answers_with_raw_identifier_path() {}
+      style: primary
+      start: 21
+      end: 67
+    - source: r#test
+      style: secondary
+      start: 13
+      end: 19
+    - source: r#runtime::r#test
+      style: secondary
+      start: 2
+      end: 19
+    - source: r#runtime::r#test
+      style: secondary
+      start: 2
+      end: 19
+    - source: '#[r#runtime::r#test]'
+      style: secondary
+      start: 0
+      end: 20
+  ? |
+    #[rstest::rstest]
+    fn namespace_qualified_rstest() {}
+  : labels:
+    - source: fn namespace_qualified_rstest() {}
+      style: primary
+      start: 18
+      end: 52
+    - source: rstest
+      style: secondary
+      start: 10
+      end: 16
+    - source: rstest::rstest
+      style: secondary
+      start: 2
+      end: 16
+    - source: rstest::rstest
+      style: secondary
+      start: 2
+      end: 16
+    - source: '#[rstest::rstest]'
+      style: secondary
+      start: 0
+      end: 17
+  ? |
+    #[rstest]
+    #[case(1)]
+    fn parameterized_with_rstest(#[case] value: u8) {}
+  : labels:
+    - source: 'fn parameterized_with_rstest(#[case] value: u8) {}'
+      style: primary
+      start: 21
+      end: 71
+    - source: rstest
+      style: secondary
+      start: 2
+      end: 8
+    - source: rstest
+      style: secondary
+      start: 2
+      end: 8
+    - source: '#[rstest]'
+      style: secondary
+      start: 0
+      end: 9
+  ? |
+    #[runtime::flavor::test]
+    async fn answers_with_nested_runtime_path() {}
+  : labels:
+    - source: async fn answers_with_nested_runtime_path() {}
+      style: primary
+      start: 25
+      end: 71
+    - source: test
+      style: secondary
+      start: 19
+      end: 23
+    - source: runtime::flavor::test
+      style: secondary
+      start: 2
+      end: 23
+    - source: runtime::flavor::test
+      style: secondary
+      start: 2
+      end: 23
+    - source: '#[runtime::flavor::test]'
+      style: secondary
+      start: 0
+      end: 24
+  ? |
+    #[test]
+    #[should_panic]
+    fn rejects_invalid_input() {}
+  : labels:
+    - source: fn rejects_invalid_input() {}
+      style: primary
+      start: 24
+      end: 53
+    - source: test
+      style: secondary
+      start: 2
+      end: 6
+    - source: test
+      style: secondary
+      start: 2
+      end: 6
+    - source: '#[test]'
+      style: secondary
+      start: 0
+      end: 7
+  ? |
+    #[test]
+    /* Keep block comments transparent to attribute attachment. */
+    fn block_comment_separated_test() {}
+  : labels:
+    - source: fn block_comment_separated_test() {}
+      style: primary
+      start: 71
+      end: 107
+    - source: test
+      style: secondary
+      start: 2
+      end: 6
+    - source: test
+      style: secondary
+      start: 2
+      end: 6
+    - source: '#[test]'
+      style: secondary
+      start: 0
+      end: 7
+  ? |
+    #[test]
+    // This test documents why comments must not detach its attribute.
+    fn comment_separated_test() {}
+  : labels:
+    - source: fn comment_separated_test() {}
+      style: primary
+      start: 75
+      end: 105
+    - source: test
+      style: secondary
+      start: 2
+      end: 6
+    - source: test
+      style: secondary
+      start: 2
+      end: 6
+    - source: '#[test]'
+      style: secondary
+      start: 0
+      end: 7
+  ? |
+    #[test]
+    fn answers() {}
+  : labels:
+    - source: fn answers() {}
+      style: primary
+      start: 8
+      end: 23
+    - source: test
+      style: secondary
+      start: 2
+      end: 6
+    - source: test
+      style: secondary
+      start: 2
+      end: 6
+    - source: '#[test]'
+      style: secondary
+      start: 0
+      end: 7
+  ? |
+    #[test_case(1; "one")]
+    fn generated_test_case(value: u8) {}
+  : labels:
+    - source: 'fn generated_test_case(value: u8) {}'
+      style: primary
+      start: 23
+      end: 59
+    - source: test_case
+      style: secondary
+      start: 2
+      end: 11
+    - source: test_case(1; "one")
+      style: secondary
+      start: 2
+      end: 21
+    - source: '#[test_case(1; "one")]'
+      style: secondary
+      start: 0
+      end: 22
+  ? |
+    #[test_case::test_case(2)]
+    fn namespace_qualified_test_case(value: u8) {}
+  : labels:
+    - source: 'fn namespace_qualified_test_case(value: u8) {}'
+      style: primary
+      start: 27
+      end: 73
+    - source: test_case
+      style: secondary
+      start: 13
+      end: 22
+    - source: test_case::test_case
+      style: secondary
+      start: 2
+      end: 22
+    - source: test_case::test_case(2)
+      style: secondary
+      start: 2
+      end: 25
+    - source: '#[test_case::test_case(2)]'
+      style: secondary
+      start: 0
+      end: 26
+  ? |
+    #[test_each_file::test_each_path("fixtures/*.txt")]
+    fn file_generated_test(path: &std::path::Path) {}
+  : labels:
+    - source: 'fn file_generated_test(path: &std::path::Path) {}'
+      style: primary
+      start: 52
+      end: 101
+    - source: test_each_path
+      style: secondary
+      start: 18
+      end: 32
+    - source: test_each_file::test_each_path
+      style: secondary
+      start: 2
+      end: 32
+    - source: test_each_file::test_each_path("fixtures/*.txt")
+      style: secondary
+      start: 2
+      end: 50
+    - source: '#[test_each_file::test_each_path("fixtures/*.txt")]'
+      style: secondary
+      start: 0
+      end: 51
+  ? |
+    #[test_matrix::test_matrix([1, 2])]
+    fn matrix_generated_test(value: u8) {}
+  : labels:
+    - source: 'fn matrix_generated_test(value: u8) {}'
+      style: primary
+      start: 36
+      end: 74
+    - source: test_matrix
+      style: secondary
+      start: 15
+      end: 26
+    - source: test_matrix::test_matrix
+      style: secondary
+      start: 2
+      end: 26
+    - source: test_matrix::test_matrix([1, 2])
+      style: secondary
+      start: 2
+      end: 34
+    - source: '#[test_matrix::test_matrix([1, 2])]'
+      style: secondary
+      start: 0
+      end: 35
+  ? |
+    #[test_strategy::proptest]
+    fn generated_property_test(value: u8) {}
+  : labels:
+    - source: 'fn generated_property_test(value: u8) {}'
+      style: primary
+      start: 27
+      end: 67
+    - source: proptest
+      style: secondary
+      start: 17
+      end: 25
+    - source: test_strategy::proptest
+      style: secondary
+      start: 2
+      end: 25
+    - source: test_strategy::proptest
+      style: secondary
+      start: 2
+      end: 25
+    - source: '#[test_strategy::proptest]'
+      style: secondary
+      start: 0
+      end: 26
+  ? |
+    #[test_with::test_with("fixture.txt")]
+    fn data_driven_test(path: &str) {}
+  : labels:
+    - source: 'fn data_driven_test(path: &str) {}'
+      style: primary
+      start: 39
+      end: 73
+    - source: test_with
+      style: secondary
+      start: 13
+      end: 22
+    - source: test_with::test_with
+      style: secondary
+      start: 2
+      end: 22
+    - source: test_with::test_with("fixture.txt")
+      style: secondary
+      start: 2
+      end: 37
+    - source: '#[test_with::test_with("fixture.txt")]'
+      style: secondary
+      start: 0
+      end: 38
+  ? |
+    #[tokio /* Preserve lexical comments inside paths. */ :: test]
+    async fn internally_commented_path_attribute() {}
+  : labels:
+    - source: async fn internally_commented_path_attribute() {}
+      style: primary
+      start: 63
+      end: 112
+    - source: test
+      style: secondary
+      start: 57
+      end: 61
+    - source: 'tokio /* Preserve lexical comments inside paths. */ :: test'
+      style: secondary
+      start: 2
+      end: 61
+    - source: 'tokio /* Preserve lexical comments inside paths. */ :: test'
+      style: secondary
+      start: 2
+      end: 61
+    - source: '#[tokio /* Preserve lexical comments inside paths. */ :: test]'
+      style: secondary
+      start: 0
+      end: 62
+  ? |
+    #[tokio::test(flavor = "multi_thread")]
+    async fn answers_on_runtime() {}
+  : labels:
+    - source: async fn answers_on_runtime() {}
+      style: primary
+      start: 40
+      end: 72
+    - source: test
+      style: secondary
+      start: 9
+      end: 13
+    - source: tokio::test
+      style: secondary
+      start: 2
+      end: 13
+    - source: tokio::test(flavor = "multi_thread")
+      style: secondary
+      start: 2
+      end: 38
+    - source: '#[tokio::test(flavor = "multi_thread")]'
+      style: secondary
+      start: 0
+      end: 39
+  ? |
+    #[tokio::test]
+    async fn answers_async() {}
+  : labels:
+    - source: async fn answers_async() {}
+      style: primary
+      start: 15
+      end: 42
+    - source: test
+      style: secondary
+      start: 9
+      end: 13
+    - source: tokio::test
+      style: secondary
+      start: 2
+      end: 13
+    - source: tokio::test
+      style: secondary
+      start: 2
+      end: 13
+    - source: '#[tokio::test]'
+      style: secondary
+      start: 0
+      end: 14
+  ? |
+    #[wasm_bindgen_test]
+    fn browser_test() {}
+  : labels:
+    - source: fn browser_test() {}
+      style: primary
+      start: 21
+      end: 41
+    - source: wasm_bindgen_test
+      style: secondary
+      start: 2
+      end: 19
+    - source: wasm_bindgen_test
+      style: secondary
+      start: 2
+      end: 19
+    - source: '#[wasm_bindgen_test]'
+      style: secondary
+      start: 0
+      end: 20
