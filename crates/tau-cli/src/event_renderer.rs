@@ -30,11 +30,11 @@ use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolStatus, ToolSuffixSegment, ToolSummaryDisplay,
     agent_context_initialized_block, build_delegate_completion_display, build_tool_summary_display,
     diff_payload_counts, extension_status_block, format_token_count, pending_tool_call_display,
-    render_compaction_block, render_diff_tool_block, render_harness_notice,
-    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_tool_use_state_without_status, render_turn_stats_block, session_status_block,
-    streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
-    tool_duration_suffix, ui_dir_block,
+    render_action_output_block, render_compaction_block, render_diff_tool_block,
+    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
+    render_tool_use_state, render_tool_use_state_without_status, render_turn_stats_block,
+    session_status_block, streaming_block, streaming_block_with_indicator_suffix,
+    synthesize_fallback_display, tool_duration_suffix, ui_dir_block,
 };
 use crate::watch_activity::WatchActivityProjection;
 use crate::{MUTEX_POISONED, build_banner};
@@ -6905,7 +6905,6 @@ impl EventRenderer {
                 true
             }
             Event::UiRetryPromptResult(result) => {
-                use crate::tool_render::render_action_output_block;
                 self.handle.print_output(
                     "retry-result",
                     render_action_output_block(&self.theme, &result.message),
@@ -6916,7 +6915,6 @@ impl EventRenderer {
                 if let tau_proto::UiSetAgentNavigationModeOutcome::Rejected { reason } =
                     result.outcome
                 {
-                    use crate::tool_render::render_action_output_block;
                     let message = match reason {
                         tau_proto::UiSetAgentNavigationModeRejection::StaleSession => {
                             "Agent navigation mode was not changed because the session changed."
@@ -6934,6 +6932,26 @@ impl EventRenderer {
                 }
                 true
             }
+            Event::UiCreateAgentResult(result) => {
+                if let tau_proto::UiCreateAgentOutcome::Rejected { message, .. } = &result.outcome {
+                    self.agent_activity.clear_optimistic_submissions();
+                    self.update_agent_in_progress();
+                    self.handle.print_output(
+                        "create-agent-result",
+                        render_action_output_block(&self.theme, message),
+                    );
+                }
+                true
+            }
+            Event::AgentPromptFailed(failed) => {
+                self.agent_activity.clear_optimistic_submissions();
+                self.update_agent_in_progress();
+                self.handle.print_output(
+                    "initial-prompt-failed",
+                    render_action_output_block(&self.theme, &failed.message),
+                );
+                true
+            }
             Event::ActionInvoke(_) => true,
             _ => false,
         }
@@ -6946,8 +6964,6 @@ impl EventRenderer {
     }
 
     fn handle_action_result(&mut self, result: &tau_proto::ActionResult) {
-        use crate::tool_render::render_action_output_block;
-
         let text = match &result.output {
             tau_proto::ActionOutput::Text { text } => text.clone(),
             tau_proto::ActionOutput::EditorBuffer {

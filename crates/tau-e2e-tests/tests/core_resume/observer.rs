@@ -180,6 +180,7 @@ impl SideObserver {
         self.peer
             .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
                 tau_proto::UiCreateAgent {
+                    request_id: "core-resume-observer-create".to_owned(),
                     literal: false,
                     session_id: session_id.clone(),
                     role: "deterministic-main".to_owned(),

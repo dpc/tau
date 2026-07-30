@@ -57,8 +57,8 @@ use self::context_limit_telemetry::{
     transcript_growth,
 };
 use crate::agent::{
-    Agent, AgentTurnState, LoopCycleState, LoopGuardTrigger, LoopTurnSignature, PendingCancel,
-    PendingPrompt,
+    Agent, AgentTurnState, InitialPromptCorrelation, LoopCycleState, LoopGuardTrigger,
+    LoopTurnSignature, PendingCancel, PendingPrompt,
 };
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
@@ -1690,6 +1690,7 @@ mod pending_notices;
 mod replay;
 mod semantic_event_router;
 mod subagents_tool;
+mod ui_create_agent;
 pub(crate) use subagents_tool::PeerIoPermit;
 pub use subagents_tool::normalized_wait_timeout_minutes;
 mod user_skill_invocation;
@@ -2483,6 +2484,9 @@ pub struct Harness {
     /// Standalone continuations whose exact completion-bearing steer was
     /// rejected before commit and must retry on branch reselection.
     pending_agent_publish_completions: HashMap<AgentId, AgentPublishCompletion>,
+    /// Accepted initial prompts awaiting their first materialized provider
+    /// prompt.
+    pending_initial_prompt_correlations: HashMap<AgentId, InitialPromptCorrelation>,
     /// Publication-local completion visible only during committed internal-tool
     /// reaction, including nested publication restoration.
     committing_agent_publish_completion: Option<AgentPublishCompletion>,
@@ -3224,6 +3228,7 @@ impl Harness {
             pending_ui_compactions_after_wait: HashMap::new(),
             enqueued_standalone_inference_checkpoints: HashSet::new(),
             pending_agent_publish_completions: HashMap::new(),
+            pending_initial_prompt_correlations: HashMap::new(),
             committing_agent_publish_completion: None,
             prompt_operations: HashMap::new(),
             prompt_tool_specs: HashMap::new(),
@@ -5032,6 +5037,21 @@ impl Harness {
         completion: Option<AgentPublishCompletion>,
         notify_watchers: bool,
     ) {
+        if let Event::ProviderResponseFinished(finished) = &event
+            && (matches!(
+                finished.stop_reason,
+                tau_proto::ProviderStopReason::Error
+                    | tau_proto::ProviderStopReason::RepetitionDetected
+            ) || finished.failure_kind.is_some()
+                || finished.error.is_some())
+            && let Some(correlation) = self.pending_initial_prompt_correlations.remove(cid)
+        {
+            self.publish_initial_prompt_failed(
+                correlation,
+                tau_proto::AgentPromptFailureStage::Submission,
+                "failed to materialize initial prompt",
+            );
+        }
         if !self.agents.contains_key(cid) {
             // The conversation was torn down between when the
             // caller looked it up and now (e.g. side conv that
@@ -5070,13 +5090,22 @@ impl Harness {
         });
         let must_pass = matches!(
             completion,
-            Some(AgentPublishCompletion::WorkingFinal { .. })
+            Some(
+                AgentPublishCompletion::WorkingFinal { .. }
+                    | AgentPublishCompletion::InitialPromptSubmission { .. }
+            )
         );
+        let suppress_activation_dispatch = completion.as_ref().is_some_and(|completion| {
+            !matches!(
+                completion,
+                AgentPublishCompletion::InitialPromptSubmission { .. }
+            )
+        });
         let sync = Some(ConversationHeadSync {
             cid: cid.clone(),
             agent_id,
             session_generation: self.current_session_generation,
-            suppress_activation_dispatch: completion.is_some(),
+            suppress_activation_dispatch,
             continuation: completion
                 .map(Box::new)
                 .map(PostCommitContinuation::AgentPublish),
@@ -5086,10 +5115,19 @@ impl Harness {
     }
 
     fn note_agent_prompt_created(&mut self, prompt: &AgentPromptCreated) {
-        if let Some(cid) = self.prompt_agents.get(&prompt.agent_prompt_id).cloned()
-            && let Some(conv) = self.agents.get_mut(&cid)
-        {
-            conv.last_prompt_id = Some(prompt.agent_prompt_id.clone());
+        if let Some(cid) = self.prompt_agents.get(&prompt.agent_prompt_id).cloned() {
+            if self
+                .pending_initial_prompt_correlations
+                .get(&cid)
+                .is_some_and(|correlation| {
+                    prompt.ctx_id.as_deref() == Some(correlation.ctx_id.as_str())
+                })
+            {
+                self.pending_initial_prompt_correlations.remove(&cid);
+            }
+            if let Some(conv) = self.agents.get_mut(&cid) {
+                conv.last_prompt_id = Some(prompt.agent_prompt_id.clone());
+            }
         }
     }
 
@@ -6128,6 +6166,12 @@ impl Harness {
         completion: AgentPublishCompletion,
         through: tau_proto::AgentHead,
     ) {
+        if let AgentPublishCompletion::InitialPromptSubmission { mut correlation } = completion {
+            correlation.activation_through = Some(through);
+            self.pending_initial_prompt_correlations
+                .insert(cid.clone(), correlation);
+            return;
+        }
         if let AgentPublishCompletion::WorkingFinal { disposition, .. } = completion {
             match disposition {
                 WorkingFinalDisposition::Challenge { title } => {
@@ -6239,6 +6283,20 @@ impl Harness {
         }) else {
             return;
         };
+        if let AgentPublishCompletion::InitialPromptSubmission { correlation } = completion {
+            self.pending_publish_idle_dispatches
+                .retain(|dispatch| dispatch.cid != cid);
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent.in_flight_prompt = None;
+            }
+            self.set_agent_turn_state(&cid, AgentTurnState::Idle);
+            self.publish_initial_prompt_failed(
+                correlation,
+                tau_proto::AgentPromptFailureStage::Submission,
+                "failed to commit initial prompt",
+            );
+            return;
+        }
         match &mut completion {
             AgentPublishCompletion::StandaloneContinuation {
                 approved_retry_event,
@@ -6246,6 +6304,9 @@ impl Harness {
             } => *approved_retry_event = Some(Box::new(event.clone())),
             AgentPublishCompletion::WorkingFinal { retry_event, .. } => {
                 *retry_event = Some(Box::new(event.clone()));
+            }
+            AgentPublishCompletion::InitialPromptSubmission { .. } => {
+                unreachable!("initial submission returned above")
             }
         }
         if matches!(
@@ -6297,6 +6358,9 @@ impl Harness {
                 approved_retry_event.clone(),
             ),
             AgentPublishCompletion::WorkingFinal { .. } => unreachable!("returned above"),
+            AgentPublishCompletion::InitialPromptSubmission { .. } => {
+                unreachable!("initial submissions are never retained for retry")
+            }
         };
         if retry_prompts.is_empty() {
             return;
@@ -8195,6 +8259,7 @@ impl Harness {
             Event::AgentPromptQueued(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptRecalled(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptTerminated(prompt) => Some(&prompt.agent_id),
+            Event::AgentPromptFailed(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptPrewarmRequested(prompt) => Some(&prompt.agent_id),
             Event::ExtInternalPromptSubmitRequest(request) => Some(&request.agent_id),
             Event::ToolRequest(request) => Some(&request.agent_id),
@@ -11298,11 +11363,12 @@ impl Harness {
                 | Event::ProviderResponseUpdated(_)
                 | Event::ProviderResponseFinished(_)
                 | Event::ProviderCacheMissDiagnostic(_)
+                | Event::AgentPromptFailed(_)
         ) {
-            // Canonical provider execution facts are harness-authored. Configured
-            // providers publish the corresponding `_reported` observation through
-            // dumb generic Emit; correlation and terminal work happen only after
-            // that report commits.
+            // Canonical provider execution facts and pre-materialization prompt
+            // terminals are harness-authored. Configured providers publish only
+            // corresponding `_reported` observations; correlation and terminal
+            // work happen after those reports commit.
             return Ok(());
         }
         if matches!(
@@ -13847,9 +13913,14 @@ impl Harness {
             Event::UiSwitchSession(req) => self
                 .handle_ui_switch_session(client_id, req)
                 .map(|keep_going| (keep_going, None)),
-            Event::UiCreateAgent(req) => self
-                .handle_ui_create_agent(req)
-                .map(|keep_going| (keep_going, None)),
+            Event::UiCreateAgent(req) => {
+                if self.is_attached_socket_ui(client_id) {
+                    self.handle_ui_create_agent_from(client_id, req)
+                        .map(|keep_going| (keep_going, None))
+                } else {
+                    Ok((true, None))
+                }
+            }
             Event::UiSetAgentDisplayName(req) => self
                 .handle_ui_set_agent_display_name(req)
                 .map(|keep_going| (keep_going, None)),
@@ -14387,10 +14458,10 @@ impl Harness {
         let is_user_interaction =
             prompt.originator.is_user() && !prompt.message_class.is_internal();
         let text = if is_user_interaction && !prompt.literal {
-            let Some(text) = self.expand_user_skill_command(&prompt.agent_id, &prompt.text) else {
-                return Ok(true);
-            };
-            text
+            match self.expand_user_skill_command(&prompt.agent_id, &prompt.text) {
+                Ok(text) => text,
+                Err(_) => return Ok(true),
+            }
         } else {
             prompt.text.clone()
         };
@@ -14492,13 +14563,14 @@ impl Harness {
         &mut self,
         agent_id: &tau_proto::AgentId,
         text: &str,
-    ) -> Option<String> {
+    ) -> Result<String, String> {
         let Some((name, args)) = user_skill_invocation::parse_user_skill_command(text) else {
-            return Some(text.to_owned());
+            return Ok(text.to_owned());
         };
         if let Some(message) = tau_skills::skill_name_validation_message(name) {
-            self.emit_info(&format!(":skill: invalid skill name `{name}`: {message}"));
-            return None;
+            let message = format!(":skill: invalid skill name `{name}`: {message}");
+            self.emit_info(&message);
+            return Err(message);
         }
         let skill_name = tau_proto::SkillName::from(name.to_owned());
         let Some(skills) = self
@@ -14506,18 +14578,19 @@ impl Harness {
             .get(agent_id)
             .map(|snapshot| &snapshot.skills)
         else {
-            self.emit_info(&format!(
-                ":skill: agent `{agent_id}` has no finalized discovery snapshot"
-            ));
-            return None;
+            let message = format!(":skill: agent `{agent_id}` has no finalized discovery snapshot");
+            self.emit_info(&message);
+            return Err(message);
         };
         let Some(skill) = skills.get(&skill_name).cloned() else {
-            self.emit_info(&format!(":skill: unknown skill `{name}`"));
-            return None;
+            let message = format!(":skill: unknown skill `{name}`");
+            self.emit_info(&message);
+            return Err(message);
         };
         if !skill.user_invocable {
-            self.emit_info(&format!(":skill: skill `{name}` is not user-invocable"));
-            return None;
+            let message = format!(":skill: skill `{name}` is not user-invocable");
+            self.emit_info(&message);
+            return Err(message);
         }
         match user_skill_invocation::read_user_invoked_skill_body(&skill.source) {
             Ok(loaded) => {
@@ -14528,7 +14601,7 @@ impl Harness {
                         user_skill_invocation::MAX_USER_INVOKED_SKILL_BYTES
                     ));
                 }
-                Some(user_skill_invocation::format_user_invoked_skill_prompt(
+                Ok(user_skill_invocation::format_user_invoked_skill_prompt(
                     name,
                     &skill.source,
                     &loaded.body,
@@ -14537,8 +14610,9 @@ impl Harness {
                 ))
             }
             Err(message) => {
-                self.emit_info(&format!(":skill: failed to load `{name}`: {message}"));
-                None
+                let message = format!(":skill: failed to load `{name}`: {message}");
+                self.emit_info(&message);
+                Err(message)
             }
         }
     }
@@ -14547,16 +14621,19 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         mut prompt: PendingPrompt,
-    ) -> Option<PendingPrompt> {
+    ) -> Result<PendingPrompt, String> {
         if !prompt.expand_user_skill_on_dispatch {
-            return Some(prompt);
+            return Ok(prompt);
         }
-        let agent_id = self
+        let Some(agent_id) = self
             .target_agent_id_for_agent(cid)
-            .map(crate::parse_agent_id)?;
+            .map(crate::parse_agent_id)
+        else {
+            return Err("created agent route is unavailable".to_owned());
+        };
         prompt.text = self.expand_user_skill_command(&agent_id, &prompt.text)?;
         prompt.expand_user_skill_on_dispatch = false;
-        Some(prompt)
+        Ok(prompt)
     }
 
     fn handle_ui_set_agent_display_name(
@@ -14601,111 +14678,6 @@ impl Harness {
     ) -> Result<bool, HarnessError> {
         self.publish_event(Some(client_id), Event::UiSwitchSession(req.clone()));
         self.switch_session(req.new_session_id, req.reason)?;
-        Ok(true)
-    }
-
-    fn handle_ui_create_agent(
-        &mut self,
-        req: tau_proto::UiCreateAgent,
-    ) -> Result<bool, HarnessError> {
-        if req.session_id != self.current_session_id {
-            let reason = format!(
-                "harness is bound to session `{}`; create-agent for `{}` rejected",
-                self.current_session_id.as_str(),
-                req.session_id.as_str()
-            );
-            self.emit_info(&reason);
-            return Ok(true);
-        }
-        if !self.available_roles.contains_key(&req.role) {
-            let message = self
-                .disabled_role_reasons
-                .get(&req.role)
-                .map(|reason| reason.message.clone())
-                .unwrap_or_else(|| format!("unknown role `{}`", req.role));
-            self.emit_info(&message);
-            return Ok(true);
-        }
-        if let Err(error) = self.validate_initial_agent_metadata(&req.metadata) {
-            self.emit_info(&format!("create-agent metadata rejected: {error}"));
-            return Ok(true);
-        }
-        let parent_cid = match req.parent_agent.as_ref() {
-            Some(agent_id) => match self.agent_routes.get(agent_id.as_str()).cloned() {
-                Some(cid) => Some(cid),
-                None => {
-                    self.emit_info(&format!(
-                        "parent_agent `{agent_id}` is not loaded in the current session"
-                    ));
-                    return Ok(true);
-                }
-            },
-            None => None,
-        };
-        let is_user_initial_prompt = req.initial_prompt.is_some()
-            && req.originator.is_user()
-            && !req.message_class.is_internal();
-        let defer_initial_skill_expansion = is_user_initial_prompt && !req.literal;
-        let initial_prompt = req.initial_prompt;
-        let parent_ephemeral = parent_cid
-            .as_ref()
-            .and_then(|cid| self.agents.get(cid))
-            .is_some_and(|agent| agent.persistence.is_ephemeral());
-        let persistence = if req.ephemeral || parent_ephemeral {
-            tau_core::AgentPersistenceMode::Ephemeral
-        } else {
-            tau_core::AgentPersistenceMode::Durable
-        };
-        let cid = self.try_create_user_agent_with_parent(
-            req.session_id.clone(),
-            &req.role,
-            parent_cid,
-            req.metadata,
-            persistence,
-        )?;
-        if is_user_initial_prompt && let Some(agent_id) = self.target_agent_id_for_agent(&cid) {
-            self.record_accepted_visible_user_interaction(&agent_id)?;
-        }
-        if let Some(conv) = self.agents.get_mut(&cid) {
-            conv.next_ctx_id = req.ctx_id.clone();
-            conv.model_override = req.model_override;
-        }
-        if let Some(initial_prompt) = initial_prompt {
-            if !req.message_class.is_internal() {
-                self.preempt_blocking_ext_side_agents(&req.session_id);
-            }
-            let mut prompt = if req.message_class.is_internal() {
-                PendingPrompt::internal(initial_prompt)
-            } else if req.originator.is_user() {
-                PendingPrompt::human_ui(initial_prompt)
-            } else {
-                PendingPrompt::user(initial_prompt)
-            }
-            .with_ctx_id(req.ctx_id.clone());
-            prompt.expand_user_skill_on_dispatch = defer_initial_skill_expansion;
-            self.ensure_prompt_activation_observed(&cid, &mut prompt);
-            if self.dispatch_blocked_for(&cid) || !self.session_initialized(&req.session_id) {
-                if let Some(conv) = self.agents.get_mut(&cid) {
-                    conv.pending_prompts.push_back(prompt.clone());
-                }
-                self.publish_event(
-                    None,
-                    Event::AgentPromptQueued(AgentPromptQueued {
-                        agent_id: crate::parse_agent_id(
-                            self.target_agent_id_for_agent(&cid)
-                                .unwrap_or_else(|| cid.to_string()),
-                        ),
-                        text: prompt.text,
-                        message_class: prompt.message_class,
-                    }),
-                );
-                self.try_advance_queue();
-            } else {
-                if let Some(prompt) = self.resolve_pending_user_skill_for_agent(&cid, prompt) {
-                    self.dispatch_prompt_for_agent(&cid, prompt)?;
-                }
-            }
-        }
         Ok(true)
     }
 
@@ -14912,6 +14884,13 @@ impl Harness {
         }) else {
             return;
         };
+        if let Some(correlation) = prompt.initial_prompt_correlation.clone() {
+            self.publish_initial_prompt_failed(
+                correlation,
+                tau_proto::AgentPromptFailureStage::Canceled,
+                "initial prompt was recalled",
+            );
+        }
         self.publish_event(
             None,
             Event::AgentPromptRecalled(AgentPromptRecalled {
@@ -14944,6 +14923,15 @@ impl Harness {
         conv.pending_cancel = Some(PendingCancel {
             reason: "cancelled by user".to_owned(),
         });
+        let _ = conv;
+        self.fail_pending_initial_prompts(
+            &cid,
+            tau_proto::AgentPromptFailureStage::Canceled,
+            "initial prompt was canceled",
+        );
+        let Some(conv) = self.agents.get_mut(&cid) else {
+            return;
+        };
         conv.pending_prompts.clear();
 
         if let Some(prompt_id) = prompt_id {
@@ -15158,6 +15146,11 @@ impl Harness {
         };
         match turn_state {
             AgentTurnState::Idle => {
+                self.fail_pending_initial_prompts(
+                    cid,
+                    tau_proto::AgentPromptFailureStage::Canceled,
+                    "initial prompt was canceled",
+                );
                 if let Some(conv) = self.agents.get_mut(cid) {
                     conv.pending_cancel = None;
                     conv.pending_prompts.clear();
@@ -15187,6 +15180,11 @@ impl Harness {
     }
 
     fn finalize_cancelled_tool_turn(&mut self, cid: &AgentId) {
+        self.fail_pending_initial_prompts(
+            cid,
+            tau_proto::AgentPromptFailureStage::Canceled,
+            "initial prompt was canceled",
+        );
         if let Some(conv) = self.agents.get_mut(cid) {
             conv.pending_cancel = None;
             // User cancellation discards stale queued work, but keeps passive
@@ -15232,6 +15230,11 @@ impl Harness {
             canceled_prompt_id.clone(),
             AgentPromptTerminationReason::Canceled,
             originator,
+        );
+        self.fail_pending_initial_prompts(
+            cid,
+            tau_proto::AgentPromptFailureStage::Canceled,
+            "initial prompt was canceled",
         );
         if let Some(conv) = self.agents.get_mut(cid) {
             conv.pending_cancel = None;
@@ -16686,6 +16689,7 @@ impl Harness {
                 | Event::AgentStatsUpdated(_)
                 | Event::AgentStarted(_)
                 | Event::AgentPromptStarted(_)
+                | Event::AgentPromptFailed(_)
                 | Event::AgentOuterTurnStarted(_)
                 | Event::AgentOuterTurnFinished(_)
                 | Event::AgentPromptCreated(_)
@@ -19724,6 +19728,11 @@ impl Harness {
             self.cancel_running_compaction(cid, spid);
             self.prompt_semantic_output.remove(spid);
             self.canceled_prompts.insert(spid.clone());
+            self.fail_pending_initial_prompts(
+                cid,
+                tau_proto::AgentPromptFailureStage::Canceled,
+                "initial prompt was canceled",
+            );
             if let Some(conv) = self.agents.get_mut(cid) {
                 conv.in_flight_prompt = None;
                 conv.pending_prompts.clear();
@@ -19957,6 +19966,11 @@ impl Harness {
             {
                 self.cancel_running_compaction(&cid, &prompt_id);
             }
+            self.fail_pending_initial_prompts(
+                &cid,
+                tau_proto::AgentPromptFailureStage::LifecycleTeardown,
+                "session switch discarded initial prompt",
+            );
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.pending_prompts.clear();
                 conv.in_flight_prompt = None;
@@ -21328,6 +21342,11 @@ impl Harness {
                 }
             }
         }
+        self.fail_pending_initial_prompts(
+            cid,
+            tau_proto::AgentPromptFailureStage::LifecycleTeardown,
+            "agent teardown discarded initial prompt",
+        );
         let Some((session_id, agent_id)) = self.agents.get_mut(cid).and_then(|conv| {
             if conv.terminating {
                 return None;
@@ -23433,6 +23452,10 @@ impl Harness {
             self.emit_harness_failure(&format!(
                 "cannot dispatch prompt for role `{role_name}`: effective tool surface contains duplicate model-visible name `{name}`"
             ));
+            self.fail_initial_prompt_materialization(
+                cid,
+                "failed to validate initial prompt tool surface",
+            );
             return false;
         }
         let capability_specs = if is_non_tool_ext_query {
@@ -23462,6 +23485,10 @@ impl Harness {
                 self.emit_harness_failure(&format!(
                     "cannot dispatch prompt for role `{role_name}` until its template is repaired: {error}"
                 ));
+                self.fail_initial_prompt_materialization(
+                    cid,
+                    "failed to render initial prompt template",
+                );
                 false
             }
         }
@@ -26909,20 +26936,26 @@ impl Harness {
             let notify_watchers = prompt.should_notify_watchers();
             let inference_activation = prompt.creates_inference_activation();
             let internal_kind = prompt.internal_kind();
-            let event_completion = completion.clone().map(|mut completion| {
-                if let AgentPublishCompletion::StandaloneContinuation {
-                    retry_prompts: suffix,
-                    complete_on_commit,
-                    approved_retry_event,
-                    ..
-                } = &mut completion
-                {
-                    *suffix = retry_prompts[index..].to_vec();
-                    *complete_on_commit = index + 1 == prompt_count;
-                    *approved_retry_event = None;
-                }
-                completion
-            });
+            let event_completion = prompt
+                .initial_prompt_correlation
+                .clone()
+                .map(|correlation| AgentPublishCompletion::InitialPromptSubmission { correlation })
+                .or_else(|| {
+                    completion.clone().map(|mut completion| {
+                        if let AgentPublishCompletion::StandaloneContinuation {
+                            retry_prompts: suffix,
+                            complete_on_commit,
+                            approved_retry_event,
+                            ..
+                        } = &mut completion
+                        {
+                            *suffix = retry_prompts[index..].to_vec();
+                            *complete_on_commit = index + 1 == prompt_count;
+                            *approved_retry_event = None;
+                        }
+                        completion
+                    })
+                });
             let event = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
                 inference_activation,
                 submission_source: prompt.submission_source,
@@ -27006,6 +27039,28 @@ impl Harness {
         }
         if pending.iter().any(PendingPrompt::is_loop_guard) {
             self.mark_loop_guard_breakers_dispatched(cid);
+        }
+        pending = pending
+            .into_iter()
+            .filter_map(|prompt| {
+                let correlation = prompt.initial_prompt_correlation.clone();
+                match self.resolve_pending_user_skill_for_agent(cid, prompt) {
+                    Ok(prompt) => Some(prompt),
+                    Err(message) => {
+                        if let Some(correlation) = correlation {
+                            self.publish_initial_prompt_failed(
+                                correlation,
+                                tau_proto::AgentPromptFailureStage::Preprocessing,
+                                &ui_create_agent::bound_create_agent_diagnostic(message),
+                            );
+                        }
+                        None
+                    }
+                }
+            })
+            .collect();
+        if pending.is_empty() {
+            return false;
         }
         self.publish_prompts_as_steered(cid, pending, completion);
         true

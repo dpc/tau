@@ -496,9 +496,9 @@ fn first_effective_prompt_with_agent_start_lists_delegate_roles() {
     h.shutdown().expect("shutdown");
 }
 
-/// A malformed selected template blocks before the durable dispatch checkpoint,
-/// publishes a mandatory replayable diagnostic, and remains retryable after the
-/// template is repaired.
+/// A malformed template terminalizes a real create request's initial activation
+/// without resurrecting its correlation after repair; a later prompt still
+/// runs.
 #[test]
 fn malformed_prompt_template_blocks_then_retries_after_repair() {
     let td = TempDir::new().expect("tempdir");
@@ -536,12 +536,37 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
         .or_default()
         .prompt_override = Some("conditional-template".to_owned());
 
-    let cid = ensure_test_user_agent(&mut h);
-    h.agents
-        .get_mut(&cid)
-        .expect("user agent")
-        .pending_replay_activation = true;
-    h.try_advance_queue();
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("malformed-template-ui"),
+        tau_proto::UiCreateAgent {
+            request_id: "create-malformed-template".to_owned(),
+            session_id: h.current_session_id.clone(),
+            role: selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("initial prompt".to_owned()),
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("prompt-malformed-template".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("create agent");
+    let agent_id = h
+        .session_loaded_agents
+        .iter()
+        .next()
+        .cloned()
+        .expect("created agent");
+    let cid = h
+        .agents
+        .iter()
+        .find_map(|(cid, agent)| {
+            (agent.agent_id.as_deref() == Some(agent_id.as_str())).then(|| cid.clone())
+        })
+        .expect("created runtime agent");
     let prompt_count = |h: &Harness| {
         let mut cursor = crate::event_log::EventLogSeq::new(0);
         let mut count = 0;
@@ -552,6 +577,14 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
         count
     };
     assert_eq!(prompt_count(&h), 0);
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptFailed(failed)
+            if failed.request_id == "create-malformed-template"
+                && failed.agent_id == agent_id
+                && failed.ctx_id == "prompt-malformed-template"
+                && failed.stage == tau_proto::AgentPromptFailureStage::Submission
+    )));
     assert!(h.replayable_harness_notices.iter().any(|notice| {
         notice.always_show && notice.message.contains("until its template is repaired")
     }));
@@ -566,6 +599,8 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
         h.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.agents[&cid].next_ctx_id.is_none());
 
     h.system_prompt_templates.insert(
         "conditional-template".to_owned(),
@@ -580,7 +615,8 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
     );
     h.dispatch_prompt_for_agent(
         &cid,
-        PendingPrompt::user("retry repaired template".to_owned()),
+        PendingPrompt::user("retry repaired template".to_owned())
+            .with_ctx_id(Some("prompt-after-template-repair".to_owned())),
     )
     .expect("retry repaired template");
     let prompt = read_nth_prompt_created(&h, 0);
@@ -588,7 +624,101 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
         prompt.system_prompt,
         "READY alias=true internal=false unsupported=false enabled=true active=false"
     );
+    assert_eq!(
+        prompt.ctx_id.as_deref(),
+        Some("prompt-after-template-repair")
+    );
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.ctx_id.as_deref() == Some("prompt-malformed-template")
+    )));
     assert_eq!(prompt_count(&h), 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// A duplicate tool surface terminalizes a real create request's exact initial
+/// activation; removing the collision permits an independently correlated
+/// prompt.
+#[test]
+fn duplicate_tool_surface_does_not_resurrect_failed_create_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    let provider = crate::test_connection_id("duplicate-create-tools");
+    for internal_name in ["first_internal", "second_internal"] {
+        h.registry.register(
+            &provider,
+            ToolSpec {
+                name: ToolName::new(internal_name),
+                model_visible_name: Some(ToolName::new("duplicate_visible")),
+                description: None,
+                tool_type: tau_proto::ToolType::Function,
+                parameters: None,
+                format: None,
+                tags: Vec::new(),
+                enabled_by_default: true,
+                background_support: None,
+                examples: Vec::new(),
+            },
+        );
+    }
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("duplicate-tools-ui"),
+        tau_proto::UiCreateAgent {
+            request_id: "create-duplicate-tools".to_owned(),
+            session_id: h.current_session_id.clone(),
+            role: h.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("initial prompt".to_owned()),
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("prompt-duplicate-tools".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("create agent");
+    let agent_id = h
+        .session_loaded_agents
+        .iter()
+        .next()
+        .cloned()
+        .expect("created agent");
+    let cid = h
+        .agents
+        .iter()
+        .find_map(|(cid, agent)| {
+            (agent.agent_id.as_deref() == Some(agent_id.as_str())).then(|| cid.clone())
+        })
+        .expect("created runtime agent");
+
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptFailed(failed)
+            if failed.request_id == "create-duplicate-tools"
+                && failed.ctx_id == "prompt-duplicate-tools"
+    )));
+    assert!(h.pending_publish_idle_dispatches.is_empty());
+    assert!(h.agents[&cid].next_ctx_id.is_none());
+
+    h.registry.unregister_connection(&provider);
+    h.dispatch_prompt_for_agent(
+        &cid,
+        PendingPrompt::user("prompt after tool repair".to_owned())
+            .with_ctx_id(Some("prompt-after-tool-repair".to_owned())),
+    )
+    .expect("dispatch independent prompt");
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(prompt.ctx_id.as_deref(), Some("prompt-after-tool-repair"));
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.ctx_id.as_deref() == Some("prompt-duplicate-tools")
+    )));
     h.shutdown().expect("shutdown");
 }
 
@@ -711,6 +841,190 @@ fn late_prompt_surface_failure_terminalizes_running_compaction() {
     h.shutdown().expect("shutdown");
 }
 
+/// A failed initial prompt is rejected before durable activation while an
+/// independently correlated ordinary B remains retryable after surface repair.
+#[test]
+fn failed_create_prompt_preflight_preserves_later_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.resolving_initial_extension_collisions = true;
+    let tool_provider = crate::test_connection_id("watermark-race-tools");
+    for internal_name in ["first_internal", "second_internal"] {
+        h.registry.register(
+            &tool_provider,
+            ToolSpec {
+                name: ToolName::new(internal_name),
+                model_visible_name: Some(ToolName::new("duplicate_visible")),
+                description: None,
+                tool_type: tau_proto::ToolType::Function,
+                parameters: None,
+                format: None,
+                tags: Vec::new(),
+                enabled_by_default: true,
+                background_support: None,
+                examples: Vec::new(),
+            },
+        );
+    }
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("watermark-race-ui"),
+        tau_proto::UiCreateAgent {
+            request_id: "create-watermark-a".to_owned(),
+            session_id: h.current_session_id.clone(),
+            role: h.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("initial A".to_owned()),
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("prompt-watermark-a".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("create agent with queued A");
+    let agent_id = h
+        .session_loaded_agents
+        .iter()
+        .next()
+        .cloned()
+        .expect("created agent");
+    let cid = h
+        .agents
+        .iter()
+        .find_map(|(cid, agent)| {
+            (agent.agent_id.as_deref() == Some(agent_id.as_str())).then(|| cid.clone())
+        })
+        .expect("created runtime agent");
+    let context_provider = crate::test_connection_id("watermark-race-context");
+    set_test_agent_context_wait(
+        &mut h,
+        agent_id.clone(),
+        std::collections::HashSet::from([context_provider]),
+    );
+
+    h.resolving_initial_extension_collisions = false;
+    h.try_advance_queue();
+    assert!(!h.pending_initial_prompt_correlations.contains_key(&cid));
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptFailed(failed)
+            if failed.request_id == "create-watermark-a"
+                && failed.ctx_id == "prompt-watermark-a"
+    )));
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.ctx_id.as_deref() == Some("prompt-watermark-a")
+    )));
+    h.dispatch_prompt_for_agent(
+        &cid,
+        PendingPrompt::user("independent B".to_owned())
+            .with_ctx_id(Some("prompt-watermark-b".to_owned())),
+    )
+    .expect("commit B behind A");
+    let activation_b = h
+        .pending_publish_idle_dispatches
+        .back()
+        .and_then(|dispatch| dispatch.activation_through)
+        .expect("B committed watermark");
+
+    finish_test_agent_context_wait(&mut h, &agent_id);
+    h.drain_publish_idle_dispatches();
+    assert!(
+        h.pending_publish_idle_dispatches
+            .iter()
+            .any(|dispatch| { dispatch.activation_through == Some(activation_b) })
+    );
+
+    h.registry.unregister_connection(&tool_provider);
+    h.drain_publish_idle_dispatches();
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(prompt.ctx_id.as_deref(), Some("prompt-watermark-b"));
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.ctx_id.as_deref() == Some("prompt-watermark-a")
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// A render-preflight failure leaves no durable activating submission, so cold
+/// reload cannot reconstruct and execute the terminalized initial prompt.
+#[test]
+fn failed_create_prompt_does_not_resurrect_after_cold_reload() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let agent_id;
+    {
+        let mut h = echo_harness(&state).expect("start");
+        h.selected_model = Some("test/model".into());
+        let provider = crate::test_connection_id("cold-preflight-tools");
+        for internal_name in ["first_internal", "second_internal"] {
+            h.registry.register(
+                &provider,
+                ToolSpec {
+                    name: ToolName::new(internal_name),
+                    model_visible_name: Some(ToolName::new("duplicate_visible")),
+                    description: None,
+                    tool_type: tau_proto::ToolType::Function,
+                    parameters: None,
+                    format: None,
+                    tags: Vec::new(),
+                    enabled_by_default: true,
+                    background_support: None,
+                    examples: Vec::new(),
+                },
+            );
+        }
+        h.handle_ui_create_agent_from(
+            &crate::test_connection_id("cold-preflight-ui"),
+            tau_proto::UiCreateAgent {
+                request_id: "create-cold-preflight".to_owned(),
+                session_id: h.current_session_id.clone(),
+                role: h.selected_role.clone(),
+                model_override: None,
+                metadata: Vec::new(),
+                initial_prompt: Some("must not survive restart".to_owned()),
+                literal: false,
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: Some("prompt-cold-preflight".to_owned()),
+                parent_agent: None,
+                ephemeral: false,
+            },
+        )
+        .expect("create agent");
+        agent_id = h
+            .session_loaded_agents
+            .iter()
+            .next()
+            .cloned()
+            .expect("created agent");
+        assert!(event_log_events(&h).iter().all(|event| !matches!(
+            event,
+            Event::AgentPromptSubmitted(submitted)
+                if submitted.agent_id == agent_id
+                    && submitted.ctx_id.as_deref() == Some("prompt-cold-preflight")
+        )));
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("cold resume");
+    resumed.try_advance_queue();
+    assert!(event_log_events(&resumed).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id
+    )));
+    resumed.shutdown().expect("resumed shutdown");
+}
+
 #[test]
 fn queued_first_user_prompt_publishes_replayable_agent_target() {
     // Regression: if the first prompt queues before the provider/model is ready,
@@ -726,19 +1040,23 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     h.available_models.clear();
     h.selected_model = None;
 
-    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
-        literal: false,
-        parent_agent: None,
-        session_id: test_session_id("s1"),
-        role: h.selected_role.clone(),
-        model_override: None,
-        metadata: Vec::new(),
-        initial_prompt: Some("hello while cold".to_owned()),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        ephemeral: false,
-    })
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "test-create-request".to_owned(),
+            literal: false,
+            parent_agent: None,
+            session_id: test_session_id("s1"),
+            role: h.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("hello while cold".to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("create-cold-queue-prompt".to_owned()),
+            ephemeral: false,
+        },
+    )
     .expect("create agent with queued first prompt");
 
     let agent_id = h
@@ -877,19 +1195,23 @@ fn new_agent_initial_human_ui_prompt_is_wrapped_only_in_provider_context() {
     h.selected_model = Some("test/model".into());
     let raw = "initial <prompt> & text";
 
-    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
-        literal: false,
-        parent_agent: None,
-        session_id: test_session_id("s1"),
-        role: h.selected_role.clone(),
-        model_override: None,
-        metadata: Vec::new(),
-        initial_prompt: Some(raw.to_owned()),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: Some("ui-new".to_owned()),
-        ephemeral: false,
-    })
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "test-create-request".to_owned(),
+            literal: false,
+            parent_agent: None,
+            session_id: test_session_id("s1"),
+            role: h.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some(raw.to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("ui-new".to_owned()),
+            ephemeral: false,
+        },
+    )
     .expect("create agent with initial UI prompt");
 
     let submitted = event_log_events(&h)
@@ -940,23 +1262,27 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
     let mut h = echo_harness(&sp).expect("start");
     let cwd = std::path::PathBuf::from("/tmp/tau-ui-cwd");
 
-    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
-        literal: false,
-        parent_agent: None,
-        session_id: test_session_id("s1"),
-        role: h.selected_role.clone(),
-        model_override: None,
-        metadata: vec![tau_proto::AgentInitialMetadata {
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
-            value: CborValue::Text(cwd.display().to_string()),
-            inheritable: true,
-        }],
-        initial_prompt: Some("hello from create".to_owned()),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        ephemeral: false,
-    })
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "test-create-request".to_owned(),
+            literal: false,
+            parent_agent: None,
+            session_id: test_session_id("s1"),
+            role: h.selected_role.clone(),
+            model_override: None,
+            metadata: vec![tau_proto::AgentInitialMetadata {
+                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                value: CborValue::Text(cwd.display().to_string()),
+                inheritable: true,
+            }],
+            initial_prompt: Some("hello from create".to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("create-cwd-prompt".to_owned()),
+            ephemeral: false,
+        },
+    )
     .expect("create agent");
 
     assert!(event_log_events(&h).iter().any(|event| {
@@ -33037,6 +33363,473 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     .expect("switch session");
     assert!(h.agent_navigation_modes.is_empty());
     h.shutdown().expect("shutdown");
+}
+
+/// Ensures create admission returns exactly one correlated point-to-point
+/// rejection and never exposes that transient result to another UI.
+#[test]
+fn ui_create_agent_rejection_is_correlated_and_point_to_point() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let requester = connect_test_client(&mut h, "create-requester", tau_proto::ClientKind::Ui);
+    let observer = connect_test_client(&mut h, "create-observer", tau_proto::ClientKind::Ui);
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("create-requester"),
+        tau_proto::UiCreateAgent {
+            request_id: "create-missing-role".to_owned(),
+            session_id: h.current_session_id.clone(),
+            role: "missing-role".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("never admitted".to_owned()),
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("create-missing-role-prompt".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("create rejection");
+
+    let results = requester
+        .lock()
+        .expect("requester frames")
+        .iter()
+        .filter_map(|frame| match peel_inner_event(&frame.frame) {
+            Some(Event::UiCreateAgentResult(result)) => Some(result.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].request_id, "create-missing-role");
+    assert!(matches!(
+        results[0].outcome,
+        tau_proto::UiCreateAgentOutcome::Rejected {
+            reason: tau_proto::UiCreateAgentRejection::RoleUnavailable,
+            agent_id: None,
+            ..
+        }
+    ));
+    assert!(
+        observer
+            .lock()
+            .expect("observer frames")
+            .iter()
+            .all(|frame| !matches!(
+                peel_inner_event(&frame.frame),
+                Some(Event::UiCreateAgentResult(_))
+            ))
+    );
+    assert!(h.session_loaded_agents.is_empty());
+}
+
+/// Admission rejects malformed request and prompt correlations before creating
+/// an agent, while a promptless request succeeds without a prompt correlation.
+#[test]
+fn ui_create_agent_validates_correlations_and_accepts_promptless_creation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let requester = connect_test_client(&mut h, "correlation-ui", tau_proto::ClientKind::Ui);
+    let session_id = h.current_session_id.clone();
+    for (request_id, ctx_id) in [
+        ("", Some("prompt-correlation")),
+        ("missing-prompt-correlation", None),
+    ] {
+        h.handle_ui_create_agent_from(
+            &crate::test_connection_id("correlation-ui"),
+            tau_proto::UiCreateAgent {
+                request_id: request_id.to_owned(),
+                session_id: session_id.clone(),
+                role: "engineer".to_owned(),
+                model_override: None,
+                metadata: Vec::new(),
+                initial_prompt: Some("hello".to_owned()),
+                literal: false,
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: ctx_id.map(str::to_owned),
+                parent_agent: None,
+                ephemeral: false,
+            },
+        )
+        .expect("reject malformed correlation");
+    }
+    assert!(h.session_loaded_agents.is_empty());
+
+    for (request_id, request_session, metadata, parent_agent) in [
+        (
+            "stale-session",
+            test_session_id("stale-session"),
+            Vec::new(),
+            None,
+        ),
+        (
+            "invalid-metadata",
+            session_id.clone(),
+            vec![tau_proto::AgentInitialMetadata {
+                key: tau_proto::AgentMetadataKey::new("oversized"),
+                value: tau_proto::CborValue::Bytes(vec![
+                    0;
+                    tau_proto::MAX_AGENT_METADATA_VALUE_BYTES
+                        + 1
+                ]),
+                inheritable: false,
+            }],
+            None,
+        ),
+        (
+            "missing-parent",
+            session_id.clone(),
+            Vec::new(),
+            Some(tau_proto::AgentId::parse("missing-parent").expect("agent id")),
+        ),
+    ] {
+        h.handle_ui_create_agent_from(
+            &crate::test_connection_id("correlation-ui"),
+            tau_proto::UiCreateAgent {
+                request_id: request_id.to_owned(),
+                session_id: request_session,
+                role: "engineer".to_owned(),
+                model_override: None,
+                metadata,
+                initial_prompt: None,
+                literal: false,
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+                parent_agent,
+                ephemeral: false,
+            },
+        )
+        .expect("reject pre-creation request");
+    }
+    assert!(h.session_loaded_agents.is_empty());
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("correlation-ui"),
+        tau_proto::UiCreateAgent {
+            request_id: "promptless-create".to_owned(),
+            session_id,
+            role: "engineer".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: None,
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("create promptless agent");
+    assert_eq!(h.session_loaded_agents.len(), 1);
+    let outcomes = requester
+        .lock()
+        .expect("requester frames")
+        .iter()
+        .filter_map(|frame| match peel_inner_event(&frame.frame) {
+            Some(Event::UiCreateAgentResult(result)) => Some(result.outcome.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.len(), 6);
+    assert!(matches!(
+        outcomes[0],
+        tau_proto::UiCreateAgentOutcome::Rejected {
+            reason: tau_proto::UiCreateAgentRejection::InvalidRequestId,
+            ..
+        }
+    ));
+    assert!(matches!(
+        outcomes[1],
+        tau_proto::UiCreateAgentOutcome::Rejected {
+            reason: tau_proto::UiCreateAgentRejection::InvalidRequestId,
+            ..
+        }
+    ));
+    assert!(matches!(
+        outcomes[2],
+        tau_proto::UiCreateAgentOutcome::Rejected {
+            reason: tau_proto::UiCreateAgentRejection::StaleSession,
+            ..
+        }
+    ));
+    assert!(matches!(
+        outcomes[3],
+        tau_proto::UiCreateAgentOutcome::Rejected {
+            reason: tau_proto::UiCreateAgentRejection::InvalidMetadata,
+            ..
+        }
+    ));
+    assert!(matches!(
+        outcomes[4],
+        tau_proto::UiCreateAgentOutcome::Rejected {
+            reason: tau_proto::UiCreateAgentRejection::ParentNotLoaded,
+            ..
+        }
+    ));
+    assert!(matches!(
+        outcomes[5],
+        tau_proto::UiCreateAgentOutcome::Created {
+            initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Absent,
+            ..
+        }
+    ));
+}
+
+/// Ensures preprocessing failure follows successful queued admission as a
+/// separately correlated prompt terminal.
+#[test]
+fn ui_create_agent_skill_rejection_reports_partial_creation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let requester = connect_test_client(&mut h, "skill-requester", tau_proto::ClientKind::Ui);
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("skill-requester"),
+        tau_proto::UiCreateAgent {
+            request_id: "create-missing-skill".to_owned(),
+            session_id: h.current_session_id.clone(),
+            role: "engineer".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some(":skill missing-skill".to_owned()),
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("create-missing-skill-prompt".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("create with invalid skill");
+    h.try_advance_queue();
+
+    let result = requester
+        .lock()
+        .expect("requester frames")
+        .iter()
+        .find_map(|frame| match peel_inner_event(&frame.frame) {
+            Some(Event::UiCreateAgentResult(result)) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("directed create result");
+    let tau_proto::UiCreateAgentOutcome::Created {
+        agent_id,
+        initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+    } = result.outcome
+    else {
+        panic!("expected queued create admission");
+    };
+    assert!(h.session_loaded_agents.contains(&agent_id));
+    assert!(event_log_events(&h).into_iter().any(|event| matches!(
+        event,
+        Event::AgentPromptFailed(failed)
+            if failed.request_id == "create-missing-skill"
+                && failed.agent_id == agent_id
+                && failed.ctx_id == "create-missing-skill-prompt"
+                && failed.stage == tau_proto::AgentPromptFailureStage::Preprocessing
+    )));
+    assert!(event_log_events(&h).into_iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptSubmitted(prompt) if prompt.agent_id == agent_id
+    )));
+    let cid = h.agent_routes[agent_id.as_str()].clone();
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after missing skill".to_owned()))
+        .expect("dispatch later no-ctx prompt");
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.ctx_id.as_deref() == Some("create-missing-skill-prompt")
+    )));
+    assert!(read_nth_prompt_created(&h, 0).ctx_id.is_none());
+}
+
+/// A committed initial submission keeps its correlation until provider-prompt
+/// materialization, so session rollover can emit a terminal instead of losing
+/// the accepted prompt.
+#[test]
+fn initial_prompt_correlation_survives_submission_until_rollover_terminal() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.complete_agent_publish(
+        &cid,
+        AgentPublishCompletion::InitialPromptSubmission {
+            correlation: crate::agent::InitialPromptCorrelation {
+                request_id: "create-rollover".to_owned(),
+                agent_id: agent_id.clone(),
+                ctx_id: "prompt-rollover".to_owned(),
+                activation_through: None,
+            },
+        },
+        tau_proto::AgentHead::Root,
+    );
+    assert!(h.pending_initial_prompt_correlations.contains_key(&cid));
+
+    h.switch_session(
+        test_session_id("replacement-session"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptFailed(failed)
+            if failed.request_id == "create-rollover"
+                && failed.agent_id == agent_id
+                && failed.ctx_id == "prompt-rollover"
+                && failed.stage == tau_proto::AgentPromptFailureStage::LifecycleTeardown
+    )));
+}
+
+/// A render/materialization error before `AgentPromptCreated` consumes the
+/// retained correlation through `agent.prompt_failed`.
+#[test]
+fn initial_prompt_materialization_error_publishes_precreated_terminal() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.complete_agent_publish(
+        &cid,
+        AgentPublishCompletion::InitialPromptSubmission {
+            correlation: crate::agent::InitialPromptCorrelation {
+                request_id: "create-render".to_owned(),
+                agent_id: agent_id.clone(),
+                ctx_id: "prompt-render".to_owned(),
+                activation_through: None,
+            },
+        },
+        tau_proto::AgentHead::Root,
+    );
+    let prompt_id = tau_proto::AgentPromptId::parse("ap-render-failure").expect("prompt id");
+    let mut failure = provider_text_response(&prompt_id, agent_id.clone(), "");
+    failure.stop_reason = tau_proto::ProviderStopReason::Error;
+    failure.error = Some("render failed".to_owned());
+    h.publish_event_for_agent_with_completion(
+        &cid,
+        None,
+        Event::ProviderResponseFinished(failure),
+        None,
+        false,
+    );
+
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptFailed(failed)
+            if failed.request_id == "create-render"
+                && failed.agent_id == agent_id
+                && failed.ctx_id == "prompt-render"
+                && failed.stage == tau_proto::AgentPromptFailureStage::Submission
+    )));
+}
+
+/// A startup-blocked initial skill prompt must be preprocessed before a
+/// message-wake steering drain; missing skills terminate instead of entering
+/// the transcript as raw `:skill` text.
+#[test]
+fn queued_initial_skill_is_resolved_before_steering_drain() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.resolving_initial_extension_collisions = true;
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "create-steered-skill".to_owned(),
+            session_id: h.current_session_id.clone(),
+            role: "engineer".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some(":skill missing-steered-skill".to_owned()),
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("prompt-steered-skill".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("queue initial prompt");
+    let cid = test_user_agent(&h);
+    assert!(!h.fold_pending_prompts_as_steered_with_completion(&cid, None));
+
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptFailed(failed)
+            if failed.request_id == "create-steered-skill"
+                && failed.ctx_id == "prompt-steered-skill"
+                && failed.stage == tau_proto::AgentPromptFailureStage::Preprocessing
+    )));
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptSteered(prompt) if prompt.text == ":skill missing-steered-skill"
+    )));
+    h.resolving_initial_extension_collisions = false;
+    h.dispatch_prompt_for_agent(
+        &cid,
+        PendingPrompt::user("after steered missing skill".to_owned()),
+    )
+    .expect("dispatch later no-ctx prompt");
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.ctx_id.as_deref() == Some("prompt-steered-skill")
+    )));
+    assert!(read_nth_prompt_created(&h, 0).ctx_id.is_none());
+}
+
+/// Recalling an accepted queued initial prompt emits its correlated canceled
+/// terminal before removing the queue entry.
+#[test]
+fn recalled_initial_prompt_publishes_correlated_terminal() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.resolving_initial_extension_collisions = true;
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "create-recalled".to_owned(),
+            session_id: h.current_session_id.clone(),
+            role: "engineer".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("queued prompt".to_owned()),
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("prompt-recalled".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("queue initial prompt");
+    let cid = test_user_agent(&h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.handle_recall_queued_prompt(&tau_proto::UiRecallQueuedPrompt {
+        session_id: h.current_session_id.clone(),
+        target_agent_id: Some(agent_id.clone()),
+    });
+
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptFailed(failed)
+            if failed.request_id == "create-recalled"
+                && failed.agent_id == agent_id
+                && failed.ctx_id == "prompt-recalled"
+                && failed.stage == tau_proto::AgentPromptFailureStage::Canceled
+    )));
+    h.resolving_initial_extension_collisions = false;
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after recall".to_owned()))
+        .expect("dispatch later no-ctx prompt");
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt) if prompt.ctx_id.as_deref() == Some("prompt-recalled")
+    )));
+    assert!(read_nth_prompt_created(&h, 0).ctx_id.is_none());
 }
 
 /// Accepted visible prompts from an authenticated socket UI must perform one

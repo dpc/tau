@@ -62,6 +62,15 @@ though history, durable prompt text, and provider projection contain only the
 canonical single-colon text. This prevents canonical `:skill` prompt text from
 being reinterpreted after the CLI removes the escape.
 
+Only attached socket UIs may send `ui.create_agent`. The harness returns its
+bounded, sanitized admission result directly to that live connection without
+publication or replay. Distinct bounded request and prompt correlation ids keep
+creation admission separate from later prompt processing. Pre-materialization
+prompt failures publish only bounded sanitized diagnostics and correlation
+metadata as transient `agent.prompt_failed` terminals; canonical provider
+failures retain their existing prompt-id lifecycle. See
+[SPEC-ui-create-agent-admission](specs/SPEC-ui-create-agent-admission.md).
+
 Gmail OAuth finish arguments remain raw only for exact-owner extension routing.
 The CLI redacts them from command echo and persistent prompt history, and the
 harness excludes transient inbound invokes from debug JSONL and redacts the

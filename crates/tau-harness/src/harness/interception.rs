@@ -265,6 +265,12 @@ impl ConversationHeadSync {
 /// Harness-owned continuation bound to one exact agent publication envelope.
 #[derive(Clone)]
 pub(crate) enum AgentPublishCompletion {
+    /// Report a correlated initial-prompt failure if its canonical submission
+    /// cannot commit.
+    InitialPromptSubmission {
+        /// Accepted initial-prompt identity.
+        correlation: crate::agent::InitialPromptCorrelation,
+    },
     /// Apply one Working final disposition only after its durable append
     /// commits.
     WorkingFinal {
@@ -305,7 +311,7 @@ impl AgentPublishCompletion {
     fn transaction_id(&self) -> &tau_proto::CompactionTransactionId {
         match self {
             Self::StandaloneContinuation { transaction_id, .. } => transaction_id,
-            Self::WorkingFinal { .. } => {
+            Self::WorkingFinal { .. } | Self::InitialPromptSubmission { .. } => {
                 unreachable!("working finals do not own compaction transactions")
             }
         }
@@ -372,6 +378,7 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // Lightweight prompt lifecycle: UIs and notification extensions use this
     // instead of the full provider prompt payload.
     EventName::AGENT_PROMPT_STARTED,
+    EventName::AGENT_PROMPT_FAILED,
     EventName::AGENT_OUTER_TURN_STARTED,
     EventName::AGENT_OUTER_TURN_FINISHED,
     // Agent response: dropping this would wedge `c.head` /
@@ -524,6 +531,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::AgentInferenceDispatchStarted(_)
             | Event::AgentPromptCreated(_)
             | Event::AgentPromptStarted(_)
+            | Event::AgentPromptFailed(_)
             | Event::AgentOuterTurnStarted(_)
             | Event::AgentOuterTurnFinished(_)
             | Event::ProviderResponseFinished(_)
@@ -772,6 +780,7 @@ impl Harness {
     /// work.
     pub(crate) fn cancel_agent_synchronized_publications(&mut self, cid: &AgentId) {
         let mut canceled_prompt_ids = Vec::new();
+        let mut canceled_initial_prompts = Vec::new();
         let removed_pending = self.pending_intercept.as_ref().is_some_and(|pending| {
             pending
                 .sync_head_for
@@ -795,6 +804,13 @@ impl Harness {
             {
                 canceled_prompt_ids.push(prompt_id);
             }
+            if let Some(AgentPublishCompletion::InitialPromptSubmission { correlation }) = pending
+                .sync_head_for
+                .as_ref()
+                .and_then(ConversationHeadSync::completion)
+            {
+                canceled_initial_prompts.push(correlation.clone());
+            }
             self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
             self.rollback_rejected_activation_successor(&pending.event);
         }
@@ -816,10 +832,26 @@ impl Harness {
             {
                 canceled_prompt_ids.push(prompt_id);
             }
+            if canceled
+                && let Some(AgentPublishCompletion::InitialPromptSubmission { correlation }) =
+                    publish
+                        .sync_head_for
+                        .as_ref()
+                        .and_then(ConversationHeadSync::completion)
+            {
+                canceled_initial_prompts.push(correlation.clone());
+            }
             !canceled
         });
         for prompt_id in canceled_prompt_ids {
             self.dispose_prompt_dispatch_bookkeeping(&prompt_id);
+        }
+        for correlation in canceled_initial_prompts {
+            self.publish_initial_prompt_failed(
+                correlation,
+                tau_proto::AgentPromptFailureStage::LifecycleTeardown,
+                "agent teardown discarded initial prompt submission",
+            );
         }
         if removed_pending {
             // Canceling one agent's intercepted completion unblocks the global
@@ -850,6 +882,18 @@ impl Harness {
                 {
                     self.dispose_prompt_dispatch_bookkeeping(&prompt_id);
                 }
+                if let Some(AgentPublishCompletion::InitialPromptSubmission { correlation }) =
+                    pending
+                        .sync_head_for
+                        .as_ref()
+                        .and_then(ConversationHeadSync::completion)
+                {
+                    self.publish_initial_prompt_failed(
+                        correlation.clone(),
+                        tau_proto::AgentPromptFailureStage::LifecycleTeardown,
+                        "session switch discarded initial prompt submission",
+                    );
+                }
                 self.rollback_rejected_activation_successor(&pending.event);
             } else {
                 // The switch already advanced session generation. Commit the
@@ -865,6 +909,23 @@ impl Harness {
         // chains to completion before changing the bound session.
         let mut retained = VecDeque::with_capacity(self.deferred_publishes.len());
         while let Some(publish) = self.deferred_publishes.pop_front() {
+            if let Some(AgentPublishCompletion::InitialPromptSubmission { correlation }) = publish
+                .sync_head_for
+                .as_ref()
+                .and_then(ConversationHeadSync::completion)
+            {
+                let correlation = correlation.clone();
+                self.discard_deferred_publish(
+                    publish,
+                    "session rollover canceled initial prompt submission",
+                );
+                self.publish_initial_prompt_failed(
+                    correlation,
+                    tau_proto::AgentPromptFailureStage::LifecycleTeardown,
+                    "session switch discarded initial prompt submission",
+                );
+                continue;
+            }
             if event_is_effectively_must_pass(&publish.event, publish.must_pass)
                 || rollover_publication_must_commit(&publish.event)
             {
@@ -897,6 +958,7 @@ impl Harness {
                 .first()
                 .is_some_and(crate::agent::PendingPrompt::should_notify_watchers),
             AgentPublishCompletion::WorkingFinal { .. } => false,
+            AgentPublishCompletion::InitialPromptSubmission { .. } => false,
         };
         let agent_id = self.agent_id_for_event(&event).or_else(|| {
             self.agents
@@ -1295,6 +1357,22 @@ impl Harness {
                 activation_through,
                 committed_activation: true,
             });
+    }
+
+    /// Retire the exact committed activation that cannot materialize.
+    ///
+    /// Ordinary deferred dispatches and other branch watermarks remain
+    /// retryable.
+    pub(super) fn retire_deferred_activation(
+        &mut self,
+        cid: &AgentId,
+        activation_through: Option<tau_proto::AgentHead>,
+    ) {
+        self.pending_publish_idle_dispatches.retain(|deferred| {
+            deferred.cid != *cid
+                || !deferred.committed_activation
+                || deferred.activation_through != activation_through
+        });
     }
 
     /// Transfer every selected-branch activation obligation covered by a

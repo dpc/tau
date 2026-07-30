@@ -334,6 +334,7 @@ pub(super) fn create_agent(
 ) -> Result<(), Box<dyn std::error::Error>> {
     peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
         tau_proto::UiCreateAgent {
+            request_id: "deterministic-daemon-create".to_owned(),
             literal: false,
             session_id: "deterministic-e2e-session"
                 .parse::<tau_proto::SessionId>()

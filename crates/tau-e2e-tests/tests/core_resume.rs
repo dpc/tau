@@ -1,6 +1,8 @@
 #![cfg(unix)]
 
+use std::io::Write;
 use std::path::Path;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{DurableSnapshot, ScenarioActionV2, ScenarioLaneV2, ScenarioV2};
@@ -32,6 +34,120 @@ const FAKE_PROVIDER: &str = env!("CARGO_BIN_EXE_tau-e2e-fake-provider");
 const DEADLINE: Duration = Duration::from_secs(20);
 const DUMMY_ROLE: &str = "deterministic-e2e";
 const DUMMY_TOOL: &str = "restart_test_dummy";
+
+/// The real prompt-stdin process reports unavailable-role admission exactly as
+/// stderr diagnostics with empty stdout and a failing exit status.
+#[test]
+fn prompt_stdin_unavailable_role_exits_without_stdout() -> Result<(), Box<dyn std::error::Error>> {
+    let scenario = ScenarioV2::new(
+        "prompt-stdin-role-rejection",
+        vec![ScenarioLaneV2 {
+            ctx_id: "unused".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "unused".to_owned(),
+                response: "unused".to_owned(),
+            }],
+        }],
+    );
+    let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
+    let mut command = fixture.command(None);
+    command
+        .arg("--prompt-stdin")
+        .arg("--role")
+        .arg("missing-role")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("prompt stdin")
+        .write_all(b"hello\n")?;
+    let output = child.wait_with_output()?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.lines().any(|line| line.starts_with("session_id: ")));
+    assert!(stderr.lines().any(|line| line == "role: missing-role"));
+    assert!(stderr.contains(
+        "error: create-agent request failed (role_unavailable): unknown role `missing-role`"
+    ));
+    fixture.complete();
+    Ok(())
+}
+
+/// The real prompt-stdin process follows accepted admission through provider
+/// completion and writes only the correlated assistant text to stdout.
+#[test]
+fn prompt_stdin_accepted_prompt_prints_correlated_completion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scenario = ScenarioV2::new(
+        "prompt-stdin-success",
+        vec![ScenarioLaneV2 {
+            ctx_id: "dynamic-ui-prompt".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "<user>hello from prompt stdin\n</user>".to_owned(),
+                response: "correlated completion".to_owned(),
+            }],
+        }],
+    );
+    let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
+    let mut command = fixture.command(None);
+    command
+        .arg("--prompt-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("prompt stdin")
+        .write_all(b"hello from prompt stdin\n")?;
+    let output = child.wait_with_output()?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout)?, "correlated completion\n");
+    fixture.complete();
+    Ok(())
+}
+
+/// The real prompt-stdin process remains attached after accepted admission and
+/// converts its correlated provider terminal into a nonzero, stdout-free exit.
+#[test]
+fn prompt_stdin_accepted_provider_failure_exits_without_stdout()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scenario = ScenarioV2::new(
+        "prompt-stdin-provider-failure",
+        vec![ScenarioLaneV2 {
+            ctx_id: "dynamic-ui-prompt".to_owned(),
+            actions: vec![ScenarioActionV2::Error {
+                user_text: "<user>fail after admission\n</user>".to_owned(),
+                failure_kind: tau_proto::ProviderFailureKind::Unknown,
+                error: "synthetic accepted failure".to_owned(),
+            }],
+        }],
+    );
+    let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
+    let mut command = fixture.command(None);
+    command
+        .arg("--prompt-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("prompt stdin")
+        .write_all(b"fail after admission\n")?;
+    let output = child.wait_with_output()?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8(output.stderr)?.contains("synthetic accepted failure"));
+    fixture.complete();
+    Ok(())
+}
 
 /// Proves Boot A selects `deterministic-e2e` / `fake/test`, exposes only
 /// `restart_test_dummy`, and renders the matching editable prompt before first

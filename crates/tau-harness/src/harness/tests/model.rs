@@ -775,21 +775,25 @@ fn ui_create_agent_applies_initial_model_override() {
     )
     .expect("handle provider snapshot");
 
-    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
-        literal: false,
-        parent_agent: None,
-        session_id: "s1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        role,
-        model_override: Some(selected_model.clone()),
-        metadata: Vec::new(),
-        initial_prompt: Some("hello".to_owned()),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        ephemeral: false,
-    })
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "test-create-request".to_owned(),
+            literal: false,
+            parent_agent: None,
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            role,
+            model_override: Some(selected_model.clone()),
+            metadata: Vec::new(),
+            initial_prompt: Some("hello".to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("create-model-override-prompt".to_owned()),
+            ephemeral: false,
+        },
+    )
     .expect("create agent");
 
     let cid = test_user_agent(&h);
@@ -815,21 +819,25 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
     let role = h.selected_role.clone();
     let selected_model: ModelId = "test/cold-selected".parse().expect("model id");
 
-    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
-        literal: false,
-        parent_agent: None,
-        session_id: "s1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        role,
-        model_override: Some(selected_model.clone()),
-        metadata: Vec::new(),
-        initial_prompt: Some("hello cold".to_owned()),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        ephemeral: false,
-    })
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "test-create-request".to_owned(),
+            literal: false,
+            parent_agent: None,
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            role,
+            model_override: Some(selected_model.clone()),
+            metadata: Vec::new(),
+            initial_prompt: Some("hello cold".to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("create-cold-model-prompt".to_owned()),
+            ephemeral: false,
+        },
+    )
     .expect("create queued agent");
 
     let cid = test_user_agent(&h);
@@ -895,21 +903,25 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
         make_skill(baseline_path, "baseline"),
     );
     h.resolving_initial_extension_collisions = true;
-    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
-        literal: false,
-        parent_agent: None,
-        session_id: "s1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        role: h.selected_role.clone(),
-        model_override: None,
-        metadata: Vec::new(),
-        initial_prompt: Some(":skill same args".to_owned()),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: Some("initial-skill".to_owned()),
-        ephemeral: false,
-    })
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "test-create-request".to_owned(),
+            literal: false,
+            parent_agent: None,
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            role: h.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some(":skill same args".to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("initial-skill".to_owned()),
+            ephemeral: false,
+        },
+    )
     .expect("create queued agent");
 
     let cid = test_user_agent(&h);

@@ -542,3 +542,14 @@ interception regressions. The deterministic provider restore lane owns exact
 production watch grammar, durable projection, and cold-replay oracles. Keep
 parser-only tests as focused validation supplements; add production-boundary
 regressions alongside each new handler or lifecycle integration.
+
+
+## UI create-agent admission coverage
+
+`tau-proto` owns wire round trips and transient classification. `tau-harness`
+unit and socket tests own authorization, point-to-point admission, interception,
+preprocessing, submission, cancellation, teardown, and no-replay behavior.
+`tau-cli` owns request/agent/prompt filtering, admission timeout, unsuccessful
+provider terminals, live-only interactive subscription, and output routing.
+Deterministic process tests own end-to-end daemon/provider completion and
+failure behavior.

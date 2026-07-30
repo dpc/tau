@@ -3684,7 +3684,7 @@ impl<'a> TerminalInputSession<'a> {
             let role = take_new_agent_role(&mut self.pending_new_agent_options, current_role);
             let model_override = self.pending_new_agent_options.take_model();
             let ephemeral = self.pending_new_agent_options.take_ephemeral();
-            create_user_agent_prompt(
+            Event::UiCreateAgent(create_user_agent_prompt(
                 self.session_id,
                 role,
                 text,
@@ -3693,7 +3693,7 @@ impl<'a> TerminalInputSession<'a> {
                     ephemeral,
                     command_handling,
                 },
-            )
+            ))
         };
         if send_event(self.writer, &event).is_err() {
             return Some(InputLoopExit::Quit);

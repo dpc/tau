@@ -42,6 +42,12 @@ Configured extensions and attached socket UIs request per-agent metadata
 mutations before validation; only the harness publishes durable canonical
 metadata facts, as specified by
 [SPEC-agent-metadata-requests-and-canonical-facts](SPEC-agent-metadata-requests-and-canonical-facts.md).
+Attached socket UIs create agents through a transient request with one
+requester-directed terminal admission result; canonical creation and prompt
+facts retain their independent persistence. Admission ends at durable creation
+plus preprocessing acceptance; later correlated prompt terminals report
+preprocessing, submission, cancellation, teardown, or execution failure. See
+[SPEC-ui-create-agent-admission](SPEC-ui-create-agent-admission.md).
 They publish transient start-agent requests through the same commit boundary
 before role, parent, duplicate-route, and child-creation processing, as specified
 by [SPEC-start-agent-requests](SPEC-start-agent-requests.md).

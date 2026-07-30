@@ -135,6 +135,16 @@ impl_event_payload!(
     tau_proto::Event::StartAgentResult
 );
 impl_event_payload!(
+    tau_proto::UiCreateAgentResult,
+    tau_proto::EventName::UI_CREATE_AGENT_RESULT,
+    tau_proto::Event::UiCreateAgentResult
+);
+impl_event_payload!(
+    tau_proto::AgentPromptFailed,
+    tau_proto::EventName::AGENT_PROMPT_FAILED,
+    tau_proto::Event::AgentPromptFailed
+);
+impl_event_payload!(
     tau_proto::UiShellCommand,
     tau_proto::EventName::UI_SHELL_COMMAND,
     tau_proto::Event::UiShellCommand

@@ -456,6 +456,23 @@ pub(crate) struct PendingPrompt {
     /// Exact activation observation allocated when this prompt entered the
     /// queue.
     pub(crate) activation_observation: Option<tau_proto::ObservationId>,
+    /// Correlation retained until this accepted initial prompt materializes.
+    pub(crate) initial_prompt_correlation: Option<InitialPromptCorrelation>,
+}
+
+/// Correlation for an accepted initial prompt before provider materialization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InitialPromptCorrelation {
+    /// Create request that introduced the prompt.
+    pub(crate) request_id: String,
+    /// Created agent that owns the prompt.
+    pub(crate) agent_id: tau_proto::AgentId,
+    /// Prompt-chain correlation copied from the create request.
+    pub(crate) ctx_id: String,
+    /// Exact committed activation watermark owned by this prompt.
+    ///
+    /// `None` until the initial prompt submission commits.
+    pub(crate) activation_through: Option<tau_proto::AgentHead>,
 }
 
 impl From<String> for PendingPrompt {
@@ -487,6 +504,7 @@ impl PendingPrompt {
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
+            initial_prompt_correlation: None,
         }
     }
 
@@ -515,6 +533,7 @@ impl PendingPrompt {
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
+            initial_prompt_correlation: None,
         }
     }
 
@@ -535,6 +554,7 @@ impl PendingPrompt {
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
+            initial_prompt_correlation: None,
         }
     }
 
@@ -549,6 +569,7 @@ impl PendingPrompt {
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
+            initial_prompt_correlation: None,
         }
     }
 
@@ -569,6 +590,7 @@ impl PendingPrompt {
             ctx_id: None,
             expand_user_skill_on_dispatch: false,
             activation_observation: None,
+            initial_prompt_correlation: None,
         }
     }
 

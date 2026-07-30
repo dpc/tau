@@ -405,6 +405,9 @@ impl EventName {
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
     pub const UI_CREATE_AGENT: Self = Self::from_static(EventCategory::Ui, "create_agent");
+    /// Requester-directed terminal result of an agent-creation request.
+    pub const UI_CREATE_AGENT_RESULT: Self =
+        Self::from_static(EventCategory::Ui, "create_agent_result");
     pub const UI_NAVIGATE_TREE: Self = Self::from_static(EventCategory::Ui, "navigate_tree");
     pub const UI_COMPACT_REQUEST: Self = Self::from_static(EventCategory::Ui, "compact_request");
     pub const UI_PROMPT_DRAFT: Self = Self::from_static(EventCategory::Ui, "prompt_draft");
@@ -517,6 +520,7 @@ impl EventName {
         Self::from_static(EventCategory::Agent, "outer_turn_finished");
     pub const AGENT_PROMPT_TERMINATED: Self =
         Self::from_static(EventCategory::Agent, "prompt_terminated");
+    pub const AGENT_PROMPT_FAILED: Self = Self::from_static(EventCategory::Agent, "prompt_failed");
     pub const AGENT_PROMPT_PREWARM_REQUESTED: Self =
         Self::from_static(EventCategory::Agent, "prompt_prewarm_requested");
     pub const AGENT_USER_MESSAGE_INJECTED: Self =

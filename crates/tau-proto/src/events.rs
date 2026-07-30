@@ -3410,6 +3410,11 @@ pub struct UiSwitchSession {
 /// pre-agent UI state (role/cwd can still change freely) and agent state.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiCreateAgent {
+    /// Caller-generated correlation id echoed by [`UiCreateAgentResult`].
+    ///
+    /// Must contain 1 through [`MAX_UI_CREATE_AGENT_REQUEST_ID_BYTES`] UTF-8
+    /// bytes.
+    pub request_id: String,
     /// Session in which the agent should be loaded.
     pub session_id: SessionId,
     /// Role to bind to the new agent.
@@ -3438,7 +3443,9 @@ pub struct UiCreateAgent {
     #[serde(default)]
     pub originator: PromptOriginator,
     /// Correlation tag copied forward onto the first `AgentPromptCreated` for
-    /// `initial_prompt`, when present.
+    /// `initial_prompt`. Required and nonempty when `initial_prompt` is
+    /// present, with at most [`MAX_UI_CREATE_AGENT_PROMPT_CTX_ID_BYTES`] UTF-8
+    /// bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_id: Option<String>,
     /// Optional parent agent whose inheritable metadata should be copied.
@@ -3448,6 +3455,97 @@ pub struct UiCreateAgent {
     /// membership in memory only for the lifetime of the current daemon.
     #[serde(default, skip_serializing_if = "is_false")]
     pub ephemeral: bool,
+}
+
+/// Maximum UTF-8 wire length of `UiCreateAgent.request_id`: exactly 128 bytes.
+pub const MAX_UI_CREATE_AGENT_REQUEST_ID_BYTES: usize = 128;
+/// Maximum UTF-8 wire length of `UiCreateAgent.ctx_id`: exactly 128 bytes.
+pub const MAX_UI_CREATE_AGENT_PROMPT_CTX_ID_BYTES: usize = 128;
+
+/// Admission state of an initial prompt carried by [`UiCreateAgent`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiCreateAgentInitialPrompt {
+    /// The request did not carry an initial prompt.
+    Absent,
+    /// The initial prompt entered harness-owned preprocessing.
+    Queued,
+}
+
+/// Stable reason why a [`UiCreateAgent`] request was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiCreateAgentRejection {
+    /// The correlation id was empty or exceeded the protocol bound.
+    InvalidRequestId,
+    /// The request names a session other than the harness binding.
+    StaleSession,
+    /// The requested role is unknown or disabled.
+    RoleUnavailable,
+    /// Initial metadata failed structural or size validation.
+    InvalidMetadata,
+    /// The requested parent is not loaded in the current session.
+    ParentNotLoaded,
+    /// The harness could not commit the new agent.
+    CreationFailed,
+    /// The agent exists but its initial prompt could not be admitted.
+    InitialPromptFailed,
+}
+
+impl UiCreateAgentRejection {
+    /// Return the stable snake-case wire label for this rejection.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequestId => "invalid_request_id",
+            Self::StaleSession => "stale_session",
+            Self::RoleUnavailable => "role_unavailable",
+            Self::InvalidMetadata => "invalid_metadata",
+            Self::ParentNotLoaded => "parent_not_loaded",
+            Self::CreationFailed => "creation_failed",
+            Self::InitialPromptFailed => "initial_prompt_failed",
+        }
+    }
+}
+
+impl fmt::Display for UiCreateAgentRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Terminal admission outcome for one [`UiCreateAgent`] request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum UiCreateAgentOutcome {
+    /// The agent exists and its optional initial prompt was admitted.
+    Created {
+        /// Harness-minted identity of the created agent.
+        agent_id: AgentId,
+        /// Admission state of the request's optional initial prompt.
+        initial_prompt: UiCreateAgentInitialPrompt,
+    },
+    /// The request could not complete admission.
+    Rejected {
+        /// Stable rejection category.
+        reason: UiCreateAgentRejection,
+        /// Bounded user-facing diagnostic.
+        message: String,
+        /// Created agent identity when creation committed before prompt
+        /// rejection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<AgentId>,
+    },
+}
+
+/// Requester-directed terminal result for [`UiCreateAgent`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiCreateAgentResult {
+    /// Correlation identifier copied from the request.
+    pub request_id: String,
+    /// Session identifier copied from the request.
+    pub session_id: SessionId,
+    /// Authoritative creation and initial-prompt admission outcome.
+    pub outcome: UiCreateAgentOutcome,
 }
 
 /// Initial metadata value requested while creating a new UI-owned agent.
@@ -4649,6 +4747,54 @@ pub struct AgentPromptTerminated {
     pub originator: PromptOriginator,
 }
 
+/// Stage at which an accepted initial prompt failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPromptFailureStage {
+    /// Harness-owned prompt preprocessing failed.
+    Preprocessing,
+    /// Canonical prompt submission failed before provider materialization.
+    Submission,
+    /// The accepted queued prompt was canceled or recalled.
+    Canceled,
+    /// Agent or session teardown discarded the accepted queued prompt.
+    LifecycleTeardown,
+}
+
+impl AgentPromptFailureStage {
+    /// Return the stable snake-case wire label for this failure stage.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Preprocessing => "preprocessing",
+            Self::Submission => "submission",
+            Self::Canceled => "canceled",
+            Self::LifecycleTeardown => "lifecycle_teardown",
+        }
+    }
+}
+
+impl fmt::Display for AgentPromptFailureStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Transient terminal failure for an accepted initial prompt that has not yet
+/// produced an [`AgentPromptCreated`] identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentPromptFailed {
+    /// Create request that introduced this initial prompt.
+    pub request_id: String,
+    /// Created agent that owns the prompt.
+    pub agent_id: AgentId,
+    /// Prompt-chain correlation copied from [`UiCreateAgent::ctx_id`].
+    pub ctx_id: String,
+    /// Lifecycle stage that failed.
+    pub stage: AgentPromptFailureStage,
+    /// Bounded, sanitized user-facing diagnostic.
+    pub message: String,
+}
+
 /// Best-effort provider-side prompt-cache prewarm request.
 ///
 /// Carries the same stable prefix fields as the first real
@@ -5398,6 +5544,8 @@ pub enum Event {
     UiSwitchSession(UiSwitchSession),
     #[serde(rename = "ui.create_agent")]
     UiCreateAgent(UiCreateAgent),
+    #[serde(rename = "ui.create_agent_result")]
+    UiCreateAgentResult(UiCreateAgentResult),
     #[serde(rename = "ui.navigate_tree")]
     UiNavigateTree(UiNavigateTree),
     #[serde(rename = "ui.compact_request")]
@@ -5482,6 +5630,8 @@ pub enum Event {
     AgentPromptStarted(AgentPromptStarted),
     #[serde(rename = "agent.prompt_terminated")]
     AgentPromptTerminated(AgentPromptTerminated),
+    #[serde(rename = "agent.prompt_failed")]
+    AgentPromptFailed(AgentPromptFailed),
     #[serde(rename = "agent.prompt_prewarm_requested")]
     AgentPromptPrewarmRequested(AgentPromptPrewarmRequested),
     #[serde(rename = "agent.user_message_injected")]
@@ -5841,6 +5991,7 @@ impl Event {
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiCreateAgent(_) => EventName::UI_CREATE_AGENT,
+            Self::UiCreateAgentResult(_) => EventName::UI_CREATE_AGENT_RESULT,
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
             Self::UiCompactRequest(_) => EventName::UI_COMPACT_REQUEST,
             Self::UiCancelPrompt(_) => EventName::UI_CANCEL_PROMPT,
@@ -5902,6 +6053,7 @@ impl Event {
             Self::AgentOuterTurnStarted(_) => EventName::AGENT_OUTER_TURN_STARTED,
             Self::AgentOuterTurnFinished(_) => EventName::AGENT_OUTER_TURN_FINISHED,
             Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,
+            Self::AgentPromptFailed(_) => EventName::AGENT_PROMPT_FAILED,
             Self::AgentPromptPrewarmRequested(_) => EventName::AGENT_PROMPT_PREWARM_REQUESTED,
             Self::AgentUserMessageInjected(_) => EventName::AGENT_USER_MESSAGE_INJECTED,
             Self::AgentHeadMoved(_) => EventName::AGENT_HEAD_MOVED,
@@ -6022,6 +6174,7 @@ impl Event {
                 | Self::AgentPromptCreated(_)
                 | Self::AgentPromptStarted(_)
                 | Self::AgentPromptTerminated(_)
+                | Self::AgentPromptFailed(_)
                 | Self::AgentPromptPrewarmRequested(_)
                 | Self::AgentState(_)
                 | Self::AgentWatchesUpdated(_)
@@ -6032,6 +6185,7 @@ impl Event {
                 | Self::SessionReplayComplete(_)
                 | Self::UiCompactRequest(_)
                 | Self::UiCreateAgent(_)
+                | Self::UiCreateAgentResult(_)
                 | Self::UiPromptDraft(_)
                 | Self::UiFocusChanged(_)
                 | Self::UiSetAgentNavigationMode(_)

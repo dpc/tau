@@ -234,6 +234,10 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   dispatch ownership so a later prompt on the same agent can proceed;
   standalone-compaction ownership remains governed by its durable recovery
   contract, and late provider terminals for the canceled id remain discarded.
+- **`agent.prompt_failed`** — Transient terminal for an accepted initial prompt
+  that failed before `agent.prompt_created` assigned a provider prompt id. It
+  carries the create request id, created agent id, prompt `ctx_id`, failure
+  stage, and a bounded sanitized message. It is not replayed.
 - **`agent.prompt_prewarm_requested`** — Best-effort provider cache prewarm for
   the next prompt prefix. Runtime/provider optimization state.
 - **`agent.compaction_triggered`** — Durable manual or harness-scheduled
@@ -693,11 +697,19 @@ intent.
   in the same daemon, with `new`/`resume` reason.
 - **`ui.create_agent`** — UI requests creation of a user-owned agent, optionally
   with the first prompt to append after context loads. The request carries the
-  role, initial metadata, optional parent agent, optional prompt correlation id,
+  request correlation id, role, initial metadata, optional parent agent, optional prompt correlation id,
   optional `model_override`, and optional `ephemeral`; when present,
   `model_override` is installed on the new agent before its first prompt is
   queued or routed, and `ephemeral: true` keeps the agent transcript and session
   membership memory-only for the daemon lifetime.
+- **`ui.create_agent_result`** — Transient requester-directed terminal admission
+  result for `ui.create_agent`. It echoes the request and session ids and reports
+  either the created agent plus `Absent`/`Queued` initial-prompt admission state
+  or a categorized rejection with an optional already-created agent id. `Queued`
+  means preprocessing accepted the prompt; it does not assert preprocessing,
+  provider submission, or execution success. It is never replayed.
+  See
+  [`SPEC-ui-create-agent-admission`](../specs/SPEC-ui-create-agent-admission.md).
 - **`ui.navigate_tree`** — User typed `:tree <anchor>`, `:tree root`, or the
   expert `:tree node <node-id>` form: move the selected or targeted agent head
   to the resolved root-or-node target so the next prompt branches there.

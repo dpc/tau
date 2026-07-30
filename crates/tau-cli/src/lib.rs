@@ -109,6 +109,7 @@ pub enum CliError {
     DaemonExited(String),
     NoRunningDaemon,
     Participant(String),
+    PromptStdin(PromptStdinError),
     SessionNotFound(String),
 }
 
@@ -125,11 +126,63 @@ impl fmt::Display for CliError {
                  drop `--attach` to spawn one",
             ),
             Self::Participant(msg) => write!(f, "participant error: {msg}"),
+            Self::PromptStdin(error) => error.fmt(f),
             Self::SessionNotFound(id) => write!(f, "session not found: `{id}`"),
         }
     }
 }
 
+/// Terminal failure while admitting or executing a one-shot stdin prompt.
+#[derive(Debug)]
+pub enum PromptStdinError {
+    /// The harness did not acknowledge create admission before its deadline.
+    AdmissionTimeout {
+        /// Admission deadline that elapsed.
+        timeout: std::time::Duration,
+    },
+    /// The harness rejected the correlated create request.
+    Rejected {
+        /// Stable protocol rejection category.
+        reason: tau_proto::UiCreateAgentRejection,
+        /// Bounded harness-authored diagnostic.
+        message: String,
+    },
+    /// The accepted initial prompt failed after create admission completed.
+    PromptFailed {
+        /// Lifecycle stage that failed.
+        stage: tau_proto::AgentPromptFailureStage,
+        /// Bounded harness-authored diagnostic.
+        message: String,
+    },
+    /// The correlated provider execution reached an unsuccessful terminal.
+    ExecutionFailed {
+        /// Provider-authored or harness-classified user-facing diagnostic.
+        message: String,
+    },
+}
+
+impl fmt::Display for PromptStdinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AdmissionTimeout { timeout } => write!(
+                f,
+                "timed out after {}s waiting for create-agent admission",
+                timeout.as_secs()
+            ),
+            Self::Rejected { reason, message } => {
+                write!(f, "create-agent request failed ({}): {message}", reason)
+            }
+            Self::PromptFailed { stage, message } => {
+                write!(f, "initial prompt failed ({}): {message}", stage)
+            }
+            Self::ExecutionFailed { message } => {
+                write!(f, "initial prompt failed (execution): {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PromptStdinError {}
 impl std::error::Error for CliError {}
 
 impl From<io::Error> for CliError {

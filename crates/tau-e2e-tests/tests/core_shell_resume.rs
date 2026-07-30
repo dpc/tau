@@ -206,6 +206,7 @@ fn create_agent_without_prompt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
         UiCreateAgent {
+            request_id: "core-shell-resume-create".to_owned(),
             literal: false,
             session_id: SESSION
                 .parse::<tau_proto::SessionId>()

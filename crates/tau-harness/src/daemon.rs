@@ -873,6 +873,8 @@ fn daemon_message_event_selectors() -> Vec<EventSelector> {
 
     vec![
         EventSelector::Exact(E::AGENT_PROMPT_CREATED),
+        EventSelector::Exact(E::UI_CREATE_AGENT_RESULT),
+        EventSelector::Exact(E::AGENT_PROMPT_FAILED),
         EventSelector::Exact(E::PROVIDER_RESPONSE_FINISHED),
         EventSelector::Exact(E::TOOL_PROGRESS),
         EventSelector::Exact(E::SHELL_COMMAND_PROGRESS),
@@ -905,6 +907,7 @@ fn daemon_message_create_agent(
     ctx_id: &str,
 ) -> UiCreateAgent {
     UiCreateAgent {
+        request_id: format!("daemon-create-{ctx_id}"),
         literal: false,
         parent_agent: None,
         session_id,
@@ -931,6 +934,7 @@ fn wait_for_daemon_trace_outcome(
     // spid counter where `our_spid_counter <= terminal_counter` (equal when no tool
     // calls, higher when tool-result follow-ups bump the counter).
     let mut our_spid_counter: Option<u64> = None;
+    let mut created_agent_id = None;
 
     loop {
         if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
@@ -945,6 +949,7 @@ fn wait_for_daemon_trace_outcome(
                 lifecycle_messages: &mut lifecycle_messages,
                 progress_messages: &mut progress_messages,
                 our_spid_counter: &mut our_spid_counter,
+                created_agent_id: &mut created_agent_id,
             };
             if let Some(outcome) = handle_daemon_trace_message(&mut peer, message, state)? {
                 return Ok(outcome);
@@ -953,6 +958,7 @@ fn wait_for_daemon_trace_outcome(
     }
 }
 
+/// Mutable correlation and output projection for one daemon prompt trace.
 struct DaemonTraceState<'a> {
     /// Correlation id attached to the submitted prompt.
     ctx_id: &'a str,
@@ -962,6 +968,30 @@ struct DaemonTraceState<'a> {
     progress_messages: &'a mut Vec<String>,
     /// Parsed prompt counter for the submitted prompt.
     our_spid_counter: &'a mut Option<u64>,
+    /// Created agent returned by admission.
+    created_agent_id: &'a mut Option<tau_proto::AgentId>,
+}
+
+impl DaemonTraceState<'_> {
+    /// Bind exactly once to the created agent's matching initial prompt.
+    fn bind_prompt(&mut self, prompt: &tau_proto::AgentPromptCreated) {
+        if self.our_spid_counter.is_none()
+            && self.created_agent_id.as_ref() == Some(&prompt.agent_id)
+            && prompt.ctx_id.as_deref() == Some(self.ctx_id)
+        {
+            *self.our_spid_counter = parse_agent_prompt_index(prompt.agent_prompt_id.as_ref());
+        }
+    }
+
+    /// Return whether a provider terminal belongs to the bound prompt chain.
+    fn owns_finished(&self, finished: &tau_proto::ProviderResponseFinished) -> bool {
+        tool_calls_from_output_items(&finished.output_items).is_empty()
+            && self.created_agent_id.as_ref() == Some(&finished.agent_id)
+            && self.our_spid_counter.is_some_and(|ours| {
+                parse_agent_prompt_index(finished.agent_prompt_id.as_ref())
+                    .is_some_and(|counter| ours <= counter)
+            })
+    }
 }
 
 fn handle_daemon_trace_message(
@@ -983,9 +1013,35 @@ fn handle_daemon_trace_message(
 fn handle_daemon_trace_event(
     peer: &mut SocketPeer,
     event: Event,
-    state: DaemonTraceState<'_>,
+    mut state: DaemonTraceState<'_>,
 ) -> Result<Option<InteractionOutcome>, HarnessError> {
     match event {
+        Event::UiCreateAgentResult(result)
+            if result.request_id == format!("daemon-create-{}", state.ctx_id) =>
+        {
+            match result.outcome {
+                tau_proto::UiCreateAgentOutcome::Created { agent_id, .. } => {
+                    *state.created_agent_id = Some(agent_id);
+                }
+                tau_proto::UiCreateAgentOutcome::Rejected {
+                    reason, message, ..
+                } => {
+                    return Err(HarnessError::Participant(format!(
+                        "create-agent request failed ({reason}): {message}"
+                    )));
+                }
+            }
+        }
+        Event::AgentPromptFailed(failed)
+            if failed.request_id == format!("daemon-create-{}", state.ctx_id)
+                && state.created_agent_id.as_ref() == Some(&failed.agent_id)
+                && failed.ctx_id == state.ctx_id =>
+        {
+            return Err(HarnessError::Participant(format!(
+                "initial prompt failed ({}): {}",
+                failed.stage, failed.message
+            )));
+        }
         Event::ToolProgress(p) => state.progress_messages.push(format_tool_progress(&p)),
         Event::ShellCommandProgress(_) => state
             .progress_messages
@@ -999,12 +1055,24 @@ fn handle_daemon_trace_event(
                 .lifecycle_messages
                 .push(format_extension_event(&event));
         }
-        Event::AgentPromptCreated(prompt) if prompt.ctx_id.as_deref() == Some(state.ctx_id) => {
-            *state.our_spid_counter = parse_agent_prompt_index(prompt.agent_prompt_id.as_ref());
-        }
-        Event::ProviderResponseFinished(finished)
-            if daemon_trace_finished_belongs_to_prompt(&finished, *state.our_spid_counter) =>
-        {
+        Event::AgentPromptCreated(prompt) => state.bind_prompt(&prompt),
+        Event::ProviderResponseFinished(finished) if state.owns_finished(&finished) => {
+            if matches!(
+                finished.stop_reason,
+                tau_proto::ProviderStopReason::Error
+                    | tau_proto::ProviderStopReason::RepetitionDetected
+            ) || finished.failure_kind.is_some()
+                || finished.error.is_some()
+            {
+                return Err(HarnessError::Participant(finished.error.unwrap_or_else(
+                    || {
+                        finished.failure_kind.map_or_else(
+                            || format!("provider stopped with {:?}", finished.stop_reason),
+                            |kind| format!("provider failure: {}", kind.as_str()),
+                        )
+                    },
+                )));
+            }
             peer.send(&HarnessInputMessage::Disconnect(Disconnect {
                 reason: Some("done".to_owned()),
             }))?;
@@ -1021,16 +1089,6 @@ fn handle_daemon_trace_event(
     }
 
     Ok(None)
-}
-
-fn daemon_trace_finished_belongs_to_prompt(
-    finished: &tau_proto::ProviderResponseFinished,
-    our_spid_counter: Option<u64>,
-) -> bool {
-    tool_calls_from_output_items(&finished.output_items).is_empty()
-        && our_spid_counter.is_some_and(|ours| {
-            parse_agent_prompt_index(finished.agent_prompt_id.as_ref()).is_some_and(|c| ours <= c)
-        })
 }
 
 fn parse_agent_prompt_index(agent_prompt_id: &str) -> Option<u64> {

@@ -55,6 +55,10 @@ fn chat_subscription_keeps_runtime_side_effects_live_only() {
     assert!(!subscription.historical_selectors.contains(&started));
     assert!(subscription.live_selectors.contains(&started));
 
+    let prompt_failed = EventSelector::Exact(EventName::AGENT_PROMPT_FAILED);
+    assert!(!subscription.historical_selectors.contains(&prompt_failed));
+    assert!(subscription.live_selectors.contains(&prompt_failed));
+
     for event in [EventName::TERM_OSC1337_SET_USER_VAR, EventName::TERM_BELL] {
         let selector = EventSelector::Exact(event);
         assert!(!subscription.historical_selectors.contains(&selector));

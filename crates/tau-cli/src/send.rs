@@ -41,7 +41,7 @@ fn classify_send_line(
 
     if canonical_line.is_some() {
         return Ok(SendLineDisposition::Message(Box::new(
-            HarnessInputMessage::emit(create_user_agent_prompt(
+            HarnessInputMessage::emit(Event::UiCreateAgent(create_user_agent_prompt(
                 session_id,
                 DEFAULT_AGENT_ROLE,
                 text,
@@ -49,7 +49,7 @@ fn classify_send_line(
                     command_handling: PromptCommandHandling::LiteralEscape,
                     ..CreateUserAgentPromptOptions::default()
                 },
-            )),
+            ))),
         )));
     }
     if text == ":tree" {
@@ -158,20 +158,20 @@ fn event_for_line(session_id: &tau_proto::SessionId, text: &str) -> Option<Event
         return None;
     }
     if text == ":skill" || text.starts_with(":skill ") || text.starts_with(":skill:") {
-        return Some(create_user_agent_prompt(
+        return Some(Event::UiCreateAgent(create_user_agent_prompt(
             session_id,
             DEFAULT_AGENT_ROLE,
             text,
             CreateUserAgentPromptOptions::default(),
-        ));
+        )));
     }
     if !text.starts_with(':') {
-        return Some(create_user_agent_prompt(
+        return Some(Event::UiCreateAgent(create_user_agent_prompt(
             session_id,
             DEFAULT_AGENT_ROLE,
             text,
             CreateUserAgentPromptOptions::default(),
-        ));
+        )));
     }
     None
 }

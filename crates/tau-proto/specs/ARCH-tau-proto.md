@@ -144,6 +144,11 @@ commit-before-effects contract is
 request. The raw event commits live but never enters semantic history; accepted
 and terminal outcomes retain their existing shared/directed routing. See
 [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
+UI agent creation similarly carries a caller correlation id and receives one
+transient requester-directed admission result. Its distinct prompt correlation
+binds later transient pre-materialization failures and the provider prompt chain;
+create admission does not claim prompt execution success. See
+[SPEC-ui-create-agent-admission](../../../specs/SPEC-ui-create-agent-admission.md).
 The protocol deliberately provides no generic transport registration, ingress
 acknowledgement, reply-route, deduplication, or send-completion schema.
 Streaming readers reject a single encoded protocol message larger than 16 MiB

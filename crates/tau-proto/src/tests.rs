@@ -1833,6 +1833,7 @@ fn representative_events() -> Vec<Event> {
             reason: SessionStartReason::New,
         }),
         Event::UiCreateAgent(UiCreateAgent {
+            request_id: "test-create-request".to_owned(),
             literal: false,
             session_id: test_session_id("s1"),
             role: "engineer".to_owned(),
@@ -2117,6 +2118,16 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
             )
             .expect("valid custom event"),
         ))),
+        HarnessOutputMessage::Deliver(EventDelivery::live(
+            UnixMicros::new(1_700_000_000_000_001),
+            Event::AgentPromptFailed(AgentPromptFailed {
+                request_id: "create-1".to_owned(),
+                agent_id: agent_id("agent-1"),
+                ctx_id: "prompt-1".to_owned(),
+                stage: AgentPromptFailureStage::Preprocessing,
+                message: "failed to load skill".to_owned(),
+            }),
+        )),
         HarnessOutputMessage::InterceptRequest(InterceptRequest {
             event: Box::new(sample_session_started()),
             persist: true,
@@ -2813,6 +2824,85 @@ fn representative_directional_messages_round_trip_through_cbor() {
         let encoded = encode_harness_output_to_vec(&message).expect("output should encode");
         let decoded = decode_harness_output_from_slice(&encoded).expect("output should decode");
         assert_eq!(decoded, message);
+    }
+}
+
+/// Pre-materialization prompt failures are live runtime terminals and must
+/// never enter semantic persistence or replay.
+#[test]
+fn initial_prompt_failure_is_transient() {
+    let event = Event::AgentPromptFailed(AgentPromptFailed {
+        request_id: "create-1".to_owned(),
+        agent_id: agent_id("agent-1"),
+        ctx_id: "prompt-1".to_owned(),
+        stage: AgentPromptFailureStage::Canceled,
+        message: "initial prompt was recalled".to_owned(),
+    });
+    assert!(!event.defaults_to_persist());
+    assert_eq!(event.name(), EventName::AGENT_PROMPT_FAILED);
+}
+
+/// Created and rejected create-agent results retain their owned,
+/// requester-facing event tags and complete closed payloads across JSON wire
+/// decoding.
+#[test]
+fn ui_create_agent_result_created_and_rejected_wire_fixtures() {
+    let fixtures = [
+        (
+            Event::UiCreateAgentResult(UiCreateAgentResult {
+                request_id: "create-ok".to_owned(),
+                session_id: test_session_id("session-1"),
+                outcome: UiCreateAgentOutcome::Created {
+                    agent_id: agent_id("agent-1"),
+                    initial_prompt: UiCreateAgentInitialPrompt::Queued,
+                },
+            }),
+            serde_json::json!({
+                "event": "ui.create_agent_result",
+                "payload": {
+                    "request_id": "create-ok",
+                    "session_id": "session-1",
+                    "outcome": {
+                        "status": "created",
+                        "agent_id": "agent-1",
+                        "initial_prompt": "queued"
+                    }
+                }
+            }),
+        ),
+        (
+            Event::UiCreateAgentResult(UiCreateAgentResult {
+                request_id: "create-rejected".to_owned(),
+                session_id: test_session_id("session-1"),
+                outcome: UiCreateAgentOutcome::Rejected {
+                    reason: UiCreateAgentRejection::RoleUnavailable,
+                    message: "unknown role".to_owned(),
+                    agent_id: None,
+                },
+            }),
+            serde_json::json!({
+                "event": "ui.create_agent_result",
+                "payload": {
+                    "request_id": "create-rejected",
+                    "session_id": "session-1",
+                    "outcome": {
+                        "status": "rejected",
+                        "reason": "role_unavailable",
+                        "message": "unknown role"
+                    }
+                }
+            }),
+        ),
+    ];
+    for (event, fixture) in fixtures {
+        assert_eq!(
+            serde_json::to_value(&event).expect("encode fixture"),
+            fixture
+        );
+        assert_eq!(
+            serde_json::from_value::<Event>(fixture).expect("decode fixture"),
+            event
+        );
     }
 }
 
@@ -4660,15 +4750,16 @@ fn context_size_alert_internal_kind_round_trips_on_durable_prompts() {
     );
 }
 
-/// Ephemeral-agent markers must be backwards-compatible with peers that do not
-/// yet send the field, and compact on the wire for the durable default.
+/// Ephemeral-agent markers default false and compact on the wire while the
+/// required creation correlation remains explicit.
 #[test]
 fn ephemeral_agent_fields_default_false_and_skip_serializing() {
     let create: UiCreateAgent = serde_json::from_value(serde_json::json!({
+        "request_id": "create-1",
         "session_id": "s1",
         "role": "engineer"
     }))
-    .expect("legacy create-agent");
+    .expect("create-agent");
     assert!(!create.ephemeral);
 
     let started = AgentStarted {

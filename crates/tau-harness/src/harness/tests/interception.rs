@@ -294,6 +294,83 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
     h.shutdown().expect("shutdown");
 }
 
+/// A canonical-submission append failure occurs after create admission, so it
+/// must terminate the correlated initial prompt instead of retracting creation
+/// or leaving the one-shot client waiting.
+#[test]
+fn initial_prompt_submission_append_failure_publishes_correlated_terminal() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut h = echo_harness(&state_dir).expect("harness");
+    connect_test_client(&mut h, "initial-prompt-ui", tau_proto::ClientKind::Ui);
+    let interceptor = connect_test_tool(&mut h, "initial-prompt-append-owner");
+    h.handle_extension_event(
+        "initial-prompt-append-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("initial-prompt-ui"),
+        tau_proto::UiCreateAgent {
+            request_id: "create-append-failure".to_owned(),
+            session_id: h.current_session_id.clone(),
+            role: "engineer".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some("hello".to_owned()),
+            literal: false,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("prompt-append-failure".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("create agent");
+    let (parked, _) = intercepted_payload(&interceptor);
+    let agent_id = h
+        .agents
+        .values()
+        .find_map(|agent| agent.agent_id.as_deref())
+        .map(crate::parse_agent_id)
+        .expect("created agent id");
+    let journal_path = state_dir
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let backup_path = journal_path.with_extension("cbor.initial-prompt-backup");
+    std::fs::rename(&journal_path, &backup_path).expect("park agent journal");
+    std::fs::create_dir(&journal_path).expect("reject append");
+
+    h.handle_extension_event(
+        "initial-prompt-append-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(parked))),
+        })),
+    )
+    .expect("release into append failure");
+
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptFailed(failed)
+            if failed.request_id == "create-append-failure"
+                && failed.agent_id == agent_id
+                && failed.ctx_id == "prompt-append-failure"
+                && failed.stage == tau_proto::AgentPromptFailureStage::Submission
+    )));
+    assert!(h.pending_agent_publish_completions.is_empty());
+
+    std::fs::remove_dir(&journal_path).expect("remove append blocker");
+    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
+    h.shutdown().expect("shutdown");
+}
+
 /// Retained Working finals require the exact captured parent: Root does not
 /// admit a later child, and a captured node does not admit a later descendant.
 #[test]
@@ -4516,6 +4593,35 @@ fn interception_cannot_retarget_user_interaction_fact() {
             &replacement,
         )
     );
+}
+
+/// The only pre-materialization prompt terminal must survive interceptor drops
+/// and retain its exact correlation and failure payload.
+#[test]
+fn prompt_failed_terminal_is_immutable_and_must_pass() {
+    let original = Event::AgentPromptFailed(tau_proto::AgentPromptFailed {
+        request_id: "create-1".to_owned(),
+        agent_id: crate::parse_agent_id("agent-1"),
+        ctx_id: "prompt-1".to_owned(),
+        stage: tau_proto::AgentPromptFailureStage::Preprocessing,
+        message: "failed to load skill".to_owned(),
+    });
+    let mut replacement = original.clone();
+    let Event::AgentPromptFailed(failed) = &mut replacement else {
+        unreachable!("prompt-failed fixture")
+    };
+    failed.ctx_id = "forged-prompt".to_owned();
+
+    assert!(crate::harness::interception::event_must_pass_by_default(
+        &original.name()
+    ));
+    assert!(
+        crate::harness::interception::immutable_protected_fact_was_modified(
+            &original,
+            &replacement
+        )
+    );
+    assert!(Harness::is_peer_forbidden_harness_fact(&original));
 }
 
 /// Ensures the initialization replacement and canonical projections

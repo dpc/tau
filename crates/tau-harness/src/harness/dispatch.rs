@@ -21,7 +21,7 @@ use tau_proto::{AgentId, Event, SessionId};
 
 use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::error::HarnessError;
-use crate::harness::Harness;
+use crate::harness::{AgentPublishCompletion, Harness};
 
 impl Harness {
     pub(crate) fn dispatch_user_prompt(
@@ -89,8 +89,14 @@ impl Harness {
         let notification_text = notify_watchers.then(|| prompt.text.clone());
         let inference_activation = prompt.creates_inference_activation();
         let internal_kind = prompt.internal_kind();
-        self.publish_for_agent(
+        let completion = prompt
+            .initial_prompt_correlation
+            .clone()
+            .map(|correlation| AgentPublishCompletion::InitialPromptSubmission { correlation });
+        let defers_notification = completion.is_some();
+        self.publish_event_for_agent_with_completion(
             agent_id,
+            None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
                 inference_activation,
                 agent_id: target_agent_id,
@@ -102,8 +108,11 @@ impl Harness {
                 display_name: self.agent_display_name_for_cid(agent_id),
                 ctx_id: prompt.ctx_id,
             }),
+            completion,
+            defers_notification && notify_watchers,
         );
-        if let Some(text) = notification_text
+        if !defers_notification
+            && let Some(text) = notification_text
             && let Some(public_agent_id) = self.ensure_agent_id_for_agent(agent_id)
         {
             self.notify_agent_watchers_about_user_prompt(&public_agent_id, &text);
@@ -124,7 +133,7 @@ impl Harness {
         agent_id: &AgentId,
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
-        let prompt = prompt.into();
+        let mut prompt = prompt.into();
         let acknowledgement_activation = matches!(
             prompt.activation_kind(),
             tau_proto::ActivationKind::VisibleUser
@@ -139,6 +148,16 @@ impl Harness {
             return Err(HarnessError::Participant(format!(
                 "agent `{agent_id}` is terminating"
             )));
+        }
+        if prompt.initial_prompt_correlation.is_some()
+            && !self.validate_prompt_render_for_dispatch(agent_id)
+        {
+            let correlation = prompt
+                .initial_prompt_correlation
+                .take()
+                .expect("checked initial prompt correlation");
+            self.fail_initial_prompt_preflight(correlation);
+            return Ok(());
         }
         // A fresh ordinary activation explicitly abandons a response-uncertain
         // inference restored from a previous harness runtime. The historical
@@ -332,11 +351,29 @@ impl Harness {
             let prompt = self
                 .pop_next_runnable_prompt(&agent_id)
                 .expect("runnable agent has a prompt");
-            let Some(prompt) = self.resolve_pending_user_skill_for_agent(&agent_id, prompt) else {
-                continue;
+            let initial_prompt_correlation = prompt.initial_prompt_correlation.clone();
+            let prompt = match self.resolve_pending_user_skill_for_agent(&agent_id, prompt) {
+                Ok(prompt) => prompt,
+                Err(message) => {
+                    if let Some(correlation) = initial_prompt_correlation {
+                        self.publish_initial_prompt_failed(
+                            correlation,
+                            tau_proto::AgentPromptFailureStage::Preprocessing,
+                            &message,
+                        );
+                    }
+                    continue;
+                }
             };
             if let Err(error) = self.dispatch_prompt_for_agent(&agent_id, prompt) {
                 self.emit_harness_failure(&format!("failed to dispatch queued prompt: {error}"));
+                if let Some(correlation) = initial_prompt_correlation {
+                    self.publish_initial_prompt_failed(
+                        correlation,
+                        tau_proto::AgentPromptFailureStage::Submission,
+                        "failed to submit initial prompt",
+                    );
+                }
                 // Reset the agent so it doesn't wedge as
                 // AgentThinking with no in-flight prompt.
                 if let Some(conv) = self.agents.get_mut(&agent_id) {

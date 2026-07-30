@@ -370,7 +370,7 @@ impl RecordedLineHandlers for TestEphemeralCommandHandlers {
     fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
         let model_override = self.pending.take_model();
         let ephemeral = self.pending.take_ephemeral();
-        let event = create_user_agent_prompt(
+        let req = create_user_agent_prompt(
             &tau_proto::SessionId::parse("s1").expect("test session id"),
             "engineer",
             text,
@@ -380,15 +380,12 @@ impl RecordedLineHandlers for TestEphemeralCommandHandlers {
                 command_handling: PromptCommandHandling::Interpret,
             },
         );
-        match event {
-            Event::UiCreateAgent(req) => self.outputs.push(format!(
-                "create:ephemeral={} model={:?} prompt={}",
-                req.ephemeral,
-                req.model_override,
-                req.initial_prompt.unwrap_or_default()
-            )),
-            other => panic!("expected create-agent prompt, got {other:?}"),
-        }
+        self.outputs.push(format!(
+            "create:ephemeral={} model={:?} prompt={}",
+            req.ephemeral,
+            req.model_override,
+            req.initial_prompt.unwrap_or_default()
+        ));
         None
     }
 
@@ -492,7 +489,7 @@ impl RecordedLineHandlers for TestNewRoleCommandHandlers {
         let role = take_new_agent_role(&mut self.pending, self.current_role.clone());
         let model_override = self.pending.take_model();
         let ephemeral = self.pending.take_ephemeral();
-        let event = create_user_agent_prompt(
+        let req = create_user_agent_prompt(
             &tau_proto::SessionId::parse("s1").expect("test session id"),
             role,
             text,
@@ -502,16 +499,13 @@ impl RecordedLineHandlers for TestNewRoleCommandHandlers {
                 command_handling: PromptCommandHandling::Interpret,
             },
         );
-        match event {
-            Event::UiCreateAgent(req) => self.outputs.push(format!(
-                "create:role={} ephemeral={} model={:?} prompt={}",
-                req.role,
-                req.ephemeral,
-                req.model_override.as_ref().map(ToString::to_string),
-                req.initial_prompt.unwrap_or_default()
-            )),
-            other => panic!("expected create-agent prompt, got {other:?}"),
-        }
+        self.outputs.push(format!(
+            "create:role={} ephemeral={} model={:?} prompt={}",
+            req.role,
+            req.ephemeral,
+            req.model_override.as_ref().map(ToString::to_string),
+            req.initial_prompt.unwrap_or_default()
+        ));
         None
     }
 
@@ -619,16 +613,13 @@ fn role_cycle_after_new_role_supersedes_pending_new_role() {
     }) {
         pending.stage_role(role);
     }
-    let event = create_user_agent_prompt(
+    let req = create_user_agent_prompt(
         &tau_proto::SessionId::parse("s1").expect("test session id"),
         pending.take_role().unwrap_or_else(|| "engineer".to_owned()),
         "please implement",
         CreateUserAgentPromptOptions::default(),
     );
 
-    let Event::UiCreateAgent(req) = event else {
-        panic!("expected create-agent prompt");
-    };
     assert_eq!(req.role, "engineer");
 }
 

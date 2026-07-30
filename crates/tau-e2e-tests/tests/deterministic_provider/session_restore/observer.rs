@@ -70,6 +70,7 @@ impl SessionRestoreObserver {
         self.peer
             .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
                 tau_proto::UiCreateAgent {
+                    request_id: "restore-observer-durable-create".to_owned(),
                     literal: false,
                     session_id: SESSION
                         .parse::<tau_proto::SessionId>()
@@ -98,6 +99,7 @@ impl SessionRestoreObserver {
         self.peer
             .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
                 tau_proto::UiCreateAgent {
+                    request_id: "restore-observer-ephemeral-create".to_owned(),
                     literal: false,
                     session_id: SESSION
                         .parse::<tau_proto::SessionId>()

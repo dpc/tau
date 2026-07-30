@@ -441,6 +441,7 @@ fn create_direct_repair_worker(
         .peer
         .send(&HarnessInputMessage::emit(Event::UiCreateAgent(
             tau_proto::UiCreateAgent {
+                request_id: "restore-mixed-ephemeral-create".to_owned(),
                 literal: false,
                 session_id: SESSION
                     .parse::<tau_proto::SessionId>()

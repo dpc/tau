@@ -17,6 +17,14 @@ directed, non-published notice result. UI detach now uses the dedicated
 connection-control behavior. UI tree inspection uses `ui_tree_request` and
 returns one requester-directed, non-published multiline notice. The
 dedicated attached-UI request row is complete.
+Agent creation accepts `ui.create_agent` only from attached socket UIs and
+returns its terminal admission result directly to the initiating connection
+without publication. Admission ends when durable creation plus initial-prompt
+preprocessing acceptance produces `Created { initial_prompt: Queued }`.
+Subsequent preprocessing and prompt execution use the separate correlated
+prompt lifecycle; pre-materialization failures publish transient
+`agent.prompt_failed` terminals. See
+[SPEC-ui-create-agent-admission](../../../specs/SPEC-ui-create-agent-admission.md).
 Configured extensions now use the dedicated `extension_notice_request`; the
 harness creates a sanitized live-only `extension.notice` through ordinary
 interception and broadcast. Extension-authored generic

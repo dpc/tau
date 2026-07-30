@@ -31,7 +31,9 @@ fn prompt_text(text: &str) -> String {
             assert_eq!(req.role, DEFAULT_AGENT_ROLE);
             assert_eq!(req.model_override, None);
             assert_eq!(req.originator, PromptOriginator::User);
-            assert_eq!(req.ctx_id, None);
+            let ctx_id = req.ctx_id.as_deref().expect("prompt correlation id");
+            assert!(!ctx_id.is_empty());
+            assert_ne!(ctx_id, req.request_id);
             req.initial_prompt.expect("initial prompt")
         }
         other => panic!("expected UiCreateAgent, got {other:?}"),

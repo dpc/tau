@@ -1,4 +1,6 @@
-use tau_proto::{Event, PromptMessageClass, PromptOriginator, UiCreateAgent};
+use tau_proto::{PromptMessageClass, PromptOriginator, UiCreateAgent};
+
+static NEXT_CREATE_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Default role used when the UI submits a prompt without an explicit selected
 /// role from session state.
@@ -38,8 +40,11 @@ pub(crate) fn create_user_agent_prompt(
     role: impl Into<String>,
     prompt: impl Into<String>,
     options: CreateUserAgentPromptOptions,
-) -> Event {
-    Event::UiCreateAgent(UiCreateAgent {
+) -> UiCreateAgent {
+    let next_id = || NEXT_CREATE_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let process_id = std::process::id();
+    UiCreateAgent {
+        request_id: format!("ui-create-{process_id}-{}", next_id()),
         parent_agent: None,
         session_id: session_id.clone(),
         role: role.into(),
@@ -49,9 +54,9 @@ pub(crate) fn create_user_agent_prompt(
         literal: options.command_handling.is_literal_escape(),
         message_class: PromptMessageClass::User,
         originator: PromptOriginator::User,
-        ctx_id: None,
+        ctx_id: Some(format!("ui-prompt-{process_id}-{}", next_id())),
         ephemeral: options.ephemeral,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -69,7 +74,7 @@ mod tests {
     #[test]
     fn create_user_agent_prompt_preserves_model_override() {
         let model: tau_proto::ModelId = "test/override".parse().expect("model id");
-        let Event::UiCreateAgent(req) = create_user_agent_prompt(
+        let req = create_user_agent_prompt(
             &tau_proto::SessionId::parse("s1").expect("test session id"),
             "engineer",
             "hello",
@@ -78,9 +83,7 @@ mod tests {
                 ephemeral: false,
                 command_handling: PromptCommandHandling::Interpret,
             },
-        ) else {
-            panic!("expected create agent event");
-        };
+        );
 
         assert_eq!(req.model_override, Some(model));
     }
@@ -89,7 +92,7 @@ mod tests {
     /// one-shot memory-only request through the create-agent event.
     #[test]
     fn create_user_agent_prompt_preserves_ephemeral_flag() {
-        let Event::UiCreateAgent(req) = create_user_agent_prompt(
+        let req = create_user_agent_prompt(
             &tau_proto::SessionId::parse("s1").expect("test session id"),
             "engineer",
             "hello",
@@ -98,9 +101,7 @@ mod tests {
                 ephemeral: true,
                 command_handling: PromptCommandHandling::Interpret,
             },
-        ) else {
-            panic!("expected create agent event");
-        };
+        );
 
         assert!(req.ephemeral);
         assert!(

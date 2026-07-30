@@ -470,21 +470,25 @@ fn literal_new_agent_skill_text_bypasses_skill_expansion() {
     let mut h = echo_harness(tmp.path()).expect("harness");
     h.selected_model = Some("test/model".into());
 
-    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
-        literal: true,
-        parent_agent: None,
-        session_id: "s1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        role: h.selected_role.clone(),
-        model_override: None,
-        metadata: Vec::new(),
-        initial_prompt: Some(":skill definitely-not-installed".to_owned()),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: Some("literal-new".to_owned()),
-        ephemeral: false,
-    })
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "test-create-request".to_owned(),
+            literal: true,
+            parent_agent: None,
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            role: h.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some(":skill definitely-not-installed".to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("literal-new".to_owned()),
+            ephemeral: false,
+        },
+    )
     .expect("create agent with literal skill text");
 
     let submitted = event_log_events(&h)

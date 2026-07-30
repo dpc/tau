@@ -1181,6 +1181,16 @@ impl FakeState {
                 .lanes
                 .iter()
                 .position(|lane| lane.ctx_id == ctx_id)
+                .or_else(|| {
+                    (matches!(
+                        scenario.name.as_str(),
+                        "spawned-tau-cold-resume"
+                            | "prompt-stdin-success"
+                            | "prompt-stdin-provider-failure"
+                    ) && scenario.lanes.len() == 1
+                        && ctx_id.starts_with("ui-prompt-"))
+                    .then_some(0)
+                })
                 .ok_or_else(|| {
                     ClientError::handler("scenario first mismatch: unknown lane ctx_id")
                 })?

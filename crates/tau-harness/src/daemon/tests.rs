@@ -122,6 +122,8 @@ fn daemon_message_trace_subscription_uses_no_prefix_selectors() {
 
     let expected = [
         EventName::AGENT_PROMPT_CREATED,
+        EventName::UI_CREATE_AGENT_RESULT,
+        EventName::AGENT_PROMPT_FAILED,
         EventName::PROVIDER_RESPONSE_FINISHED,
         EventName::TOOL_PROGRESS,
         EventName::SHELL_COMMAND_PROGRESS,
@@ -136,6 +138,72 @@ fn daemon_message_trace_subscription_uses_no_prefix_selectors() {
     .collect::<Vec<_>>();
 
     assert_eq!(selectors, expected);
+}
+
+/// Daemon trace correlation binds the first created-agent prompt only, rejects
+/// a foreign agent, and accepts later counters in the bound agent's prompt
+/// chain.
+#[test]
+fn daemon_trace_correlation_requires_created_agent_and_binds_once() {
+    let main = tau_proto::AgentId::parse("main").expect("agent id");
+    let other = tau_proto::AgentId::parse("other").expect("agent id");
+    let mut lifecycle = Vec::new();
+    let mut progress = Vec::new();
+    let mut prompt_index = None;
+    let mut created_agent_id = Some(main.clone());
+    let mut state = DaemonTraceState {
+        ctx_id: "prompt-1",
+        lifecycle_messages: &mut lifecycle,
+        progress_messages: &mut progress,
+        our_spid_counter: &mut prompt_index,
+        created_agent_id: &mut created_agent_id,
+    };
+    let make_prompt =
+        |agent_id: tau_proto::AgentId, prompt_id: &str| tau_proto::AgentPromptCreated {
+            agent_prompt_id: prompt_id.parse().expect("prompt id"),
+            agent_id,
+            session_id: tau_proto::SessionId::parse("session-1").expect("session id"),
+            system_prompt: String::new(),
+            context: tau_proto::PromptContext::default(),
+            tools: Vec::new(),
+            tools_ref: None,
+            model: "test/model".parse().expect("model id"),
+            model_params: tau_proto::ModelParams::default(),
+            tool_choice: Default::default(),
+            originator: tau_proto::PromptOriginator::User,
+            share_user_cache_key: false,
+            ctx_id: Some("prompt-1".to_owned()),
+            compaction: None,
+            operation: tau_proto::PromptOperation::Inference,
+        };
+    state.bind_prompt(&make_prompt(other.clone(), "ap-other-9"));
+    assert_eq!(*state.our_spid_counter, None);
+    state.bind_prompt(&make_prompt(main.clone(), "ap-main-2"));
+    state.bind_prompt(&make_prompt(main.clone(), "ap-main-7"));
+    assert_eq!(*state.our_spid_counter, Some(2));
+
+    let make_finished =
+        |agent_id: tau_proto::AgentId, prompt_id: &str| tau_proto::ProviderResponseFinished {
+            agent_prompt_id: prompt_id.parse().expect("prompt id"),
+            agent_id,
+            output_items: Vec::new(),
+            stop_reason: tau_proto::ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            originator: tau_proto::PromptOriginator::User,
+            usage: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        };
+    assert!(!state.owns_finished(&make_finished(other, "ap-other-99")));
+    assert!(state.owns_finished(&make_finished(main, "ap-main-3")));
 }
 
 /// Ensures dropping the listener forwarder wakes an idle poll/accept wait
@@ -325,6 +393,79 @@ fn post_accept_startup_error_is_sent_through_normal_writer() {
     let reason = disconnect.reason.expect("disconnect reason");
     assert!(reason.contains("harness startup failed"));
     assert!(reason.contains("marker write failed"));
+}
+
+/// A create rejection crosses only the initiating real socket and cannot leak
+/// to a second attached socket without relying on in-memory bus inspection.
+#[test]
+fn create_agent_rejection_isolated_to_requester_socket() {
+    fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
+        crate::harness::run_echo_provider(r, w).map_err(|error| error.to_string())
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    let mut harness = Harness::new_with_provider(
+        td.path().join("state"),
+        TauDirs {
+            config_dir: Some(td.path().join("config")),
+            state_dir: Some(td.path().join("runtime")),
+        },
+        echo_runner,
+        echo_tools(),
+        "s1",
+        tau_proto::SessionStartReason::Initial,
+        tau_core::SessionPersistenceMode::Durable,
+    )
+    .expect("harness");
+    let (requester_server, requester_client) = UnixStream::pair().expect("requester pair");
+    let (observer_server, observer_client) = UnixStream::pair().expect("observer pair");
+    observer_client
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("observer timeout");
+    let requester_id = harness.accept_client(requester_server).expect("requester");
+    harness.accept_client(observer_server).expect("observer");
+
+    harness
+        .handle_ui_create_agent_from(
+            &requester_id,
+            tau_proto::UiCreateAgent {
+                request_id: "socket-rejection".to_owned(),
+                session_id: tau_proto::SessionId::parse("s1").expect("session id"),
+                role: "missing-role".to_owned(),
+                model_override: None,
+                metadata: Vec::new(),
+                initial_prompt: Some("never admitted".to_owned()),
+                literal: false,
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: Some("socket-prompt".to_owned()),
+                parent_agent: None,
+                ephemeral: false,
+            },
+        )
+        .expect("reject create");
+
+    let mut requester = PeerInputReader::new(BufReader::new(requester_client));
+    let message = requester
+        .read_message()
+        .expect("requester frame")
+        .expect("requester result");
+    let HarnessOutputMessage::Deliver(delivery) = message else {
+        panic!("expected directed create result")
+    };
+    assert!(matches!(
+        delivery.into_event(),
+        tau_proto::Event::UiCreateAgentResult(tau_proto::UiCreateAgentResult {
+            outcome: tau_proto::UiCreateAgentOutcome::Rejected { .. },
+            ..
+        })
+    ));
+
+    let mut observer = PeerInputReader::new(BufReader::new(observer_client));
+    assert!(
+        observer.read_message().is_err(),
+        "observer socket must receive no directed result"
+    );
 }
 
 /// Ensures pre-resolved entrypoints cannot silently accept the environment

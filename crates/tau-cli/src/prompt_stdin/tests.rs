@@ -1,4 +1,4 @@
-use tau_proto::{MessageItem, PromptOriginator, ProviderStopReason};
+use tau_proto::{AgentPromptCreated, MessageItem, PromptOriginator, ProviderStopReason};
 
 use super::*;
 
@@ -7,6 +7,263 @@ fn prompt_stdin_role_uses_startup_role_or_default() {
     assert_eq!(prompt_stdin_role(Some("specialist")), "specialist");
     assert_eq!(prompt_stdin_role(None), DEFAULT_AGENT_ROLE);
 }
+
+fn create_result(
+    request_id: &str,
+    outcome: tau_proto::UiCreateAgentOutcome,
+) -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver(Event::UiCreateAgentResult(tau_proto::UiCreateAgentResult {
+        request_id: request_id.to_owned(),
+        session_id: tau_proto::SessionId::parse("session-1").expect("session id"),
+        outcome,
+    }))
+}
+
+fn prompt_created(agent_id: &str, prompt_id: &str, ctx_id: &str) -> AgentPromptCreated {
+    AgentPromptCreated {
+        agent_prompt_id: prompt_id.parse().expect("prompt id"),
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+        session_id: tau_proto::SessionId::parse("session-1").expect("session id"),
+        system_prompt: String::new(),
+        context: tau_proto::PromptContext::default(),
+        tools: Vec::new(),
+        tools_ref: None,
+        model: "test/model".parse().expect("model id"),
+        model_params: tau_proto::ModelParams::default(),
+        tool_choice: Default::default(),
+        originator: PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: Some(ctx_id.to_owned()),
+        compaction: None,
+        operation: tau_proto::PromptOperation::Inference,
+    }
+}
+
+/// A matching create rejection must terminate admission immediately while an
+/// unrelated result remains unable to satisfy the correlation.
+#[test]
+fn prompt_stdin_admission_reports_matching_rejection() {
+    let (tx, rx) = mpsc::channel();
+    tx.send(Ok(Some(create_result(
+        "unrelated",
+        tau_proto::UiCreateAgentOutcome::Created {
+            agent_id: tau_proto::AgentId::parse("other-agent").expect("agent id"),
+            initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+        },
+    ))))
+    .expect("unrelated result");
+    tx.send(Ok(Some(create_result(
+        "wanted",
+        tau_proto::UiCreateAgentOutcome::Rejected {
+            reason: tau_proto::UiCreateAgentRejection::RoleUnavailable,
+            message: "unknown role `missing`".to_owned(),
+            agent_id: None,
+        },
+    ))))
+    .expect("matching result");
+
+    let error = wait_for_create_agent_admission_until(
+        &rx,
+        "wanted",
+        "wanted-prompt",
+        std::time::Instant::now() + Duration::from_secs(1),
+    )
+    .expect_err("rejection must fail");
+    assert_eq!(
+        error.to_string(),
+        "create-agent request failed (role_unavailable): unknown role `missing`"
+    );
+}
+
+/// The admission deadline is independent of provider execution and can expire
+/// deterministically without sleeping when no result arrives.
+#[test]
+fn prompt_stdin_admission_timeout_is_bounded() {
+    let (_tx, rx) = mpsc::channel();
+    let error = wait_for_create_agent_admission_until(
+        &rx,
+        "wanted",
+        "wanted-prompt",
+        std::time::Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("past deadline"),
+    )
+    .expect_err("elapsed admission deadline");
+    assert_eq!(
+        error.to_string(),
+        "timed out after 10s waiting for create-agent admission"
+    );
+}
+
+/// Acceptance ends only the admission phase; this helper does not impose a
+/// deadline on the later provider-response receiver.
+#[test]
+fn prompt_stdin_admission_accepts_created_result() {
+    let (tx, rx) = mpsc::channel();
+    tx.send(Ok(Some(create_result(
+        "wanted",
+        tau_proto::UiCreateAgentOutcome::Created {
+            agent_id: tau_proto::AgentId::parse("created-agent").expect("agent id"),
+            initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+        },
+    ))))
+    .expect("created result");
+    wait_for_create_agent_admission_until(
+        &rx,
+        "wanted",
+        "wanted-prompt",
+        std::time::Instant::now() + Duration::from_secs(1),
+    )
+    .expect("created admission");
+}
+
+/// A foreign agent that reuses the prompt correlation before admission cannot
+/// bind the created agent's provider-chain floor.
+#[test]
+fn prompt_stdin_admission_rejects_foreign_same_ctx_binding() {
+    let (tx, rx) = mpsc::channel();
+    tx.send(Ok(Some(HarnessOutputMessage::deliver(
+        Event::AgentPromptCreated(prompt_created("other", "ap-other-9", "prompt-1")),
+    ))))
+    .expect("foreign prompt");
+    tx.send(Ok(Some(create_result(
+        "request-1",
+        tau_proto::UiCreateAgentOutcome::Created {
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+        },
+    ))))
+    .expect("created result");
+
+    let admission = wait_for_create_agent_admission_until(
+        &rx,
+        "request-1",
+        "prompt-1",
+        std::time::Instant::now() + Duration::from_secs(1),
+    )
+    .expect("created admission");
+    assert_eq!(admission.initial_prompt_index, None);
+}
+
+/// After admission, prompt-stdin binds the first matching created-agent prompt
+/// exactly once and ignores same-ctx prompts from foreign agents.
+#[test]
+fn prompt_stdin_binds_owned_same_ctx_prompt_once() {
+    let mut output = OneShotOutput {
+        agent_id: Some(tau_proto::AgentId::parse("main").expect("agent id")),
+        ctx_id: Some("prompt-1".to_owned()),
+        ..OneShotOutput::default()
+    };
+    for prompt in [
+        prompt_created("other", "ap-other-8", "prompt-1"),
+        prompt_created("main", "ap-main-2", "prompt-1"),
+        prompt_created("main", "ap-main-7", "prompt-1"),
+    ] {
+        handle_prompt_stdin_message(
+            HarnessOutputMessage::deliver(Event::AgentPromptCreated(prompt)),
+            &mut output,
+        )
+        .expect("created prompt");
+    }
+    assert_eq!(output.initial_prompt_index, Some(2));
+}
+
+/// A user-originated terminal response from another agent cannot complete an
+/// admitted prompt-stdin invocation on a busy shared daemon.
+#[test]
+fn prompt_stdin_ignores_unrelated_agent_after_admission() {
+    let mut output = OneShotOutput {
+        agent_id: Some(tau_proto::AgentId::parse("main").expect("agent id")),
+        ..OneShotOutput::default()
+    };
+    let mut unrelated =
+        assistant_finished("ap-other-1", "foreign answer", ProviderStopReason::EndTurn);
+    unrelated.agent_id = tau_proto::AgentId::parse("other").expect("agent id");
+
+    assert!(
+        !handle_prompt_stdin_message(
+            HarnessOutputMessage::deliver(Event::ProviderResponseFinished(unrelated)),
+            &mut output,
+        )
+        .expect("unrelated response")
+    );
+    assert!(output.final_response.is_none());
+    assert!(
+        handle_prompt_stdin_message(
+            HarnessOutputMessage::deliver(Event::ProviderResponseFinished(assistant_finished(
+                "ap-main-1",
+                "owned answer",
+                ProviderStopReason::EndTurn,
+            ))),
+            &mut output,
+        )
+        .expect("owned response")
+    );
+    assert_eq!(output.final_response.as_deref(), Some("owned answer"));
+}
+
+/// A pre-materialization failure must match all three create, agent, and prompt
+/// identities before it can terminate the one-shot invocation.
+#[test]
+fn prompt_stdin_accepts_only_fully_correlated_prompt_failure() {
+    let mut output = OneShotOutput {
+        request_id: Some("request-1".to_owned()),
+        agent_id: Some(tau_proto::AgentId::parse("main").expect("agent id")),
+        ctx_id: Some("prompt-1".to_owned()),
+        ..OneShotOutput::default()
+    };
+    let failed = tau_proto::AgentPromptFailed {
+        request_id: "request-1".to_owned(),
+        agent_id: tau_proto::AgentId::parse("other").expect("agent id"),
+        ctx_id: "prompt-1".to_owned(),
+        stage: tau_proto::AgentPromptFailureStage::Preprocessing,
+        message: "failed to load skill".to_owned(),
+    };
+    assert!(
+        !handle_prompt_stdin_message(
+            HarnessOutputMessage::deliver(Event::AgentPromptFailed(failed.clone())),
+            &mut output,
+        )
+        .expect("foreign failure must be ignored")
+    );
+
+    let error = handle_prompt_stdin_message(
+        HarnessOutputMessage::deliver(Event::AgentPromptFailed(tau_proto::AgentPromptFailed {
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            ..failed
+        })),
+        &mut output,
+    )
+    .expect_err("matching failure must terminate");
+    assert_eq!(
+        error.to_string(),
+        "initial prompt failed (preprocessing): failed to load skill"
+    );
+}
+
+/// An owned unsuccessful provider terminal must fail the invocation instead of
+/// printing partial output and exiting successfully.
+#[test]
+fn prompt_stdin_reports_owned_provider_failure() {
+    let mut output = OneShotOutput {
+        agent_id: Some(tau_proto::AgentId::parse("main").expect("agent id")),
+        ..OneShotOutput::default()
+    };
+    let mut finished = assistant_finished("ap-main-1", "partial", ProviderStopReason::Error);
+    finished.error = Some("provider unavailable".to_owned());
+
+    let error = handle_prompt_stdin_message(
+        HarnessOutputMessage::deliver(Event::ProviderResponseFinished(finished)),
+        &mut output,
+    )
+    .expect_err("owned provider error must fail");
+    assert_eq!(
+        error.to_string(),
+        "initial prompt failed (execution): provider unavailable"
+    );
+    assert!(output.final_response.is_none());
+}
+
 fn user_update(spid: &str, text: &str, thinking: Option<&str>) -> ProviderResponseUpdated {
     let mut deltas = Vec::new();
     if let Some(thinking) = thinking.filter(|thinking| !thinking.is_empty()) {

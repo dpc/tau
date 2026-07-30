@@ -35,6 +35,42 @@ fn append_agent_creation(store: &mut tau_core::AgentStore, agent_id: &str) {
         .expect("seed agent creation");
 }
 
+/// A prompt failure delivered before subscription remains live-only: historical
+/// catch-up must not replay the terminal to a late subscriber.
+#[test]
+fn initial_prompt_failure_is_absent_from_historical_catch_up() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    h.publish_event(
+        None,
+        Event::AgentPromptFailed(tau_proto::AgentPromptFailed {
+            request_id: "create-transient".to_owned(),
+            agent_id: crate::parse_agent_id("agent-transient"),
+            ctx_id: "prompt-transient".to_owned(),
+            stage: tau_proto::AgentPromptFailureStage::Submission,
+            message: "not replayable".to_owned(),
+        }),
+    );
+
+    let sink = connect_test_client(&mut h, "late-prompt-failure", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "late-prompt-failure",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_FAILED,
+            )],
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("subscribe to historical prompt failures");
+
+    assert!(sink.lock().expect("sink").iter().all(|routed| !matches!(
+        peel_inner_event(&routed.frame),
+        Some(Event::AgentPromptFailed(_))
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 /// Collect message-category deliveries with the requested replay marker.
 fn message_deliveries(sink: &Arc<Mutex<Vec<RoutedFrame>>>, replay: bool) -> Vec<Event> {
     sink.lock()
@@ -360,21 +396,25 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("start");
-    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
-        literal: false,
-        session_id: "s1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        role: "engineer".to_owned(),
-        model_override: None,
-        metadata: Vec::new(),
-        initial_prompt: None,
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        parent_agent: None,
-        ephemeral: true,
-    })
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "test-create-request".to_owned(),
+            literal: false,
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            role: "engineer".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: None,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+            parent_agent: None,
+            ephemeral: true,
+        },
+    )
     .expect("create ephemeral agent through harness lifecycle");
     let agent_id = event_log_events(&h)
         .into_iter()
@@ -498,21 +538,25 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
 fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
-        literal: false,
-        session_id: "s1"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        role: "engineer".to_owned(),
-        model_override: None,
-        metadata: Vec::new(),
-        initial_prompt: None,
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        parent_agent: None,
-        ephemeral: true,
-    })
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("ui-create-test"),
+        tau_proto::UiCreateAgent {
+            request_id: "test-create-request".to_owned(),
+            literal: false,
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            role: "engineer".to_owned(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: None,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+            parent_agent: None,
+            ephemeral: true,
+        },
+    )
     .expect("create target");
     let agent_id = event_log_events(&h)
         .into_iter()

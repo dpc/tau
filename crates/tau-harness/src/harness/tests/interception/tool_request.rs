@@ -1067,21 +1067,25 @@ fn peer_internal_ephemeral_lifecycle_is_suppressed_from_debug_log() {
         tau_proto::ClientKind::Core,
     );
     harness
-        .handle_ui_create_agent(tau_proto::UiCreateAgent {
-            literal: false,
-            session_id: "s1"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            role: "engineer".to_owned(),
-            model_override: None,
-            metadata: Vec::new(),
-            initial_prompt: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-            parent_agent: None,
-            ephemeral: true,
-        })
+        .handle_ui_create_agent_from(
+            &crate::test_connection_id("ui-create-test"),
+            tau_proto::UiCreateAgent {
+                request_id: "test-create-request".to_owned(),
+                literal: false,
+                session_id: "s1"
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
+                role: "engineer".to_owned(),
+                model_override: None,
+                metadata: Vec::new(),
+                initial_prompt: None,
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+                parent_agent: None,
+                ephemeral: true,
+            },
+        )
         .expect("create ephemeral agent");
     let agent_id = event_log_events(&harness)
         .into_iter()
