@@ -1,9 +1,0 @@
-id: silent-filter-map-ok
-valid:
-  - entries.filter_map(Result::ok)
-  - values.filter_map(|value| value.parse().inspect_err(log_error).ok())
-  - values.filter_map(|value| value.checked_add(1))
-  - read_dir(path)?.filter_map(|entry| entry.ok())
-invalid:
-  - values.filter_map(|value| value.parse().ok())
-  - values.filter_map(|value| { value.parse().ok() })
