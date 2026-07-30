@@ -3,6 +3,7 @@
 //! Semantic fields and provider replay sidecars follow
 //! `SPEC-tau-proto-provider-data`.
 
+mod arc_bytes;
 use std::fmt::{self, Write as _};
 use std::sync::Arc;
 
@@ -275,26 +276,6 @@ pub struct ImageContent {
     pub height: u32,
     /// Provider detail mode used when the bytes were prepared.
     pub detail: ImageDetail,
-}
-
-mod arc_bytes {
-    use std::sync::Arc;
-
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub(super) fn serialize<S>(data: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serde_bytes::Bytes::new(data).serialize(serializer)
-    }
-
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        serde_bytes::ByteBuf::deserialize(deserializer).map(|bytes| Arc::from(bytes.into_vec()))
-    }
 }
 
 impl fmt::Debug for ImageContent {

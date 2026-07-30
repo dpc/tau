@@ -1,5 +1,7 @@
 //! Output-truncation helpers shared by every tool.
 
+#[cfg(test)]
+mod tests;
 /// Maximum lines before truncation kicks in.
 pub(crate) const MAX_OUTPUT_LINES: usize = 2000;
 /// Number of leading lines kept when line-count truncation kicks in.
@@ -197,27 +199,4 @@ pub(crate) fn truncate_head(input: &str) -> Truncated {
 #[cfg(test)]
 pub(crate) fn truncate_tail(input: &str) -> Truncated {
     truncate_line_oriented(input)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn combined_line_and_byte_truncation_stops_within_budget_without_popping_prefix() {
-        let lines = (1..=MAX_OUTPUT_LINES + 1)
-            .map(|line| format!("{line} {}", "x".repeat(120)))
-            .collect::<Vec<_>>();
-        let total_bytes = lines.iter().map(String::len).sum::<usize>() + lines.len() - 1;
-
-        let truncated = truncate_line_oriented_lines(
-            lines.iter().map(String::as_str),
-            lines.len(),
-            total_bytes,
-        );
-
-        assert!(truncated.was_truncated);
-        assert!(truncated.content.len() <= MAX_OUTPUT_BYTES);
-        assert!(truncated.content.starts_with("1 "));
-    }
 }
