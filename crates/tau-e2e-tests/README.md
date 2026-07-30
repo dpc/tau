@@ -37,6 +37,14 @@ with explicit `tau resume <session-id>`, and checks the actual VT projection nev
 repaints the completed row as pending. A replay-aware side UI observer and typed
 CBOR `SessionStore`/`AgentStore` snapshots independently prove replay boundaries,
 stable identity, unchanged durable prefix, and one fresh same-agent prompt.
+A live-attach case starts two fixed PTYs against one daemon, attaches the second
+exact public CLI by explicit session before activity, and submits one closed text
+turn through the owner. Normalized semantic row classes cover session,
+extension-ready, initialization, prompt, response, editable-prompt, and status
+order in both views; a replay-aware observer, exact one-action provider trace,
+bounded synchronization, process-group teardown, and clean runtime artifacts are
+independent oracles. It does not claim byte-identical rendering, broader
+multi-client ordering, tools, production providers, or multi-agent behavior.
 Its multi-agent case instead creates and completes the S1 production
 main/worker pair in a headless Boot A, then runs the universal resumed Boot B
 under the PTY. It selects both restored transcripts only by stable ID, submits

@@ -149,6 +149,121 @@ fn prompt_stdin_accepted_provider_failure_exits_without_stdout()
     Ok(())
 }
 
+/// Proves a second exact public CLI attached by explicit session before any
+/// activity receives the same semantic single-turn projection as the owning
+/// CLI, while attachment itself spends no provider action.
+#[test]
+fn two_public_ptys_share_one_live_turn_with_semantic_parity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let nonce = format!("{:x}", std::process::id());
+    let prompt = format!("attach-parity-prompt-{nonce}");
+    let response = format!("attach-parity-response-{nonce}");
+    let scenario = ScenarioV2::new(
+        "live-dual-pty-attach",
+        vec![ScenarioLaneV2 {
+            ctx_id: "dynamic-ui-prompt".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: format!("<user>{prompt}</user>"),
+                response: response.clone(),
+            }],
+        }],
+    );
+    let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
+    let mut original = PtyProcess::spawn(
+        fixture.command(None),
+        false,
+        Some(PtyArtifacts::new(
+            fixture.artifact_path("attach-original.raw.bounded"),
+            fixture.artifact_path("attach-original.normalized.txt"),
+        )),
+    )?;
+    let deadline = Instant::now() + DEADLINE;
+    let (socket, session_id) = discover_daemon(fixture.runtime_home(), None, deadline)?;
+    let mut observer = SideObserver::connect(
+        &socket,
+        &session_id,
+        fixture.artifact_path("attach-observer.json"),
+        deadline,
+    )?;
+    wait_extensions(&mut observer, deadline)?;
+    wait_for_dummy_role_selection(&mut observer, deadline)?;
+    original.wait_ready_to_start_role(DUMMY_ROLE, deadline)?;
+
+    let attached = PtyProcess::spawn(
+        fixture.attach_command(session_id.as_str()),
+        false,
+        Some(PtyArtifacts::new(
+            fixture.artifact_path("attach-second.raw.bounded"),
+            fixture.artifact_path("attach-second.normalized.txt"),
+        )),
+    )?;
+    attached.wait_ready_to_start_role(DUMMY_ROLE, deadline)?;
+    if fixture
+        .trace()?
+        .lines()
+        .any(|line| line.contains(" matched "))
+    {
+        return Err("attaching the second UI consumed a provider action".into());
+    }
+
+    original.send_line(&prompt)?;
+    let loaded = observer.recv_until(deadline, |observed| {
+        !observed.replay
+            && matches!(
+                &observed.event,
+                Event::SessionAgentLoaded(loaded) if loaded.session_id == session_id
+            )
+    })?;
+    let Event::SessionAgentLoaded(loaded) = loaded.event else {
+        unreachable!("predicate admitted another event")
+    };
+    let agent_id = loaded.agent_id;
+    observer.recv_until(deadline, |observed| {
+        !observed.replay
+            && matches!(
+                &observed.event,
+                Event::ProviderResponseFinished(finished)
+                    if finished.agent_id == agent_id
+                        && provider_finished_contains(&observed.event, &response)
+            )
+    })?;
+    observer.recv_until(deadline, |observed| {
+        !observed.replay
+            && matches!(
+                &observed.event,
+                Event::AgentStatsUpdated(stats)
+                    if stats.agent_id == agent_id
+                        && stats.runtime_state == AgentRuntimeState::Idle
+            )
+    })?;
+    original.wait_for(&response, deadline)?;
+    attached.wait_for(&response, deadline)?;
+    let original_frame = original.wait_ready_for(agent_id.as_str(), deadline)?;
+    let attached_frame = attached.wait_ready_for(agent_id.as_str(), deadline)?;
+    assert_attach_semantics(&original_frame, &session_id, &prompt, &response, &agent_id)?;
+    assert_attach_semantics(&attached_frame, &session_id, &prompt, &response, &agent_id)?;
+    assert_exact_ready_set(&observer.events)?;
+    let matched = fixture
+        .trace()?
+        .lines()
+        .filter(|line| line.contains(" matched "))
+        .count();
+    assert_eq!(matched, 1, "expected exactly one fake-provider action");
+
+    fixture.write_artifact("attach-original.normalized.txt", original_frame.as_bytes())?;
+    fixture.write_artifact("attach-second.normalized.txt", attached_frame.as_bytes())?;
+    fixture.write_artifact(
+        "attach-observer.json",
+        &serde_json::to_vec_pretty(&observer.events)?,
+    )?;
+    drop(observer);
+    attached.finish()?;
+    original.finish()?;
+    fixture.require_boot_gone(session_id.as_str())?;
+    fixture.complete();
+    Ok(())
+}
+
 /// Proves Boot A selects `deterministic-e2e` / `fake/test`, exposes only
 /// `restart_test_dummy`, and renders the matching editable prompt before first
 /// input. It then proves that completed tool call never repaints as pending in
@@ -299,6 +414,44 @@ fn spawned_tau_resume_keeps_completed_dummy_tool_terminal_and_continues()
     assert_eq!(count_text(&snapshot_b, &after), 1);
     assert_eq!(count_text(&snapshot_b, &after_complete), 1);
     fixture.complete();
+    Ok(())
+}
+
+/// Checks stable semantic row classes and their partial order without requiring
+/// byte-for-byte or cell-for-cell equality between attached terminal views.
+fn assert_attach_semantics(
+    frame: &str,
+    session_id: &SessionId,
+    prompt: &str,
+    response: &str,
+    agent_id: &AgentId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rows = frame.lines().collect::<Vec<_>>();
+    let find = |needle: &str| {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .ok_or_else(|| format!("missing semantic row `{needle}` in:\n{frame}"))
+    };
+    let session = find(&format!("sessions/{}/", session_id.as_str()))?;
+    let extension = find("extension e2e-fake-provider ready")?;
+    let submitted = find(prompt)?;
+    let initialized = find(&format!("initialized {}", agent_id.as_str()))?;
+    let answered = find(response)?;
+    let editable = find(&format!("Write a message to {}...", agent_id.as_str()))?;
+    find(&format!("@{}", agent_id.as_str()))?;
+    if !(session < submitted
+        && extension < submitted
+        && initialized <= submitted
+        && submitted < answered
+        && answered < editable)
+    {
+        return Err(format!(
+            "semantic row order violated: session={session}, extension={extension}, \
+             initialized={initialized}, submitted={submitted}, answered={answered}, \
+             editable={editable}\n{frame}"
+        )
+        .into());
+    }
     Ok(())
 }
 

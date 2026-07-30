@@ -36,6 +36,17 @@ const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024;
 const MAX_DELTAS: usize = 8;
 const MAX_AGENT_START_PAIRS: usize = 2;
 
+/// Closed public-PTY scenarios allowed to bind their sole lane from the
+/// harness-minted interactive prompt correlation.
+///
+/// See `SPEC-tau-e2e-deterministic-provider`.
+const PUBLIC_PTY_DYNAMIC_LANE_SCENARIOS: &[&str] = &[
+    "spawned-tau-cold-resume",
+    "live-dual-pty-attach",
+    "prompt-stdin-success",
+    "prompt-stdin-provider-failure",
+];
+
 /// Runs the deterministic provider over standard input/output.
 pub fn run_stdio() -> Result<(), Box<dyn std::error::Error>> {
     TauExtensionRunner::new(FakeProvider).run(
@@ -1184,12 +1195,8 @@ impl FakeState {
                 .iter()
                 .position(|lane| lane.ctx_id == ctx_id)
                 .or_else(|| {
-                    (matches!(
-                        scenario.name.as_str(),
-                        "spawned-tau-cold-resume"
-                            | "prompt-stdin-success"
-                            | "prompt-stdin-provider-failure"
-                    ) && scenario.lanes.len() == 1
+                    (PUBLIC_PTY_DYNAMIC_LANE_SCENARIOS.contains(&scenario.name.as_str())
+                        && scenario.lanes.len() == 1
                         && ctx_id.starts_with("ui-prompt-"))
                     .then_some(0)
                 })

@@ -955,6 +955,51 @@ fn v2_no_context_lane_binding_requires_the_unique_retained_child() {
     assert!(!checkpoint.exists());
 }
 
+/// Ensures only an explicitly allowlisted one-lane public-PTY scenario can bind
+/// a harness-minted interactive prompt correlation.
+#[test]
+fn v2_dynamic_public_pty_lane_binding_is_explicitly_allowlisted() {
+    let prompt = prompt_for(
+        &tau_proto::AgentId::parse("main").expect("agent id"),
+        "<user>turn</user>",
+        Some("ui-prompt-generated"),
+    );
+    for name in PUBLIC_PTY_DYNAMIC_LANE_SCENARIOS {
+        let mut state = FakeState::default();
+        state.scenario = Some(ScenarioConfig::V2(ScenarioV2::new(
+            *name,
+            vec![ScenarioLaneV2 {
+                ctx_id: "configured-placeholder".to_owned(),
+                actions: vec![ScenarioActionV2::Text {
+                    user_text: "<user>turn</user>".to_owned(),
+                    response: "done".to_owned(),
+                }],
+            }],
+        )));
+        state.lane_cursors = vec![0];
+        assert_eq!(
+            state
+                .select_v2_lane(&prompt)
+                .expect("allowlisted public PTY binds"),
+            0
+        );
+    }
+
+    let mut rejected = FakeState::default();
+    rejected.scenario = Some(ScenarioConfig::V2(ScenarioV2::new(
+        "diagnostic-name-only",
+        vec![ScenarioLaneV2 {
+            ctx_id: "configured-placeholder".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "<user>turn</user>".to_owned(),
+                response: "done".to_owned(),
+            }],
+        }],
+    )));
+    rejected.lane_cursors = vec![0];
+    assert!(rejected.select_v2_lane(&prompt).is_err());
+}
+
 /// Rejects an `agent_start` schema mismatch and unrelated extra tool results
 /// before committing the cursor, lane, child association, or checkpoint.
 #[test]

@@ -141,6 +141,16 @@ metadata and the durable session lock are released before Boot B. Captured PTY b
 synthetic and retained only on failure or explicit opt-in. This establishes one
 quiescent completed-tool cold-resume projection, not arbitrary terminal fidelity,
 crash consistency, filesystem sandboxing, or safe execution of other tools.
+Its live-attach case concurrently owns a second exact public CLI and fixed PTY
+against the first CLI's daemon. The second process receives only the same private
+HOME/XDG inputs and explicit session identity; it cannot reconfigure the daemon.
+Both process groups and bounded PTY readers are independently reaped before the
+fixture checks that runtime discovery artifacts and the session lock disappeared.
+The closed surface remains one fake-provider text action and the existing
+no-side-effect dummy extension; attachment consumes no action and invokes no tool.
+This proves only semantic parity for one live text projection, not arbitrary
+multi-client ordering, presentation identity, provider behavior, or concurrent
+prompt/tool safety.
 An external uncatchable kill of the test process itself prevents Rust `Drop`
 cleanup; the mandatory Nix/nextest runner remains the outer process/sandbox owner
 for that residual case.

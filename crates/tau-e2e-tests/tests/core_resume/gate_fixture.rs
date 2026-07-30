@@ -246,6 +246,25 @@ impl GateFixture {
         command
     }
 
+    /// Builds a scrubbed exact-Tau command that attaches to one explicit live
+    /// session without attempting to reconfigure its daemon.
+    pub(super) fn attach_command(&self, session_id: &str) -> Command {
+        let mut command = Command::new(&self.tau_bin);
+        command
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", &self.config_home)
+            .env("XDG_STATE_HOME", &self.state_home)
+            .env("XDG_CACHE_HOME", &self.cache_home)
+            .env("XDG_RUNTIME_DIR", &self.runtime_home)
+            .env("TERM", "xterm-256color")
+            .env("LANG", "C.UTF-8")
+            .arg("attach")
+            .arg(session_id)
+            .current_dir(&self.cwd);
+        command
+    }
+
     /// Builds the scrubbed S8 headless-daemon command over these same config,
     /// state, runtime, checkpoint, and artifact roots.
     pub(super) fn headless_command(&self, daemon_bin: &Path, socket: &Path) -> Command {

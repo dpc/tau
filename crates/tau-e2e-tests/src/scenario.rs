@@ -24,7 +24,8 @@ pub struct ScenarioV1 {
 pub struct ScenarioV2 {
     /// Schema version, fixed at zero by `GATE-no-backward-compatibility`.
     pub version: u8,
-    /// Stable diagnostic scenario name.
+    /// Stable scenario identity used for diagnostics and narrowly allowlisted
+    /// fixture capabilities such as public-PTY `ui-prompt-*` lane binding.
     pub name: String,
     /// Independently consumed lanes keyed by exact initial-prompt correlation
     /// id.
@@ -35,10 +36,11 @@ pub struct ScenarioV2 {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioLaneV2 {
-    /// Exact `ctx_id` copied from the lane's initial UI submission. A one-lane
-    /// public-PTY scenario may bind its first agent when the UI supplies no id;
-    /// a multi-lane session-restore scenario may instead bind only the exact
-    /// harness-minted child by unique configured first-prompt text.
+    /// Exact `ctx_id` copied from the lane's initial UI submission. A named,
+    /// one-lane public-PTY scenario may instead bind its first agent from a
+    /// harness-minted `ui-prompt-*` id; a multi-lane session-restore scenario
+    /// may bind only the exact harness-minted child by unique configured
+    /// first-prompt text.
     pub ctx_id: String,
     /// Exact ordered actions for this lane.
     pub actions: Vec<ScenarioActionV2>,
