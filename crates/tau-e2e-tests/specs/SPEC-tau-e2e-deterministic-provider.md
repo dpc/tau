@@ -100,7 +100,7 @@ next explicit worker continuation only while the balanced call/error pair
 remains in context. S1 adds one
 distinct adjacent `AgentStartCall`/`AgentStartResult` pair; S4 raises that
 closed bound to two unique adjacent pairs. The fake requires
-exact bounded instruction, optional role, task name, call id, production tool
+exact bounded instruction, required role, task name, call id, production tool
 name/type/schema, one sole successful result in the latest continuation block
 with an exact two-field payload,
 and harness-minted distinct

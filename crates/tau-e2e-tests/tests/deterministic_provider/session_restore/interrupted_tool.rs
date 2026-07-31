@@ -170,7 +170,7 @@ fn interrupted_tool_scenario(diagnostic: &str) -> ScenarioV2 {
                         user_text: "start the tool-holding deterministic worker".to_owned(),
                         call_id: "s6-agent-start".into(),
                         prompt: WORKER_PROMPT.to_owned(),
-                        role: Some("deterministic-worker".to_owned()),
+                        role: "deterministic-worker".to_owned(),
                         task_name: "tool-holding deterministic worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {

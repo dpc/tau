@@ -641,11 +641,10 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         name: tau_proto::ToolName::new(WORKDIR_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Read or change the durable workdir for this shell extension instance. Omit `path` \
+            "Read or change your durable workdir. Omit `path` \
              to read the current path and availability. A provided path is resolved from the \
              last committed workdir, validated, canonicalized, and persisted. Do not combine a \
-             workdir change with shell or filesystem calls that rely on the new directory; wait \
-             for this result and make dependent calls in a later turn."
+             workdir change with shell or filesystem calls that rely on the new directory."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,

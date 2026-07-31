@@ -158,9 +158,8 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                     || prompt.len() > 4 * 1024
                     || task_name.is_empty()
                     || task_name.len() > 256
-                    || role
-                        .as_ref()
-                        .is_some_and(|role| role.is_empty() || role.len() > 256)
+                    || role.is_empty()
+                    || role.len() > 256
                     || !agent_start_call_ids.insert(call_id.as_str())
                     || agent_start_call_ids.len() > MAX_AGENT_START_PAIRS
                     || !matches!(

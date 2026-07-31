@@ -21,7 +21,7 @@ fn status_guidance_prefers_meaningful_batched_reports() {
                 "state": {"type":"string","enum":["working","done","blocked"]},
                 "task_name": {
                     "type":"string",
-                    "description":"Short user-visible label for the current task (a few words; 160 UTF-8 bytes maximum)."
+                    "description":"Short user-visible label for the current task (a few words)."
                 }
             },
             "required": ["state", "task_name"],
@@ -334,7 +334,7 @@ fn tool_background_result(call_id: &str) -> tau_proto::ToolBackgroundResult {
 }
 
 #[test]
-fn agent_start_spec_advertises_only_current_tool_name() {
+fn agent_start_spec_advertises_required_explicit_role() {
     // Tau does not preserve compatibility for renamed tool call names yet.
     // Only the current public spelling should be advertised or handled.
     let tools = BuiltinTools::default();
@@ -348,13 +348,82 @@ fn agent_start_spec_advertises_only_current_tool_name() {
     assert!(!names.iter().any(|name| name == "delegate"));
     assert!(tools.handles(&ToolName::new(AGENT_START_TOOL_NAME)));
     assert!(!tools.handles(&ToolName::new("delegate")));
-    let description = agent_start_tool_spec()
-        .description
-        .expect("agent_start description");
+    let spec = agent_start_tool_spec();
+    assert_eq!(spec.description.as_deref(), Some("Start a sub-agent"));
+    let parameters = spec.parameters.expect("agent_start parameters");
     assert_eq!(
-        description,
-        "Start a sub-task with a `prompt`. The new agent is watched automatically, as if \
-         `agent_watch` had been called. Returns the new agent's ID."
+        parameters["required"],
+        serde_json::json!(["task_name", "prompt", "role"])
+    );
+    assert_eq!(
+        parameters["properties"]["prompt"]["description"],
+        "Initial prompt for the sub-agent."
+    );
+    assert_eq!(
+        parameters["properties"]["role"]["description"],
+        "Sub-agent role to use."
+    );
+}
+
+/// The runtime parser rejects omitted or empty roles instead of silently
+/// selecting a default, while preserving explicitly selected roles.
+#[test]
+fn agent_start_runtime_requires_explicit_nonempty_role() {
+    let arguments = |role: Option<&str>| {
+        let mut entries = vec![
+            (
+                CborValue::Text("task_name".to_owned()),
+                CborValue::Text("review".to_owned()),
+            ),
+            (
+                CborValue::Text("prompt".to_owned()),
+                CborValue::Text("Review this change".to_owned()),
+            ),
+        ];
+        if let Some(role) = role {
+            entries.push((
+                CborValue::Text("role".to_owned()),
+                CborValue::Text(role.to_owned()),
+            ));
+        }
+        CborValue::Map(entries)
+    };
+
+    assert_eq!(
+        parse_delegate_args(&arguments(None)).expect_err("missing role"),
+        "missing string argument: role"
+    );
+    assert_eq!(
+        parse_delegate_args(&arguments(Some(" "))).expect_err("empty role"),
+        "`role` must not be empty"
+    );
+    for role in ["engineer", "reviewer"] {
+        assert_eq!(
+            parse_delegate_args(&arguments(Some(role)))
+                .expect("explicit role")
+                .role,
+            role
+        );
+    }
+}
+
+/// Model-visible built-in tool prose stays synchronized with the intentionally
+/// concise contracts requested for these tools.
+#[test]
+fn built_in_tool_descriptions_match_public_contract() {
+    assert_eq!(
+        cancel_tool_spec().description.as_deref(),
+        Some("Request cancellation of a running tool call owned by this conversation.")
+    );
+    assert_eq!(
+        compact_tool_spec().description.as_deref(),
+        Some("Compact your context.")
+    );
+    assert_eq!(
+        skill_tool_spec().description.as_deref(),
+        Some(
+            "Discover available skills not pre-advertised in <available_skills>. If the search resolves to one skill, the full skill is loaded; otherwise matching skill names and descriptions are returned with guidance. Query terms are split on punctuation, lowercased, and deduplicated; hyphenated skill names are preserved. Call with exact skill name to load exact match."
+        )
     );
 }
 

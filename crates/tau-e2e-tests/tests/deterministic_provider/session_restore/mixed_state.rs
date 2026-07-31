@@ -349,7 +349,7 @@ fn mixed_state_scenario(diagnostic: &str) -> ScenarioV2 {
                         user_text: "start the quiescent deterministic worker".to_owned(),
                         call_id: "s7-start-quiescent".into(),
                         prompt: QUIESCENT_PROMPT.to_owned(),
-                        role: Some(QUIESCENT_ROLE.to_owned()),
+                        role: QUIESCENT_ROLE.to_owned(),
                         task_name: "quiescent worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
@@ -367,7 +367,7 @@ fn mixed_state_scenario(diagnostic: &str) -> ScenarioV2 {
                         user_text: "start the dispatch-uncertain deterministic worker".to_owned(),
                         call_id: "s7-start-uncertain".into(),
                         prompt: UNCERTAIN_PROMPT.to_owned(),
-                        role: Some(UNCERTAIN_ROLE.to_owned()),
+                        role: UNCERTAIN_ROLE.to_owned(),
                         task_name: "dispatch-uncertain worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {

@@ -142,10 +142,7 @@ impl BuiltinState {
             }
             AGENT_START_TOOL_NAME => {
                 let parsed = parse_delegate_args(&call.arguments).ok()?;
-                let args = match parsed.role {
-                    Some(role) => format!("[{}] +{role}", parsed.task_name),
-                    None => format!("[{}]", parsed.task_name),
-                };
+                let args = format!("[{}] +{}", parsed.task_name, parsed.role);
                 (args, tau_proto::PROGRESS_INDICATOR_TEXT, None)
             }
             WAIT_TOOL_NAME => (
@@ -416,7 +413,7 @@ impl BuiltinTools {
             parent_agent: None,
             query_id: query_id.clone(),
             instruction: delegate_instruction(&self_agent_id, &parsed.prompt),
-            role: parsed.role,
+            role: Some(parsed.role),
             input_stats: prompt_stats,
             tool_call_id: Some(call_id.clone()),
             task_name: Some(task_name.clone()),
@@ -1864,7 +1861,7 @@ fn assistant_text_from_context_item(item: &ContextItem) -> Option<String> {
 struct DelegateArgs {
     task_name: String,
     prompt: String,
-    role: Option<String>,
+    role: String,
 }
 
 fn parse_delegate_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
@@ -1900,10 +1897,14 @@ fn parse_delegate_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
     if task_name.trim().is_empty() {
         return Err("`task_name` must not be empty".to_owned());
     }
+    let role = role.ok_or_else(|| "missing string argument: role".to_owned())?;
+    if role.trim().is_empty() {
+        return Err("`role` must not be empty".to_owned());
+    }
     Ok(DelegateArgs {
         task_name,
         prompt,
-        role: role.filter(|role| !role.trim().is_empty()),
+        role,
     })
 }
 
@@ -1949,7 +1950,7 @@ fn skill_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ToolName::new(SKILL_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Discover and load short, focused skills. Most available skills are NOT pre-advertised in <available_skills>, so a missing entry there is no reason to skip this tool. If the search resolves to one skill, the full skill is loaded; otherwise matching skill names and descriptions are returned with guidance. Query terms are split on punctuation, lowercased, and deduplicated; hyphenated skill names are preserved. To load a specific ambiguous result, call this tool again with only the exact skill name.".to_owned()),
+        description: Some("Discover available skills not pre-advertised in <available_skills>. If the search resolves to one skill, the full skill is loaded; otherwise matching skill names and descriptions are returned with guidance. Query terms are split on punctuation, lowercased, and deduplicated; hyphenated skill names are preserved. Call with exact skill name to load exact match.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"Keywords matched case-insensitively against skill names and descriptions."},"search_content":{"type":"boolean","description":"When true, also search the first 64 KiB of the skill file (except the frontmatter). Default false."}},"required":["query"],"additionalProperties":false})),
         format: None,
@@ -1961,7 +1962,20 @@ fn skill_tool_spec() -> ToolSpec {
 }
 
 fn agent_start_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(AGENT_START_TOOL_NAME), model_visible_name: None, description: Some("Start a sub-task with a `prompt`. The new agent is watched automatically, as if `agent_watch` had been called. Returns the new agent's ID.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short user-visible label for the sub-task (a few words)."},"prompt":{"type":"string","description":"Self-contained task for the sub-agent."},"role":{"type":"string","description":"Optional sub-agent role to use."}},"required":["task_name","prompt"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec {
+        name: ToolName::new(AGENT_START_TOOL_NAME),
+        model_visible_name: None,
+        description: Some("Start a sub-agent".to_owned()),
+        tool_type: ToolType::Function,
+        parameters: Some(
+            serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short user-visible label for the sub-task (a few words)."},"prompt":{"type":"string","description":"Initial prompt for the sub-agent."},"role":{"type":"string","description":"Sub-agent role to use."}},"required":["task_name","prompt","role"],"additionalProperties":false}),
+        ),
+        format: None,
+        tags: Vec::new(),
+        enabled_by_default: true,
+        background_support: Some(BackgroundSupport::Never),
+        examples: Vec::new(),
+    }
 }
 
 fn message_tool_spec() -> ToolSpec {
@@ -2023,7 +2037,7 @@ fn cancel_tool_spec() -> ToolSpec {
         name: ToolName::new(CANCEL_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Request cancellation of a running tool call owned by this conversation. Requires `tool_call_id`.".to_owned(),
+            "Request cancellation of a running tool call owned by this conversation.".to_owned(),
         ),
         tool_type: ToolType::Function,
         parameters: Some(
@@ -2045,11 +2059,16 @@ fn compact_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ToolName::new(COMPACT_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Request durable standalone compaction of this agent after the current tool round. The accepted result is asynchronous and can be awaited with wait.".to_owned()),
+        description: Some("Compact your context.".to_owned()),
         tool_type: ToolType::Function,
-        parameters: Some(serde_json::json!({"type":"object","properties":{},"additionalProperties":false})),
+        parameters: Some(
+            serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
         format: None,
-        tags: vec![tau_proto::ToolTag::new("harness:compaction"), tau_proto::ToolTag::new("harness:compaction:self")],
+        tags: vec![
+            tau_proto::ToolTag::new("harness:compaction"),
+            tau_proto::ToolTag::new("harness:compaction:self"),
+        ],
         enabled_by_default: true,
         background_support: Some(BackgroundSupport::Instant),
         examples: Vec::new(),

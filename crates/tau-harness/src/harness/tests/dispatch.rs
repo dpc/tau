@@ -11,7 +11,7 @@ use super::*;
 use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::interception::AgentPublishCompletion;
 use crate::harness::{
-    BackgroundCompletionPromptMode, PendingTool, RestoredCheckpointAuthority,
+    BackgroundCompletionPromptMode, PendingTool, RestoredCheckpointAuthority, STATUS_REMINDER,
     agent_message_activation_class, background_completion_prompt,
     extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
@@ -28107,10 +28107,12 @@ fn status_acknowledgement_tracks_effective_snapshot_and_policy() {
         h.queue_status_acknowledgement_if_needed(&cid, call);
     }
     assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
-    assert!(h.agents[&cid].pending_prompts.iter().all(|prompt| {
-        prompt.text
-            == "Reminder: acknowledge meaningful user-level work with `status`; batch it with other independent tool calls when possible."
-    }));
+    assert!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .all(|prompt| { prompt.text == STATUS_REMINDER })
+    );
     h.agents
         .get_mut(&cid)
         .expect("agent")
@@ -28216,6 +28218,10 @@ fn status_acknowledgement_resets_at_addressed_work_dispatch() {
 /// keeps the first reminder delivered when that same activation dispatches.
 #[test]
 fn coalesced_addressed_work_receives_one_status_reminder() {
+    assert_eq!(
+        STATUS_REMINDER,
+        "Reminder: call `status` tool when starting new task; batch it with other calls if possible."
+    );
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -28254,11 +28260,7 @@ fn coalesced_addressed_work_receives_one_status_reminder() {
         h.agents[&cid]
             .pending_prompts
             .iter()
-            .filter(|prompt| {
-                prompt
-                    .text
-                    .starts_with("Reminder: acknowledge meaningful user-level work")
-            })
+            .filter(|prompt| { prompt.text == STATUS_REMINDER })
             .count(),
         1,
         "same activation must retain exactly one reminder"

@@ -234,7 +234,7 @@ fn dispatch_uncertain_scenario() -> ScenarioV2 {
                         user_text: "start the held deterministic worker".to_owned(),
                         call_id: "s5-agent-start".into(),
                         prompt: WORKER_PROMPT.to_owned(),
-                        role: Some("deterministic-worker".to_owned()),
+                        role: "deterministic-worker".to_owned(),
                         task_name: "deterministic worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {

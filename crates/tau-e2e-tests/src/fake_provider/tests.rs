@@ -1255,7 +1255,7 @@ fn agent_start_scenario() -> ScenarioV2 {
                     user_text: "start".to_owned(),
                     call_id: "call".into(),
                     prompt: "work".to_owned(),
-                    role: Some("worker".to_owned()),
+                    role: "worker".to_owned(),
                     task_name: "worker task".to_owned(),
                 },
                 ScenarioActionV2::AgentStartResult {

@@ -198,7 +198,7 @@ fn s4_scenario() -> ScenarioV2 {
                         user_text: "start worker alpha".to_owned(),
                         call_id: "s4-start-alpha".into(),
                         prompt: ALPHA_INSTRUCTION.to_owned(),
-                        role: Some(ALPHA_ROLE.to_owned()),
+                        role: ALPHA_ROLE.to_owned(),
                         task_name: ALPHA_NAME.to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
@@ -211,7 +211,7 @@ fn s4_scenario() -> ScenarioV2 {
                         user_text: "start worker beta".to_owned(),
                         call_id: "s4-start-beta".into(),
                         prompt: BETA_INSTRUCTION.to_owned(),
-                        role: Some(BETA_ROLE.to_owned()),
+                        role: BETA_ROLE.to_owned(),
                         task_name: BETA_NAME.to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {

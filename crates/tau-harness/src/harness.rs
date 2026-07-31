@@ -101,6 +101,10 @@ use crate::harness::extension_data::{
     run_extension_data_delete_file, run_extension_data_list_files, run_extension_data_read_file,
     run_extension_data_rename_file, run_extension_data_write_file,
 };
+
+/// Model-visible reminder to report meaningful work through the status tool.
+pub(crate) const STATUS_REMINDER: &str =
+    "Reminder: call `status` tool when starting new task; batch it with other calls if possible.";
 #[cfg(test)]
 use crate::harness::extension_data::{
     append_extension_data_file, atomic_replace_extension_data_file, checked_extension_data_path,
@@ -27308,10 +27312,9 @@ impl Harness {
         if !agent.work_status.mark_ack_notice_delivered() {
             return;
         }
-        agent.pending_prompts.push_back(PendingPrompt::internal(
-            "Reminder: acknowledge meaningful user-level work with `status`; batch it with other independent tool calls when possible."
-                .to_owned(),
-        ));
+        agent
+            .pending_prompts
+            .push_back(PendingPrompt::internal(STATUS_REMINDER.to_owned()));
     }
 
     /// Return addressed work already selected to share the next continuation.

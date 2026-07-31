@@ -138,7 +138,7 @@ Keep the fake provider closed and data-driven:
   generated role/model/tool configuration before spawning processes.
 - Add a closed adjacent V2 `AgentStartCall`/`AgentStartResult` pair.
   `AgentStartCall` matches exact user text and emits only the built-in
-  `agent_start` tool with exact instruction, optional role, task name, and call
+  `agent_start` tool with exact instruction, required role, task name, and call
   ID. `AgentStartResult` accepts only the correlated successful result,
   validates harness-minted `self_agent_id` and `sub_agent_id`, and emits its
   configured terminal response.

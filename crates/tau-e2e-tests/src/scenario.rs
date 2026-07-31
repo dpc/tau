@@ -93,8 +93,8 @@ pub enum ScenarioActionV2 {
         call_id: ToolCallId,
         /// Exact self-contained child prompt.
         prompt: String,
-        /// Optional exact child role.
-        role: Option<String>,
+        /// Exact child role.
+        role: String,
         /// Exact user-visible child task name.
         task_name: String,
     },

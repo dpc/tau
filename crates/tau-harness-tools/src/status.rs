@@ -20,7 +20,7 @@ pub(crate) fn tool_spec() -> ToolSpec {
             "type": "object",
             "properties": {
                 "state": {"type":"string","enum":["working","done","blocked"]},
-                "task_name": {"type":"string","description":"Short user-visible label for the current task (a few words; 160 UTF-8 bytes maximum)."}
+                "task_name": {"type":"string","description":"Short user-visible label for the current task (a few words)."}
             },
             "required": ["state", "task_name"],
             "additionalProperties": false

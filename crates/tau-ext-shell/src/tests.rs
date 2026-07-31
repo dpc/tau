@@ -2766,6 +2766,12 @@ fn workdir_schema_keeps_path_optional() {
         .into_iter()
         .find(|tool| tool.name.as_str() == WORKDIR_TOOL_NAME)
         .expect("workdir tool");
+    assert_eq!(
+        tool.description.as_deref(),
+        Some(
+            "Read or change your durable workdir. Omit `path` to read the current path and availability. A provided path is resolved from the last committed workdir, validated, canonicalized, and persisted. Do not combine a workdir change with shell or filesystem calls that rely on the new directory."
+        )
+    );
     let parameters = tool.parameters.expect("workdir parameters");
     assert!(parameters.get("required").is_none());
     assert_eq!(parameters["properties"]["path"]["type"], "string");

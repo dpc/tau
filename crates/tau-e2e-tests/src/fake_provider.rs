@@ -1511,13 +1511,11 @@ impl FakeState {
                 task_name,
                 ..
             } => {
-                let mut fields = vec![
+                let fields = vec![
                     ("task_name", CborValue::Text(task_name)),
                     ("prompt", CborValue::Text(child_prompt)),
+                    ("role", CborValue::Text(role)),
                 ];
-                if let Some(role) = role {
-                    fields.push(("role", CborValue::Text(role)));
-                }
                 emit_tool_call(handle, prompt, call_id, "agent_start", cbor_map(fields))
             }
             ScenarioActionV2::AgentWatchCall { call_id, .. } => {
@@ -2195,14 +2193,14 @@ fn agent_start_parameters() -> serde_json::Value {
             },
             "prompt": {
                 "type": "string",
-                "description": "Self-contained task for the sub-agent."
+                "description": "Initial prompt for the sub-agent."
             },
             "role": {
                 "type": "string",
-                "description": "Optional sub-agent role to use."
+                "description": "Sub-agent role to use."
             }
         },
-        "required": ["task_name", "prompt"],
+        "required": ["task_name", "prompt", "role"],
         "additionalProperties": false
     })
 }

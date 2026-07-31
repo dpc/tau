@@ -143,7 +143,7 @@ fn production_worker_scenario(name: &str, prefix: &str) -> ScenarioV2 {
                         user_text: "start the deterministic worker".to_owned(),
                         call_id: format!("{prefix}-agent-start").into(),
                         prompt: WORKER_PROMPT.to_owned(),
-                        role: Some("deterministic-worker".to_owned()),
+                        role: "deterministic-worker".to_owned(),
                         task_name: "deterministic worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
@@ -288,7 +288,7 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
                             user_text: "start the deterministic worker".to_owned(),
                             call_id: "s2-agent-start".into(),
                             prompt: WORKER_PROMPT.to_owned(),
-                            role: Some("deterministic-worker".to_owned()),
+                            role: "deterministic-worker".to_owned(),
                             task_name: "deterministic worker".to_owned(),
                         },
                         ScenarioActionV2::AgentStartResult {
