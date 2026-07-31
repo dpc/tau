@@ -10,7 +10,7 @@ use crate::{list_agents as path_crate_list_agents, theme as path_crate_theme};
 
 #[cfg(test)]
 mod agent_picker_tests;
-mod cold_attach_stager;
+pub(crate) mod cold_attach_stager;
 #[cfg(test)]
 mod event_message_tests;
 #[cfg(test)]
@@ -785,8 +785,12 @@ fn enqueue_remote_delivery(
 ) -> bool {
     let delivery_id = delivery.delivery_id;
     let queue_bytes = delivery.queue_bytes;
+    let standalone_shell_terminal = delivery.standalone_shell_terminal;
+    let abandoned_shell_starts = delivery.abandoned_shell_starts;
     let cmd = RendererCmd::Remote {
         event: Box::new(delivery.event),
+        standalone_shell_terminal,
+        abandoned_shell_starts,
         recorded_at: delivery.recorded_at,
         delivery_id,
         queue_bytes,
@@ -1243,6 +1247,8 @@ pub(crate) fn run_chat(
                     match cmd {
                         RendererCmd::Remote {
                             event,
+                            standalone_shell_terminal,
+                            abandoned_shell_starts,
                             recorded_at,
                             delivery_id,
                             queue_bytes,
@@ -1272,7 +1278,18 @@ pub(crate) fn run_chat(
                                     "renderer queue stalled"
                                 );
                             }
-                            renderer.handle_socket_delivery(&event, recorded_at, delivery_id);
+                            renderer.abandon_shell_starts(&abandoned_shell_starts);
+                            if standalone_shell_terminal
+                                && let Event::ShellCommandFinished(finished) = &*event
+                            {
+                                renderer.handle_standalone_socket_shell_finished(
+                                    finished,
+                                    recorded_at,
+                                    delivery_id,
+                                );
+                            } else {
+                                renderer.handle_socket_delivery(&event, recorded_at, delivery_id);
+                            }
                         }
                         RendererCmd::RemoteDisconnect {
                             reason,
@@ -1544,6 +1561,10 @@ enum RendererCmd {
     Remote {
         /// Typed payload interpreted by the event renderer.
         event: Box<Event>,
+        /// Whether a replayed shell terminal must bypass active-id correlation.
+        standalone_shell_terminal: bool,
+        /// Presentation-only shell starts disproved by the attach snapshot.
+        abandoned_shell_starts: Vec<cold_attach_stager::ShellStartPresentation>,
         /// Harness-provided observation time.
         recorded_at: UnixMicros,
         /// Process-local content-free stage correlation.

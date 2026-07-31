@@ -68,6 +68,21 @@ user-shell routes until process exit; it contains opaque harness-generated ids,
 not arbitrary peer ids. Ephemeral-agent suppression therefore applies to report
 and canonical payloads without trusting peer target fields.
 
+An attaching UI receives replay-marked current-state snapshots for at most 128
+pending routes in ascending public-command-id order, within a 64 KiB aggregate
+CBOR-encoded `UiShellCommand` payload budget. These snapshot bounds do not cap
+or reject live routing. A route exceeding the remaining byte
+budget is skipped while later smaller payloads remain eligible. One UI-only
+replay notice reports the total omitted count. Omitted routes continue normally,
+and their eventual live completion renders as a standalone terminal. The
+snapshot carries the public lifecycle id and
+canonical request identity, but no accumulated progress or output, so the UI can
+render one correlated running row and transition that row when the live
+completion arrives. This snapshot is directed UI catch-up, not semantic history;
+it does not make `!!`, progress chunks, or ephemeral routes durable.
+The omission notice is delivered only when the UI selected both
+`ui.shell_command` and `harness.notice`.
+
 This implements only the shell command report row of
 [SPEC-peer-event-publication](SPEC-peer-event-publication.md).
 It does not change UI command routing, the Action family, Tool-versus-Action/Core

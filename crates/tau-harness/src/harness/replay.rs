@@ -42,6 +42,11 @@ use crate::model::{
     thinking_summaries_for_model, verbosities_for_model,
 };
 
+/// Maximum running shell routes projected into one attach snapshot.
+const RUNNING_SHELL_SNAPSHOT_MAX_ITEMS: usize = 128;
+/// Maximum aggregate encoded `UiShellCommand` payload bytes in one snapshot.
+const RUNNING_SHELL_SNAPSHOT_MAX_BYTES: usize = 64 * 1024;
+
 /// Errors accumulated while replaying catch-up state for one subscriber.
 #[derive(Default)]
 struct ReplayOutcome {
@@ -126,8 +131,8 @@ impl Harness {
     }
 
     /// Catches one subscriber up on the bound session's content: the
-    /// loaded-agent roster, each agent's durable transcript facts as
-    /// replay-marked frames, and currently queued prompts.
+    /// loaded-agent roster, each agent's durable transcript facts, the bounded
+    /// UI-only running-shell current state, and currently queued prompts.
     ///
     /// Called from two places: subscribe-time catch-up (after the
     /// `SessionStarted` snapshot above) and session-init completion, where
@@ -313,12 +318,67 @@ impl Harness {
                 self.send_catch_up_event(client_id, None, event);
             }
         }
+        self.replay_running_shell_commands(client_id, selectors, is_ui);
         self.replay_active_queued_prompts(client_id, selectors);
         for agent_id in loaded_agents {
             let error = outcome.agent_error(&agent_id);
             self.emit_agent_replay_complete(client_id, agent_id, error);
         }
         outcome
+    }
+
+    /// Snapshot currently running user-shell lifecycles for one attaching UI.
+    ///
+    /// The canonical request is sufficient to create an empty correlated
+    /// running row. Progress chunks remain transient; the eventual live
+    /// completion updates this row by the same public command id.
+    ///
+    /// Exact `ui.shell_command` subscribers receive up to 128 accepted routes
+    /// in ascending public-id order within a 64 KiB aggregate CBOR payload
+    /// budget. Selection skips a route that exceeds the remaining budget
+    /// and continues with later ids. When anything is omitted, a UI that
+    /// also exactly subscribes to `harness.notice` receives one
+    /// replay-marked omission notice. This projection neither caps live
+    /// admission nor adds durable state.
+    fn replay_running_shell_commands(
+        &mut self,
+        client_id: &tau_proto::ConnectionId,
+        selectors: &[EventSelector],
+        is_ui: bool,
+    ) {
+        if !is_ui {
+            return;
+        }
+        let wants_shell_snapshots = selectors.contains(&EventSelector::Exact(
+            tau_proto::EventName::UI_SHELL_COMMAND,
+        ));
+        if !wants_shell_snapshots {
+            return;
+        }
+        let (commands, omitted) = bounded_running_shell_snapshot(
+            self.pending_ui_shell_commands
+                .values()
+                .map(|pending| &pending.command),
+        );
+        for command in commands {
+            let event = Event::UiShellCommand(command);
+            if selector_matches_event(selectors, &event) {
+                self.send_catch_up_event(client_id, None, event);
+            }
+        }
+        if omitted != 0 {
+            let notice = Event::HarnessNotice(tau_proto::HarnessNotice {
+                kind: tau_proto::notice_kind::HARNESS_SHELL_SNAPSHOT_OMITTED.to_owned(),
+                message: format!(
+                    "running shell snapshot omitted {omitted} route(s) because attach catch-up is bounded"
+                ),
+                level: tau_proto::NoticeLevel::Warning,
+                always_show: true,
+            });
+            if selectors.contains(&EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)) {
+                self.send_catch_up_event(client_id, None, notice);
+            }
+        }
     }
 
     /// Catches up every already-subscribed peer when session init completes.
@@ -842,6 +902,32 @@ impl Harness {
             self.send_catch_up_event(client_id, None, thinking_levels_event);
         }
     }
+}
+
+/// Select one deterministic bounded running-shell snapshot.
+fn bounded_running_shell_snapshot<'a>(
+    commands: impl Iterator<Item = &'a tau_proto::UiShellCommand>,
+) -> (Vec<tau_proto::UiShellCommand>, usize) {
+    let mut candidates = commands.collect::<Vec<_>>();
+    candidates.sort_unstable_by(|left, right| left.command_id.cmp(&right.command_id));
+    let total = candidates.len();
+    let mut encoded_bytes = 0usize;
+    let commands = candidates
+        .into_iter()
+        .filter_map(|command| {
+            let mut encoded = Vec::new();
+            ciborium::into_writer(command, &mut encoded).ok()?;
+            let next_bytes = encoded_bytes.saturating_add(encoded.len());
+            if RUNNING_SHELL_SNAPSHOT_MAX_BYTES < next_bytes {
+                return None;
+            }
+            encoded_bytes = next_bytes;
+            Some(command.clone())
+        })
+        .take(RUNNING_SHELL_SNAPSHOT_MAX_ITEMS)
+        .collect::<Vec<_>>();
+    let omitted = total.saturating_sub(commands.len());
+    (commands, omitted)
 }
 
 fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {

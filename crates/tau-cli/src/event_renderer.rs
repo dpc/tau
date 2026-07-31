@@ -20,6 +20,7 @@ use tau_proto::{
 use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
 use crate::agent_navigation::AgentNavigation;
+use crate::chat::cold_attach_stager::ShellStartPresentation;
 use crate::chat::{DraftSlot, invalidate_pending_draft, retarget_prompt_draft_snapshot};
 use crate::markdown_render::{
     MarkdownStreamCache, markdown_block_with_osc8, markdown_prefixed_block_with_osc8,
@@ -331,6 +332,9 @@ pub(crate) struct EventRenderer {
     /// Updated in place as progress chunks arrive, finalized on
     /// `ShellCommandFinished`.
     shell_blocks: HashMap<String, ShellBlockState>,
+    /// Synchronous marker for a historical terminal that must not consume a
+    /// current lifecycle with the same public id.
+    standalone_shell_terminals: HashSet<String>,
     /// Live extension lifecycle blocks keyed by instance_id. Shown in
     /// above_active while starting, then completed in the same transcript
     /// snapshot that originally owned the starting block.
@@ -1554,6 +1558,7 @@ impl EventRenderer {
             tool_calls: HashMap::new(),
             tool_timer: None,
             shell_blocks: HashMap::new(),
+            standalone_shell_terminals: HashSet::new(),
             extension_blocks: HashMap::new(),
             action_invocation_owners: HashMap::new(),
             ready_extensions: HashSet::new(),
@@ -6919,6 +6924,20 @@ impl EventRenderer {
     }
 
     fn handle_shell_command_finished(&mut self, finished: &tau_proto::ShellCommandFinished) {
+        if self
+            .standalone_shell_terminals
+            .remove(finished.command_id.as_str())
+        {
+            let suffix = Self::shell_finished_suffix(finished, finished.include_in_context);
+            let block = render_shell_block(
+                &self.theme,
+                &finished.command,
+                &finished.output,
+                Some(&suffix),
+            );
+            self.handle.print_output("shell-finished", block);
+            return;
+        }
         let include_in_context =
             if let Some(state) = self.shell_blocks.remove(finished.command_id.as_str()) {
                 // Use the final, post-truncation output from the extension rather
@@ -6940,6 +6959,100 @@ impl EventRenderer {
         );
         self.handle.print_output("shell-finished", block);
         self.shell_agents.remove(finished.command_id.as_str());
+    }
+
+    /// Route one historical shell terminal normally while bypassing active-id
+    /// correlation for this synchronous delivery only.
+    pub(crate) fn handle_standalone_socket_shell_finished(
+        &mut self,
+        finished: &tau_proto::ShellCommandFinished,
+        recorded_at: UnixMicros,
+        delivery_id: u64,
+    ) {
+        let event = Event::ShellCommandFinished(finished.clone());
+        self.standalone_shell_terminals
+            .insert(finished.command_id.to_string());
+        self.learn_agent_metadata(&event);
+        tracing::trace!(
+            target: "tau_cli::frontend_progress",
+            delivery_id,
+            event = %event.name(),
+            "routing standalone historical shell terminal"
+        );
+        if let Some(target) = finished.target_agent_id.as_ref()
+            && self.displayed_agent_id.as_deref() != Some(target.as_str())
+        {
+            self.handle_recorded_at_for_hidden_agent(&event, recorded_at, target.to_string());
+        } else {
+            self.handle_recorded_at_for_visible_agent(&event, recorded_at);
+        }
+        self.update_agent_in_progress();
+    }
+
+    /// Remove starts shown before catch-up that the authoritative running-route
+    /// snapshot did not confirm.
+    pub(crate) fn abandon_shell_starts(&mut self, starts: &[ShellStartPresentation]) {
+        for start in starts {
+            let command_id = &start.command_id;
+            for pending in self.pending_initial_discovery.values_mut() {
+                pending.retain(|(event, _)| {
+                    !matches!(
+                        event,
+                        Event::UiShellCommand(command)
+                            if command.command_id == *command_id
+                                && command.target_agent_id == start.target_agent_id
+                    )
+                });
+            }
+            if start.target_agent_id.is_none() {
+                let agent_ids = self.agents_ui_state.keys().cloned().collect::<Vec<_>>();
+                for agent_id in agent_ids {
+                    if let Some(mut state) = self.agents_ui_state.remove(&agent_id) {
+                        if let Some(shell) = state.shell_blocks.remove(command_id.as_str()) {
+                            self.handle
+                                .select_detached(std::mem::take(&mut state.output));
+                            self.handle.remove_block(shell.block_id);
+                            state.output = self.handle.take_detached();
+                        }
+                        self.agents_ui_state.insert(agent_id, state);
+                    }
+                }
+                let mut no_agent = std::mem::take(&mut self.no_agent_ui_state);
+                if let Some(shell) = no_agent.shell_blocks.remove(command_id.as_str()) {
+                    self.handle
+                        .select_detached(std::mem::take(&mut no_agent.output));
+                    self.handle.remove_block(shell.block_id);
+                    no_agent.output = self.handle.take_detached();
+                }
+                self.no_agent_ui_state = no_agent;
+            }
+            if start
+                .target_agent_id
+                .as_ref()
+                .is_some_and(|target| self.displayed_agent_id.as_deref() != Some(target.as_str()))
+            {
+                if let Some(target) = start.target_agent_id.as_ref()
+                    && let Some(mut state) = self.agents_ui_state.remove(target.as_str())
+                {
+                    if let Some(shell) = state.shell_blocks.remove(command_id.as_str()) {
+                        self.handle
+                            .select_detached(std::mem::take(&mut state.output));
+                        self.handle.remove_block(shell.block_id);
+                        state.output = self.handle.take_detached();
+                    }
+                    self.agents_ui_state.insert(target.to_string(), state);
+                }
+                self.shell_agents.remove(command_id.as_str());
+                continue;
+            }
+            if let Some(state) = self.shell_blocks.remove(command_id.as_str()) {
+                self.handle.remove_block(state.block_id);
+            }
+            self.shell_agents.remove(command_id.as_str());
+        }
+        if !starts.is_empty() {
+            self.handle.redraw();
+        }
     }
 
     fn shell_finished_suffix(

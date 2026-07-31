@@ -1,5 +1,105 @@
 use super::*;
 
+/// Builds one current user-shell command for bounded snapshot selection.
+fn snapshot_shell(id: &str, command: String) -> tau_proto::UiShellCommand {
+    tau_proto::UiShellCommand {
+        session_id: tau_proto::SessionId::parse("snapshot-session").expect("session id"),
+        command_id: tau_proto::ShellCommandId::parse(id).expect("command id"),
+        command,
+        include_in_context: true,
+        target_agent_id: Some(crate::parse_agent_id("snapshot-agent")),
+    }
+}
+
+/// Snapshot item selection is bounded and deterministic regardless of map
+/// order.
+#[test]
+fn running_shell_snapshot_selects_first_128_public_ids() {
+    let commands = (0..129)
+        .rev()
+        .map(|index| snapshot_shell(&format!("shell-{index:03}"), "x".to_owned()))
+        .collect::<Vec<_>>();
+
+    let (selected, omitted) = bounded_running_shell_snapshot(commands.iter());
+
+    assert_eq!(selected.len(), 128);
+    assert_eq!(omitted, 1);
+    assert_eq!(selected[0].command_id.as_str(), "shell-000");
+    assert_eq!(selected[127].command_id.as_str(), "shell-127");
+}
+
+/// An oversized earlier payload is skipped without starving a later small
+/// route.
+#[test]
+fn running_shell_snapshot_skips_over_budget_route_and_continues() {
+    let commands = vec![
+        snapshot_shell("shell-a", "a".repeat(40 * 1024)),
+        snapshot_shell("shell-b", "b".repeat(40 * 1024)),
+        snapshot_shell("shell-c", "small".to_owned()),
+    ];
+
+    let (selected, omitted) = bounded_running_shell_snapshot(commands.iter());
+
+    assert_eq!(omitted, 1);
+    assert_eq!(
+        selected
+            .iter()
+            .map(|command| command.command_id.as_str())
+            .collect::<Vec<_>>(),
+        ["shell-a", "shell-c"]
+    );
+}
+
+/// Candidate scanning continues beyond the 128th public id when an earlier
+/// oversized route cannot consume an accepted snapshot slot.
+#[test]
+fn running_shell_snapshot_counts_accepted_not_examined_routes() {
+    let mut commands = (1..=127)
+        .map(|index| snapshot_shell(&format!("shell-{index:03}"), "x".to_owned()))
+        .collect::<Vec<_>>();
+    commands.push(snapshot_shell("shell-000", "x".repeat(65 * 1024)));
+    commands.push(snapshot_shell("shell-129", "last".to_owned()));
+
+    let (selected, omitted) = bounded_running_shell_snapshot(commands.iter());
+
+    assert_eq!(selected.len(), 128);
+    assert_eq!(omitted, 1);
+    assert_eq!(selected[0].command_id.as_str(), "shell-001");
+    assert_eq!(selected[127].command_id.as_str(), "shell-129");
+}
+
+/// The aggregate budget admits an exactly 64 KiB CBOR payload and rejects the
+/// first byte beyond it.
+#[test]
+fn running_shell_snapshot_enforces_exact_cbor_byte_boundary() {
+    let probe = snapshot_shell("shell-boundary", "x".repeat(60 * 1024));
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&probe, &mut encoded).expect("encode probe");
+    let overhead = encoded.len() - probe.command.len();
+    let exact = snapshot_shell(
+        "shell-boundary",
+        "x".repeat(RUNNING_SHELL_SNAPSHOT_MAX_BYTES - overhead),
+    );
+    let over = snapshot_shell(
+        "shell-boundary",
+        "x".repeat(RUNNING_SHELL_SNAPSHOT_MAX_BYTES - overhead + 1),
+    );
+    let mut exact_encoded = Vec::new();
+    ciborium::into_writer(&exact, &mut exact_encoded).expect("encode exact fixture");
+    let mut over_encoded = Vec::new();
+    ciborium::into_writer(&over, &mut over_encoded).expect("encode over-budget fixture");
+
+    assert_eq!(exact_encoded.len(), RUNNING_SHELL_SNAPSHOT_MAX_BYTES);
+    assert_eq!(over_encoded.len(), RUNNING_SHELL_SNAPSHOT_MAX_BYTES + 1);
+
+    let (selected, omitted) = bounded_running_shell_snapshot([&exact].into_iter());
+    assert_eq!(selected, [exact]);
+    assert_eq!(omitted, 0);
+    let (selected, omitted) = bounded_running_shell_snapshot([&over].into_iter());
+    assert!(selected.is_empty());
+    assert_eq!(omitted, 1);
+}
+
 /// Accepted manual-compaction work is a durable user-visible lifecycle
 /// fact, so late subscribers must receive it before a matching
 /// transaction start.

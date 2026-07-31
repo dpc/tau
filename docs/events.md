@@ -695,7 +695,18 @@ intent.
   their corresponding lists, including with empty lists.
 - **`ui.shell_command`** — User submitted a `!` (in-context) or `!!`
   (UI-only) shell command. Carries command id, command, session id,
-  `include_in_context` flag.
+  `include_in_context` flag. On attach, a UI may receive replay-marked
+  current-state snapshots for at most 128 routes in ascending public-id order
+  and within a 64 KiB aggregate CBOR-encoded-payload budget. These snapshot
+  bounds do not cap or reject live routing. A route exceeding the
+  remaining byte budget is skipped while later smaller routes remain eligible;
+  one UI-only replay notice reports the omitted count.
+  The notice requires exact subscriptions to both `ui.shell_command` and
+  `harness.notice`. Omitted routes continue live, and their completion renders
+  as a standalone terminal.
+  Snapshots carry no progress or output and remain UI-only and non-durable,
+  including for `!!` and ephemeral targets; the later live completion settles
+  the same correlated row.
 - **`ui.switch_session`** — User wants to switch to a different session
   in the same daemon, with `new`/`resume` reason.
 - **`ui.create_agent`** — UI requests creation of a user-owned agent, optionally

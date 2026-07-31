@@ -123,6 +123,8 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
     let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
     remote_tx
         .send(RendererCmd::Remote {
+            abandoned_shell_starts: Vec::new(),
+            standalone_shell_terminal: false,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(1),
             delivery_id: 1,
@@ -154,7 +156,11 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
     let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_millis(10)),
-        Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        Ok(RendererCmd::Remote {
+            standalone_shell_terminal: false,
+            delivery_id: 1,
+            ..
+        })
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_millis(10)),
@@ -190,6 +196,8 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
         .expect("local selection");
     remote_tx
         .send(RendererCmd::Remote {
+            abandoned_shell_starts: Vec::new(),
+            standalone_shell_terminal: false,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(1),
             delivery_id: 1,
@@ -202,7 +210,11 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
     let mut next = || scheduler.recv_timeout(Duration::from_millis(10));
     assert!(matches!(
         next(),
-        Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        Ok(RendererCmd::Remote {
+            standalone_shell_terminal: false,
+            delivery_id: 1,
+            ..
+        })
     ));
     assert!(matches!(
         next(),
@@ -221,6 +233,8 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
     let (local_tx, local_rx) = LocalRendererSender::channel(admitted, arbiter.clone());
     remote_tx
         .send(RendererCmd::Remote {
+            abandoned_shell_starts: Vec::new(),
+            standalone_shell_terminal: false,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(1),
             delivery_id: 1,
@@ -255,7 +269,11 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
     };
     assert!(matches!(
         scheduler.recv_timeout_after_local_check(Duration::from_secs(1), &mut after_local_check),
-        Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        Ok(RendererCmd::Remote {
+            standalone_shell_terminal: false,
+            delivery_id: 1,
+            ..
+        })
     ));
     done_rx
         .recv_timeout(Duration::from_secs(1))
@@ -277,6 +295,8 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
     let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
     remote_tx
         .send(RendererCmd::Remote {
+            abandoned_shell_starts: Vec::new(),
+            standalone_shell_terminal: false,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(1),
             delivery_id: 1,
@@ -294,6 +314,8 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
     admitted.store(2, Ordering::Release);
     remote_tx
         .send(RendererCmd::Remote {
+            abandoned_shell_starts: Vec::new(),
+            standalone_shell_terminal: false,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(2),
             delivery_id: 2,
@@ -306,12 +328,20 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
     let mut next = || scheduler.recv_timeout(Duration::from_millis(10));
     assert!(matches!(
         next(),
-        Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        Ok(RendererCmd::Remote {
+            standalone_shell_terminal: false,
+            delivery_id: 1,
+            ..
+        })
     ));
     assert!(matches!(next(), Ok(RendererCmd::ActionInvoked { .. })));
     assert!(matches!(
         next(),
-        Ok(RendererCmd::Remote { delivery_id: 2, .. })
+        Ok(RendererCmd::Remote {
+            standalone_shell_terminal: false,
+            delivery_id: 2,
+            ..
+        })
     ));
 }
 
@@ -330,6 +360,8 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
         admitted.store(delivery_id, Ordering::Release);
         remote_tx
             .send(RendererCmd::Remote {
+                abandoned_shell_starts: Vec::new(),
+                standalone_shell_terminal: false,
                 event: Box::new(Event::TermBell(tau_proto::TermBell {})),
                 recorded_at: UnixMicros::new(delivery_id),
                 delivery_id,
@@ -343,16 +375,28 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
     let mut next = || scheduler.recv_timeout(Duration::from_millis(10));
     assert!(matches!(
         next(),
-        Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        Ok(RendererCmd::Remote {
+            standalone_shell_terminal: false,
+            delivery_id: 1,
+            ..
+        })
     ));
     assert!(matches!(
         next(),
-        Ok(RendererCmd::Remote { delivery_id: 2, .. })
+        Ok(RendererCmd::Remote {
+            standalone_shell_terminal: false,
+            delivery_id: 2,
+            ..
+        })
     ));
     assert!(matches!(next(), Ok(RendererCmd::ClearSelectedAgent)));
     assert!(matches!(
         next(),
-        Ok(RendererCmd::Remote { delivery_id: 3, .. })
+        Ok(RendererCmd::Remote {
+            standalone_shell_terminal: false,
+            delivery_id: 3,
+            ..
+        })
     ));
 }
 
@@ -369,6 +413,8 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
     let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
     remote_tx
         .send(RendererCmd::Remote {
+            abandoned_shell_starts: Vec::new(),
+            standalone_shell_terminal: false,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(1),
             delivery_id: 1,
@@ -389,6 +435,8 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
         }
         remote_tx
             .send(RendererCmd::Remote {
+                abandoned_shell_starts: Vec::new(),
+                standalone_shell_terminal: false,
                 event: Box::new(Event::TermBell(tau_proto::TermBell {})),
                 recorded_at: UnixMicros::new(2),
                 delivery_id: 2,
@@ -411,7 +459,11 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
         scheduler
             .recv_timeout(Duration::from_millis(10))
             .expect("admitted remote prefix"),
-        RendererCmd::Remote { delivery_id: 1, .. }
+        RendererCmd::Remote {
+            standalone_shell_terminal: false,
+            delivery_id: 1,
+            ..
+        }
     ));
     let selection = scheduler
         .recv_timeout(Duration::from_millis(10))
@@ -468,7 +520,11 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
         scheduler
             .recv_timeout(Duration::from_secs(1))
             .expect("later remote arrival"),
-        RendererCmd::Remote { delivery_id: 2, .. }
+        RendererCmd::Remote {
+            standalone_shell_terminal: false,
+            delivery_id: 2,
+            ..
+        }
     ));
     assert_eq!(budget.release(1), 0);
 }

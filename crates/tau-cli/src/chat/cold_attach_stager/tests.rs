@@ -4,7 +4,7 @@ use tau_proto::{Event, UnixMicros};
 
 use super::{
     ColdAttachStager, RENDERER_QUEUE_MAX_BYTES, RENDERER_QUEUE_MAX_ITEMS, RendererDelivery,
-    renderer_event_from_delivery,
+    ShellStartPresentation, renderer_event_from_delivery,
 };
 
 /// Builds one plain replayable transcript prompt.
@@ -23,12 +23,98 @@ fn historical_prompt(text: &str) -> Event {
 /// Wraps a replay event with deterministic queue metadata.
 fn replay(event: Event, queue_bytes: usize, delivery_id: u64) -> RendererDelivery {
     RendererDelivery {
+        abandoned_shell_starts: Vec::new(),
         event,
         replay: true,
         recorded_at: UnixMicros::new(1),
         queue_bytes,
         delivery_id,
+        standalone_shell_terminal: false,
     }
+}
+
+/// Wraps a live event with deterministic queue metadata.
+fn live(event: Event, delivery_id: u64) -> RendererDelivery {
+    RendererDelivery {
+        abandoned_shell_starts: Vec::new(),
+        event,
+        replay: false,
+        recorded_at: UnixMicros::new(2),
+        queue_bytes: 1,
+        delivery_id,
+        standalone_shell_terminal: false,
+    }
+}
+
+/// Builds one correlated user-shell start.
+fn shell_start() -> Event {
+    Event::UiShellCommand(tau_proto::UiShellCommand {
+        session_id: "session-1".parse().expect("valid session id"),
+        command_id: tau_proto::ShellCommandId::parse("shell-1").expect("valid command id"),
+        command: "fixture-block".to_owned(),
+        include_in_context: true,
+        target_agent_id: Some("agent-1".parse().expect("valid agent id")),
+    })
+}
+
+/// Live starts observed before Subscribe win over the replay snapshot, and the
+/// terminal releases the bounded correlation entry for a future lifecycle.
+#[test]
+fn deduplicates_live_shell_start_before_replay_snapshot() {
+    let mut stager = ColdAttachStager::staging();
+    assert_eq!(stager.admit(live(shell_start(), 1)).len(), 1);
+
+    let finished = Event::ShellCommandFinished(tau_proto::ShellCommandFinished {
+        command_id: tau_proto::ShellCommandId::parse("shell-1").expect("valid command id"),
+        session_id: "session-1".parse().expect("valid session id"),
+        command: "fixture-block".to_owned(),
+        include_in_context: true,
+        target_agent_id: Some("agent-1".parse().expect("valid agent id")),
+        output: "done".to_owned(),
+        exit_code: None,
+        cancelled: true,
+    });
+    let historical = stager.admit(replay(finished.clone(), 1, 2));
+    assert!(matches!(
+        historical.as_slice(),
+        [RendererDelivery {
+            event: Event::ShellCommandFinished(old),
+            ..
+        }] if old.command_id.as_str() == "shell-1"
+            && old.command == "fixture-block"
+            && old.cancelled
+    ));
+    assert!(historical[0].standalone_shell_terminal);
+    assert!(stager.admit(replay(shell_start(), 1, 3)).is_empty());
+
+    assert_eq!(stager.admit(live(finished, 3)).len(), 1);
+    assert_eq!(stager.admit(live(shell_start(), 4)).len(), 1);
+}
+
+/// Replay completion explicitly abandons a pre-boundary start that the running
+/// snapshot did not confirm, so a completed `!!` cannot leave an orphan row.
+#[test]
+fn replay_boundary_abandons_unconfirmed_shell_start() {
+    let mut stager = ColdAttachStager::pass_through();
+    assert_eq!(stager.admit(live(shell_start(), 1)).len(), 1);
+    let boundary = Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        session_id: "session-1".parse().expect("valid session id"),
+        error: None,
+    });
+
+    let ready = stager.admit(replay(boundary, 1, 2));
+
+    assert!(matches!(
+        ready.as_slice(),
+        [delivery]
+            if delivery.abandoned_shell_starts
+                == [ShellStartPresentation {
+                    command_id: tau_proto::ShellCommandId::parse("shell-1")
+                        .expect("valid command id"),
+                    target_agent_id: Some("agent-1".parse().expect("valid agent id")),
+                }]
+    ));
+    assert_eq!(stager.admit(live(shell_start(), 3)).len(), 1);
 }
 
 /// Replayed terminal-output events must never repeat old terminal side effects.
@@ -94,11 +180,13 @@ fn places_state_before_history_and_live_after_boundary() {
     });
     let live = Event::TermBell(tau_proto::TermBell {});
     let delivery = |event, replay, delivery_id| RendererDelivery {
+        abandoned_shell_starts: Vec::new(),
         event,
         replay,
         recorded_at: UnixMicros::new(1),
         queue_bytes: 1,
         delivery_id,
+        standalone_shell_terminal: false,
     };
     let mut stager = ColdAttachStager::staging();
 
@@ -126,11 +214,13 @@ fn drains_history_before_disconnect() {
     assert!(
         stager
             .admit(RendererDelivery {
+                abandoned_shell_starts: Vec::new(),
                 event: event.clone(),
                 replay: true,
                 recorded_at: UnixMicros::new(1),
                 queue_bytes: 2,
                 delivery_id: 9,
+                standalone_shell_terminal: false,
             })
             .is_empty()
     );

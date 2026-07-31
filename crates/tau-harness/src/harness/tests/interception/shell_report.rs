@@ -252,6 +252,197 @@ fn ui_only_terminal_completion_does_not_enter_target_journal() {
     );
 }
 
+/// Attach catch-up snapshots one empty running lifecycle and the live terminal
+/// settles that same public command id once without replaying progress history.
+#[test]
+fn late_ui_snapshots_running_shell_then_receives_one_live_completion() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (command, route_id) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-late-ui",
+        true,
+    );
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(progress_report(
+                &route_id,
+                command.target_agent_id.clone(),
+                "transient chunk",
+            )),
+        )
+        .expect("commit transient progress");
+
+    let sink = connect_test_client(&mut harness, "late-shell-ui", tau_proto::ClientKind::Ui);
+    harness
+        .handle_client_event(
+            "late-shell-ui",
+            TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+                historical_selectors: vec![
+                    EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND),
+                    EventSelector::Prefix("shell.".to_owned()),
+                ],
+                live_selectors: vec![EventSelector::Prefix("shell.".to_owned())],
+            })),
+        )
+        .expect("subscribe late UI");
+
+    let replayed = sink
+        .lock()
+        .expect("sink")
+        .iter()
+        .filter_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Deliver(delivery) if delivery.replay => {
+                Some((*delivery.event).clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        replayed.as_slice(),
+        [Event::UiShellCommand(snapshot)]
+            if snapshot == &command
+    ));
+
+    harness
+        .handle_extension_event(
+            "shell-owner",
+            TestProtocolItem::Event(finished_report(&route_id, &command, "completed")),
+        )
+        .expect("complete snapshotted shell");
+
+    let live_terminals = sink
+        .lock()
+        .expect("sink")
+        .iter()
+        .filter(|routed| {
+            matches!(
+                &routed.frame,
+                HarnessOutputMessage::Deliver(delivery)
+                    if !delivery.replay
+                        && matches!(&*delivery.event, Event::ShellCommandFinished(finished)
+                            if finished.command_id == command.command_id
+                                && finished.output == "completed")
+            )
+        })
+        .count();
+    assert_eq!(live_terminals, 1);
+}
+
+/// Live routing remains uncapped while UI catch-up projects a bounded,
+/// selector-sensitive current-state snapshot.
+#[test]
+fn running_shell_snapshot_bounds_only_attach_projection() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
+    let (first, _) = seed_routed_shell_command(
+        &mut harness,
+        "shell-owner",
+        tau_proto::ClientKind::Tool,
+        "shell-000",
+        false,
+    );
+    for index in 1..129 {
+        let mut command = first.clone();
+        command.command_id = test_shell_command_id(&format!("shell-{index:03}"));
+        harness.handle_ui_shell_command(&crate::test_connection_id("ui"), command);
+    }
+    assert_eq!(
+        harness.pending_ui_shell_commands.len(),
+        129,
+        "live route admission must not inherit the replay cap"
+    );
+
+    let cases = [
+        (
+            "snapshot-shell-notice",
+            tau_proto::ClientKind::Ui,
+            vec![
+                EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND),
+                EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE),
+            ],
+            128,
+            1,
+        ),
+        (
+            "snapshot-shell-only",
+            tau_proto::ClientKind::Ui,
+            vec![EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND)],
+            128,
+            0,
+        ),
+        (
+            "snapshot-notice-only",
+            tau_proto::ClientKind::Ui,
+            vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
+            0,
+            0,
+        ),
+        (
+            "snapshot-non-ui",
+            tau_proto::ClientKind::Tool,
+            vec![
+                EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND),
+                EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE),
+            ],
+            0,
+            0,
+        ),
+    ];
+    for (name, kind, selectors, expected_shells, expected_notices) in cases {
+        let sink = connect_test_client(&mut harness, name, kind);
+        harness
+            .handle_client_event(
+                name,
+                TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+                    historical_selectors: selectors,
+                    live_selectors: Vec::new(),
+                })),
+            )
+            .expect("subscribe snapshot client");
+        let sink = sink.lock().expect("sink");
+        let replayed = sink.iter().filter_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Deliver(delivery) if delivery.replay => {
+                Some(delivery.event.as_ref())
+            }
+            _ => None,
+        });
+        let shell_ids = replayed
+            .clone()
+            .filter_map(|event| match event {
+                Event::UiShellCommand(command) => Some(command.command_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let notices = replayed
+            .filter_map(|event| match event {
+                Event::HarnessNotice(notice)
+                    if notice.kind == tau_proto::notice_kind::HARNESS_SHELL_SNAPSHOT_OMITTED =>
+                {
+                    Some(notice)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(shell_ids.len(), expected_shells, "{name}");
+        if expected_shells != 0 {
+            assert_eq!(
+                shell_ids,
+                (0..128)
+                    .map(|index| format!("shell-{index:03}"))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(notices.len(), expected_notices, "{name}");
+        if let Some(notice) = notices.first() {
+            assert!(notice.message.contains("omitted 1 route(s)"));
+        }
+    }
+}
+
 /// A failed target-journal append still settles one live terminal while
 /// suppressing context injection, replay, leaked lifecycle state, and
 /// duplicates.

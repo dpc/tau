@@ -1,5 +1,7 @@
 //! Bounded presentation-only staging for explicit cold attachment.
 
+use std::collections::{HashMap, HashSet};
+
 use tau_proto::{Event, UnixMicros};
 
 use super::{RENDERER_QUEUE_MAX_BYTES, RENDERER_QUEUE_MAX_ITEMS};
@@ -7,8 +9,9 @@ use super::{RENDERER_QUEUE_MAX_BYTES, RENDERER_QUEUE_MAX_ITEMS};
 #[cfg(test)]
 mod tests;
 
-/// One decoded event retaining the delivery phase needed by cold-attach
-/// staging.
+/// One decoded event plus presentation actions derived from the replay
+/// boundary. The renderer applies abandonment before the event and uses the
+/// standalone flag only for the annotated historical terminal.
 pub(super) struct RendererDelivery {
     /// Typed payload interpreted by the event renderer.
     pub(super) event: Event,
@@ -20,18 +23,54 @@ pub(super) struct RendererDelivery {
     pub(super) queue_bytes: usize,
     /// Process-local correlation retained from socket decode through rendering.
     pub(super) delivery_id: u64,
+    /// Render a historical shell terminal without consuming an active
+    /// lifecycle.
+    pub(super) standalone_shell_terminal: bool,
+    /// Starts shown before catch-up but absent from its authoritative snapshot.
+    pub(super) abandoned_shell_starts: Vec<ShellStartPresentation>,
+}
+
+/// Presentation owner retained for a start that may need boundary cleanup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ShellStartPresentation {
+    /// Public lifecycle id.
+    pub(crate) command_id: tau_proto::ShellCommandId,
+    /// Canonical target when known.
+    pub(crate) target_agent_id: Option<tau_proto::AgentId>,
 }
 
 /// Current presentation behavior for incoming deliveries.
 enum StagingPhase {
     /// Plain replay transcript is retained behind current-state catch-up.
     Staging,
-    /// Deliveries pass directly through in protocol order.
+    /// Deliveries pass directly through in protocol order; shell reconciliation
+    /// remains independently active until replay completion.
     PassThrough,
 }
 
+/// Shell lifecycle reconciliation around one replay boundary.
+enum ShellReconciliation {
+    /// Record live/snapshot starts until replay completes.
+    Collecting {
+        /// Every start already admitted before the boundary.
+        starts: HashMap<tau_proto::ShellCommandId, Option<tau_proto::AgentId>>,
+        /// Starts confirmed by a current-state snapshot.
+        snapshotted: HashSet<tau_proto::ShellCommandId>,
+    },
+    /// Suppress queued duplicate starts, preserve historical terminals as
+    /// standalone, and retain each snapshot-confirmed id until its live
+    /// terminal settles it; disable reconciliation once no confirmed ids
+    /// remain.
+    Draining(HashSet<tau_proto::ShellCommandId>),
+    /// Preserve steady-state delivery without filtering.
+    Disabled,
+}
+
 /// Bounded UI-local staging that places cold-attach state before transcript
-/// rows.
+/// rows and reconciles duplicate shell-start observations.
+///
+/// A historical terminal that reuses an active id renders as a standalone old
+/// lifecycle without consuming the current row.
 pub(super) struct ColdAttachStager {
     /// Current presentation behavior.
     phase: StagingPhase,
@@ -40,6 +79,8 @@ pub(super) struct ColdAttachStager {
     transcript: Vec<RendererDelivery>,
     /// Bytes retained in `transcript`.
     transcript_bytes: usize,
+    /// Active public shell lifecycle ids already admitted to the renderer.
+    shell_reconciliation: ShellReconciliation,
 }
 
 impl ColdAttachStager {
@@ -49,6 +90,10 @@ impl ColdAttachStager {
             phase: StagingPhase::Staging,
             transcript: Vec::new(),
             transcript_bytes: 0,
+            shell_reconciliation: ShellReconciliation::Collecting {
+                starts: HashMap::new(),
+                snapshotted: HashSet::new(),
+            },
         }
     }
 
@@ -58,15 +103,70 @@ impl ColdAttachStager {
             phase: StagingPhase::PassThrough,
             transcript: Vec::new(),
             transcript_bytes: 0,
+            shell_reconciliation: ShellReconciliation::Collecting {
+                starts: HashMap::new(),
+                snapshotted: HashSet::new(),
+            },
         }
     }
 
     /// Admits one decoded delivery and returns deliveries ready for rendering.
-    pub(super) fn admit(&mut self, delivery: RendererDelivery) -> Vec<RendererDelivery> {
+    pub(super) fn admit(&mut self, mut delivery: RendererDelivery) -> Vec<RendererDelivery> {
+        let replay_complete = matches!(delivery.event, Event::SessionReplayComplete(_));
+        if replay_complete {
+            delivery.abandoned_shell_starts = self.finish_shell_reconciliation();
+        }
+        match (&mut self.shell_reconciliation, &delivery.event) {
+            (
+                ShellReconciliation::Collecting {
+                    starts,
+                    snapshotted,
+                },
+                Event::UiShellCommand(command),
+            ) => {
+                if delivery.replay {
+                    snapshotted.insert(command.command_id.clone());
+                }
+                let already_started = starts
+                    .insert(command.command_id.clone(), command.target_agent_id.clone())
+                    .is_some();
+                if already_started {
+                    return Vec::new();
+                }
+            }
+            (ShellReconciliation::Draining(starts), Event::UiShellCommand(command)) => {
+                if starts.contains(&command.command_id) {
+                    return Vec::new();
+                }
+            }
+            (
+                ShellReconciliation::Collecting { starts, .. },
+                Event::ShellCommandFinished(finished),
+            ) => {
+                if delivery.replay && starts.contains_key(&finished.command_id) {
+                    delivery.standalone_shell_terminal = true;
+                    return vec![delivery];
+                }
+                starts.remove(&finished.command_id);
+            }
+            (ShellReconciliation::Draining(starts), Event::ShellCommandFinished(finished)) => {
+                if delivery.replay && starts.contains(&finished.command_id) {
+                    delivery.standalone_shell_terminal = true;
+                    return vec![delivery];
+                }
+                starts.remove(&finished.command_id);
+                if starts.is_empty()
+                    && matches!(self.shell_reconciliation, ShellReconciliation::Draining(_))
+                {
+                    self.shell_reconciliation = ShellReconciliation::Disabled;
+                }
+            }
+            _ => {}
+        }
         if matches!(self.phase, StagingPhase::PassThrough) {
             return vec![delivery];
         }
-        if matches!(delivery.event, Event::SessionReplayComplete(_)) {
+        if replay_complete {
             return self.finish_staging(delivery);
         }
         if delivery.replay && is_tool_transcript_event(&delivery.event) {
@@ -92,11 +192,44 @@ impl ColdAttachStager {
         vec![delivery]
     }
 
-    /// Flushes retained transcript and permanently resumes protocol order.
+    /// Flushes retained transcript and permanently resumes protocol order
+    /// without ending the independent shell-reconciliation phase.
     fn finish_staging(&mut self, delivery: RendererDelivery) -> Vec<RendererDelivery> {
         let mut ready = self.finish();
         ready.push(delivery);
         ready
+    }
+
+    /// Close collection at replay completion while retaining only ids whose
+    /// already-queued duplicate start or live terminal still needs draining.
+    fn finish_shell_reconciliation(&mut self) -> Vec<ShellStartPresentation> {
+        let (next, abandoned) = match std::mem::replace(
+            &mut self.shell_reconciliation,
+            ShellReconciliation::Disabled,
+        ) {
+            ShellReconciliation::Collecting {
+                starts,
+                snapshotted,
+            } => {
+                let abandoned = starts
+                    .into_iter()
+                    .filter(|(command_id, _)| !snapshotted.contains(command_id))
+                    .map(|(command_id, target_agent_id)| ShellStartPresentation {
+                        command_id,
+                        target_agent_id,
+                    })
+                    .collect::<Vec<_>>();
+                let next = if snapshotted.is_empty() {
+                    ShellReconciliation::Disabled
+                } else {
+                    ShellReconciliation::Draining(snapshotted)
+                };
+                (next, abandoned)
+            }
+            _ => (ShellReconciliation::Disabled, Vec::new()),
+        };
+        self.shell_reconciliation = next;
+        abandoned
     }
 
     /// Ends staging and returns retained transcript in relative order.
@@ -158,5 +291,7 @@ pub(super) fn renderer_event_from_delivery(
         recorded_at: recorded_at.unwrap_or_else(UnixMicros::now),
         queue_bytes,
         delivery_id,
+        standalone_shell_terminal: false,
+        abandoned_shell_starts: Vec::new(),
     })
 }

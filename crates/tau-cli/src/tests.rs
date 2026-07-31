@@ -20,6 +20,7 @@ use tau_proto::{
 };
 
 use super::agent_navigation::AgentNavigationState;
+use super::chat::cold_attach_stager::ShellStartPresentation;
 use super::chat::{
     DraftSlot, custom_prompt_replacement, invalidate_pending_draft, is_known_static_command,
     leading_command_token, next_agent_cycle_selection, queue_prompt_draft_snapshot,
@@ -4918,6 +4919,117 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
     assert!(vt.screen_contains(90, "worker-output"));
+}
+
+/// Replay-boundary abandonment removes only the unconfirmed lifecycle from
+/// every renderer owner while preserving unrelated and current lifecycles.
+#[test]
+fn shell_replay_abandonment_covers_renderer_owners_and_collision() {
+    let command = |id: &str, text: &str, target: Option<&str>| {
+        Event::UiShellCommand(tau_proto::UiShellCommand {
+            session_id: test_session_id("s1"),
+            command_id: tau_proto::ShellCommandId::parse(id).expect("command id"),
+            command: text.to_owned(),
+            include_in_context: false,
+            target_agent_id: target.map(agent_id),
+        })
+    };
+    let abandoned = |id: &str, target: Option<&str>| ShellStartPresentation {
+        command_id: tau_proto::ShellCommandId::parse(id).expect("command id"),
+        target_agent_id: target.map(agent_id),
+    };
+
+    for (case, target, initially_selected, selected_after) in [
+        ("visible", Some("worker"), Some("worker"), Some("worker")),
+        ("hidden", Some("worker"), Some("main"), Some("worker")),
+        ("no-agent", None, None, None),
+    ] {
+        let (_term, handle, vt) = setup(100, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: test_session_id("s1"),
+            reason: tau_proto::SessionStartReason::Initial,
+        }));
+        if let Some(agent) = initially_selected {
+            renderer.switch_agent(agent.to_owned());
+        }
+        renderer.handle(&command("shell-x", &format!("{case}-remove-X"), target));
+        renderer.handle(&command("shell-y", &format!("{case}-retain-Y"), target));
+        renderer.abandon_shell_starts(&[abandoned("shell-x", target)]);
+        if let Some(agent) = selected_after {
+            renderer.switch_agent(agent.to_owned());
+        }
+        sync(&handle);
+        assert!(!vt.screen_contains(100, &format!("{case}-remove-X")));
+        assert!(vt.screen_contains(100, &format!("{case}-retain-Y")));
+    }
+
+    // Targeted starts can be deferred behind initial discovery. Removing X
+    // before agent selection must prevent it from resurrecting when the queue
+    // flushes, while unrelated Y survives.
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::HarnessAgentContextInitialized(
+        tau_proto::HarnessAgentContextInitialized {
+            session_id: test_session_id("s1"),
+            agent_id: agent_id("worker"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("worker-init")
+                .expect("initialization id"),
+            listed_skills: Vec::new(),
+            agents_files: Vec::new(),
+        },
+    ));
+    renderer.handle(&command("shell-x", "deferred-remove-X", Some("worker")));
+    renderer.handle(&command("shell-y", "deferred-retain-Y", Some("worker")));
+    renderer.abandon_shell_starts(&[abandoned("shell-x", Some("worker"))]);
+    renderer.switch_agent("worker".to_owned());
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "deferred-remove-X"));
+    assert!(vt.screen_contains(100, "deferred-retain-Y"));
+
+    // A colliding historical terminal renders standalone and does not consume
+    // the active row subsequently settled by the live terminal.
+    renderer.handle(&command(
+        "shell-collision",
+        "current-collision",
+        Some("worker"),
+    ));
+    let terminal = tau_proto::ShellCommandFinished {
+        command_id: tau_proto::ShellCommandId::parse("shell-collision").expect("command id"),
+        session_id: test_session_id("s1"),
+        command: "historical-collision".to_owned(),
+        include_in_context: false,
+        target_agent_id: Some(agent_id("worker")),
+        output: "historical-output".to_owned(),
+        exit_code: Some(0),
+        cancelled: false,
+    };
+    renderer.handle_standalone_socket_shell_finished(&terminal, tau_proto::UnixMicros::new(1), 1);
+    sync(&handle);
+    assert!(vt.screen_contains(100, "historical-output"));
+    assert!(vt.screen_contains(100, "current-collision"));
+    renderer.handle(&Event::ShellCommandFinished(
+        tau_proto::ShellCommandFinished {
+            command: "current-collision".to_owned(),
+            output: "current-output".to_owned(),
+            ..terminal
+        },
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "historical-output"));
+    assert!(vt.screen_contains(100, "current-output"));
 }
 
 #[test]

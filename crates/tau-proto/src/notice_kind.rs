@@ -8,6 +8,7 @@ pub const HARNESS_FAILURE: &str = "harness.failure";
 pub const HARNESS_INTERNAL_WARNING: &str = "harness.internal_warning";
 pub const HARNESS_NOTICE: &str = "harness.notice";
 pub const HARNESS_REPLAY_ERROR: &str = "harness.replay_error";
+pub const HARNESS_SHELL_SNAPSHOT_OMITTED: &str = "harness.shell_snapshot_omitted";
 pub const MODEL_SELECTION: &str = "model.selection";
 pub const SKILL_COLLISION: &str = "skill.collision";
 pub const UI_COMMAND_ERROR: &str = "ui.command_error";

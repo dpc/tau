@@ -37,6 +37,27 @@ fn chat_subscription_includes_manual_compaction_lifecycle() {
     }
 }
 
+/// Cold attach requests running shell snapshots and omission notices while
+/// retaining live terminal delivery.
+#[test]
+fn chat_subscription_includes_shell_reconciliation_events() {
+    let HarnessInputMessage::Subscribe(subscription) = chat_subscribe_message() else {
+        panic!("chat subscription must produce Subscribe")
+    };
+    for event in [EventName::UI_SHELL_COMMAND, EventName::HARNESS_NOTICE] {
+        assert!(
+            subscription
+                .historical_selectors
+                .contains(&EventSelector::Exact(event))
+        );
+    }
+    assert!(
+        subscription
+            .live_selectors
+            .contains(&EventSelector::Exact(EventName::SHELL_COMMAND_FINISHED))
+    );
+}
+
 /// Ensures the chat UI subscription stays as an explicit event allow-list so
 /// newly-added protocol events do not silently expand UI traffic or replay
 /// catch-up.
