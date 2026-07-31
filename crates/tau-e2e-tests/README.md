@@ -53,10 +53,13 @@ observer prompt facts exclude duplicate submission, observer stats own the
 running-to-idle transition, and the provider snapshot excludes duplicate
 cancellation.
 The two-agent attach case creates the complete main/worker roster before either
-UI attaches. Each UI selects both stable IDs in a different order and must
-materialize the same ID-keyed semantic transcript rows without changing the
-other UI's selection, typed durable event streams, provider trace, or runtime
-stats.
+UI attaches. Each UI enters and independently clears a distinct unsubmitted
+prompt draft and selects both stable IDs in a different order. One UI changes
+runtime theme; the peer performs a local repaint and recheck that retains its
+original theme. Both must
+materialize the same ID-keyed semantic transcript rows without leaking local
+presentation state or changing typed durable event streams, the provider trace,
+or runtime stats.
 Its multi-agent case instead creates and completes the S1 production
 main/worker pair in a headless Boot A, then runs the universal resumed Boot B
 under the PTY. It selects both restored transcripts only by stable ID, submits

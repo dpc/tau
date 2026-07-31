@@ -26,6 +26,32 @@ const ROWS: u16 = 40;
 const MAX_RAW_BYTES: usize = 256 * 1024;
 const MAX_FRAMES: usize = 512;
 
+/// Monotonic count of PTY reads completed into the semantic VT model.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct PtyReadGeneration(
+    /// Completed PTY reads; private so callers cannot forge a boundary.
+    u64,
+);
+
+/// Semantic style attributes retained by the VT model for one cell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct VtCellStyle {
+    /// Resolved foreground color.
+    foreground: vt100::Color,
+    /// Resolved background color.
+    background: vt100::Color,
+    /// Whether the cell uses bold emphasis.
+    bold: bool,
+}
+
+/// One atomic observation of a selected-agent status-row style transition.
+pub(super) struct VtStyleChange {
+    /// Styles extracted from the exact frame below.
+    pub(super) styles: Vec<VtCellStyle>,
+    /// Normalized semantic VT frame that supplied `styles`.
+    pub(super) frame: String,
+}
+
 /// Shared bounded terminal observations produced by the PTY reader.
 struct Capture {
     /// Bounded raw PTY suffix for failure diagnostics.
@@ -40,6 +66,8 @@ struct Capture {
     tool_violation: Option<String>,
     /// Whether completed historical tool activity is forbidden for this boot.
     tool_latch_armed: bool,
+    /// Number of completed PTY reads processed into the VT model.
+    generation: PtyReadGeneration,
 }
 
 /// Test-only synchronization at one exact post-read/pre-processing boundary.
@@ -136,6 +164,7 @@ impl PtyProcess {
                 closed: false,
                 tool_violation: None,
                 tool_latch_armed,
+                generation: PtyReadGeneration(0),
             }),
             Condvar::new(),
         ));
@@ -166,6 +195,36 @@ impl PtyProcess {
             .ok_or_else(|| path_std_io::Error::other("PTY writer closed"))?;
         writer.write_all(line.as_bytes())?;
         writer.write_all(b"\r")?;
+        writer.flush()
+    }
+
+    /// Sends editable prompt text without submitting it.
+    pub(super) fn send_text(&mut self, text: &str) -> Result<(), std::io::Error> {
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| path_std_io::Error::other("PTY writer closed"))?;
+        writer.write_all(text.as_bytes())?;
+        writer.flush()
+    }
+
+    /// Sends Ctrl-U to clear the current editable prompt without submission.
+    pub(super) fn send_clear_prompt_key(&mut self) -> Result<(), std::io::Error> {
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| path_std_io::Error::other("PTY writer closed"))?;
+        writer.write_all(b"\x15")?;
+        writer.flush()
+    }
+
+    /// Deletes `count` editable characters without submitting the prompt.
+    pub(super) fn send_backspaces(&mut self, count: usize) -> Result<(), std::io::Error> {
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| path_std_io::Error::other("PTY writer closed"))?;
+        writer.write_all(&vec![0x7f; count])?;
         writer.flush()
     }
 
@@ -201,6 +260,91 @@ impl PtyProcess {
             }
             let (next, _) = wake
                 .wait_timeout(capture, remaining.min(Duration::from_millis(100)))
+                .map_err(|_| "PTY capture poisoned")?;
+            capture = next;
+        }
+    }
+
+    /// Returns the completed-read generation of the semantic VT model.
+    pub(super) fn read_generation(&self) -> Result<PtyReadGeneration, Box<dyn std::error::Error>> {
+        Ok(self
+            .capture
+            .0
+            .lock()
+            .map_err(|_| "PTY capture poisoned")?
+            .generation)
+    }
+
+    /// Waits until one marker is absent from a strictly newer VT generation.
+    pub(super) fn wait_for_absence_after(
+        &self,
+        marker: &str,
+        generation: PtyReadGeneration,
+        deadline: Instant,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let (lock, wake) = &*self.capture;
+        let mut capture = lock.lock().map_err(|_| "PTY capture poisoned")?;
+        loop {
+            let frame = normalized_screen(&capture.parser);
+            if generation < capture.generation && !frame.contains(marker) {
+                return Ok(frame);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || capture.closed {
+                return Err(format!(
+                    "timed out waiting for `{marker}` to clear; last frame:\n{frame}"
+                )
+                .into());
+            }
+            let (next, _) = wake
+                .wait_timeout(capture, remaining)
+                .map_err(|_| "PTY capture poisoned")?;
+            capture = next;
+        }
+    }
+
+    /// Returns styles from the unique selected-agent status row.
+    ///
+    /// `marker` must be ASCII because byte columns map directly to VT cells.
+    pub(super) fn marker_styles(
+        &self,
+        marker: &str,
+    ) -> Result<Vec<VtCellStyle>, Box<dyn std::error::Error>> {
+        let capture = self.capture.0.lock().map_err(|_| "PTY capture poisoned")?;
+        selected_agent_status_styles(&capture.parser, marker)
+    }
+
+    /// Waits until an exact visible marker's VT styles differ from `previous`.
+    pub(super) fn wait_for_marker_style_change(
+        &self,
+        marker: &str,
+        previous: &[VtCellStyle],
+        deadline: Instant,
+    ) -> Result<VtStyleChange, Box<dyn std::error::Error>> {
+        if !marker.is_ascii() {
+            return Err("selected-agent style marker must be ASCII".into());
+        }
+        let (lock, wake) = &*self.capture;
+        let mut capture = lock.lock().map_err(|_| "PTY capture poisoned")?;
+        loop {
+            if let Ok(styles) = selected_agent_status_styles(&capture.parser, marker)
+                && styles != previous
+            {
+                return Ok(VtStyleChange {
+                    styles,
+                    frame: normalized_screen(&capture.parser),
+                });
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || capture.closed {
+                return Err(format!(
+                    "timed out waiting for selected-agent style change; last frame:\n{}",
+                    normalized_screen(&capture.parser)
+                )
+                .into());
+            }
+            let (next, _) = wake
+                .wait_timeout(capture, remaining)
                 .map_err(|_| "PTY capture poisoned")?;
             capture = next;
         }
@@ -445,6 +589,7 @@ fn read_pty(
                     wake.notify_all();
                     break;
                 }
+                capture.generation.0 = capture.generation.0.saturating_add(1);
                 let frame = normalized_screen(&capture.parser);
                 if capture.frames.back() != Some(&frame) {
                     capture.frames.push_back(frame.clone());
@@ -514,6 +659,48 @@ fn normalized_screen(parser: &vt100::Parser) -> String {
         .join("\n")
 }
 
+/// Extracts styles from one exact ASCII selected-agent status row.
+fn selected_agent_status_styles(
+    parser: &vt100::Parser,
+    marker: &str,
+) -> Result<Vec<VtCellStyle>, Box<dyn std::error::Error>> {
+    if !marker.is_ascii() {
+        return Err("selected-agent style marker must be ASCII".into());
+    }
+    let contents = parser.screen().contents();
+    let expected_prefix = format!("@{marker} ");
+    let matches = contents
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with(&expected_prefix))
+        .collect::<Vec<_>>();
+    let [(row, line)] = matches.as_slice() else {
+        return Err(format!(
+            "expected one selected-agent status row for `{marker}`, found {}",
+            matches.len()
+        )
+        .into());
+    };
+    let col = line
+        .find(marker)
+        .ok_or("selected-agent marker missing from matched status row")?;
+    marker
+        .bytes()
+        .enumerate()
+        .map(|(offset, _)| {
+            let cell = parser
+                .screen()
+                .cell(*row as u16, (col + offset) as u16)
+                .ok_or("selected-agent marker cell is outside the visible VT")?;
+            Ok(VtCellStyle {
+                foreground: cell.fgcolor(),
+                background: cell.bgcolor(),
+                bold: cell.bold(),
+            })
+        })
+        .collect()
+}
+
 fn prompt_ready(parser: &vt100::Parser) -> bool {
     prompt_ready_for(parser, "Write a message to main...")
 }
@@ -530,6 +717,30 @@ fn prompt_ready_for(parser: &vt100::Parser, needle: &str) -> bool {
         })
 }
 
+/// Ensures the style oracle selects one anchored status row rather than an
+/// earlier transcript occurrence of the same ASCII agent id.
+#[test]
+fn selected_agent_status_styles_require_one_anchored_row() {
+    let mut parser = vt100::Parser::new(4, 80, 0);
+    parser.process(b"message mentions main\r\n\x1b[1;35;44m@main status\x1b[0m");
+    let styles = selected_agent_status_styles(&parser, "main").expect("unique status row");
+    assert_eq!(
+        styles,
+        vec![
+            VtCellStyle {
+                foreground: vt100::Color::Idx(5),
+                background: vt100::Color::Idx(4),
+                bold: true,
+            };
+            4
+        ]
+    );
+    assert!(selected_agent_status_styles(&parser, "maïn").is_err());
+
+    parser.process(b"\r\n@main duplicate");
+    assert!(selected_agent_status_styles(&parser, "main").is_err());
+}
+
 /// Ensures the sticky oracle catches a pending-to-ok repaint even when both
 /// frames arrive in one kernel read.
 #[test]
@@ -541,6 +752,7 @@ fn bytewise_capture_latches_pending_before_same_read_terminal_repaint() {
         closed: false,
         tool_violation: None,
         tool_latch_armed: true,
+        generation: PtyReadGeneration(0),
     };
     process_capture_bytes(
         &mut capture,
@@ -562,6 +774,7 @@ fn bytewise_capture_latches_agent_start_pending_repaint() {
         closed: false,
         tool_violation: None,
         tool_latch_armed: true,
+        generation: PtyReadGeneration(0),
     };
     process_capture_bytes(
         &mut capture,
@@ -583,6 +796,7 @@ fn bytewise_capture_latches_pending_before_backspace_overwrite() {
         closed: false,
         tool_violation: None,
         tool_latch_armed: true,
+        generation: PtyReadGeneration(0),
     };
     process_capture_bytes(
         &mut capture,
@@ -603,6 +817,7 @@ fn armed_capture_stops_mid_chunk_without_losing_prior_violation() {
         closed: false,
         tool_violation: None,
         tool_latch_armed: true,
+        generation: PtyReadGeneration(0),
     };
     let mut bytes = b"restart_test_dummy pending\r".to_vec();
     bytes.resize(MAX_RAW_BYTES, b'x');
@@ -640,6 +855,7 @@ fn reader_thread_stop_preserves_last_pre_stop_artifact() {
             closed: false,
             tool_violation: None,
             tool_latch_armed: true,
+            generation: PtyReadGeneration(0),
         }),
         Condvar::new(),
     ));

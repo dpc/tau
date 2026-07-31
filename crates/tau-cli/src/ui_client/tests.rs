@@ -1,10 +1,9 @@
 use super::*;
 
-/// Ensures the chat UI stays subscribed to lightweight prompt lifecycle events
-/// without receiving full provider prompt payloads or unhandled agent
-/// snapshots.
+/// Keeps the chat subscription explicit and excludes peer draft-liveness facts,
+/// which must never become another terminal's editable prompt state.
 #[test]
-fn chat_subscription_uses_prompt_started_not_prompt_created() {
+fn chat_subscription_excludes_peer_drafts_and_unhandled_payloads() {
     let selectors = chat_subscription_selectors();
 
     assert!(selectors.contains(&EventSelector::Exact(EventName::AGENT_PROMPT_STARTED)));
@@ -17,6 +16,7 @@ fn chat_subscription_uses_prompt_started_not_prompt_created() {
     )));
     assert!(!selectors.contains(&EventSelector::Exact(EventName::TOOL_BACKGROUND_RESULT)));
     assert!(!selectors.contains(&EventSelector::Exact(EventName::AGENT_STATE)));
+    assert!(!selectors.contains(&EventSelector::Exact(EventName::UI_PROMPT_DRAFT)));
     assert!(!selectors.contains(&EventSelector::Prefix("agent.".to_owned())));
 }
 

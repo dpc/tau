@@ -54,6 +54,26 @@ impl SideObserver {
         artifact_path: PathBuf,
         deadline: Instant,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::connect_with_prompt_drafts(socket, expected_session, artifact_path, deadline, false)
+    }
+
+    /// Connects with the ordinary selectors plus live UI draft observations.
+    pub(super) fn connect_observing_prompt_drafts(
+        socket: &Path,
+        expected_session: &SessionId,
+        artifact_path: PathBuf,
+        deadline: Instant,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::connect_with_prompt_drafts(socket, expected_session, artifact_path, deadline, true)
+    }
+
+    fn connect_with_prompt_drafts(
+        socket: &Path,
+        expected_session: &SessionId,
+        artifact_path: PathBuf,
+        deadline: Instant,
+        observe_prompt_drafts: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         loop {
             let mut peer = match SocketPeer::connect(socket) {
                 Ok(peer) => peer,
@@ -72,7 +92,7 @@ impl SideObserver {
                 expected_session_id: None,
                 capabilities: Default::default(),
             }))?;
-            let selectors = selectors();
+            let selectors = selectors(observe_prompt_drafts);
             peer.send(&HarnessInputMessage::Subscribe(Subscribe {
                 historical_selectors: selectors.clone(),
                 live_selectors: selectors,
@@ -401,7 +421,7 @@ pub(super) fn discover_daemon(
     }
 }
 
-fn selectors() -> Vec<EventSelector> {
+fn selectors(observe_prompt_drafts: bool) -> Vec<EventSelector> {
     use EventName as E;
     [
         E::SESSION_STARTED,
@@ -434,6 +454,7 @@ fn selectors() -> Vec<EventSelector> {
         E::HARNESS_NOTICE,
     ]
     .into_iter()
+    .chain(observe_prompt_drafts.then_some(E::UI_PROMPT_DRAFT))
     .map(EventSelector::Exact)
     .collect()
 }

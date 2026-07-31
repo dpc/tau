@@ -113,7 +113,15 @@ not cover shell, tool, or other local-presentation behavior. A separate
 main/worker case attaches two UIs only after the complete typed roster is idle.
 Both select every agent by stable public ID in opposite orders, compare
 ID-keyed semantic transcript rows, and prove selection remains UI-local while
-provider traces, runtime facts, and typed durable event streams remain unchanged.
+provider facts, agent runtime stats, and typed durable event streams remain unchanged.
+The same dual-PTY scenario enters distinct unsubmitted drafts, clears them
+independently, and applies a runtime theme in one UI. Exact visible-canary
+round trips across completed PTY-read boundaries and stable-row styles prove
+local redraw and theme isolation while both terminals
+continue to project the same ID-keyed semantic transcript rows. Exact provider
+and durable snapshots exclude submission and authoritative journal mutation.
+The observer requires the expected live-only prompt-draft liveness rows; those
+rows are not durable semantic state.
 
 S8 adds a separate topology under that same target. A test-only headless daemon
 first completes the production `agent_start` main/worker flow with exact

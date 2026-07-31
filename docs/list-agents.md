@@ -80,3 +80,8 @@ rechecks the session, live lifecycle, and the selected picker's eligibility
 rule. Selecting through the all-agent picker does not resume a suspended agent.
 The picker never loads or resumes an unloaded agent. A later successfully
 admitted visible prompt to that selected existing agent does make it `active`.
+
+Each attached terminal owns its selected transcript, editable prompt draft,
+runtime theme, and redraw state. These visual and editing differences do not
+alter another attached UI or submit provider work. Draft edits can still publish
+the separately specified live prompt-draft liveness observation.

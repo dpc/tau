@@ -50,10 +50,10 @@ const RESTORE_NOTICE: &str = concat!(
     "and recreate timers or other session-scoped setup if still needed."
 );
 
-/// Proves two attached public UIs materialize the same ID-keyed main/worker
-/// transcripts while keeping stable-ID selection entirely connection-local.
+/// Proves two attached public UIs share ID-keyed semantic transcripts while
+/// keeping drafts, stable-ID selection, themes, and their redraws local.
 #[test]
-fn attached_public_terminals_select_agents_independently() -> Result<(), Box<dyn std::error::Error>>
+fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn std::error::Error>>
 {
     let scenario = scenario();
     let fixture = GateFixture::new_multi_agent(&scenario, Path::new(FAKE_PROVIDER))?;
@@ -62,13 +62,13 @@ fn attached_public_terminals_select_agents_independently() -> Result<(), Box<dyn
     let daemon = HeadlessProcess::spawn(
         fixture.headless_command(Path::new(HARNESS_DAEMON), &socket),
         socket.clone(),
-        fixture.artifact_path("selection-daemon.stderr"),
+        fixture.artifact_path("presentation-daemon.stderr"),
     )?;
     let deadline = Instant::now() + DEADLINE;
     let mut observer = SideObserver::connect(
         &socket,
         &session_id,
-        fixture.artifact_path("selection-observer.json"),
+        fixture.artifact_path("presentation-observer.json"),
         deadline,
     )?;
     observer.wait_for_extension("e2e-fake-provider", deadline)?;
@@ -84,7 +84,7 @@ fn attached_public_terminals_select_agents_independently() -> Result<(), Box<dyn
     let setup_actions = matched_actions(&fixture)?;
     if setup_actions != 4 {
         return Err(format!(
-            "selection fixture consumed {setup_actions} setup actions, expected 4"
+            "presentation fixture consumed {setup_actions} setup actions, expected 4"
         )
         .into());
     }
@@ -97,8 +97,8 @@ fn attached_public_terminals_select_agents_independently() -> Result<(), Box<dyn
         fixture.command(Some(session_id.as_str())),
         true,
         Some(PtyArtifacts::new(
-            fixture.artifact_path("selection-first.raw.bounded"),
-            fixture.artifact_path("selection-first.normalized.txt"),
+            fixture.artifact_path("presentation-first.raw.bounded"),
+            fixture.artifact_path("presentation-first.normalized.txt"),
         )),
     )?;
     let deadline = Instant::now() + DEADLINE;
@@ -106,14 +106,14 @@ fn attached_public_terminals_select_agents_independently() -> Result<(), Box<dyn
         discover_daemon(fixture.runtime_home(), Some(&session_id), deadline)?;
     if discovered != session_id {
         return Err(format!(
-            "selection fixture resumed session `{discovered}`, expected `{session_id}`"
+            "presentation fixture resumed session `{discovered}`, expected `{session_id}`"
         )
         .into());
     }
-    let mut observer = SideObserver::connect(
+    let mut observer = SideObserver::connect_observing_prompt_drafts(
         &live_socket,
         &session_id,
-        fixture.artifact_path("selection-observer.json"),
+        fixture.artifact_path("presentation-observer.json"),
         deadline,
     )?;
     wait_resume_boundaries(&mut observer, &session_id, &identities, deadline)?;
@@ -123,15 +123,52 @@ fn attached_public_terminals_select_agents_independently() -> Result<(), Box<dyn
         fixture.attach_command(session_id.as_str()),
         false,
         Some(PtyArtifacts::new(
-            fixture.artifact_path("selection-second.raw.bounded"),
-            fixture.artifact_path("selection-second.normalized.txt"),
+            fixture.artifact_path("presentation-second.raw.bounded"),
+            fixture.artifact_path("presentation-second.normalized.txt"),
         )),
     )?;
     second.wait_for("worker completion observed", deadline)?;
-    let trace_before_selection = fixture.trace()?;
-    let durable_before_selection = DurableSessionSnapshot::load(&fixture.tau_state(), &session_id)?;
-    durable_before_selection.require_prefix(&durable_before)?;
-    let observer_before_selection = observer.events.len();
+    let trace_before_presentation = fixture.trace()?;
+    let durable_before_presentation =
+        DurableSessionSnapshot::load(&fixture.tau_state(), &session_id)?;
+    durable_before_presentation.require_prefix(&durable_before)?;
+    let observer_before_presentation = observer.events.len();
+
+    const FIRST_DRAFT: &str = "first-ui-private-draft";
+    const SECOND_DRAFT: &str = "second-ui-private-draft";
+    second.send_text(SECOND_DRAFT)?;
+    wait_draft(&mut observer, SECOND_DRAFT, deadline)?;
+    let second_draft = second.wait_for(SECOND_DRAFT, deadline)?;
+    if second_draft.contains(FIRST_DRAFT) {
+        return Err("second UI unexpectedly contained the first UI draft".into());
+    }
+    let first_after_peer_draft = repaint_barrier(&mut first, "first-peer-draft-barrier", deadline)?;
+    if first_after_peer_draft.contains(SECOND_DRAFT) {
+        return Err("attached UI draft leaked into the owning resume UI".into());
+    }
+    first.send_text(FIRST_DRAFT)?;
+    wait_draft(&mut observer, FIRST_DRAFT, deadline)?;
+    let first_draft = first.wait_for(FIRST_DRAFT, deadline)?;
+    if first_draft.contains(SECOND_DRAFT) {
+        return Err("attached UI draft leaked into the owning resume UI".into());
+    }
+    let second_still_private = repaint_barrier(&mut second, "second-peer-draft-barrier", deadline)?;
+    if second_still_private.contains(FIRST_DRAFT) {
+        return Err("owning UI draft leaked into the attached UI".into());
+    }
+    first.send_clear_prompt_key()?;
+    wait_draft(&mut observer, "", deadline)?;
+    first.wait_ready_for(identities.main.as_str(), deadline)?;
+    let second_still_private = repaint_barrier(&mut second, "second-peer-clear-barrier", deadline)?;
+    if !second_still_private.contains(SECOND_DRAFT) {
+        return Err("clearing the owning UI draft cleared the attached UI draft".into());
+    }
+    if second_still_private.contains(FIRST_DRAFT) {
+        return Err("clearing the owning UI draft mutated the attached UI".into());
+    }
+    second.send_clear_prompt_key()?;
+    wait_draft(&mut observer, "", deadline)?;
+    second.wait_ready_for(identities.main.as_str(), deadline)?;
 
     let first_rows = select_all_agents(
         &mut first,
@@ -174,59 +211,116 @@ fn attached_public_terminals_select_agents_independently() -> Result<(), Box<dyn
         first.wait_for(&format!("current: {}", identities.worker), deadline)?;
     assert_transcript_rows(&first_still_worker, &identities.worker, &identities)?;
 
-    let post_selection_roster =
+    const SECOND_THEME_NOTICE: &str = "theme set to `tau-dpc` for this UI";
+    let second_style_before = second.marker_styles(identities.main.as_str())?;
+    let first_style_before = first.marker_styles(identities.worker.as_str())?;
+    second.send_line(":theme tau-dpc")?;
+    let second_themed = second.wait_for(SECOND_THEME_NOTICE, deadline)?;
+    assert_transcript_rows(&second_themed, &identities.main, &identities)?;
+    let second_theme_change = second.wait_for_marker_style_change(
+        identities.main.as_str(),
+        &second_style_before,
+        deadline,
+    )?;
+    assert_transcript_rows(&second_theme_change.frame, &identities.main, &identities)?;
+    let first_after_local_repaint =
+        repaint_barrier(&mut first, "first-theme-retention-barrier", deadline)?;
+    assert_transcript_rows(&first_after_local_repaint, &identities.worker, &identities)?;
+    if first_after_local_repaint.contains(SECOND_THEME_NOTICE)
+        || first.marker_styles(identities.worker.as_str())? != first_style_before
+    {
+        return Err("attached UI theme or notice leaked into the owning UI".into());
+    }
+    if second.marker_styles(identities.main.as_str())? != second_theme_change.styles {
+        return Err("peer repaint changed the themed UI's stable-row style".into());
+    }
+    let first_final_frame = first_after_local_repaint;
+
+    let post_presentation_roster =
         observer.roster(&session_id, SessionAgentListScope::Current, deadline)?;
-    assert_roster(&post_selection_roster, &identities)?;
+    assert_roster(&post_presentation_roster, &identities)?;
     observer.drain_available()?;
-    if let Some(offending) = observer.events[observer_before_selection..]
-        .iter()
-        .find(|observed| {
-            matches!(
-                observed.event,
-                tau_proto::Event::ProviderPromptSubmitted(_)
-                    | tau_proto::Event::AgentStatsUpdated(_)
-            )
-        })
+    if let Some(offending) =
+        observer.events[observer_before_presentation..]
+            .iter()
+            .find(|observed| {
+                matches!(
+                    observed.event,
+                    tau_proto::Event::ProviderPromptSubmitted(_)
+                        | tau_proto::Event::AgentStatsUpdated(_)
+                )
+            })
     {
         return Err(format!(
-            "agent selection changed provider or agent runtime facts: {offending:?}"
+            "terminal-local presentation changed provider or agent runtime facts: {offending:?}"
         )
         .into());
     }
 
     fixture.write_artifact(
-        "selection-observer.json",
+        "presentation-observer.json",
         &serde_json::to_vec_pretty(&observer.events)?,
     )?;
     fixture.write_artifact(
-        "selection-first.normalized.txt",
-        first_still_worker.as_bytes(),
+        "presentation-first.normalized.txt",
+        first_final_frame.as_bytes(),
     )?;
     drop(observer);
     second.finish()?;
     first.finish()?;
     fixture.require_boot_gone(session_id.as_str())?;
-    let trace_after_selection = fixture.trace()?;
-    if trace_after_selection != trace_before_selection {
+    let trace_after_presentation = fixture.trace()?;
+    if trace_after_presentation != trace_before_presentation {
         return Err(format!(
-            "agent selection changed the fake-provider trace\nbefore:\n{trace_before_selection}\n\
-             after:\n{trace_after_selection}"
+            "terminal-local presentation changed the fake-provider trace\nbefore:\n{trace_before_presentation}\n\
+             after:\n{trace_after_presentation}"
         )
         .into());
     }
-    let actions_after_selection = matched_actions(&fixture)?;
-    if actions_after_selection != 4 {
+    let actions_after_presentation = matched_actions(&fixture)?;
+    if actions_after_presentation != 4 {
         return Err(format!(
-            "agent selection changed matched provider actions from 4 to \
-             {actions_after_selection}"
+            "terminal-local presentation changed matched provider actions from 4 to \
+             {actions_after_presentation}"
         )
         .into());
     }
     let durable_after = DurableSessionSnapshot::load(&fixture.tau_state(), &session_id)?;
-    durable_after.require_prefix(&durable_before_selection)?;
-    durable_before_selection.require_prefix(&durable_after)?;
+    durable_after.require_prefix(&durable_before_presentation)?;
+    durable_before_presentation.require_prefix(&durable_after)?;
     fixture.complete();
     Ok(())
+}
+
+/// Waits for the exact debounced source-side prompt-draft liveness fact.
+fn wait_draft(
+    observer: &mut SideObserver,
+    text: &str,
+    deadline: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    observer.recv_until(deadline, |observed| {
+        matches!(
+            &observed.event,
+            tau_proto::Event::UiPromptDraft(draft) if draft.text == text
+        )
+    })?;
+    Ok(())
+}
+
+/// Temporarily appends and removes one ASCII canary to prove an exact repaint.
+fn repaint_barrier(
+    terminal: &mut PtyProcess,
+    canary: &str,
+    deadline: Instant,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if !canary.is_ascii() {
+        return Err("editor repaint canary must be ASCII".into());
+    }
+    terminal.send_text(canary)?;
+    terminal.wait_for(canary, deadline)?;
+    let generation = terminal.read_generation()?;
+    terminal.send_backspaces(canary.len())?;
+    terminal.wait_for_absence_after(canary, generation, deadline)
 }
 
 /// Selects both stable IDs and returns semantic transcript rows keyed by ID.

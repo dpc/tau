@@ -153,10 +153,15 @@ correlated readiness and permits one prompt-correlated cancellation. This proves
 selected-agent and settled-status projection parity plus a typed
 running-to-idle transition, not arbitrary multi-client ordering, presentation
 identity, production-provider behavior, or concurrent prompt/tool safety.
-The main/worker selection case attaches only after both typed agents are idle,
-then limits both public UIs to stable-ID selection. Exact provider traces,
+The main/worker presentation case attaches only after both typed agents are idle,
+then limits both public UIs to draft editing/clearing, stable-ID selection, and
+one runtime theme command. Exact visible-canary round trips across completed
+PTY-read boundaries and stable-row styles guard local draft, selection, theme,
+and redraw state. Exact provider traces,
 observer provider/stats facts, and typed durable snapshots independently prove
-that this UI-local operation spends no model action and appends no durable event.
+that these actions submit no model work, mutate no agent runtime stats, and
+append no authoritative semantic event. The observer does require the expected
+live-only prompt-draft liveness rows, which are not durable semantic state.
 An external uncatchable kill of the test process itself prevents Rust `Drop`
 cleanup; the mandatory Nix/nextest runner remains the outer process/sandbox owner
 for that residual case.
