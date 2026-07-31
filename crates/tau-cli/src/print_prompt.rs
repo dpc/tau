@@ -10,6 +10,7 @@ use crate::{CliError, mint_short_id};
 pub(crate) fn run_print_prompt(
     role: &str,
     enable_agents_md: bool,
+    profile: Option<&tau_config::settings::ProfileName>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     extension_environment: &[String],
@@ -18,6 +19,7 @@ pub(crate) fn run_print_prompt(
     let mut daemon = launch_render_daemon(
         "print-prompt",
         role,
+        profile,
         role_cli_overrides,
         extension_cli_overrides,
         extension_environment,
@@ -30,6 +32,7 @@ pub(crate) fn run_print_prompt(
 
 pub(crate) fn run_print_system_prompt(
     role: &str,
+    profile: Option<&tau_config::settings::ProfileName>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     extension_environment: &[String],
@@ -38,6 +41,7 @@ pub(crate) fn run_print_system_prompt(
     let mut daemon = launch_render_daemon(
         "print-system-prompt",
         role,
+        profile,
         role_cli_overrides,
         extension_cli_overrides,
         extension_environment,
@@ -51,6 +55,7 @@ pub(crate) fn run_print_system_prompt(
 fn launch_render_daemon(
     session_prefix: &str,
     role: &str,
+    profile: Option<&tau_config::settings::ProfileName>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     extension_environment: &[String],
@@ -69,6 +74,7 @@ fn launch_render_daemon(
         Some(output),
         Some(role),
         DaemonCliOverrides {
+            profile,
             role: role_cli_overrides,
             extension: extension_cli_overrides,
             extension_environment: Some(extension_environment),

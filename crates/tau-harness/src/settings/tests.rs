@@ -3,7 +3,7 @@ use std::{ffi as path_std_ffi, path as path_std_path};
 
 use tau_config::settings as path_tau_config_settings;
 use tau_config::settings::{
-    ExtensionCliOverride, ExtensionEntry, HarnessConfigCliOverride, HarnessSettings,
+    ExtensionCliOverride, ExtensionEntry, HarnessConfigCliOverride, HarnessSettings, ProfileName,
     load_harness_settings_in,
 };
 use tempfile::TempDir;
@@ -93,6 +93,55 @@ fn resolve_config_in_uses_supplied_config_dir() {
     assert!(
         !config.extensions.contains_key("core-shell"),
         "headless embedded tests must not accidentally read the developer's global harness config"
+    );
+}
+
+/// Ensures profile extension toggles name real built-ins or base-configured
+/// extensions, so a disabled typo cannot leave the actual built-in enabled.
+#[test]
+fn profile_extension_targets_must_exist_in_builtins_or_base_config() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(tempdir.path().to_path_buf()),
+        state_dir: None,
+    };
+    std::fs::write(
+        tempdir.path().join("harness.yaml"),
+        r#"
+extensions:
+  custom:
+    command: ["custom-extension"]
+profiles:
+  focused:
+    extensions:
+      std-pim:
+        enable: false
+      custom:
+        enable: false
+"#,
+    )
+    .expect("write configured profile");
+    let profile = ProfileName::parse("focused").expect("profile");
+    validate_profile_extension_targets(&dirs, &profile).expect("known profile targets");
+
+    std::fs::write(
+        tempdir.path().join("harness.yaml"),
+        r#"
+profiles:
+  focused:
+    extensions:
+      std-pmi:
+        enable: false
+"#,
+    )
+    .expect("write typo profile");
+    let error =
+        validate_profile_extension_targets(&dirs, &profile).expect_err("unknown extension target");
+    assert!(
+        error
+            .to_string()
+            .contains("configuration profile `focused` changes unknown extension `std-pmi`"),
+        "{error}"
     );
 }
 

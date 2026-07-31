@@ -93,6 +93,39 @@ The same global fragment path is available to one-shot harness config overrides,
 for example `--harness-config 'agents.promptFragments=[{ name: "run.policy", priority:
 65, text: "Follow the run policy." }]'`.
 
+## Configuration profiles
+
+Use `profiles` for named, opt-in role adjustments without replacing normal base
+configuration. `tau --profile focused` selects a profile; `TAU_PROFILE=focused`
+does the same when the flag is absent. Tau rejects an unknown name. The selected
+profile loads after `harness.yaml` and `harness.d` files, but before
+`--harness-config` and role CLI overrides, so a relative profile setting uses the
+base setting as its starting point:
+
+```yaml
+agents:
+  effort: low
+
+profiles:
+  focused:
+    agents:
+      effort: increase
+      role_groups:
+        review:
+          roles:
+            reviewer:
+              verbosity: high
+```
+
+Profiles support agent defaults, global role metadata, role groups, and role
+patches. They do not expose unrelated harness settings; keep those in base files
+or use a normal command-line override.
+
+`tau component harness` runs in the current process, so it cannot apply
+`--profile`; set `TAU_PROFILE` before launching that component instead. Normal
+`tau --profile NAME` startup and render commands forward the resolved selection
+to their spawned harness daemon.
+
 Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. `agents.default_role` selects the startup role; if omitted, Tau starts on the first role in `agents.role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.
 
 Named context-size alerts can be set globally, on a role group, or on one role.

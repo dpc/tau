@@ -69,11 +69,52 @@ fn enable_extensions_env_rejects_non_utf8() {
     assert!(parse_enable_extensions_env(Some(OsString::from_vec(vec![0xff]))).is_err());
 }
 
+/// Ensures an explicit CLI selection overrides `TAU_PROFILE`, while an absent
+/// flag preserves the environment selection for direct harness startup.
+#[test]
+fn selected_profile_prefers_cli_over_environment() {
+    assert_eq!(
+        selected_profile_from_sources(Some("cli"), Some("environment".into()))
+            .expect("valid profile selection")
+            .as_ref()
+            .map(ProfileName::as_str),
+        Some("cli")
+    );
+    assert_eq!(
+        selected_profile_from_sources(None, Some("environment".into()))
+            .expect("valid environment profile")
+            .as_ref()
+            .map(ProfileName::as_str),
+        Some("environment")
+    );
+    assert_eq!(
+        selected_profile_from_sources(None, None).expect("absent profile"),
+        None
+    );
+}
+
+/// Ensures empty and non-UTF-8 profile selections fail at the shared API
+/// boundary instead of reaching profile lookup as arbitrary strings.
+#[test]
+fn selected_profile_rejects_invalid_names() {
+    assert!(ProfileName::parse("").is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+
+        assert!(selected_profile_from_sources(None, Some(OsString::from_vec(vec![0xff]))).is_err());
+    }
+}
+
 fn dirs_with_config(dir: &std::path::Path) -> TauDirs {
     TauDirs {
         config_dir: Some(dir.to_path_buf()),
         state_dir: None,
     }
+}
+
+fn profile_name(value: &str) -> ProfileName {
+    ProfileName::parse(value).expect("valid profile name")
 }
 
 fn dirs_with_config_and_state(
@@ -2638,6 +2679,221 @@ fn harness_relative_provider_settings_merge_and_saturate() {
         reviewer.thinking_summary,
         Some(tau_proto::ThinkingSummary::Detailed)
     );
+}
+
+/// Ensures a selected profile overlays file-layer role defaults before its
+/// relative values resolve, while a later CLI layer still wins for extensions.
+#[test]
+fn selected_profile_merges_roles_before_cli_and_extensions() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  effort: low
+  role_groups:
+    base:
+      roles:
+        base-role: {}
+profiles:
+  focused:
+    agents:
+      effort: increase
+      role_groups:
+        profile:
+          roles:
+            profile-role:
+              enable: false
+              verbosity: high
+    extensions:
+      core-shell:
+        enable: false
+"#,
+    )
+    .expect("write base profile");
+    let overrides = [
+        HarnessConfigCliOverride::from_str("extensions.core-shell.enable=true")
+            .expect("extension override"),
+    ];
+
+    let profile = profile_name("focused");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[RoleCliOverride::Enable("profile-role".to_owned())],
+        &overrides,
+    )
+    .expect("load selected profile");
+
+    assert_eq!(
+        settings.roles["base-role"].effort,
+        Some(tau_proto::Effort::Medium)
+    );
+    assert_eq!(
+        settings.roles["profile-role"].effort,
+        Some(tau_proto::Effort::Medium)
+    );
+    assert_eq!(
+        settings.roles["profile-role"].verbosity,
+        Some(tau_proto::Verbosity::High)
+    );
+    assert_eq!(settings.extensions["core-shell"].enable, Some(true));
+}
+
+/// Ensures profile definitions merge through ordinary user/drop-in discovery,
+/// then reject unknown selected names instead of silently using base settings.
+#[test]
+fn selected_profile_discovers_drop_ins_and_reports_unknown_names() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+profiles:
+  focused:
+    agents:
+      role_groups:
+        profile:
+          roles:
+            profile-role: {}
+"#,
+    )
+    .expect("write profile");
+    std::fs::create_dir(td.path().join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        td.path().join("harness.d/20-focused.yaml"),
+        r#"
+profiles:
+  focused:
+    extensions:
+      core-shell:
+        enable: false
+"#,
+    )
+    .expect("write profile drop-in");
+
+    let profile = profile_name("focused");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+    assert!(settings.roles.contains_key("profile-role"));
+    assert_eq!(settings.extensions["core-shell"].enable, Some(false));
+
+    let profile = profile_name("missing");
+    let error = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect_err("unknown profile");
+    assert_eq!(
+        error.to_string(),
+        "unknown configuration profile: `missing`"
+    );
+}
+
+/// Ensures every selected profile source replays independently, preserving
+/// relative provider adjustments rather than replacing an earlier profile map.
+#[test]
+fn selected_profile_replays_relative_settings_from_each_drop_in() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  effort: low
+  role_groups:
+    profile:
+      roles:
+        profile-role: {}
+profiles:
+  focused:
+    agents:
+      effort: increase
+    extensions:
+      core-shell:
+        enable: false
+"#,
+    )
+    .expect("write base profile");
+    std::fs::create_dir(td.path().join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        td.path().join("harness.d/20-focused.yaml"),
+        r#"
+profiles:
+  focused:
+    agents:
+      effort: increase
+    extensions:
+      core-shell:
+        enable: true
+"#,
+    )
+    .expect("write profile drop-in");
+
+    let profile = profile_name("focused");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+    assert_eq!(
+        settings.roles["profile-role"].effort,
+        Some(tau_proto::Effort::High)
+    );
+    assert_eq!(settings.extensions["core-shell"].enable, Some(true));
+}
+
+/// Ensures profiles accept only their explicit role and extension-enable
+/// surface rather than becoming a recursive second harness configuration.
+#[test]
+fn selected_profile_rejects_unsupported_settings_and_extensions() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+profiles:
+  invalid:
+    session_retention_days: 1
+"#,
+    )
+    .expect("write profiles");
+
+    let profile = profile_name("invalid");
+    let error = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect_err("unsupported profile setting");
+    assert!(error.to_string().contains("unknown field"), "{error}");
+
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+profiles:
+  invalid:
+    extensions:
+      core-shell:
+        command: ["not-supported"]
+"#,
+    )
+    .expect("write unsupported extension profile");
+    let error = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect_err("unsupported extension setting");
+    assert!(error.to_string().contains("unknown field"), "{error}");
 }
 
 /// Ensures one-shot harness config accepts relative provider defaults, starts

@@ -14,7 +14,7 @@ use std::{fmt, sync as path_std_sync};
 use tau_config::settings as path_tau_config_settings;
 use tau_config::settings::{
     ExtensionCliOverride, ExtensionEntry, ExtensionSecretEntry, HarnessConfigCliOverride,
-    HarnessSettings, RoleCliOverride,
+    HarnessSettings, ProfileName, RoleCliOverride, SettingsError,
 };
 
 const TEST_DUMMY_EXTENSION_NAME: &str = "test-dummy";
@@ -515,8 +515,19 @@ pub(crate) fn load_harness_settings_or_warn(
 ) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
     let role_overrides = role_cli_overrides_from_env();
     let harness_config_overrides = harness_config_overrides_from_env().unwrap_or_default();
+    let profile = match tau_config::settings::selected_profile(None) {
+        Ok(profile) => profile,
+        Err(error) => {
+            eprintln!("tau: harness.yaml failed to parse — ignored.\n{error}");
+            return (
+                apply_startup_role_override(HarnessSettings::built_in()),
+                Some(error),
+            );
+        }
+    };
     load_harness_settings_with_overrides_or_warn(
         dirs,
+        profile.as_ref(),
         &role_overrides,
         &harness_config_overrides,
         true,
@@ -532,20 +543,28 @@ pub(crate) fn load_harness_settings_or_warn(
 pub(crate) fn load_harness_settings_without_environment_or_warn(
     dirs: &tau_config::settings::TauDirs,
 ) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
-    load_harness_settings_with_overrides_or_warn(dirs, &[], &[], false)
+    load_harness_settings_with_overrides_or_warn(dirs, None, &[], &[], false)
 }
 
 fn load_harness_settings_with_overrides_or_warn(
     dirs: &tau_config::settings::TauDirs,
+    profile: Option<&ProfileName>,
     role_overrides: &[RoleCliOverride],
     harness_config_overrides: &[HarnessConfigCliOverride],
     apply_startup_environment: bool,
 ) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
-    match tau_config::settings::load_harness_settings_with_cli_overrides_in(
-        dirs,
-        role_overrides,
-        harness_config_overrides,
-    ) {
+    let result = (|| {
+        if let Some(profile) = profile {
+            validate_profile_extension_targets(dirs, profile)?;
+        }
+        tau_config::settings::load_harness_settings_with_profile_and_cli_overrides_in(
+            dirs,
+            profile,
+            role_overrides,
+            harness_config_overrides,
+        )
+    })();
+    match result {
         Ok(settings) => (
             if apply_startup_environment {
                 apply_startup_role_override(settings)
@@ -566,6 +585,33 @@ fn load_harness_settings_with_overrides_or_warn(
             )
         }
     }
+}
+
+/// Rejects profile extension typos before their enablement patches enter
+/// config.
+fn validate_profile_extension_targets(
+    dirs: &tau_config::settings::TauDirs,
+    profile: &ProfileName,
+) -> Result<(), tau_config::settings::SettingsError> {
+    let base = tau_config::settings::load_harness_settings_in(dirs)?;
+    let mut known_names = base
+        .extensions
+        .into_keys()
+        .collect::<std::collections::HashSet<_>>();
+    known_names.extend(
+        builtin_extensions()
+            .into_iter()
+            .map(|extension| extension.name),
+    );
+    for extension in tau_config::settings::profile_extension_names_in(dirs, profile)? {
+        if !known_names.contains(&extension) {
+            return Err(SettingsError::UnknownProfileExtension {
+                profile: profile.clone(),
+                extension,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn apply_startup_role_override(mut settings: HarnessSettings) -> HarnessSettings {
@@ -713,9 +759,30 @@ pub fn validate_cli_overrides(
     extension_overrides: &[ExtensionCliOverride],
     harness_config_overrides: &[HarnessConfigCliOverride],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let profile = tau_config::settings::selected_profile(None)?;
+    validate_cli_overrides_with_profile(
+        profile.as_ref(),
+        role_overrides,
+        extension_overrides,
+        harness_config_overrides,
+    )
+}
+
+/// Validates CLI overrides against one explicitly selected configuration
+/// profile.
+pub fn validate_cli_overrides_with_profile(
+    profile: Option<&ProfileName>,
+    role_overrides: &[RoleCliOverride],
+    extension_overrides: &[ExtensionCliOverride],
+    harness_config_overrides: &[HarnessConfigCliOverride],
+) -> Result<(), Box<dyn std::error::Error>> {
     let dirs = path_tau_config_settings::TauDirs::default();
-    let settings =
-        load_settings_for_cli_overrides_in(&dirs, role_overrides, harness_config_overrides)?;
+    let settings = load_settings_for_cli_overrides_in(
+        &dirs,
+        profile,
+        role_overrides,
+        harness_config_overrides,
+    )?;
     resolve_extensions_with_cli_overrides(&settings, builtin_extensions(), extension_overrides)?;
     Ok(())
 }
@@ -728,9 +795,31 @@ pub fn validate_extension_environment_and_cli_overrides(
     role_overrides: &[RoleCliOverride],
     harness_config_overrides: &[HarnessConfigCliOverride],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let profile = tau_config::settings::selected_profile(None)?;
+    validate_extension_environment_and_cli_overrides_with_profile(
+        profile.as_ref(),
+        environment_names,
+        cli_overrides,
+        role_overrides,
+        harness_config_overrides,
+    )
+}
+
+/// Validates extension environment and CLI overrides for an explicit profile.
+pub fn validate_extension_environment_and_cli_overrides_with_profile(
+    profile: Option<&ProfileName>,
+    environment_names: &[String],
+    cli_overrides: &[ExtensionCliOverride],
+    role_overrides: &[RoleCliOverride],
+    harness_config_overrides: &[HarnessConfigCliOverride],
+) -> Result<(), Box<dyn std::error::Error>> {
     let dirs = path_tau_config_settings::TauDirs::default();
-    let settings =
-        load_settings_for_cli_overrides_in(&dirs, role_overrides, harness_config_overrides)?;
+    let settings = load_settings_for_cli_overrides_in(
+        &dirs,
+        profile,
+        role_overrides,
+        harness_config_overrides,
+    )?;
     resolve_extensions_with_environment_and_cli_overrides(
         &settings,
         builtin_extensions(),
@@ -742,18 +831,24 @@ pub fn validate_extension_environment_and_cli_overrides(
 
 fn load_settings_for_cli_overrides_in(
     dirs: &tau_config::settings::TauDirs,
+    profile: Option<&ProfileName>,
     role_overrides: &[RoleCliOverride],
     harness_config_overrides: &[HarnessConfigCliOverride],
 ) -> Result<HarnessSettings, Box<dyn std::error::Error>> {
-    match tau_config::settings::load_harness_settings_with_cli_overrides_in(
+    if let Some(profile) = profile {
+        validate_profile_extension_targets(dirs, profile)?;
+    }
+    match tau_config::settings::load_harness_settings_with_profile_and_cli_overrides_in(
         dirs,
+        profile,
         role_overrides,
         harness_config_overrides,
     ) {
         Ok(settings) => Ok(apply_startup_role_override(settings)),
-        Err(path_tau_config_settings::SettingsError::UnknownRoleCliOverride(role)) => Err(
-            Box::new(path_tau_config_settings::SettingsError::UnknownRoleCliOverride(role)),
-        ),
+        Err(
+            error @ (path_tau_config_settings::SettingsError::UnknownRoleCliOverride(_)
+            | path_tau_config_settings::SettingsError::UnknownProfile(_)),
+        ) => Err(Box::new(error)),
         Err(error) => {
             if !harness_config_overrides.is_empty() {
                 eprintln!("tau: harness.yaml failed to parse — ignored.\n{error}");
@@ -761,8 +856,9 @@ fn load_settings_for_cli_overrides_in(
                     config_dir: None,
                     state_dir: dirs.state_dir.clone(),
                 };
-                return tau_config::settings::load_harness_settings_with_cli_overrides_in(
+                return tau_config::settings::load_harness_settings_with_profile_and_cli_overrides_in(
                     &fallback_dirs,
+                    profile,
                     role_overrides,
                     harness_config_overrides,
                 )
@@ -823,8 +919,13 @@ fn resolve_config_in_with_extension_cli_overrides(
     // ignored.
     let role_overrides = role_cli_overrides_from_env();
     let harness_config_overrides = harness_config_overrides_from_env()?;
-    let settings =
-        load_settings_for_cli_overrides_in(dirs, &role_overrides, &harness_config_overrides)?;
+    let profile = tau_config::settings::selected_profile(None)?;
+    let settings = load_settings_for_cli_overrides_in(
+        dirs,
+        profile.as_ref(),
+        &role_overrides,
+        &harness_config_overrides,
+    )?;
     let environment_names = tau_config::settings::parse_enable_extensions_env(std::env::var_os(
         tau_config::settings::TAU_ENABLE_EXTENSIONS_ENV,
     ))?;

@@ -155,6 +155,23 @@ fn dev_print_prompt_uses_shared_role_flag() {
     ));
 }
 
+/// Ensures `--profile` stays a root-owned harness selection and reaches the
+/// same argument bundle as other startup configuration options.
+#[test]
+fn profile_flag_parses_as_root_harness_selection() {
+    let cli = path_super_cli::Cli::parse_from([
+        "tau",
+        "--profile",
+        "focused",
+        "--role",
+        "engineer",
+        "dev",
+        "print-prompt",
+    ]);
+    assert_eq!(cli.harness.profile.as_deref(), Some("focused"));
+    assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
+}
+
 /// Ensures the root run command accepts `--ephemeral` as an explicit
 /// session-persistence mode without affecting the separate attach/resume flags.
 #[test]
@@ -821,12 +838,12 @@ fn attach_rejects_startup_overrides_that_existing_daemon_cannot_apply() {
         "core-shell".to_owned(),
     )];
 
-    let role_err = super::reject_attach_startup_overrides(false, Some("manager"), &[], &[])
+    let role_err = super::reject_attach_startup_overrides(false, false, Some("manager"), &[], &[])
         .expect_err("interactive attach role should fail");
     assert!(role_err.to_string().contains("cannot apply --role"));
 
     let role_override_err =
-        super::reject_attach_startup_overrides(false, None, &role_overrides, &[])
+        super::reject_attach_startup_overrides(false, false, None, &role_overrides, &[])
             .expect_err("attach role overrides should fail");
     assert!(
         role_override_err
@@ -835,7 +852,7 @@ fn attach_rejects_startup_overrides_that_existing_daemon_cannot_apply() {
     );
 
     let extension_override_err =
-        super::reject_attach_startup_overrides(false, None, &[], &extension_overrides)
+        super::reject_attach_startup_overrides(false, false, None, &[], &extension_overrides)
             .expect_err("attach extension overrides should fail");
     assert!(
         extension_override_err
@@ -843,8 +860,12 @@ fn attach_rejects_startup_overrides_that_existing_daemon_cannot_apply() {
             .contains("extension enable/disable")
     );
 
-    super::reject_attach_startup_overrides(true, Some("manager"), &[], &[])
+    super::reject_attach_startup_overrides(true, false, Some("manager"), &[], &[])
         .expect("prompt-stdin uses --role for the submitted prompt");
+
+    let profile_error = super::reject_attach_startup_overrides(false, true, None, &[], &[])
+        .expect_err("attach cannot apply environment-selected profile");
+    assert!(profile_error.to_string().contains("cannot apply --profile"));
 }
 
 #[test]
@@ -998,11 +1019,12 @@ fn attach_rejects_public_extension_environment() {
 /// switched into its scratch HOME/XDG environment.
 #[test]
 fn dev_tmux_rejects_startup_overrides_before_harness_validation() {
-    let role_error = super::reject_dev_tmux_startup_overrides(Some("manager"), &[], &[], &[])
+    let role_error = super::reject_dev_tmux_startup_overrides(None, Some("manager"), &[], &[], &[])
         .expect_err("--role refused");
     assert!(role_error.to_string().contains("cannot use --role"));
 
     let extension_error = super::reject_dev_tmux_startup_overrides(
+        None,
         None,
         &[],
         &[path_tau_config_settings::ExtensionCliOverride::DisableAll],
@@ -1145,6 +1167,11 @@ fn gmail_oauth_finish_redirect_url_is_redacted_from_echo_and_prompt_history() {
         redacted_command_echo_line(":email auth google start work"),
         ":email auth google start work"
     );
+
+    let profile_error =
+        super::reject_dev_tmux_startup_overrides(Some("focused"), None, &[], &[], &[])
+            .expect_err("profile refused");
+    assert!(profile_error.to_string().contains("configuration profile"));
 }
 
 #[test]

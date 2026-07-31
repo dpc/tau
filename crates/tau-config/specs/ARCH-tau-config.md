@@ -1,7 +1,7 @@
 # ARCH-tau-config: tau-config architecture
 
 Extension availability is layered in this order: built-in defaults, harness
-configuration/drop-ins and ordered `--harness-config` layers,
+configuration/drop-ins, the selected profile, and ordered `--harness-config` layers,
 `TAU_ENABLE_EXTENSIONS` named enables, then extension CLI overrides in argv order.
 
 `tau-config` is the boundary between user-authored files/CLI overrides and the
@@ -18,6 +18,9 @@ overrides.
   lexical order above the base user file.
 - `--harness-config KEY=VALUE` overrides are the highest-precedence harness
   config layers and must preserve command-line order.
+- A selected `profiles.<name>` patch loads after built-in/user/drop-in files and
+  before `--harness-config` layers. `--profile <name>` wins over `TAU_PROFILE`;
+  an unknown selected name is an explicit error.
 - Config discovery is fallible: unreadable base paths, unreadable drop-in
   directories, bad directory entries, and non-directory `*.d` paths are explicit
   config errors.
@@ -112,6 +115,16 @@ array replacement:
 - `inter_session_receiver` and `inter_session_auto_start` are ordinary scalar
   role fields. Group defaults and role overrides can grant them across any
   number of groups. Auto-start without effective receiver capability is invalid.
+
+## Selectable configuration profiles
+
+`profiles` is a raw configuration-only map, not part of effective
+`HarnessSettings`. A selected profile supports agent provider defaults,
+agent/global role metadata, role groups and roles, plus `extensions.<name>.enable`
+for a built-in or base-configured extension. This explicit subset avoids a second
+universal recursive merge schema. Its role patches replay after base file layers,
+so relative values resolve against base settings, and before CLI role or
+`--harness-config` patches.
 
 ## Extension names and paths
 

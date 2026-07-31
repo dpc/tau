@@ -1,4 +1,5 @@
 use tau_config::settings as path_tau_config_settings;
+use tau_config::settings::ProfileName;
 
 use super::*;
 
@@ -234,6 +235,7 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            profile: None,
             role: &[],
             extension: &[],
             extension_environment: None,
@@ -254,6 +256,7 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            profile: None,
             role: &[],
             extension: &[],
             extension_environment: None,
@@ -264,6 +267,41 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
     assert!(without_override.get_envs().any(|(key, value)| {
         key == tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV && value.is_none()
     }));
+}
+
+/// Ensures a resolved CLI profile reaches the daemon and an absent selection
+/// clears inherited profile state rather than changing child configuration.
+#[test]
+fn daemon_command_sets_and_clears_profile_env() {
+    let spec = |profile| DaemonCommandSpec {
+        tau_binary: Path::new("tau"),
+        session_id: "session-1",
+        session_status: SessionLaunchStatus::New,
+        stdout: Stdio::null(),
+        stderr: Stdio::null(),
+        stdin: Stdio::null(),
+        startup_role: None,
+        cli_overrides: DaemonCliOverrides {
+            profile,
+            role: &[],
+            extension: &[],
+            extension_environment: None,
+            harness_config: &[],
+        },
+        storage_mode: HarnessStorageMode::Durable,
+    };
+    let profile = ProfileName::parse("focused").expect("profile");
+    let selected = build_daemon_command(spec(Some(&profile)));
+    assert!(selected.get_envs().any(|(key, value)| {
+        key == tau_config::settings::TAU_PROFILE_ENV && value == Some("focused".as_ref())
+    }));
+
+    let absent = build_daemon_command(spec(None));
+    assert!(
+        absent.get_envs().any(|(key, value)| {
+            key == tau_config::settings::TAU_PROFILE_ENV && value.is_none()
+        })
+    );
 }
 
 /// Ensures the private parent-to-child extension transport cannot be inherited
@@ -279,6 +317,7 @@ fn daemon_command_clears_empty_extension_transport() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            profile: None,
             role: &[],
             extension: &[],
             extension_environment: None,
@@ -315,6 +354,7 @@ fn daemon_command_forwards_public_extension_environment_separately() {
         stdin: Stdio::null(),
         startup_role: Some("engineer"),
         cli_overrides: DaemonCliOverrides {
+            profile: None,
             role: &[],
             extension: &cli,
             extension_environment: Some(&names),
@@ -349,6 +389,7 @@ fn daemon_command_clears_socket_activation_env() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            profile: None,
             role: &[],
             extension: &[],
             extension_environment: None,
@@ -385,6 +426,7 @@ fn daemon_command_and_parent_path_share_runtime_instance_id() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            profile: None,
             role: &[],
             extension: &[],
             extension_environment: None,
@@ -419,6 +461,7 @@ fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            profile: None,
             role: &[],
             extension: &[],
             extension_environment: None,
@@ -445,6 +488,7 @@ fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            profile: None,
             role: &[],
             extension: &[],
             extension_environment: None,
@@ -473,6 +517,7 @@ fn daemon_command_maps_storage_mode_to_exclusive_environment_marker() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            profile: None,
             role: &[],
             extension: &[],
             extension_environment: None,
@@ -501,6 +546,7 @@ fn daemon_command_uses_initial_ui_stdio() {
         stdin: Stdio::null(),
         startup_role: None,
         cli_overrides: DaemonCliOverrides {
+            profile: None,
             role: &[],
             extension: &[],
             extension_environment: None,

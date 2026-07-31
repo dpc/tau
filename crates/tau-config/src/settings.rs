@@ -6,7 +6,7 @@
 //!
 //! Uses the `config` crate for layered YAML loading.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
@@ -699,6 +699,10 @@ struct HarnessSettingsWire {
     tool_policy: ToolPolicy,
     /// Agent defaults and role groups.
     agents: AgentsSettings,
+    /// Named, opt-in patches. The loader consumes these before returning the
+    /// effective settings, so they never enter [`HarnessSettings`].
+    #[serde(default, rename = "profiles")]
+    _profiles: BTreeMap<String, HarnessProfile>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -941,6 +945,95 @@ struct HarnessRoleOverrides {
     // duplicate ignore entries in this replay-only wire type.
     #[serde(default)]
     agents: HarnessAgentRoleOverrides,
+}
+
+/// Raw, selected-profile patches kept separate from effective harness settings.
+///
+/// Profiles deliberately expose only role metadata and extension enablement.
+/// This avoids making a profile a second, recursively-merged copy of the
+/// complete harness configuration schema.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HarnessProfile {
+    /// Agent defaults, role groups, and per-role patches.
+    agents: HarnessProfileAgentOverrides,
+    /// Enablement changes for normally resolved extensions, including
+    /// built-ins.
+    extensions: BTreeMap<String, HarnessProfileExtension>,
+}
+
+/// The supported agent portion of one configuration profile.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HarnessProfileAgentOverrides {
+    /// Role groups and their member role patches.
+    #[serde(alias = "roleGroups")]
+    role_groups: RawRoleGroups,
+    /// Global prompt fragments applied to every role.
+    #[serde(alias = "promptFragments")]
+    prompt_fragments: Vec<RolePromptFragment>,
+    /// Global required skills applied to every role.
+    #[serde(alias = "requiredSkills")]
+    required_skills: Vec<tau_proto::SkillName>,
+    /// Default model patch.
+    #[serde(default, deserialize_with = "present_option")]
+    model: Option<Option<ModelId>>,
+    /// Default effort patch.
+    #[serde(default, deserialize_with = "present_option")]
+    effort: Option<Option<ConfiguredRoleSetting<tau_proto::Effort>>>,
+    /// Default verbosity patch.
+    #[serde(default, deserialize_with = "present_option")]
+    verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
+    /// Default thinking-summary patch.
+    #[serde(
+        default,
+        alias = "thinkingSummary",
+        deserialize_with = "present_option"
+    )]
+    thinking_summary: Option<Option<ConfiguredRoleSetting<tau_proto::ThinkingSummary>>>,
+    /// Default service-tier patch.
+    #[serde(default, alias = "serviceTier", deserialize_with = "present_option")]
+    service_tier: Option<Option<tau_proto::ServiceTier>>,
+    /// Default compaction patch.
+    #[serde(default, deserialize_with = "present_option")]
+    compaction: Option<Option<RoleCompaction>>,
+    /// Global named context-size alert patches.
+    #[serde(alias = "contextSizeAlerts")]
+    context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
+}
+
+impl From<HarnessProfileAgentOverrides> for HarnessAgentRoleOverrides {
+    fn from(profile: HarnessProfileAgentOverrides) -> Self {
+        Self {
+            role_groups: profile.role_groups,
+            prompt_fragments: profile.prompt_fragments,
+            required_skills: profile.required_skills,
+            model: profile.model,
+            effort: profile.effort,
+            verbosity: profile.verbosity,
+            thinking_summary: profile.thinking_summary,
+            service_tier: profile.service_tier,
+            compaction: profile.compaction,
+            context_size_alerts: profile.context_size_alerts,
+        }
+    }
+}
+
+/// One profile's explicit extension availability change.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HarnessProfileExtension {
+    /// Whether the named base extension should run.
+    #[serde(alias = "enabled")]
+    enable: Option<bool>,
+}
+
+/// Named profiles discovered from built-in and user configuration files.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct HarnessProfiles {
+    /// Raw profile patches keyed by the selectable profile name.
+    profiles: BTreeMap<String, HarnessProfile>,
 }
 
 #[derive(Default, Deserialize)]
@@ -2071,6 +2164,16 @@ pub enum SettingsError {
     },
     /// A command-line role override named a role absent from effective config.
     UnknownRoleCliOverride(String),
+    /// The requested configuration profile is not present in effective files.
+    UnknownProfile(ProfileName),
+    /// A profile names an extension absent from base configuration and
+    /// built-ins.
+    UnknownProfileExtension {
+        /// The selected profile containing the bad target.
+        profile: ProfileName,
+        /// The extension name that no base or built-in entry defines.
+        extension: String,
+    },
     /// A `--harness-config KEY=VALUE` override had invalid syntax, YAML, or
     /// conflicting legacy/canonical key spellings.
     InvalidHarnessConfigCliOverride(String),
@@ -2090,6 +2193,13 @@ impl fmt::Display for SettingsError {
             Self::UnknownRoleCliOverride(role) => {
                 write!(f, "unknown role in CLI override: `{role}`")
             }
+            Self::UnknownProfile(profile) => {
+                write!(f, "unknown configuration profile: `{profile}`")
+            }
+            Self::UnknownProfileExtension { profile, extension } => write!(
+                f,
+                "configuration profile `{profile}` changes unknown extension `{extension}`"
+            ),
             Self::InvalidInterSessionAutoStart { role } => write!(
                 f,
                 "role `{role}` enables `inter_session_auto_start` without `inter_session_receiver`"
@@ -2108,9 +2218,72 @@ impl std::error::Error for SettingsError {
             Self::DuplicateGroupedRole { .. }
             | Self::InvalidInterSessionAutoStart { .. }
             | Self::UnknownRoleCliOverride(_)
+            | Self::UnknownProfile(_)
+            | Self::UnknownProfileExtension { .. }
             | Self::InvalidHarnessConfigCliOverride(_) => None,
         }
     }
+}
+
+/// Environment variable selecting a named harness configuration profile.
+pub const TAU_PROFILE_ENV: &str = "TAU_PROFILE";
+
+/// A validated profile name selected from the CLI or environment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileName(String);
+
+impl ProfileName {
+    /// Parses a non-empty profile name so loader callers cannot silently bypass
+    /// selection validation.
+    pub fn parse(value: impl Into<String>) -> Result<Self, SettingsError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(SettingsError::Config(config::ConfigError::Message(
+                "configuration profile must not be empty".to_owned(),
+            )));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the profile name as its configuration-map key.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProfileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Resolves the profile selected by a CLI flag or [`TAU_PROFILE_ENV`].
+///
+/// An explicit CLI value wins over the environment. Empty selections fail so
+/// typoed shell expansions do not silently disable profile selection.
+pub fn selected_profile(cli_profile: Option<&str>) -> Result<Option<ProfileName>, SettingsError> {
+    selected_profile_from_sources(cli_profile, std::env::var_os(TAU_PROFILE_ENV))
+}
+
+/// Resolves a profile from already-read CLI and environment sources.
+fn selected_profile_from_sources(
+    cli_profile: Option<&str>,
+    environment_profile: Option<OsString>,
+) -> Result<Option<ProfileName>, SettingsError> {
+    let profile = match cli_profile {
+        Some(profile) => Some(profile.to_owned()),
+        None => environment_profile
+            .map(|profile| {
+                profile.into_string().map_err(|_| {
+                    SettingsError::Config(config::ConfigError::Message(format!(
+                        "{TAU_PROFILE_ENV} must contain valid UTF-8"
+                    )))
+                })
+            })
+            .transpose()?,
+    };
+    profile.map(ProfileName::parse).transpose()
 }
 
 impl From<config::ConfigError> for SettingsError {
@@ -2334,10 +2507,36 @@ pub fn load_harness_settings_with_cli_overrides_in(
     role_overrides: &[RoleCliOverride],
     harness_config_overrides: &[HarnessConfigCliOverride],
 ) -> Result<HarnessSettings, SettingsError> {
+    load_harness_settings_with_profile_and_cli_overrides_in(
+        dirs,
+        None,
+        role_overrides,
+        harness_config_overrides,
+    )
+}
+
+/// Like [`load_harness_settings_with_cli_overrides_in`], with one named profile
+/// applied after file layers and before command-line configuration and role
+/// overrides.
+///
+/// Callers that select profiles through process environment should resolve that
+/// selection with [`selected_profile`] and pass the result here. This explicit
+/// boundary keeps deterministic callers independent from ambient environment.
+pub fn load_harness_settings_with_profile_and_cli_overrides_in(
+    dirs: &TauDirs,
+    profile_name: Option<&ProfileName>,
+    role_overrides: &[RoleCliOverride],
+    harness_config_overrides: &[HarnessConfigCliOverride],
+) -> Result<HarnessSettings, SettingsError> {
+    let profiles = match profile_name {
+        Some(name) => load_harness_profile_layers(dirs, name)?,
+        None => Vec::new(),
+    };
     let mut settings: HarnessSettings = load_yaml_layered_with_builtin_and_harness_overrides(
         BUILT_IN_HARNESS_YAML,
         dirs.config_dir.as_deref(),
         "harness",
+        &profiles,
         harness_config_overrides,
     )?;
 
@@ -2366,16 +2565,21 @@ pub fn load_harness_settings_with_cli_overrides_in(
             &effective_provider_defaults,
         )?;
     }
+    for profile in profiles {
+        let overrides = HarnessRoleOverrides {
+            agents: profile.agents.into(),
+        };
+        apply_harness_role_overrides(
+            &mut role_settings,
+            &mut effective_provider_defaults,
+            overrides,
+        )?;
+    }
     for overrides in harness_role_cli_override_layers(harness_config_overrides)? {
-        let provider_defaults = overrides.agents.provider_defaults();
-        effective_provider_defaults.apply_patch(&provider_defaults);
-        role_settings.apply_provider_defaults_to_roles(&provider_defaults);
-        role_settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments);
-        role_settings.apply_required_skill_overrides(overrides.agents.required_skills);
-        role_settings.apply_context_size_alert_overrides(overrides.agents.context_size_alerts);
-        role_settings.apply_role_group_overrides(
-            overrides.agents.role_groups,
-            &effective_provider_defaults,
+        apply_harness_role_overrides(
+            &mut role_settings,
+            &mut effective_provider_defaults,
+            overrides,
         )?;
     }
     role_settings.apply_role_cli_overrides(role_overrides)?;
@@ -2389,6 +2593,21 @@ pub fn load_harness_settings_with_cli_overrides_in(
     settings.roles = role_settings.roles;
     settings.role_groups = role_settings.role_groups;
     Ok(settings)
+}
+
+/// Replays one raw role patch in source order through domain-specific merging.
+fn apply_harness_role_overrides(
+    settings: &mut HarnessSettings,
+    effective_provider_defaults: &mut AgentRole,
+    overrides: HarnessRoleOverrides,
+) -> Result<(), SettingsError> {
+    let provider_defaults = overrides.agents.provider_defaults();
+    effective_provider_defaults.apply_patch(&provider_defaults);
+    settings.apply_provider_defaults_to_roles(&provider_defaults);
+    settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments);
+    settings.apply_required_skill_overrides(overrides.agents.required_skills);
+    settings.apply_context_size_alert_overrides(overrides.agents.context_size_alerts);
+    settings.apply_role_group_overrides(overrides.agents.role_groups, effective_provider_defaults)
 }
 
 // Legacy harness aliases are accepted for user compatibility, but every alias
@@ -2514,6 +2733,14 @@ fn normalize_harness_config_value(
             }
         }
     }
+    if let Some(serde_json::Value::Object(profiles)) = map.get_mut("profiles") {
+        for (profile_name, profile) in profiles {
+            normalize_harness_config_value(
+                profile,
+                &format!("{source}, configuration profile `{profile_name}`"),
+            )?;
+        }
+    }
     if let Some(tool_policy) = map.get_mut("tool_policy") {
         normalize_tool_policy_config_keys(tool_policy, source, "tool_policy")?;
     }
@@ -2585,6 +2812,7 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
     built_in_text: &'static str,
     dir: Option<&Path>,
     name: &str,
+    profiles: &[HarnessProfile],
     overrides: &[HarnessConfigCliOverride],
 ) -> Result<T, SettingsError> {
     let mut builder = config::Config::builder().add_source(normalized_harness_yaml_source(
@@ -2603,6 +2831,9 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
             &format!("harness config {}", path.display()),
         )?);
     }
+    for profile in profiles {
+        builder = builder.add_source(profile_extension_source(profile)?);
+    }
     let normalized_overrides = normalized_harness_config_overrides(overrides)?;
     for override_ in &normalized_overrides {
         builder = builder.add_source(harness_config_override_source(override_)?);
@@ -2611,6 +2842,92 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
     let value: serde_json::Value = config.try_deserialize()?;
     serde_json::from_value(value)
         .map_err(|error| SettingsError::Config(config::ConfigError::Message(error.to_string())))
+}
+
+/// Serializes the intentionally small generic subset of a selected profile.
+fn profile_extension_source(
+    profile: &HarnessProfile,
+) -> Result<config::File<config::FileSourceString, config::FileFormat>, SettingsError> {
+    let extensions = profile
+        .extensions
+        .iter()
+        .filter_map(|(name, patch)| {
+            patch.enable.map(|enable| {
+                (
+                    name.clone(),
+                    serde_json::json!({
+                        "enable": enable,
+                    }),
+                )
+            })
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let value = serde_json::json!({ "extensions": extensions });
+    let yaml = serde_yaml_ng::to_string(&value).map_err(|error| {
+        SettingsError::Config(config::ConfigError::Message(format!(
+            "failed to serialize selected profile extensions: {error}"
+        )))
+    })?;
+    Ok(config::File::from_str(&yaml, config::FileFormat::Yaml).required(true))
+}
+
+/// Loads one selected profile from every built-in/user/drop-in source in order.
+///
+/// Keeping these patches separate preserves additive role semantics and
+/// relative provider-setting resolution across profile definitions.
+fn load_harness_profile_layers(
+    dirs: &TauDirs,
+    name: &ProfileName,
+) -> Result<Vec<HarnessProfile>, SettingsError> {
+    let mut profiles = Vec::new();
+    let mut built_in =
+        load_harness_profile_layer(BUILT_IN_HARNESS_YAML, "built-in harness config")?;
+    if let Some(profile) = built_in.profiles.remove(name.as_str()) {
+        profiles.push(profile);
+    }
+    for path in yaml_layer_paths(dirs.config_dir.as_deref(), "harness")? {
+        let text = std::fs::read_to_string(&path).map_err(|err| {
+            SettingsError::Config(config::ConfigError::Message(format!(
+                "failed to read {}: {err}",
+                path.display()
+            )))
+        })?;
+        let mut layer =
+            load_harness_profile_layer(&text, &format!("harness config {}", path.display()))?;
+        if let Some(profile) = layer.profiles.remove(name.as_str()) {
+            profiles.push(profile);
+        }
+    }
+    if profiles.is_empty() {
+        return Err(SettingsError::UnknownProfile(name.clone()));
+    }
+    Ok(profiles)
+}
+
+/// Returns every extension enablement target from the selected raw profile.
+///
+/// Harness startup validates these names against its built-in extension set and
+/// the base configured extension table before it applies the profile.
+pub fn profile_extension_names_in(
+    dirs: &TauDirs,
+    name: &ProfileName,
+) -> Result<BTreeSet<String>, SettingsError> {
+    Ok(load_harness_profile_layers(dirs, name)?
+        .into_iter()
+        .flat_map(|profile| profile.extensions.into_keys())
+        .collect())
+}
+
+/// Parses the profile map from one normalized harness configuration source.
+fn load_harness_profile_layer(
+    text: &str,
+    description: &str,
+) -> Result<HarnessProfiles, SettingsError> {
+    config::Config::builder()
+        .add_source(normalized_harness_yaml_source(text, description)?)
+        .build()?
+        .try_deserialize()
+        .map_err(SettingsError::from)
 }
 
 fn normalized_harness_yaml_source(

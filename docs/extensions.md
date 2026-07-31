@@ -87,7 +87,18 @@ Tau-managed secrets, but it does not make them an operating-system sandbox. See
 ## Configuration layers
 
 Built-in defaults load first, followed by `harness.yaml`, lexically sorted
-`harness.d/*.yaml` or `*.yml` drop-ins, and ordered command-line overrides.
+`harness.d/*.yaml` or `*.yml` drop-ins, an optional selected profile, and ordered
+command-line overrides. Select a profile with `--profile NAME` or
+`TAU_PROFILE=NAME`; the flag wins. A profile can change only `enable` for an
+base-configured or built-in extension, and CLI overrides still win:
+
+```yaml
+profiles:
+  focused:
+    extensions:
+      std-pim:
+        enable: false
+```
 
 Repeat `--harness-config=KEY=VALUE` to make a one-launch override:
 

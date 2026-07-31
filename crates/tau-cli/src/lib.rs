@@ -5,6 +5,7 @@
 //! Transcript presentation follows `SPEC-tau-cli-transcript-styling`.
 
 use tau_config::settings as path_tau_config_settings;
+use tau_config::settings::ProfileName;
 
 pub mod cli;
 
@@ -424,11 +425,17 @@ fn validate_agent_trace_mode(
 }
 
 fn reject_dev_tmux_startup_overrides(
+    profile: Option<&str>,
     startup_role: Option<&str>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<(), CliError> {
+    if profile.is_some() {
+        return Err(CliError::Participant(
+            "`tau dev tmux` cannot use a configuration profile because the outer helper must not load normal user harness config before spawning the scratch Tau".to_owned(),
+        ));
+    }
     if startup_role.is_some() {
         return Err(CliError::Participant(
             "`tau dev tmux` cannot use --role because the outer helper must not load normal user harness config before spawning the scratch Tau".to_owned(),
@@ -459,10 +466,16 @@ fn reject_legacy_config_path(config: Option<&std::path::Path>) -> Result<(), Cli
 
 fn reject_attach_startup_overrides(
     prompt_stdin: bool,
+    profile_selected: bool,
     startup_role: Option<&str>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
 ) -> Result<(), CliError> {
+    if profile_selected {
+        return Err(CliError::Participant(
+            "`tau attach` cannot apply --profile to an already-running daemon".to_owned(),
+        ));
+    }
     if startup_role.is_some() && !prompt_stdin {
         return Err(CliError::Participant(
             "`tau attach` cannot apply --role to an already-running interactive daemon; use --prompt-stdin if you want --role for the submitted prompt".to_owned(),
@@ -646,7 +659,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             println!("{}", version_label());
             return Ok(());
         }
-
         reject_legacy_config_path(run.config.as_deref())?;
         let command = match command {
             Some(cli::Command::Run(args)) => DispatchCommand::Startup {
@@ -667,6 +679,23 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 mode: StartupMode::New,
             },
         };
+        if let DispatchCommand::Startup {
+            args,
+            mode: StartupMode::Attach(_),
+        } = &command
+        {
+            reject_harness_config_overrides(&harness_config_overrides, "attach")?;
+            reject_attach_startup_overrides(
+                args.prompt_stdin,
+                harness.profile.is_some()
+                    || std::env::var_os(tau_config::settings::TAU_PROFILE_ENV).is_some(),
+                harness.role.as_deref(),
+                &role_cli_overrides,
+                &extension_cli_overrides,
+            )?;
+        }
+        let selected_profile = tau_config::settings::selected_profile(harness.profile.as_deref())
+            .map_err(|error| CliError::Participant(error.to_string()))?;
         let reads_extension_environment = match &command {
             DispatchCommand::Startup { .. } => true,
             DispatchCommand::Other(cli::Command::Dev {
@@ -692,7 +721,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 mode: StartupMode::Attach(_),
                 ..
             } => {
-                reject_harness_config_overrides(&harness_config_overrides, "attach")?;
                 reject_attach_extension_environment(&environment_extension_names)?;
             }
             DispatchCommand::Startup { .. }
@@ -732,6 +760,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 command: cli::DevCommand::Tmux { .. },
             }) => {
                 reject_dev_tmux_startup_overrides(
+                    selected_profile.as_ref().map(ProfileName::as_str),
                     harness.role.as_deref(),
                     &role_cli_overrides,
                     &extension_cli_overrides,
@@ -763,14 +792,16 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             return dev_tmux::run(command);
         }
 
-        tau_harness::validate_cli_overrides(
+        tau_harness::validate_cli_overrides_with_profile(
+            selected_profile.as_ref(),
             &role_cli_overrides,
             &extension_cli_overrides,
             &harness_config_overrides,
         )
         .map_err(|error| CliError::Participant(error.to_string()))?;
         if reads_extension_environment {
-            tau_harness::validate_extension_environment_and_cli_overrides(
+            tau_harness::validate_extension_environment_and_cli_overrides_with_profile(
+                selected_profile.as_ref(),
                 &environment_extension_names,
                 &extension_cli_overrides,
                 &role_cli_overrides,
@@ -790,22 +821,11 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             } => {
                 reject_legacy_config_path(config.as_deref())?;
                 reject_ephemeral_incompatible(ephemeral, &startup_mode)?;
-                if matches!(startup_mode, StartupMode::Attach(_)) {
-                    reject_attach_startup_overrides(
-                        prompt_stdin,
-                        harness.role.as_deref(),
-                        &role_cli_overrides,
-                        &extension_cli_overrides,
-                    )?;
-                }
                 let (session_id, session_status) = match &startup_mode {
-                    StartupMode::Attach(session) => {
-                        reject_harness_config_overrides(&harness_config_overrides, "attach")?;
-                        (
-                            crate::daemon::resolve_attach_session_id(session.as_ref())?,
-                            SessionLaunchStatus::Resumed,
-                        )
-                    }
+                    StartupMode::Attach(session) => (
+                        crate::daemon::resolve_attach_session_id(session.as_ref())?,
+                        SessionLaunchStatus::Resumed,
+                    ),
                     StartupMode::Resume(session) => (
                         resolve_resume_session_id(session.as_ref())?,
                         SessionLaunchStatus::Resumed,
@@ -823,6 +843,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         session_status,
                         harness.role.as_deref(),
                         crate::daemon::DaemonCliOverrides {
+                            profile: selected_profile.as_ref(),
                             role: &role_cli_overrides,
                             extension: &extension_cli_overrides,
                             extension_environment: None,
@@ -837,6 +858,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         session_status,
                         harness.role.as_deref(),
                         crate::daemon::DaemonCliOverrides {
+                            profile: selected_profile.as_ref(),
                             role: &role_cli_overrides,
                             extension: &extension_cli_overrides,
                             extension_environment: None,
@@ -962,6 +984,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     print_prompt::run_print_prompt(
                         role,
                         enable_agents_md,
+                        selected_profile.as_ref(),
                         &role_cli_overrides,
                         &extension_cli_overrides,
                         &environment_extension_names,
@@ -973,6 +996,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         required_harness_role(harness.role.as_deref(), "print-system-prompt")?;
                     print_prompt::run_print_system_prompt(
                         role,
+                        selected_profile.as_ref(),
                         &role_cli_overrides,
                         &extension_cli_overrides,
                         &environment_extension_names,
@@ -983,6 +1007,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     let role = required_harness_role(harness.role.as_deref(), "print-tools")?;
                     print_tools::run_print_tools(
                         role,
+                        selected_profile.as_ref(),
                         &role_cli_overrides,
                         &extension_cli_overrides,
                         &environment_extension_names,
@@ -1000,6 +1025,12 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 initial_ui_stdio,
             }) => {
                 reject_harness_config_overrides(&harness_config_overrides, "component")?;
+                if harness.profile.is_some() {
+                    return Err(CliError::Participant(
+                        "`tau component` cannot apply --profile in-process; set TAU_PROFILE before starting the component"
+                            .to_owned(),
+                    ));
+                }
                 if initial_ui_stdio && name != "harness" {
                     return Err(CliError::Participant(
                         "--initial-ui-stdio is only valid for `tau component harness`".to_owned(),

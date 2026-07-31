@@ -392,6 +392,8 @@ fn daemon_output_for_session_in(
 }
 
 pub(crate) struct DaemonCliOverrides<'a> {
+    /// Explicit profile selection resolved before the daemon is spawned.
+    pub(crate) profile: Option<&'a tau_config::settings::ProfileName>,
     pub(crate) role: &'a [tau_config::settings::RoleCliOverride],
     pub(crate) extension: &'a [tau_config::settings::ExtensionCliOverride],
     /// Parsed public extension environment to forward deterministically.
@@ -603,6 +605,11 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
 
     if let Some(role) = spec.startup_role.filter(|role| !role.is_empty()) {
         cmd.env(tau_harness::STARTUP_ROLE_ENV, role);
+    }
+    if let Some(profile) = spec.cli_overrides.profile {
+        cmd.env(tau_config::settings::TAU_PROFILE_ENV, profile.as_str());
+    } else {
+        cmd.env_remove(tau_config::settings::TAU_PROFILE_ENV);
     }
     match spec.storage_mode {
         HarnessStorageMode::Durable => {

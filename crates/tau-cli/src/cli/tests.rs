@@ -45,6 +45,7 @@ fn targeted_startup_keeps_root_option_placement() {
     assert!(Cli::try_parse_from(["tau", "resume", "--ephemeral"]).is_err());
     for option in [
         "--role=engineer",
+        "--profile=focused",
         "--harness-config=agents.default_role=engineer",
         "--enable-role=engineer",
         "--disable-role=engineer",

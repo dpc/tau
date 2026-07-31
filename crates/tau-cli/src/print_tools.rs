@@ -8,6 +8,7 @@ use crate::render_request::RenderResponse;
 use crate::{CliError, mint_short_id};
 pub(crate) fn run_print_tools(
     role: &str,
+    profile: Option<&tau_config::settings::ProfileName>,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
     extension_environment: &[String],
@@ -26,6 +27,7 @@ pub(crate) fn run_print_tools(
         Some(output),
         Some(role),
         DaemonCliOverrides {
+            profile,
             role: role_cli_overrides,
             extension: extension_cli_overrides,
             extension_environment: Some(extension_environment),

@@ -94,5 +94,6 @@ pub use crate::internal_tools::{
 pub use crate::settings::{
     EXTENSION_CLI_OVERRIDES_ENV, HARNESS_CONFIG_CLI_OVERRIDES_ENV, ROLE_CLI_OVERRIDES_ENV,
     STARTUP_ROLE_ENV, builtin_extensions, default_config, validate_cli_overrides,
-    validate_extension_environment_and_cli_overrides,
+    validate_cli_overrides_with_profile, validate_extension_environment_and_cli_overrides,
+    validate_extension_environment_and_cli_overrides_with_profile,
 };
