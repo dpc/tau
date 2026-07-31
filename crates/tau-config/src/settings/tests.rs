@@ -759,6 +759,18 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
             serde_json::Value::Bool(true),
         );
     }
+    let agents = value
+        .pointer_mut("/agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("agents map");
+    agents.insert(
+        "thinkingSummary".to_owned(),
+        serde_json::Value::String("auto".to_owned()),
+    );
+    agents.insert(
+        "serviceTier".to_owned(),
+        serde_json::Value::String("default".to_owned()),
+    );
 
     normalize_harness_config_value(&mut value, "test").expect("normalize");
 
@@ -775,6 +787,8 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
     assert!(value.pointer("/agents/prompt_fragments").is_some());
     assert!(value.pointer("/agents/required_skills").is_some());
     assert!(value.pointer("/agents/context_size_alerts").is_some());
+    assert!(value.pointer("/agents/thinking_summary").is_some());
+    assert!(value.pointer("/agents/service_tier").is_some());
     let group = value
         .pointer("/agents/role_groups/engineer")
         .expect("group");
@@ -814,6 +828,8 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         ("agents.defaultRole", "agents.default_role"),
         ("agents.promptFragments", "agents.prompt_fragments"),
         ("agents.requiredSkills", "agents.required_skills"),
+        ("agents.thinkingSummary", "agents.thinking_summary"),
+        ("agents.serviceTier", "agents.service_tier"),
         (
             "agents.contextSizeAlerts.compact-soon.enable",
             "agents.context_size_alerts.compact-soon.enable",
@@ -2480,6 +2496,228 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
             "global fragment should apply once to {role_name}"
         );
     }
+}
+
+/// Ensures top-level agents provider settings become effective defaults for
+/// every role, including all supported model-facing provider parameters.
+#[test]
+fn harness_agent_provider_defaults_apply_to_all_roles() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        agents:
+          model: openai/global-model
+          effort: medium
+          verbosity: high
+          thinkingSummary: concise
+          serviceTier: flex
+          compaction: { threshold: 123456 }
+          role_groups:
+            custom:
+              roles:
+                inherited: {}
+        "#,
+    )
+    .expect("write harness");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let inherited = &settings.roles["inherited"];
+    assert_eq!(
+        inherited.model.as_ref().map(ToString::to_string).as_deref(),
+        Some("openai/global-model")
+    );
+    assert_eq!(inherited.effort, Some(tau_proto::Effort::Medium));
+    assert_eq!(inherited.verbosity, Some(tau_proto::Verbosity::High));
+    assert_eq!(
+        inherited.thinking_summary,
+        Some(tau_proto::ThinkingSummary::Concise)
+    );
+    assert_eq!(inherited.service_tier, Some(tau_proto::ServiceTier::Flex));
+    assert_eq!(
+        inherited.compaction,
+        Some(RoleCompaction::Threshold(123_456))
+    );
+}
+
+/// Locks the domain merge order: each layer applies agents defaults, then group
+/// defaults, then role overrides; a later layer therefore replaces earlier
+/// values before its more-specific values are applied.
+#[test]
+fn harness_agent_provider_defaults_merge_before_group_and_role_overrides() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        agents:
+          model: openai/base-global
+          effort: minimal
+          verbosity: high
+          thinking_summary: detailed
+          service_tier: fast
+          role_groups:
+            custom:
+              model: openai/base-group
+              effort: low
+              roles:
+                reviewer:
+                  model: openai/base-role
+                  effort: high
+                  service_tier: fast
+        "#,
+    )
+    .expect("write base");
+    std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir drop-ins");
+    std::fs::write(
+        dir.join("harness.d/10-provider-defaults.yaml"),
+        r#"
+        agents:
+          model: openai/drop-in-global
+          effort: off
+          thinking_summary: null
+          service_tier: flex
+          role_groups:
+            custom:
+              effort: medium
+              roles:
+                reviewer:
+                  model: openai/drop-in-role
+                newcomer: {}
+        "#,
+    )
+    .expect("write drop-in");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let reviewer = &settings.roles["reviewer"];
+    assert_eq!(
+        reviewer.model.as_ref().map(ToString::to_string).as_deref(),
+        Some("openai/drop-in-role")
+    );
+    assert_eq!(reviewer.effort, Some(tau_proto::Effort::Medium));
+    assert_eq!(reviewer.thinking_summary, None);
+    assert_eq!(reviewer.service_tier, Some(tau_proto::ServiceTier::Flex));
+    assert_eq!(
+        settings.roles["newcomer"].verbosity,
+        Some(tau_proto::Verbosity::High)
+    );
+}
+
+/// Ensures relative provider settings resolve broadly to narrowly, use the
+/// documented built-in bases when needed, and saturate at each setting's ends.
+#[test]
+fn harness_relative_provider_settings_merge_and_saturate() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        agents:
+          effort: increase
+          verbosity: decrease:99
+          thinking_summary: decrease
+          role_groups:
+            custom:
+              effort: increase:99
+              thinking_summary: increase:2
+              roles:
+                reviewer:
+                  effort: decrease:99
+                  verbosity: increase
+                  thinking_summary: increase:99
+        "#,
+    )
+    .expect("write harness");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let reviewer = &settings.roles["reviewer"];
+    assert_eq!(reviewer.effort, Some(tau_proto::Effort::Off));
+    assert_eq!(reviewer.verbosity, Some(tau_proto::Verbosity::Medium));
+    assert_eq!(
+        reviewer.thinking_summary,
+        Some(tau_proto::ThinkingSummary::Detailed)
+    );
+}
+
+/// Ensures one-shot harness config accepts relative provider defaults, starts
+/// otherwise-unset values from neutral bases, and rejects a zero adjustment.
+#[test]
+fn harness_config_cli_relative_provider_defaults_use_neutral_bases() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        agents:
+          role_groups:
+            custom:
+              roles:
+                inherited: {}
+        "#,
+    )
+    .expect("write harness");
+    let overrides = [
+        HarnessConfigCliOverride::from_str("agents.effort=increase").expect("effort"),
+        HarnessConfigCliOverride::from_str("agents.verbosity=decrease:99").expect("verbosity"),
+        HarnessConfigCliOverride::from_str("agents.thinking_summary=increase:99")
+            .expect("thinking summary"),
+    ];
+
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
+            .expect("load");
+    let inherited = &settings.roles["inherited"];
+    assert_eq!(inherited.effort, Some(tau_proto::Effort::High));
+    assert_eq!(inherited.verbosity, Some(tau_proto::Verbosity::Low));
+    assert_eq!(
+        inherited.thinking_summary,
+        Some(tau_proto::ThinkingSummary::Detailed)
+    );
+
+    let zero = [HarnessConfigCliOverride::from_str("agents.effort=increase:0").expect("parse")];
+    assert!(
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &zero).is_err()
+    );
+}
+
+/// Ensures command-line provider defaults, including legacy aliases, use the
+/// same role replay path as defaults read from harness files.
+#[test]
+fn harness_config_cli_provider_defaults_apply_to_all_roles() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        agents:
+          role_groups:
+            custom:
+              roles:
+                inherited: {}
+        "#,
+    )
+    .expect("write harness");
+    let overrides = [
+        HarnessConfigCliOverride::from_str("agents.model=openai/cli-model").expect("model"),
+        HarnessConfigCliOverride::from_str("agents.thinkingSummary=detailed")
+            .expect("thinking summary"),
+        HarnessConfigCliOverride::from_str("agents.serviceTier=fast").expect("service tier"),
+    ];
+
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
+            .expect("load");
+    let inherited = &settings.roles["inherited"];
+    assert_eq!(
+        inherited.model.as_ref().map(ToString::to_string).as_deref(),
+        Some("openai/cli-model")
+    );
+    assert_eq!(
+        inherited.thinking_summary,
+        Some(tau_proto::ThinkingSummary::Detailed)
+    );
+    assert_eq!(inherited.service_tier, Some(tau_proto::ServiceTier::Fast));
 }
 
 /// Ensures command-line agent-global prompt fragments are folded into every

@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
+use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -712,6 +713,23 @@ struct AgentsSettings {
     prompt_fragments: Vec<RolePromptFragment>,
     #[serde(default, alias = "requiredSkills")]
     required_skills: Vec<tau_proto::SkillName>,
+    /// Provider settings that default every role before group and role patches.
+    #[serde(default, deserialize_with = "present_option")]
+    model: Option<Option<ModelId>>,
+    #[serde(default, deserialize_with = "present_option")]
+    effort: Option<Option<ConfiguredRoleSetting<tau_proto::Effort>>>,
+    #[serde(default, deserialize_with = "present_option")]
+    verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
+    #[serde(
+        default,
+        alias = "thinkingSummary",
+        deserialize_with = "present_option"
+    )]
+    thinking_summary: Option<Option<ConfiguredRoleSetting<tau_proto::ThinkingSummary>>>,
+    #[serde(default, alias = "serviceTier", deserialize_with = "present_option")]
+    service_tier: Option<Option<tau_proto::ServiceTier>>,
+    #[serde(default, deserialize_with = "present_option")]
+    compaction: Option<Option<RoleCompaction>>,
     /// Agent-global alert patches applied before group and role settings.
     #[serde(default, alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
@@ -728,6 +746,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         for extension_name in wire.extensions.keys() {
             validate_extension_name(extension_name).map_err(D::Error::custom)?;
         }
+        let provider_defaults = wire.agents.provider_defaults();
         let mut settings = Self {
             session_retention_days: wire.session_retention_days,
             diagnostic_retention_days: wire.diagnostic_retention_days,
@@ -743,9 +762,12 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             agent_id_template: wire.agents.id_template,
             agent_display_name_template: wire.agents.display_name_template,
         };
+        let mut effective_provider_defaults = AgentRole::default();
+        effective_provider_defaults.apply_patch(&provider_defaults);
+        settings.apply_provider_defaults_to_roles(&provider_defaults);
         settings.apply_context_size_alert_overrides(wire.agents.context_size_alerts);
         settings
-            .apply_role_group_overrides(wire.agents.role_groups)
+            .apply_role_group_overrides(wire.agents.role_groups, &effective_provider_defaults)
             .map_err(D::Error::custom)?;
         validate_custom_prompts(&settings.custom_prompts).map_err(D::Error::custom)?;
         settings.remove_disabled_roles();
@@ -930,10 +952,56 @@ struct HarnessAgentRoleOverrides {
     prompt_fragments: Vec<RolePromptFragment>,
     #[serde(alias = "requiredSkills")]
     required_skills: Vec<tau_proto::SkillName>,
+    #[serde(default, deserialize_with = "present_option")]
+    model: Option<Option<ModelId>>,
+    #[serde(default, deserialize_with = "present_option")]
+    effort: Option<Option<ConfiguredRoleSetting<tau_proto::Effort>>>,
+    #[serde(default, deserialize_with = "present_option")]
+    verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
+    #[serde(
+        default,
+        alias = "thinkingSummary",
+        deserialize_with = "present_option"
+    )]
+    thinking_summary: Option<Option<ConfiguredRoleSetting<tau_proto::ThinkingSummary>>>,
+    #[serde(default, alias = "serviceTier", deserialize_with = "present_option")]
+    service_tier: Option<Option<tau_proto::ServiceTier>>,
+    #[serde(default, deserialize_with = "present_option")]
+    compaction: Option<Option<RoleCompaction>>,
     /// Agent-global alert patches replayed through domain-specific role
     /// merging.
     #[serde(alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
+}
+
+impl AgentsSettings {
+    /// Returns the provider settings that apply before group and role patches.
+    fn provider_defaults(&self) -> AgentRolePatch {
+        AgentRolePatch {
+            model: self.model.clone(),
+            effort: self.effort,
+            verbosity: self.verbosity,
+            thinking_summary: self.thinking_summary,
+            service_tier: self.service_tier,
+            compaction: self.compaction,
+            ..AgentRolePatch::default()
+        }
+    }
+}
+
+impl HarnessAgentRoleOverrides {
+    /// Returns the provider settings that apply before group and role patches.
+    fn provider_defaults(&self) -> AgentRolePatch {
+        AgentRolePatch {
+            model: self.model.clone(),
+            effort: self.effort,
+            verbosity: self.verbosity,
+            thinking_summary: self.thinking_summary,
+            service_tier: self.service_tier,
+            compaction: self.compaction,
+            ..AgentRolePatch::default()
+        }
+    }
 }
 
 /// One saved prompt template exposed through the CLI `:prompt <id>` command.
@@ -1004,11 +1072,11 @@ struct RawRoleGroup {
     #[serde(deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
     #[serde(deserialize_with = "present_option")]
-    effort: Option<Option<tau_proto::Effort>>,
+    effort: Option<Option<ConfiguredRoleSetting<tau_proto::Effort>>>,
     #[serde(deserialize_with = "present_option")]
-    verbosity: Option<Option<tau_proto::Verbosity>>,
+    verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
     #[serde(alias = "thinkingSummary", deserialize_with = "present_option")]
-    thinking_summary: Option<Option<tau_proto::ThinkingSummary>>,
+    thinking_summary: Option<Option<ConfiguredRoleSetting<tau_proto::ThinkingSummary>>>,
     #[serde(alias = "serviceTier", deserialize_with = "present_option")]
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(deserialize_with = "present_option")]
@@ -1047,6 +1115,104 @@ struct RawRoleGroup {
 // to default tool behavior, while `tools: []` sets an explicit empty
 // allow-list. Prompt fragments and required skills are the exceptions and
 // remain additive when present.
+///
+/// Model-facing scalar settings additionally accept a saturating relative
+/// adjustment. Resolution always produces the existing absolute role value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfiguredRoleSetting<T> {
+    /// A concrete setting replaces the inherited value.
+    Absolute(T),
+    /// Adjusts the inherited value by validated saturating levels.
+    Relative(tau_proto::UiRoleSettingAdjustment),
+}
+
+impl<'de, T> Deserialize<'de> for ConfiguredRoleSetting<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire<T> {
+            Absolute(T),
+            Relative(String),
+        }
+
+        match Wire::deserialize(deserializer)? {
+            Wire::Absolute(value) => Ok(Self::Absolute(value)),
+            Wire::Relative(value) => {
+                let (direction, amount) = value
+                    .split_once(':')
+                    .map_or((value.as_str(), 1), |(direction, amount)| {
+                        (direction, amount.parse::<u8>().unwrap_or(0))
+                    });
+                if amount == 0 {
+                    return Err(D::Error::custom(
+                        "relative role setting amount must be a positive integer",
+                    ));
+                }
+                match direction {
+                    "increase" => NonZeroU8::new(amount)
+                        .map(tau_proto::UiRoleSettingAdjustment::Increase)
+                        .map(Self::Relative)
+                        .ok_or_else(|| {
+                            D::Error::custom(
+                                "relative role setting amount must be a positive integer",
+                            )
+                        }),
+                    "decrease" => NonZeroU8::new(amount)
+                        .map(tau_proto::UiRoleSettingAdjustment::Decrease)
+                        .map(Self::Relative)
+                        .ok_or_else(|| {
+                            D::Error::custom(
+                                "relative role setting amount must be a positive integer",
+                            )
+                        }),
+                    _ => Err(D::Error::custom(
+                        "relative role setting must be increase, decrease, increase:<amount>, or decrease:<amount>",
+                    )),
+                }
+            }
+        }
+    }
+}
+
+trait RelativeRoleSettingValue: Copy {
+    /// Applies Tau's shared, saturating positive adjustment.
+    fn adjust(self, adjustment: tau_proto::UiRoleSettingAdjustment) -> Self;
+}
+
+impl RelativeRoleSettingValue for tau_proto::Effort {
+    fn adjust(self, adjustment: tau_proto::UiRoleSettingAdjustment) -> Self {
+        tau_proto::Effort::adjust(self, adjustment)
+    }
+}
+
+impl RelativeRoleSettingValue for tau_proto::Verbosity {
+    fn adjust(self, adjustment: tau_proto::UiRoleSettingAdjustment) -> Self {
+        tau_proto::Verbosity::adjust(self, adjustment)
+    }
+}
+
+impl RelativeRoleSettingValue for tau_proto::ThinkingSummary {
+    fn adjust(self, adjustment: tau_proto::UiRoleSettingAdjustment) -> Self {
+        tau_proto::ThinkingSummary::adjust(self, adjustment)
+    }
+}
+
+impl<T: RelativeRoleSettingValue> ConfiguredRoleSetting<T> {
+    /// Resolves this setting against an absolute inherited value.
+    fn resolve(self, inherited: T) -> T {
+        match self {
+            Self::Absolute(value) => value,
+            Self::Relative(adjustment) => inherited.adjust(adjustment),
+        }
+    }
+}
+
 fn present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1071,11 +1237,11 @@ struct AgentRolePatch {
     #[serde(deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
     #[serde(deserialize_with = "present_option")]
-    effort: Option<Option<tau_proto::Effort>>,
+    effort: Option<Option<ConfiguredRoleSetting<tau_proto::Effort>>>,
     #[serde(deserialize_with = "present_option")]
-    verbosity: Option<Option<tau_proto::Verbosity>>,
+    verbosity: Option<Option<ConfiguredRoleSetting<tau_proto::Verbosity>>>,
     #[serde(alias = "thinkingSummary", deserialize_with = "present_option")]
-    thinking_summary: Option<Option<tau_proto::ThinkingSummary>>,
+    thinking_summary: Option<Option<ConfiguredRoleSetting<tau_proto::ThinkingSummary>>>,
     #[serde(alias = "serviceTier", deserialize_with = "present_option")]
     service_tier: Option<Option<tau_proto::ServiceTier>>,
     #[serde(deserialize_with = "present_option")]
@@ -1171,7 +1337,11 @@ impl HarnessSettings {
         s
     }
 
-    fn apply_role_group_overrides(&mut self, groups: RawRoleGroups) -> Result<(), SettingsError> {
+    fn apply_role_group_overrides(
+        &mut self,
+        groups: RawRoleGroups,
+        provider_defaults: &AgentRole,
+    ) -> Result<(), SettingsError> {
         for (group_name, group) in groups {
             let group_defaults = group.defaults();
             let existing_role_names = self
@@ -1198,7 +1368,7 @@ impl HarnessSettings {
             for (role_name, role_overrides) in group.roles {
                 let mut override_role = AgentRole {
                     context_size_alerts: self.context_size_alerts.clone(),
-                    ..AgentRole::default()
+                    ..provider_defaults.clone()
                 };
                 override_role.apply_patch(&group_defaults);
                 override_role.apply_patch(&role_overrides);
@@ -1213,6 +1383,12 @@ impl HarnessSettings {
             }
         }
         Ok(())
+    }
+
+    fn apply_provider_defaults_to_roles(&mut self, defaults: &AgentRolePatch) {
+        for role in self.roles.values_mut() {
+            role.apply_patch(defaults);
+        }
     }
 
     fn apply_role_cli_overrides(
@@ -1791,13 +1967,21 @@ impl AgentRole {
             self.model = model.clone();
         }
         if let Some(effort) = patch.effort {
-            self.effort = effort;
+            self.effort = effort
+                .map(|setting| setting.resolve(self.effort.unwrap_or(tau_proto::Effort::Medium)));
         }
         if let Some(verbosity) = patch.verbosity {
-            self.verbosity = verbosity;
+            self.verbosity = verbosity.map(|setting| {
+                setting.resolve(self.verbosity.unwrap_or(tau_proto::Verbosity::Medium))
+            });
         }
         if let Some(thinking_summary) = patch.thinking_summary {
-            self.thinking_summary = thinking_summary;
+            self.thinking_summary = thinking_summary.map(|setting| {
+                setting.resolve(
+                    self.thinking_summary
+                        .unwrap_or(tau_proto::ThinkingSummary::Auto),
+                )
+            });
         }
         if let Some(service_tier) = patch.service_tier {
             self.service_tier = service_tier;
@@ -2162,19 +2346,37 @@ pub fn load_harness_settings_with_cli_overrides_in(
     // them through the domain merge path; all other harness fields keep normal
     // config-layer semantics.
     let mut role_settings = HarnessSettings::built_in();
+    let mut effective_provider_defaults = AgentRole::default();
+    let built_in_provider_defaults =
+        parse_built_in_yaml::<HarnessRoleOverrides>("built-in.harness.yaml", BUILT_IN_HARNESS_YAML)
+            .agents
+            .provider_defaults();
+    effective_provider_defaults.apply_patch(&built_in_provider_defaults);
     for overrides in
         load_yaml_layer_files::<HarnessRoleOverrides>(dirs.config_dir.as_deref(), "harness")?
     {
+        let provider_defaults = overrides.agents.provider_defaults();
+        effective_provider_defaults.apply_patch(&provider_defaults);
+        role_settings.apply_provider_defaults_to_roles(&provider_defaults);
         role_settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments);
         role_settings.apply_required_skill_overrides(overrides.agents.required_skills);
         role_settings.apply_context_size_alert_overrides(overrides.agents.context_size_alerts);
-        role_settings.apply_role_group_overrides(overrides.agents.role_groups)?;
+        role_settings.apply_role_group_overrides(
+            overrides.agents.role_groups,
+            &effective_provider_defaults,
+        )?;
     }
     for overrides in harness_role_cli_override_layers(harness_config_overrides)? {
+        let provider_defaults = overrides.agents.provider_defaults();
+        effective_provider_defaults.apply_patch(&provider_defaults);
+        role_settings.apply_provider_defaults_to_roles(&provider_defaults);
         role_settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments);
         role_settings.apply_required_skill_overrides(overrides.agents.required_skills);
         role_settings.apply_context_size_alert_overrides(overrides.agents.context_size_alerts);
-        role_settings.apply_role_group_overrides(overrides.agents.role_groups)?;
+        role_settings.apply_role_group_overrides(
+            overrides.agents.role_groups,
+            &effective_provider_defaults,
+        )?;
     }
     role_settings.apply_role_cli_overrides(role_overrides)?;
     role_settings.remove_disabled_roles();
@@ -2346,6 +2548,14 @@ fn normalize_harness_config_value(
             source,
             "agents",
         )?;
+        normalize_alias_key(
+            agents,
+            "thinkingSummary",
+            "thinking_summary",
+            source,
+            "agents",
+        )?;
+        normalize_alias_key(agents, "serviceTier", "service_tier", source, "agents")?;
         normalize_alias_key(agents, "roleGroups", "role_groups", source, "agents")?;
     }
     let Some(serde_json::Value::Object(agents)) = map.get_mut("agents") else {
@@ -2537,6 +2747,8 @@ fn canonical_agents_key(key: &str) -> &str {
         "promptFragments" => "prompt_fragments",
         "requiredSkills" => "required_skills",
         "contextSizeAlerts" => "context_size_alerts",
+        "thinkingSummary" => "thinking_summary",
+        "serviceTier" => "service_tier",
         _ => key,
     }
 }

@@ -13,6 +13,7 @@
 //! `SPEC-tau-proto-provider-updates`.
 
 use std::fmt;
+use std::num::NonZeroU8;
 
 use serde::{Deserialize, Serialize, de as path_serde_de, ser as path_serde_ser};
 
@@ -531,6 +532,29 @@ impl Effort {
         }
     }
 
+    /// Applies a positive relative adjustment without wrapping past either end.
+    #[must_use]
+    pub fn adjust(self, adjustment: UiRoleSettingAdjustment) -> Self {
+        (0..adjustment.amount().get()).fold(self, |value, _| match adjustment {
+            UiRoleSettingAdjustment::Increase(_) => match value {
+                Self::Off => Self::Minimal,
+                Self::Minimal => Self::Low,
+                Self::Low => Self::Medium,
+                Self::Medium => Self::High,
+                Self::High => Self::XHigh,
+                Self::XHigh | Self::Max => Self::Max,
+            },
+            UiRoleSettingAdjustment::Decrease(_) => match value {
+                Self::Off | Self::Minimal => Self::Off,
+                Self::Low => Self::Minimal,
+                Self::Medium => Self::Low,
+                Self::High => Self::Medium,
+                Self::XHigh => Self::High,
+                Self::Max => Self::XHigh,
+            },
+        })
+    }
+
     /// Cycle in the canonical order, but only through levels that are
     /// in `allowed` so callers don't land on a level the current model
     /// doesn't support (e.g. xhigh on `gpt-5.4-mini`). Falls back to
@@ -704,6 +728,21 @@ impl Verbosity {
         }
     }
 
+    /// Applies a positive relative adjustment without wrapping past either end.
+    #[must_use]
+    pub fn adjust(self, adjustment: UiRoleSettingAdjustment) -> Self {
+        (0..adjustment.amount().get()).fold(self, |value, _| match adjustment {
+            UiRoleSettingAdjustment::Increase(_) => match value {
+                Self::Low => Self::Medium,
+                Self::Medium | Self::High => Self::High,
+            },
+            UiRoleSettingAdjustment::Decrease(_) => match value {
+                Self::Low | Self::Medium => Self::Low,
+                Self::High => Self::Medium,
+            },
+        })
+    }
+
     /// Cycle in canonical order through levels that are in `allowed`.
     /// Falls back to plain [`Verbosity::next`] when `allowed` is empty.
     #[must_use]
@@ -845,6 +884,23 @@ impl ThinkingSummary {
             Self::Concise => Self::Detailed,
             Self::Detailed => Self::Off,
         }
+    }
+
+    /// Applies a positive relative adjustment without wrapping past either end.
+    #[must_use]
+    pub fn adjust(self, adjustment: UiRoleSettingAdjustment) -> Self {
+        (0..adjustment.amount().get()).fold(self, |value, _| match adjustment {
+            UiRoleSettingAdjustment::Increase(_) => match value {
+                Self::Off => Self::Auto,
+                Self::Auto => Self::Concise,
+                Self::Concise | Self::Detailed => Self::Detailed,
+            },
+            UiRoleSettingAdjustment::Decrease(_) => match value {
+                Self::Off | Self::Auto => Self::Off,
+                Self::Concise => Self::Auto,
+                Self::Detailed => Self::Concise,
+            },
+        })
     }
 
     /// Cycle in canonical order through levels that are in `allowed`.
@@ -3312,6 +3368,25 @@ pub struct UiRoleUpdate {
     pub action: UiRoleUpdateAction,
 }
 
+/// A positive, saturating relative adjustment for one ordered role setting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum UiRoleSettingAdjustment {
+    /// Raise the setting by this many ordered levels.
+    Increase(NonZeroU8),
+    /// Lower the setting by this many ordered levels.
+    Decrease(NonZeroU8),
+}
+
+impl UiRoleSettingAdjustment {
+    /// Returns the validated positive number of ordered levels to move.
+    #[must_use]
+    pub const fn amount(self) -> NonZeroU8 {
+        match self {
+            Self::Increase(amount) | Self::Decrease(amount) => amount,
+        }
+    }
+}
+
 /// Typed role mutation requested by a UI. `None` fields clear the explicit
 /// role value so normal model-specific fallback resolution applies.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3332,17 +3407,32 @@ pub enum UiRoleUpdateAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<Effort>,
     },
+    /// Adjust the role's current effective reasoning effort.
+    AdjustEffort {
+        /// Saturating direction and number of effort levels to move.
+        adjustment: UiRoleSettingAdjustment,
+    },
     /// Set or clear the role's output verbosity.
     SetVerbosity {
         /// Output verbosity to store, or `None` to use the model fallback.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         verbosity: Option<Verbosity>,
     },
+    /// Adjust the role's current effective output verbosity.
+    AdjustVerbosity {
+        /// Saturating direction and number of verbosity levels to move.
+        adjustment: UiRoleSettingAdjustment,
+    },
     /// Set or clear the role's thinking-summary mode.
     SetThinkingSummary {
         /// Thinking-summary mode to store, or `None` to use the model fallback.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking_summary: Option<ThinkingSummary>,
+    },
+    /// Adjust the role's current effective thinking-summary mode.
+    AdjustThinkingSummary {
+        /// Saturating direction and number of thinking-summary levels to move.
+        adjustment: UiRoleSettingAdjustment,
     },
     /// Set or clear the role's provider service tier.
     SetServiceTier {

@@ -1,5 +1,7 @@
 //! Shared parsing for UI command subsets.
 
+use std::num::NonZeroU8;
+
 #[cfg(test)]
 mod tests;
 
@@ -106,19 +108,50 @@ fn parse_model_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, Stri
     })
 }
 
+fn parse_relative_role_setting(
+    value: &str,
+) -> Result<Option<tau_proto::UiRoleSettingAdjustment>, String> {
+    let (direction, amount) = value
+        .split_once(':')
+        .map_or((value, 1), |(direction, amount)| {
+            (direction, amount.parse::<u8>().unwrap_or(0))
+        });
+    if direction != "increase" && direction != "decrease" {
+        return Ok(None);
+    }
+    if amount == 0 {
+        return Err("relative setting amount must be a positive integer".to_owned());
+    }
+    let amount = NonZeroU8::new(amount).expect("checked positive amount");
+    Ok(Some(match direction {
+        "increase" => tau_proto::UiRoleSettingAdjustment::Increase(amount),
+        "decrease" => tau_proto::UiRoleSettingAdjustment::Decrease(amount),
+        _ => unreachable!("checked above"),
+    }))
+}
+
 fn parse_effort_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    if let Some(adjustment) = parse_relative_role_setting(value)? {
+        return Ok(tau_proto::UiRoleUpdateAction::AdjustEffort { adjustment });
+    }
     Ok(tau_proto::UiRoleUpdateAction::SetEffort {
         effort: parse_resettable(value)?,
     })
 }
 
 fn parse_verbosity_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    if let Some(adjustment) = parse_relative_role_setting(value)? {
+        return Ok(tau_proto::UiRoleUpdateAction::AdjustVerbosity { adjustment });
+    }
     Ok(tau_proto::UiRoleUpdateAction::SetVerbosity {
         verbosity: parse_resettable(value)?,
     })
 }
 
 fn parse_thinking_summary_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    if let Some(adjustment) = parse_relative_role_setting(value)? {
+        return Ok(tau_proto::UiRoleUpdateAction::AdjustThinkingSummary { adjustment });
+    }
     Ok(tau_proto::UiRoleUpdateAction::SetThinkingSummary {
         thinking_summary: parse_resettable(value)?,
     })

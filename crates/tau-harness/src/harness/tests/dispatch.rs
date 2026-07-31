@@ -11922,6 +11922,192 @@ fn restored_context_usage_requires_current_model_and_resets_on_model_change() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures relative role updates start from the selected model's effective
+/// defaults, then retain explicit saturated endpoints through the dispatch
+/// path.
+#[test]
+fn relative_role_updates_use_model_fallbacks_and_saturate() {
+    use std::num::NonZeroU8;
+
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = quiet_provider_harness(&state).expect("start");
+    let role = h.selected_role.clone();
+    let model = h.selected_model.clone().expect("selected model");
+    let settings = h
+        .provider_model_info
+        .get_mut(&model)
+        .expect("selected model settings");
+    settings.efforts = vec![
+        tau_proto::Effort::Off,
+        tau_proto::Effort::Low,
+        tau_proto::Effort::Medium,
+        tau_proto::Effort::High,
+        tau_proto::Effort::Max,
+    ];
+    settings.verbosities = vec![
+        tau_proto::Verbosity::Low,
+        tau_proto::Verbosity::Medium,
+        tau_proto::Verbosity::High,
+    ];
+    settings.thinking_summaries = vec![
+        tau_proto::ThinkingSummary::Off,
+        tau_proto::ThinkingSummary::Auto,
+        tau_proto::ThinkingSummary::Concise,
+        tau_proto::ThinkingSummary::Detailed,
+    ];
+    let configured_role = h.available_roles.get_mut(&role).expect("selected role");
+    configured_role.effort = None;
+    configured_role.verbosity = None;
+    configured_role.thinking_summary = None;
+
+    let one = NonZeroU8::new(1).expect("positive adjustment");
+    for action in [
+        tau_proto::UiRoleUpdateAction::AdjustEffort {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Increase(one),
+        },
+        tau_proto::UiRoleUpdateAction::AdjustVerbosity {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Increase(one),
+        },
+        tau_proto::UiRoleUpdateAction::AdjustThinkingSummary {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Increase(one),
+        },
+    ] {
+        h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+            role: role.clone(),
+            action,
+        })
+        .expect("apply relative role update");
+    }
+    let updated_role = h.available_roles.get(&role).expect("updated role");
+    assert_eq!(updated_role.effort, Some(tau_proto::Effort::High));
+    assert_eq!(updated_role.verbosity, Some(tau_proto::Verbosity::Medium));
+    assert_eq!(
+        updated_role.thinking_summary,
+        Some(tau_proto::ThinkingSummary::Concise)
+    );
+
+    let far = NonZeroU8::new(99).expect("positive adjustment");
+    for action in [
+        tau_proto::UiRoleUpdateAction::AdjustEffort {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(far),
+        },
+        tau_proto::UiRoleUpdateAction::AdjustVerbosity {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(far),
+        },
+        tau_proto::UiRoleUpdateAction::AdjustThinkingSummary {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(far),
+        },
+    ] {
+        h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+            role: role.clone(),
+            action,
+        })
+        .expect("saturate role setting downward");
+    }
+    let updated_role = h.available_roles.get(&role).expect("updated role");
+    assert_eq!(updated_role.effort, Some(tau_proto::Effort::Off));
+    assert_eq!(updated_role.verbosity, Some(tau_proto::Verbosity::Low));
+    assert_eq!(
+        updated_role.thinking_summary,
+        Some(tau_proto::ThinkingSummary::Off)
+    );
+
+    for action in [
+        tau_proto::UiRoleUpdateAction::AdjustEffort {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Increase(far),
+        },
+        tau_proto::UiRoleUpdateAction::AdjustVerbosity {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Increase(far),
+        },
+        tau_proto::UiRoleUpdateAction::AdjustThinkingSummary {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Increase(far),
+        },
+    ] {
+        h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+            role: role.clone(),
+            action,
+        })
+        .expect("saturate role setting upward");
+    }
+    let updated_role = h.available_roles.get(&role).expect("updated role");
+    assert_eq!(updated_role.effort, Some(tau_proto::Effort::Max));
+    assert_eq!(updated_role.verbosity, Some(tau_proto::Verbosity::High));
+    assert_eq!(
+        updated_role.thinking_summary,
+        Some(tau_proto::ThinkingSummary::Detailed)
+    );
+
+    let settings = h
+        .provider_model_info
+        .get_mut(&model)
+        .expect("selected model settings");
+    settings.efforts = vec![tau_proto::Effort::Medium, tau_proto::Effort::High];
+    settings.verbosities = vec![tau_proto::Verbosity::Low, tau_proto::Verbosity::Medium];
+    settings.thinking_summaries = vec![
+        tau_proto::ThinkingSummary::Off,
+        tau_proto::ThinkingSummary::Auto,
+        tau_proto::ThinkingSummary::Concise,
+    ];
+    for action in [
+        tau_proto::UiRoleUpdateAction::AdjustEffort {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(one),
+        },
+        tau_proto::UiRoleUpdateAction::AdjustVerbosity {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(one),
+        },
+        tau_proto::UiRoleUpdateAction::AdjustThinkingSummary {
+            adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(one),
+        },
+    ] {
+        h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+            role: role.clone(),
+            action,
+        })
+        .expect("adjust the model-clamped role setting");
+    }
+    let updated_role = h.available_roles.get(&role).expect("updated role");
+    assert_eq!(updated_role.effort, Some(tau_proto::Effort::Medium));
+    assert_eq!(updated_role.verbosity, Some(tau_proto::Verbosity::Low));
+    assert_eq!(
+        updated_role.thinking_summary,
+        Some(tau_proto::ThinkingSummary::Off)
+    );
+
+    let settings = h
+        .provider_model_info
+        .get_mut(&model)
+        .expect("selected model settings");
+    settings.efforts = vec![
+        tau_proto::Effort::Off,
+        tau_proto::Effort::Low,
+        tau_proto::Effort::Medium,
+        tau_proto::Effort::High,
+        tau_proto::Effort::Max,
+    ];
+    settings.verbosities = vec![
+        tau_proto::Verbosity::Low,
+        tau_proto::Verbosity::Medium,
+        tau_proto::Verbosity::High,
+    ];
+    settings.thinking_summaries = vec![
+        tau_proto::ThinkingSummary::Off,
+        tau_proto::ThinkingSummary::Auto,
+        tau_proto::ThinkingSummary::Concise,
+        tau_proto::ThinkingSummary::Detailed,
+    ];
+    assert_eq!(h.selected_model_params().effort, tau_proto::Effort::Medium);
+    assert_eq!(
+        h.selected_model_params().verbosity,
+        tau_proto::Verbosity::Low
+    );
+    assert_eq!(
+        h.selected_model_params().thinking_summary,
+        tau_proto::ThinkingSummary::Off
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Role model overrides and fallback deletion must invalidate usage from the
 /// previous resolved model, while an explicit per-agent override remains
 /// authoritative.

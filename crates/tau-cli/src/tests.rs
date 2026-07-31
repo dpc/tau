@@ -5468,6 +5468,8 @@ fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
 /// requested off state. `reset` is the only textual way to clear a setting.
 #[test]
 fn role_setting_updates_are_typed_and_reset_aware() {
+    use std::num::NonZeroU8;
+
     use super::ui_commands::parse_role_setting_update;
 
     let tool_names = || {
@@ -5504,6 +5506,15 @@ fn role_setting_updates_are_typed_and_reset_aware() {
             UiRoleUpdateAction::SetEffort { effort: None },
         ),
         (
+            "effort",
+            "increase:2",
+            UiRoleUpdateAction::AdjustEffort {
+                adjustment: tau_proto::UiRoleSettingAdjustment::Increase(
+                    NonZeroU8::new(2).expect("positive"),
+                ),
+            },
+        ),
+        (
             "verbosity",
             "high",
             UiRoleUpdateAction::SetVerbosity {
@@ -5511,10 +5522,28 @@ fn role_setting_updates_are_typed_and_reset_aware() {
             },
         ),
         (
+            "verbosity",
+            "decrease",
+            UiRoleUpdateAction::AdjustVerbosity {
+                adjustment: tau_proto::UiRoleSettingAdjustment::Decrease(
+                    NonZeroU8::new(1).expect("positive"),
+                ),
+            },
+        ),
+        (
             "thinking-summary",
             "off",
             UiRoleUpdateAction::SetThinkingSummary {
                 thinking_summary: Some(ThinkingSummary::Off),
+            },
+        ),
+        (
+            "thinking-summary",
+            "increase:3",
+            UiRoleUpdateAction::AdjustThinkingSummary {
+                adjustment: tau_proto::UiRoleSettingAdjustment::Increase(
+                    NonZeroU8::new(3).expect("positive"),
+                ),
             },
         ),
         (

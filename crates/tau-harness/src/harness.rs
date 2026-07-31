@@ -19220,6 +19220,10 @@ impl Harness {
             .get(role_name)
             .cloned()
             .unwrap_or_default();
+        let effective_params =
+            model_for_role(&self.provider_model_info, &self.available_roles, role_name)
+                .map(|model| self.params_for_role_model(role_name, &model))
+                .unwrap_or_default();
 
         match action {
             tau_proto::UiRoleUpdateAction::Delete => unreachable!("handled by caller"),
@@ -19229,11 +19233,21 @@ impl Harness {
             tau_proto::UiRoleUpdateAction::SetEffort { effort } => {
                 next_role.effort = effort;
             }
+            tau_proto::UiRoleUpdateAction::AdjustEffort { adjustment } => {
+                next_role.effort = Some(effective_params.effort.adjust(adjustment));
+            }
             tau_proto::UiRoleUpdateAction::SetVerbosity { verbosity } => {
                 next_role.verbosity = verbosity;
             }
+            tau_proto::UiRoleUpdateAction::AdjustVerbosity { adjustment } => {
+                next_role.verbosity = Some(effective_params.verbosity.adjust(adjustment));
+            }
             tau_proto::UiRoleUpdateAction::SetThinkingSummary { thinking_summary } => {
                 next_role.thinking_summary = thinking_summary;
+            }
+            tau_proto::UiRoleUpdateAction::AdjustThinkingSummary { adjustment } => {
+                next_role.thinking_summary =
+                    Some(effective_params.thinking_summary.adjust(adjustment));
             }
             tau_proto::UiRoleUpdateAction::SetServiceTier { service_tier } => {
                 next_role.service_tier = service_tier;

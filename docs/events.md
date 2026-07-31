@@ -685,14 +685,18 @@ intent.
   agent. `agent_id` may be omitted only when the harness can unambiguously infer
   the target from session selection/default state.
 - **`ui.role_update`** — User changes or deletes a role. Wire actions are
-  `delete`, `set_model`, `set_effort`, `set_verbosity`,
-  `set_thinking_summary`, `set_service_tier`, `set_compaction_threshold`,
+   `delete`, `set_model`, `set_effort`, `adjust_effort`, `set_verbosity`,
+   `adjust_verbosity`, `set_thinking_summary`, `adjust_thinking_summary`,
+   `set_service_tier`, `set_compaction_threshold`,
   `set_tools`, `set_enable_tool_groups`, `set_disable_tool_groups`,
   `set_enable_tools`, and `set_disable_tools`. Nullable override setters,
   including `set_tools`, use `null` or omission to clear back to
   model/provider fallback behavior. For `set_tools`, an empty list is an
-  explicit empty tool allow-list; the enable/disable vector setters replace
-  their corresponding lists, including with empty lists.
+   explicit empty tool allow-list; the enable/disable vector setters replace
+   their corresponding lists, including with empty lists.
+   Each `adjust_*` action carries a positive `increase` or `decrease` amount,
+   resolves from the role's current effective model value, and saturates at the
+   setting's lowest or highest level before storing an absolute override.
 - **`ui.shell_command`** — User submitted a `!` (in-context) or `!!`
   (UI-only) shell command. Carries command id, command, session id,
   `include_in_context` flag. On attach, a UI may receive replay-marked

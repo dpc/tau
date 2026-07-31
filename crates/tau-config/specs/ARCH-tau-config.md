@@ -89,6 +89,9 @@ can collide with a lower-precedence canonical key instead of overriding it.
 Role metadata is merged through domain-specific logic rather than generic YAML
 array replacement:
 
+- Each config layer applies `agents` provider defaults (`model`, `effort`,
+  `verbosity`, `thinking_summary`, `service_tier`, and `compaction`) to every
+  role before applying that layer's role-group defaults and role overrides.
 - `agents.role_groups.<group>` defaults apply to all existing members of that group and
   to roles listed in the same layer.
 - Per-role overrides are applied after group defaults.

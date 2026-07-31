@@ -6005,3 +6005,42 @@ fn test_extension_name(value: impl AsRef<str>) -> crate::ExtensionName {
     crate::ExtensionName::parse(value.as_ref())
         .expect("test extension name must satisfy the identifier grammar")
 }
+
+/// Ensures relative role adjustments require positive wire amounts and saturate
+/// at both endpoints for every ordered model-facing setting.
+#[test]
+fn role_setting_adjustments_are_positive_saturating_and_wire_safe() {
+    use std::num::NonZeroU8;
+
+    let increase = crate::UiRoleSettingAdjustment::Increase(NonZeroU8::new(99).expect("positive"));
+    let decrease = crate::UiRoleSettingAdjustment::Decrease(NonZeroU8::new(99).expect("positive"));
+    assert_eq!(crate::Effort::Off.adjust(decrease), crate::Effort::Off);
+    assert_eq!(crate::Effort::Max.adjust(increase), crate::Effort::Max);
+    assert_eq!(
+        crate::Verbosity::Low.adjust(decrease),
+        crate::Verbosity::Low
+    );
+    assert_eq!(
+        crate::Verbosity::High.adjust(increase),
+        crate::Verbosity::High
+    );
+    assert_eq!(
+        crate::ThinkingSummary::Off.adjust(decrease),
+        crate::ThinkingSummary::Off
+    );
+    assert_eq!(
+        crate::ThinkingSummary::Detailed.adjust(increase),
+        crate::ThinkingSummary::Detailed
+    );
+    assert!(serde_json::from_str::<crate::UiRoleSettingAdjustment>(r#"{"Increase":0}"#).is_err());
+    let action = crate::UiRoleUpdateAction::AdjustEffort {
+        adjustment: increase,
+    };
+    assert_eq!(
+        serde_json::from_value::<crate::UiRoleUpdateAction>(
+            serde_json::to_value(&action).expect("serialize"),
+        )
+        .expect("deserialize"),
+        action
+    );
+}

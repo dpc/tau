@@ -2,16 +2,25 @@
 
 Agent roles are named aliases for the model and model-behavior settings Tau should use for agent turns.
 
-A role can set:
+`agents`, a role group, and a role can set these provider/model fields:
 
-- `description`: short free-form summary shown in `:role ...` completions
-- `order`: optional numeric order within the containing role group
 - `model`: qualified model id, in `provider/model` form
 - `effort`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`
 - `verbosity`: `low`, `medium`, or `high`
 - `thinking_summary`: `off`, `auto`, `concise`, or `detailed`
 - `service_tier`: `fast` or `flex`
 - `compaction`: automatic compaction policy: `provider_default`, `disabled`, or `{ threshold: 200000 }`; the harness schedules standalone compaction for models that publish it, while legacy models may use inline provider context management
+
+For `effort`, `verbosity`, and `thinking_summary`, use `increase` or
+`decrease` to adjust an inherited value by one level, or `increase:<amount>` /
+`decrease:<amount>` for a saturating multi-level adjustment. Relative settings
+resolve from the built-in bases (`medium`, `medium`, and `auto`) when no broader
+absolute setting exists.
+
+A role can also set:
+
+- `description`: short free-form summary shown in `:role ...` completions
+- `order`: optional numeric order within the containing role group
 - `context_size_alerts`: named token thresholds that queue configurable internal
   prompts after a turn; committed deliveries appear in UI history as
   `[tau-internal]: <configured message>`
@@ -60,6 +69,24 @@ agents:
     - name: user.short-plain-style
       priority: 65
       text: Keep answers short and plain, using only simple words.
+```
+
+Use the same top-level `agents` scope for model defaults shared by every role.
+Within each config layer, Tau applies `agents` provider settings first, then
+role-group settings, then role settings. Higher-precedence config layers repeat
+that ordering, so a later top-level setting replaces settings from an earlier
+layer unless that later layer's group or role overrides it:
+
+```yaml
+agents:
+  model: chatgpt/gpt-5.3-codex
+  effort: medium
+  role_groups:
+    review:
+      effort: high
+      roles:
+        reviewer:
+          effort: xhigh
 ```
 
 The same global fragment path is available to one-shot harness config overrides,
@@ -190,7 +217,7 @@ The removed `peer_entrypoint`/`auto_start_role` schema is not accepted.
 }
 ```
 
-Missing fields use group defaults first, then provider-published fallback knobs for the role's resolved model. `required_skills` from `agents`, groups, and roles are additive and de-duplicated. After startup skill discovery, Tau disables any role whose required skills cannot be found by exact name, are hidden from model-side skill loading, or cannot be read; this emits a mandatory `harness.config_error` notice and removes the role from selection and delegation. If the selected/default startup role is disabled this way, startup fails clearly instead of falling back to another role. Tools start from extension default enablement, then harness `tool_policy.rules` apply by provider/tool tags. Role overrides run afterward in broad-to-specific order: `disable_tool_tags`, `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then `enable_tools`. `tools` remains an explicit role allow-list base when set. This order lets a role disable `shell:*` and keep `shell:workdir`, or disable a group and keep one named tool. When `compaction` is omitted, Tau uses the model's published standalone threshold when available, otherwise it asks an inline-capable provider to use its model-specific default. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
+Missing provider/model fields use `agents` defaults first, then group defaults, then provider-published fallback knobs for the role's resolved model. `required_skills` from `agents`, groups, and roles are additive and de-duplicated. After startup skill discovery, Tau disables any role whose required skills cannot be found by exact name, are hidden from model-side skill loading, or cannot be read; this emits a mandatory `harness.config_error` notice and removes the role from selection and delegation. If the selected/default startup role is disabled this way, startup fails clearly instead of falling back to another role. Tools start from extension default enablement, then harness `tool_policy.rules` apply by provider/tool tags. Role overrides run afterward in broad-to-specific order: `disable_tool_tags`, `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then `enable_tools`. `tools` remains an explicit role allow-list base when set. This order lets a role disable `shell:*` and keep `shell:workdir`, or disable a group and keep one named tool. When `compaction` is omitted, Tau uses the model's published standalone threshold when available, otherwise it asks an inline-capable provider to use its model-specific default. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
 
 Global harness policy is configured under `tool_policy.rules` keyed by stable rule name. Rules default to `enable: true`, can be disabled with `enable: false`, match when all `when.model_tags` patterns match the selected model, then run `disable_tool_tags` before `enable_tool_tags`. Rules sort by `priority` (default `0`, lower runs first) and then by rule name for ties. Tag patterns are exact (`shell:workdir`) or terminal prefix wildcards (`shell:*`, `shell:edit:*`). Built-in rule `builtin.chatgpt-shell` matches `shell:chatgpt`, disables `shell:*`, and re-enables `shell:edit:apply_patch`, `shell:read:image`, `shell:exec:shell_command`, `shell:workdir`, and `shell:lock`; image-producing tools remain independently gated by the exact provider route modalities. Rule names may contain dots; for CLI overrides, prefer the whole-map form such as `--harness-config 'tool_policy={rules: {builtin.chatgpt-shell: {enable: false}}}'` rather than dotted paths through the rule name.
 
@@ -243,6 +270,12 @@ Examples:
 ```
 
 Use `reset` as the value to clear a field and return to model/provider fallback behavior (`off` is still the explicit off value for `effort` and `thinking-summary`).
+
+For `effort`, `verbosity`, and `thinking-summary`, `increase`,
+`decrease`, `increase:<amount>`, and `decrease:<amount>` adjust the current
+effective role value and saturate at each setting's endpoints. This differs
+from configuration, where relative values resolve broadly from `agents` through
+the role group to the role before Tau stores the absolute result.
 
 The convenience command `:fast` mutates the currently selected role using the same role-update path.
 
