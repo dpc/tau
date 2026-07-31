@@ -347,7 +347,7 @@ fn running_shell_snapshot_bounds_only_attach_projection() {
     );
     for index in 1..129 {
         let mut command = first.clone();
-        command.command_id = test_shell_command_id(&format!("shell-{index:03}"));
+        command.command_id = test_shell_command_id(format!("shell-{index:03}"));
         harness.handle_ui_shell_command(&crate::test_connection_id("ui"), command);
     }
     assert_eq!(

@@ -32,7 +32,7 @@ fn running_shell_snapshot_selects_first_128_public_ids() {
 /// route.
 #[test]
 fn running_shell_snapshot_skips_over_budget_route_and_continues() {
-    let commands = vec![
+    let commands = [
         snapshot_shell("shell-a", "a".repeat(40 * 1024)),
         snapshot_shell("shell-b", "b".repeat(40 * 1024)),
         snapshot_shell("shell-c", "small".to_owned()),
