@@ -46,6 +46,12 @@ delivery order, while an exact one-action provider trace,
 bounded synchronization, process-group teardown, and clean runtime artifacts are
 independent oracles. It does not claim byte-identical rendering, broader
 multi-client ordering, tools, production providers, or multi-agent behavior.
+A companion attach case holds one correlated provider prompt, attaches only
+after hold readiness, proves both UIs show the same selected agent, and then
+proves both settle on its editable status after one exact cancellation. Typed
+observer prompt facts exclude duplicate submission, observer stats own the
+running-to-idle transition, and the provider snapshot excludes duplicate
+cancellation.
 Its multi-agent case instead creates and completes the S1 production
 main/worker pair in a headless Boot A, then runs the universal resumed Boot B
 under the PTY. It selects both restored transcripts only by stable ID, submits

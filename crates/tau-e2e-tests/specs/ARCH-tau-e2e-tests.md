@@ -103,8 +103,13 @@ bytes. A late replay-aware socket observer proves canonical delivery order
 remains unchanged while the attached UI presents current state before
 transcript. Exact fake-provider consumption, bounded synchronization,
 process-group teardown, and absence of runtime discovery artifacts remain
-separate authorities. This baseline does not cover shell, tool, provider,
-multi-agent, or other local-presentation behavior.
+separate authorities. A correlated `HoldUntilCancel` lane also attaches only
+after its hold-ready fact and requires both terminals to present the same
+selected agent, then converge on its editable status after one exact
+cancellation. Typed stats own the running-to-idle transition; provider traces,
+stats snapshots, and side-observer prompt facts
+independently exclude duplicate submission or cancellation. This baseline does
+not cover shell, tool, multi-agent, or other local-presentation behavior.
 
 S8 adds a separate topology under that same target. A test-only headless daemon
 first completes the production `agent_start` main/worker flow with exact

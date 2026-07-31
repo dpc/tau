@@ -132,6 +132,7 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
     wait_for_canceled_hold(&mut observer, &prompt, deadline)?;
     assert_hold_reaped(&fixture, &prompt)?;
     wait_for_idle_auto(&mut observer, &agent_id, &prompt, deadline)?;
+    assert_exact_canceled_hold_facts(&observer.events, &prompt)?;
 
     fixture.write_artifact(
         "peer-target-observer.json",
@@ -146,10 +147,36 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
     Ok(())
 }
 
-fn wait_for_live_hold(
+/// Waits for prompt creation, submission, active-auto/running stats, and the
+/// later prompt-correlated hold-ready notice in that order.
+pub(super) fn wait_for_live_hold(
     observer: &mut SideObserver,
     agent_id: &AgentId,
     deadline: Instant,
+) -> Result<AgentPromptCreated, Box<dyn std::error::Error>> {
+    wait_for_live_hold_with_navigation(
+        observer,
+        agent_id,
+        deadline,
+        AgentNavigationMode::ActiveAuto,
+    )
+}
+
+/// Waits for one correlated running provider hold while accepting the ordinary
+/// active navigation mode used by a directly selected terminal agent.
+pub(super) fn wait_for_selected_live_hold(
+    observer: &mut SideObserver,
+    agent_id: &AgentId,
+    deadline: Instant,
+) -> Result<AgentPromptCreated, Box<dyn std::error::Error>> {
+    wait_for_live_hold_with_navigation(observer, agent_id, deadline, AgentNavigationMode::Active)
+}
+
+fn wait_for_live_hold_with_navigation(
+    observer: &mut SideObserver,
+    agent_id: &AgentId,
+    deadline: Instant,
+    expected_navigation: AgentNavigationMode,
 ) -> Result<AgentPromptCreated, Box<dyn std::error::Error>> {
     let created = observer.recv_until(deadline, |observed| {
         matches!(
@@ -179,11 +206,11 @@ fn wait_for_live_hold(
                 &observed.event,
                 Event::AgentStatsUpdated(stats)
                     if &stats.agent_id == agent_id
-                        && stats.navigation_mode == AgentNavigationMode::ActiveAuto
+                        && stats.navigation_mode == expected_navigation
                         && stats.runtime_state == AgentRuntimeState::Running
             )
         })
-        .ok_or("hold-ready notice arrived before an active-auto/running snapshot")?;
+        .ok_or("hold-ready notice arrived before the required running snapshot")?;
     let hold_ready_indices = observer
         .events
         .iter()
@@ -196,7 +223,10 @@ fn wait_for_live_hold(
         return Err("provider did not emit exactly one correlated hold-ready fact".into());
     }
     if running_index >= hold_ready_indices[0] {
-        return Err("hold-ready notice was not ordered after active-auto/running".into());
+        return Err(format!(
+            "hold-ready notice was not ordered after {expected_navigation:?}/running"
+        )
+        .into());
     }
     if observer.events.iter().any(hold_ended) {
         return Err("provider hold ended before terminal selection".into());
@@ -204,7 +234,8 @@ fn wait_for_live_hold(
     Ok(prompt)
 }
 
-fn hold_ready_notice(prompt: &AgentPromptCreated) -> String {
+/// Builds the exact visible fake-provider readiness notice for one prompt.
+pub(super) fn hold_ready_notice(prompt: &AgentPromptCreated) -> String {
     format!(
         "e2e_fake_provider.hold_ready {{\"prompt_id\":\"{}\"}}",
         prompt.agent_prompt_id
@@ -225,7 +256,8 @@ fn is_exact_visible_hold_ready(
     )
 }
 
-fn assert_hold_live(
+/// Requires one ready trace and no timeout or cancellation trace for a prompt.
+pub(super) fn assert_hold_live(
     fixture: &GateFixture,
     prompt: &AgentPromptCreated,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -248,7 +280,8 @@ fn assert_hold_trace_live(
     Ok(())
 }
 
-fn assert_hold_reaped(
+/// Requires one ready and one canceled trace with no timeout for a prompt.
+pub(super) fn assert_hold_reaped(
     fixture: &GateFixture,
     prompt: &AgentPromptCreated,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -269,7 +302,9 @@ fn assert_hold_reaped(
     Ok(())
 }
 
-fn wait_for_canceled_hold(
+/// Waits for the prompt-correlated canceled terminal and provider
+/// acknowledgement; exact lifecycle counts are checked after idle.
+pub(super) fn wait_for_canceled_hold(
     observer: &mut SideObserver,
     prompt: &AgentPromptCreated,
     deadline: Instant,
@@ -285,36 +320,98 @@ fn wait_for_canceled_hold(
     if !observer.events.iter().any(cancel_completed) {
         observer.recv_until(deadline, cancel_completed)?;
     }
-    let cancellations = observer
-        .events
+    Ok(())
+}
+
+/// Requires the complete side-observer lifecycle to contain exactly one fact
+/// at each stage for the correlated canceled prompt.
+pub(super) fn assert_exact_canceled_hold_facts(
+    events: &[super::observer::ObservedEvent],
+    prompt: &AgentPromptCreated,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let created = events
         .iter()
-        .filter(|observed| cancel_completed(observed))
+        .filter(|observed| matches!(&observed.event, Event::AgentPromptCreated(value) if value.agent_prompt_id == prompt.agent_prompt_id))
         .count();
-    let timeouts = observer
-        .events
+    let submitted = events
         .iter()
-        .filter(|observed| {
-            matches!(
-                &observed.event,
-                Event::HarnessNotice(notice)
-                    if notice.message.starts_with("e2e_fake_provider.hold_timeout ")
-            )
-        })
+        .filter(|observed| matches!(&observed.event, Event::ProviderPromptSubmitted(value) if value.agent_prompt_id == prompt.agent_prompt_id))
         .count();
-    if cancellations != 1 || timeouts != 0 {
+    let terminated = events
+        .iter()
+        .filter(|observed| matches!(&observed.event, Event::AgentPromptTerminated(value) if value.agent_prompt_id == prompt.agent_prompt_id && value.reason == AgentPromptTerminationReason::Canceled))
+        .count();
+    let cancellation_notices = events
+        .iter()
+        .filter_map(cancel_completed_payload)
+        .collect::<Result<Vec<_>, _>>()?;
+    let timeouts = events
+        .iter()
+        .filter(|observed| matches!(&observed.event, Event::HarnessNotice(notice) if notice.message.starts_with("e2e_fake_provider.hold_timeout ")))
+        .count();
+    if created != 1
+        || submitted != 1
+        || terminated != 1
+        || cancellation_notices.len() != 1
+        || timeouts != 0
+    {
         return Err(format!(
-            "unexpected hold terminal facts: cancel_completed={cancellations}, hold_timeout={timeouts}"
+            "unexpected hold facts: created={created}, submitted={submitted}, terminated={terminated}, cancel_completed={}, hold_timeout={timeouts}",
+            cancellation_notices.len()
+        )
+        .into());
+    }
+    let cancellation = &cancellation_notices[0];
+    if cancellation.selected != prompt.agent_prompt_id
+        || cancellation.canceled_by != prompt.agent_prompt_id
+        || cancellation.active_before.as_slice() != [prompt.agent_prompt_id.clone()]
+    {
+        return Err(format!(
+            "provider cancellation stats did not identify one exact active prompt: {cancellation:?}"
         )
         .into());
     }
     Ok(())
 }
 
-fn wait_for_idle_auto(
+/// Waits for an idle active-auto snapshot ordered after prompt termination.
+pub(super) fn wait_for_idle_auto(
     observer: &mut SideObserver,
     agent_id: &AgentId,
     prompt: &AgentPromptCreated,
     deadline: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    wait_for_idle_with_navigation(
+        observer,
+        agent_id,
+        prompt,
+        deadline,
+        AgentNavigationMode::ActiveAuto,
+    )
+}
+
+/// Waits for the selected terminal agent's correlated post-cancel idle state.
+pub(super) fn wait_for_selected_idle(
+    observer: &mut SideObserver,
+    agent_id: &AgentId,
+    prompt: &AgentPromptCreated,
+    deadline: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    wait_for_idle_with_navigation(
+        observer,
+        agent_id,
+        prompt,
+        deadline,
+        AgentNavigationMode::Active,
+    )
+}
+
+fn wait_for_idle_with_navigation(
+    observer: &mut SideObserver,
+    agent_id: &AgentId,
+    prompt: &AgentPromptCreated,
+    deadline: Instant,
+    expected_navigation: AgentNavigationMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let terminated = observer
         .events
@@ -332,7 +429,7 @@ fn wait_for_idle_auto(
             &observed.event,
             Event::AgentStatsUpdated(stats)
                 if &stats.agent_id == agent_id
-                    && stats.navigation_mode == AgentNavigationMode::ActiveAuto
+                    && stats.navigation_mode == expected_navigation
                     && stats.runtime_state == AgentRuntimeState::Idle
         )
     }) {
@@ -343,7 +440,7 @@ fn wait_for_idle_auto(
             &observed.event,
             Event::AgentStatsUpdated(stats)
                 if &stats.agent_id == agent_id
-                    && stats.navigation_mode == AgentNavigationMode::ActiveAuto
+                    && stats.navigation_mode == expected_navigation
                     && stats.runtime_state == AgentRuntimeState::Idle
         )
     })?;
@@ -365,6 +462,29 @@ fn cancel_completed(observed: &super::observer::ObservedEvent) -> bool {
         Event::HarnessNotice(notice)
             if notice.message.starts_with("e2e_fake_provider.cancel_completed ")
     )
+}
+
+fn cancel_completed_payload(
+    observed: &super::observer::ObservedEvent,
+) -> Option<Result<CancelAcknowledgement, serde_json::Error>> {
+    let Event::HarnessNotice(notice) = &observed.event else {
+        return None;
+    };
+    notice
+        .message
+        .strip_prefix("e2e_fake_provider.cancel_completed ")
+        .map(serde_json::from_str)
+}
+
+/// Typed fake-provider snapshot emitted after one cancellation request.
+#[derive(Debug, serde::Deserialize)]
+struct CancelAcknowledgement {
+    /// Prompt selected by the cancellation request.
+    selected: tau_proto::AgentPromptId,
+    /// Prompt whose hold worker acknowledged cancellation.
+    canceled_by: tau_proto::AgentPromptId,
+    /// Active prompt set immediately before provider removal.
+    active_before: Vec<tau_proto::AgentPromptId>,
 }
 
 /// Receives the exact external-message RPC result before the shared deadline.

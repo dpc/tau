@@ -61,11 +61,13 @@ The separate peer-navigation PTY case starts with no agent, exposes no tools,
 and authorizes one exact external message through a fixture-owned same-process
 callback endpoint. Its sole provider action is a bounded hold used to inspect
 the live navigation interval.
-The live dual-PTY attach case reuses the one-lane public-PTY binding exception.
-Its sole text action may bind the harness-minted `ui-prompt-*` correlation for
-the first agent. Starting the explicit-session attach after that turn consumes
-no additional action, and both terminal projections must reach the same semantic
-completed turn before teardown.
+The live dual-PTY attach cases reuse the one-lane public-PTY binding exception.
+One case permits a sole text action to bind the harness-minted `ui-prompt-*`
+correlation and attaches after completion. The other permits a sole bounded
+`HoldUntilCancel`, attaches only after its prompt-correlated hold-ready notice,
+then issues one exact cancellation. Both terminal projections must agree on the
+selected agent and settled editable status while typed stats prove runtime;
+attachment consumes no provider action.
 
 Hermetic embedded and daemon launches bypass ambient Tau startup-role,
 role/config, extension, and secret environment transports, retain that policy

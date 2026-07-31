@@ -280,6 +280,141 @@ fn late_attached_public_pty_stages_current_state_before_completed_turn()
     Ok(())
 }
 
+/// Proves a second public CLI attached only after a correlated provider hold is
+/// ready presents the same selected agent, then both terminals settle after one
+/// exact cancellation while typed stats prove the running-to-idle transition.
+#[test]
+fn live_attached_public_ptys_share_selected_agent_and_cancellation_settlement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let nonce = format!("{:x}", std::process::id());
+    let prompt_text = format!("attach-hold-prompt-{nonce}");
+    let scenario = ScenarioV2::new(
+        "live-dual-pty-attach",
+        vec![ScenarioLaneV2 {
+            ctx_id: "dynamic-ui-prompt".to_owned(),
+            actions: vec![ScenarioActionV2::HoldUntilCancel {
+                user_text: format!("<user>{prompt_text}</user>"),
+                timeout_ms: 10_000,
+            }],
+        }],
+    );
+    let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
+    let mut original = PtyProcess::spawn(
+        fixture.command(None),
+        false,
+        Some(PtyArtifacts::new(
+            fixture.artifact_path("attach-cancel-original.raw.bounded"),
+            fixture.artifact_path("attach-cancel-original.normalized.txt"),
+        )),
+    )?;
+    let deadline = Instant::now() + DEADLINE;
+    let (socket, session_id) = discover_daemon(fixture.runtime_home(), None, deadline)?;
+    let mut observer = SideObserver::connect(
+        &socket,
+        &session_id,
+        fixture.artifact_path("attach-cancel-observer.json"),
+        deadline,
+    )?;
+    wait_extensions(&mut observer, deadline)?;
+    wait_for_dummy_role_selection(&mut observer, deadline)?;
+    original.wait_ready_to_start_role(DUMMY_ROLE, deadline)?;
+    original.send_line(&prompt_text)?;
+    let loaded = observer.recv_until(deadline, |observed| {
+        matches!(
+            &observed.event,
+            Event::SessionAgentLoaded(loaded) if loaded.session_id == session_id
+        )
+    })?;
+    let Event::SessionAgentLoaded(loaded) = loaded.event else {
+        unreachable!("predicate admitted another event")
+    };
+    let agent_id = loaded.agent_id;
+    let prompt = peer_navigation::wait_for_selected_live_hold(&mut observer, &agent_id, deadline)?;
+    original.wait_for(&peer_navigation::hold_ready_notice(&prompt), deadline)?;
+    peer_navigation::assert_hold_live(&fixture, &prompt)?;
+
+    let attached = PtyProcess::spawn(
+        fixture.attach_command(session_id.as_str()),
+        false,
+        Some(PtyArtifacts::new(
+            fixture.artifact_path("attach-cancel-second.raw.bounded"),
+            fixture.artifact_path("attach-cancel-second.normalized.txt"),
+        )),
+    )?;
+    let original_running = original.wait_for(&format!("@{}", agent_id.as_str()), deadline)?;
+    let attached_running = attached.wait_for(&format!("@{}", agent_id.as_str()), deadline)?;
+    assert_live_attach_semantics(&original_running, &session_id, &agent_id)?;
+    assert_live_attach_semantics(&attached_running, &session_id, &agent_id)?;
+
+    observer.cancel_prompt(&session_id, &prompt)?;
+    peer_navigation::wait_for_canceled_hold(&mut observer, &prompt, deadline)?;
+    peer_navigation::assert_hold_reaped(&fixture, &prompt)?;
+    peer_navigation::wait_for_selected_idle(&mut observer, &agent_id, &prompt, deadline)?;
+    original.wait_for("cancelling current prompt", deadline)?;
+    attached.wait_for("cancelling current prompt", deadline)?;
+    let original_idle = original.wait_ready_for(agent_id.as_str(), deadline)?;
+    let attached_idle = attached.wait_ready_for(agent_id.as_str(), deadline)?;
+    peer_navigation::assert_exact_canceled_hold_facts(&observer.events, &prompt)?;
+    assert_settled_attach_semantics(&original_idle, &session_id, &agent_id)?;
+    assert_settled_attach_semantics(&attached_idle, &session_id, &agent_id)?;
+
+    fixture.write_artifact(
+        "attach-cancel-observer.json",
+        &serde_json::to_vec_pretty(&observer.events)?,
+    )?;
+    fixture.write_artifact(
+        "attach-cancel-original.normalized.txt",
+        original_idle.as_bytes(),
+    )?;
+    fixture.write_artifact(
+        "attach-cancel-second.normalized.txt",
+        attached_idle.as_bytes(),
+    )?;
+    drop(observer);
+    attached.finish()?;
+    original.finish()?;
+    fixture.require_boot_gone(session_id.as_str())?;
+    fixture.complete();
+    Ok(())
+}
+
+/// Checks the stable session, selected agent, and editable idle status after
+/// cancellation without depending on transcript rows retained in the viewport.
+fn assert_settled_attach_semantics(
+    frame: &str,
+    session_id: &SessionId,
+    agent_id: &AgentId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for needle in [
+        format!("sessions/{}/", session_id.as_str()),
+        format!("Write a message to {}...", agent_id.as_str()),
+        format!("@{}", agent_id.as_str()),
+    ] {
+        if !frame.lines().any(|row| row.contains(&needle)) {
+            return Err(format!("missing settled semantic row `{needle}` in:\n{frame}").into());
+        }
+    }
+    Ok(())
+}
+
+/// Checks stable selected-agent and session status semantics shared by both
+/// live attached terminal projections; typed observer stats own runtime.
+fn assert_live_attach_semantics(
+    frame: &str,
+    session_id: &SessionId,
+    agent_id: &AgentId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for needle in [
+        format!("sessions/{}/", session_id.as_str()),
+        format!("@{}", agent_id.as_str()),
+    ] {
+        if !frame.lines().any(|row| row.contains(&needle)) {
+            return Err(format!("missing semantic row `{needle}` in:\n{frame}").into());
+        }
+    }
+    Ok(())
+}
+
 /// Proves Boot A selects `deterministic-e2e` / `fake/test`, exposes only
 /// `restart_test_dummy`, and renders the matching editable prompt before first
 /// input. It then proves that completed tool call never repaints as pending in

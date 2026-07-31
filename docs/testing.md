@@ -227,11 +227,13 @@ historical rows, and transcript ordering.
 For those two resume topologies, a side UI observer preserves replay metadata
 and typed CBOR store reads prove identity and prefix/suffix durability.
 A live-attach topology starts two fixed PTYs against one daemon, attaches the
-second exact public CLI by explicit session before input, and submits one
-fake-provider text turn through the owner. Normalized VT row classes require
-both views to preserve the same session, extension-ready, agent-initialization,
-prompt, response, editable-prompt, and status elements in semantic order without
-requiring byte or cell identity. A replay-aware side observer, one-action trace,
+second exact public CLI by explicit session, and exercises both a completed text
+turn and a correlated provider hold. The hold variant attaches only after the
+prompt-specific hold-ready signal, requires both views to preserve the selected
+agent, cancels once, and requires both views to settle on its editable status.
+Typed stats prove the correlated running-to-idle transition. Normalized VT row
+classes compare semantic elements rather than byte or cell identity.
+Replay-aware side observers, exact traces, provider stats,
 bounded condition-driven waits, process-group cleanup, and runtime-artifact
 cleanup remain independent oracles.
 A third topology starts the universal PTY agentless and tool-free, then uses a

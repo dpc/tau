@@ -146,11 +146,13 @@ against the first CLI's daemon. The second process receives only the same privat
 HOME/XDG inputs and explicit session identity; it cannot reconfigure the daemon.
 Both process groups and bounded PTY readers are independently reaped before the
 fixture checks that runtime discovery artifacts and the session lock disappeared.
-The closed surface remains one fake-provider text action and the existing
-no-side-effect dummy extension; attachment consumes no action and invokes no tool.
-This proves only semantic parity for one live text projection, not arbitrary
-multi-client ordering, presentation identity, provider behavior, or concurrent
-prompt/tool safety.
+The closed surface remains either one fake-provider text action or one bounded
+hold-until-cancel action plus the existing no-side-effect dummy extension;
+attachment consumes no action and invokes no tool. The hold case attaches after
+correlated readiness and permits one prompt-correlated cancellation. This proves
+selected-agent and settled-status projection parity plus a typed
+running-to-idle transition, not arbitrary multi-client ordering, presentation
+identity, production-provider behavior, or concurrent prompt/tool safety.
 An external uncatchable kill of the test process itself prevents Rust `Drop`
 cleanup; the mandatory Nix/nextest runner remains the outer process/sandbox owner
 for that residual case.
