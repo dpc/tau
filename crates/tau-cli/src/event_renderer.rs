@@ -3888,6 +3888,32 @@ impl EventRenderer {
         self.handle_recorded_delivery(event, recorded_at, Some(delivery_id));
     }
 
+    /// Selects the validated owner of a reconstructed pending start, then
+    /// processes the start through the ordinary visible-agent path.
+    pub(crate) fn handle_reconstructed_tool_start_socket_delivery(
+        &mut self,
+        event: &Event,
+        target_agent_id: &tau_proto::AgentId,
+        recorded_at: UnixMicros,
+        delivery_id: u64,
+    ) {
+        let user_originated =
+            matches!(event, Event::ToolStarted(started) if started.originator.is_user());
+        if user_originated
+            && self.current_agent_id.is_none()
+            && self.displayed_agent_id.is_none()
+            && !self.awaiting_new_agent_selection
+            && self.can_select_target_from_empty(target_agent_id.as_str())
+        {
+            self.show_agent_transcript(target_agent_id.to_string());
+            self.awaiting_new_agent_selection = false;
+            self.set_current_agent_id(Some(target_agent_id.to_string()), true);
+            self.refresh_prompt_placeholder();
+            self.render_model_status();
+        }
+        self.handle_socket_delivery(event, recorded_at, delivery_id);
+    }
+
     fn handle_recorded_delivery(
         &mut self,
         event: &Event,

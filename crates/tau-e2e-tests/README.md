@@ -33,10 +33,16 @@ once across two cold resumes, and startup rejection of invalid
 scenario config.
 The Unix-only `core_resume` gate additionally spawns the exact universal `tau`
 under a real PTY twice. It completes `restart_test_dummy`, reaps Boot A, resumes
-with explicit `tau resume <session-id>`, and checks the actual VT projection never
-repaints the completed row as pending. A replay-aware side UI observer and typed
+with explicit `tau resume <session-id>`, checks the restored terminal row, then
+arms sticky monitoring before the fresh turn to reject later pending repaints. A
+replay-aware side UI observer and typed
 CBOR `SessionStore`/`AgentStore` snapshots independently prove replay boundaries,
 stable identity, unchanged durable prefix, and one fresh same-agent prompt.
+Two live-attach variants compare the exact unique dummy-tool row in both PTYs
+after completion and during a release-held invocation. The held case waits for
+the durable tool request and live correlated readiness, sends one bounded authenticated
+release frame, then compares both PTYs' successful `ok` and `restart succeeded`
+snapshots while one typed terminal owns lifecycle truth.
 A live-attach case starts one fixed PTY, completes one closed text turn, then
 attaches a second exact public CLI by explicit session. Normalized semantic row
 classes cover session,

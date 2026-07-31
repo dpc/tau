@@ -6,7 +6,10 @@ After major changes to this extension's features, tool/action behavior, configur
 
 Local design notes:
 
-- `specs/ARCH-tau-ext-test-dummy.md` describes the fixture boundaries and behavior invariants, and documents why this disabled-by-default fixture has only a trusted local stdio boundary.
+- `specs/ARCH-tau-ext-test-dummy.md` describes the fixture boundaries and
+  behavior invariants, including the trusted local stdio control boundary and
+  the release mode's narrowly scoped caller-provisioned fixture-private Unix
+  socket.
 - `TESTING.md` describes the regression coverage expected for restart modes, replay suppression, and prompt interception.
 - `SECURITY.md` is required reading and records the extension's capability,
   trust, and worker-lifecycle boundary.

@@ -2,11 +2,13 @@
 
 `tau-ext-test-dummy` is a disabled-by-default, test-only configured extension.
 It is trusted same-UID local fixture code, not a sandbox and not user-facing
-functionality. It communicates only through Tau's stdio extension protocol. The
+functionality. It communicates through Tau's stdio extension protocol and, in
+release mode only, one caller-provisioned fixture-private Unix socket. The
 supervisor may provide ordinary inherited process state, but this crate does not
 inspect environment variables or secrets, use its configured state directory,
-perform path-based filesystem I/O, open network connections, or spawn child
-processes.
+open network connections, or spawn child processes. The one narrow filesystem
+exception is the configured fixture-private Unix socket used by
+`hold_until_success_release`.
 
 The harness supplies typed configuration, prompt events, tool starts,
 cancellation, and disconnect. Configuration rejects unknown fields and invalid
@@ -22,6 +24,19 @@ or teardown. Cancellation may emit only the correlated cancellation terminal;
 disconnect and teardown emit none. The mode must never gain model arguments,
 runtime control, filesystem, network, environment, secret, or child-process
 authority.
+
+For each invocation, the caller creates and owns a private `0700` fixture root,
+chooses a fresh absent socket leaf beneath it, and generates the nonce.
+`hold_until_success_release` binds that leaf and removes it on every worker exit;
+it never creates or removes the caller's root. Its newline-delimited JSON frame
+is capped at 4096 bytes including the delimiter and contains only `call_id` and
+`release_nonce`.
+Both values must exactly match the active invocation and configured
+caller-generated nonce. Bad, oversized, stale, duplicate, or mismatched frames
+are rejected without release. The worker accepts one active invocation, reports
+readiness before arming release, and uses one bounded overall lifecycle.
+Cancellation and shutdown wake notification-driven waits. Teardown joins all
+owned threads and removes the socket without manufacturing a success result.
 
 Primary safeguards are the focused dummy lifecycle tests and the S6
 interrupted-worker cold-resume acceptance in `tau-e2e-tests`. Re-review this

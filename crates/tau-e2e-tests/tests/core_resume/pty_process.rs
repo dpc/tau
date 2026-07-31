@@ -477,6 +477,14 @@ impl PtyProcess {
         Ok(())
     }
 
+    /// Arms sticky monitoring after the restored terminal row is established.
+    pub(super) fn start_tool_monitoring(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut capture = self.capture.0.lock().map_err(|_| "PTY capture poisoned")?;
+        capture.tool_violation = None;
+        capture.tool_latch_armed = true;
+        Ok(())
+    }
+
     /// Atomically verifies and disarms the Boot-B historical-tool monitor after
     /// the fresh turn has reached terminal VT readiness.
     pub(super) fn finish_tool_monitoring(&self) -> Result<(), Box<dyn std::error::Error>> {

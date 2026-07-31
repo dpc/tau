@@ -63,11 +63,15 @@ callback endpoint. Its sole provider action is a bounded hold used to inspect
 the live navigation interval.
 The live dual-PTY attach cases reuse the one-lane public-PTY binding exception.
 One case permits a sole text action to bind the harness-minted `ui-prompt-*`
-correlation and attaches after completion. The other permits a sole bounded
-`HoldUntilCancel`, attaches only after its prompt-correlated hold-ready notice,
-then issues one exact cancellation. Both terminal projections must agree on the
-selected agent and settled editable status while typed stats prove runtime;
-attachment consumes no provider action.
+correlation and attaches after completion. Tool cases permit exactly two fake
+provider actions around one deterministic `restart_test_dummy` invocation:
+completed attach uses immediate success, while pending attach waits on the
+fixture-private authenticated release socket until both PTYs show the same
+pending row. The interruption case separately permits one bounded
+`HoldUntilCancel` and one exact cancellation. Public terminal snapshots must
+agree on selected-agent and pending/settled status while typed lifecycle facts
+prove runtime; attachment itself consumes no provider action or tool invocation.
+The snapshot assertions do not claim an absence of intermediate redraw flicker.
 The two-agent attached-UI case first completes the deterministic main/worker
 scenario and correlates both stable IDs and idle readiness through typed facts.
 Each UI then selects both IDs independently. Exact fake traces, typed provider

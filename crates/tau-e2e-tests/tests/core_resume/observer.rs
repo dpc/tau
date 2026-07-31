@@ -442,6 +442,7 @@ fn selectors(observe_prompt_drafts: bool) -> Vec<EventSelector> {
         E::PROVIDER_TOOL_ERROR,
         E::TOOL_REQUEST,
         E::TOOL_STARTED,
+        E::TOOL_PROGRESS_REPORTED,
         E::TOOL_RESULT_DISPLAY,
         E::TOOL_ERROR,
         E::EXTENSION_READY,

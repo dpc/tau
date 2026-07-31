@@ -17,6 +17,11 @@ Regression coverage should include:
 - an injected short deadline producing the fixed timeout terminal;
 - hold-mode disconnect joining the worker without a terminal result, error, or
   cancellation report;
+- `hold_until_success_release` rejecting malformed and nonce-mismatched frames,
+  accepting only the exact typed call-id/nonce frame, and returning the exact
+  normal success result;
+- release-mode disconnect joining its worker, removing the Unix socket, and
+  producing no synthetic success;
 - invalid config emitting `ConfigError`;
 - replayed `tool.started` deliveries producing no tool result/error and no
   forced exit behavior;

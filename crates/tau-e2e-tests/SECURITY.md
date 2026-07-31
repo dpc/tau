@@ -146,13 +146,16 @@ against the first CLI's daemon. The second process receives only the same privat
 HOME/XDG inputs and explicit session identity; it cannot reconfigure the daemon.
 Both process groups and bounded PTY readers are independently reaped before the
 fixture checks that runtime discovery artifacts and the session lock disappeared.
-The closed surface remains either one fake-provider text action or one bounded
-hold-until-cancel action plus the existing no-side-effect dummy extension;
-attachment consumes no action and invokes no tool. The hold case attaches after
-correlated readiness and permits one prompt-correlated cancellation. This proves
-selected-agent and settled-status projection parity plus a typed
-running-to-idle transition, not arbitrary multi-client ordering, presentation
-identity, production-provider behavior, or concurrent prompt/tool safety.
+The closed surface permits one fake-provider text action for text-only attach or
+two fake-provider actions around one `restart_test_dummy` invocation for tool
+attach. Completed-tool attach uses deterministic success. Pending-tool attach
+uses the fixture-private authenticated release socket only after both PTYs show
+the same pending row. Attachment itself consumes no provider action and invokes
+no tool. The separate interruption case retains its bounded
+hold-until-cancel action. These cases prove parity snapshots plus typed terminal
+facts for selected-agent, pending, and settled states; they do not prove absence
+of intermediate redraw flicker, arbitrary multi-client ordering, production
+provider behavior, or concurrent prompt/tool safety.
 The main/worker presentation case attaches only after both typed agents are idle,
 then limits both public UIs to draft editing/clearing, stable-ID selection, and
 one runtime theme command. Exact visible-canary round trips across completed

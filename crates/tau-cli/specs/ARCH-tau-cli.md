@@ -156,14 +156,21 @@ non-replay `session.replay_complete` boundary. Replay-marked current-state rows
 continue directly to the renderer, so session, extension, context, and agent
 initialization state appears before historical conversation without changing
 wire delivery or shared catch-up semantics. Staging uses the same 1,024-item /
-64-MiB limits as renderer admission. Encountering tool-bearing history flushes
-retained plain history in relative order and disables further staging because
-tool reconstruction has cross-event ordering dependencies. If an oversized
-plain catch-up reaches a limit after some state has already rendered, the UI
-similarly flushes retained history in its original relative order and stops
-staging rather than claiming to restore the already-overtaken global wire order
-or growing memory without bound. Traffic after the boundary passes through
-directly.
+64-MiB aggregate limits as renderer admission across retained transcript,
+pending tool starts, buffered live tool frames, and session/membership/ownership
+indexes. Replayed provider-declared
+tool calls authorize only matching durable starts owned by agents currently
+loaded in this session; canonical terminals close those starts, including
+provider-projected errors. The UI publishes the remaining baseline at
+`session.replay_complete`, then buffered live frames, and disables the fold
+unconditionally. Encountering tool-bearing history flushes retained plain
+history because tool reconstruction has cross-event ordering dependencies.
+If live retention reaches the aggregate bound, the UI flushes the reconstructed
+baseline and buffered live frames deterministically. Historical overflow or any
+scope-index update that cannot fit instead clears the incomplete baseline and
+suppresses later replayed starts through the boundary. Both paths disable metadata
+observation rather than dropping or growing without bound. Traffic after
+the boundary and every non-attach UI passes through directly.
 
 External-editor prompt trailers are prompt-surface text. They may quote
 assistant responses and prior prompt text to help compose the next prompt, but
@@ -233,11 +240,14 @@ independent axis, so later agent replay is visible as steady replay. The report
 includes exact encoded byte totals plus bounded size distributions for selected
 payload components and equality classifications; it never reports payload
 contents. Only interactive chat opts into this detailed work; extension meters
-remain cumulative-only. The interactive chat exact subscription omits
-`tool.request` in both historical and live selectors because its renderer does
-not consume that admission fact. `tool.started` remains live so the renderer can
-create pending tool state, and generic UI, provider, extension, and restore
-subscriptions remain independent of the chat allow-list.
+remain cumulative-only. Interactive chat reconstructs pending rows by folding
+durable historical `tool.started` dispatch facts against canonical lifecycle
+terminals through `session.replay_complete`, then applies tool frames that arrived
+live during catch-up. Requests, including rejected, unrouted, duplicate, and stale
+requests, never create pending presentation. A background placeholder closes the
+foreground provider turn but keeps the row pending until the real background
+terminal. Generic UI, provider, extension, and restore subscriptions remain
+independent of the chat allow-list.
 
 ## Navigation projection
 

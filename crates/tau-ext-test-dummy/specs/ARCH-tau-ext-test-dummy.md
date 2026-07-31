@@ -24,6 +24,19 @@ invocation with correlated transient progress only after a worker reaches its
 wait point, then waits for exact cancellation or a fixed terminal deadline.
 Cancellation joins the worker and reports cancellation; disconnect and teardown
 join it without terminal output.
+`hold_until_success_release` is a separate test-fixture mode. For each invocation,
+the caller creates and owns a private `0700` root, configures a fresh absent
+`release_socket_path` below it, and generates `release_nonce`. The extension
+binds and later removes only the socket leaf. It starts one worker, reports
+readiness, and only then arms release. It accepts newline-delimited JSON frames of at
+most 4096 bytes (including the newline), with the exact closed shape
+`{"call_id":"…","release_nonce":"…"}`. Only an exact match for the active call
+and configured nonce reports the normal `restart succeeded` result. Malformed,
+oversized, duplicate, stale, and mismatched frames cannot release the hold.
+One bounded overall lifecycle covers readiness, connection, and frame assembly.
+Cancellation and shutdown wake the notification-driven worker. Cancellation,
+disconnect, and teardown join all owned threads and remove the socket without
+synthesizing success.
 
 Restart replies (`success` `tool.result_reported` and error
 `tool.error_reported`) must echo the
@@ -36,13 +49,17 @@ configuration.
 
 Security-relevant boundaries:
 
-- Communication is limited to the trusted local Tau extension stdio protocol.
-- The crate does not read or write files, persist state, access secrets, open
-  network connections, or spawn subprocesses.
+- Communication is limited to the trusted local Tau extension stdio protocol
+  and the fixture-private Unix release socket described above.
+- Apart from creating and removing that socket, the crate does not read or
+  write files, persist state, access secrets, open network connections, or spawn
+  subprocesses.
 - Config parsing rejects unknown fields and invalid `restart_mode` values.
-- Hold mode accepts no tool arguments or external control, permits one active
-  worker, bounds readiness at one second and terminal waiting at ten seconds,
-  and joins that worker on cancellation or shutdown.
+- `hold_no_side_effect` accepts no tool arguments or external control, permits
+  one active worker, bounds readiness at one second and terminal waiting at ten
+  seconds, and joins that worker on cancellation or shutdown.
+- `hold_until_success_release` permits one externally released worker and
+  arbitrates release, cancellation, and shutdown so exactly one outcome wins.
 - Replayed `tool.started` deliveries are ignored so historical events cannot
   retrigger tool replies or extension exits.
 

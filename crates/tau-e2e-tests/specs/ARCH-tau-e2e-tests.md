@@ -108,8 +108,14 @@ after its hold-ready fact and requires both terminals to present the same
 selected agent, then converge on its editable status after one exact
 cancellation. Typed stats own the running-to-idle transition; provider traces,
 stats snapshots, and side-observer prompt facts
-independently exclude duplicate submission or cancellation. This baseline does
-not cover shell, tool, or other local-presentation behavior. A separate
+independently exclude duplicate submission or cancellation. Two dummy-tool
+cases compare the exact unique terminal row after a completed round and the
+exact unique pending row after the durable tool request and live correlated
+readiness. The pending case releases its fixture-private socket once and compares
+both PTYs' post-release `ok` and `restart succeeded` snapshots. One typed terminal,
+durable snapshots, and exact fake-provider
+consumption own lifecycle truth independently of the VT rows. This baseline
+does not cover shell or other local-presentation behavior. A separate
 main/worker case attaches two UIs only after the complete typed roster is idle.
 Both select every agent by stable public ID in opposite orders, compare
 ID-keyed semantic transcript rows, and prove selection remains UI-local while
@@ -134,9 +140,10 @@ first completes the production `agent_start` main/worker flow with exact
 `ctx_id` lane bindings. After bounded process-group and socket cleanup, only
 Boot B runs the exact universal `tau resume <session-id>` under the PTY against the
 same private config, stores, and fake-provider checkpoint. Stable typed agent IDs
-drive explicit terminal switches. The VT model is authoritative only for
-transcript selection, the completed `agent_start` row remaining terminal, and
-the targeted worker continuation appearing after its restored transcript.
+drive explicit terminal switches. After the first restored frame establishes the
+completed `agent_start` row, sticky VT monitoring covers later switches and the
+fresh turn. The VT model is authoritative only for transcript selection and the
+targeted worker continuation appearing after its restored transcript.
 Replay-aware socket delivery, directed rosters, typed multi-agent stores, and
 exact fake-provider consumption remain independent authorities. This does not
 extend terminal rendering, production-provider, crash-exact, watch-restoration,

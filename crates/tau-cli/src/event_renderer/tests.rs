@@ -590,6 +590,60 @@ fn agent_id_for_event_resolves_tool_metadata_and_started_fallback() {
     );
 }
 
+/// Ordinary tool starts preserve empty-screen selection semantics, while the
+/// validated reconstructed presentation selects only a user-originated owner.
+#[test]
+fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
+    let owner = agent_id("started-agent");
+    let user_start = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        call_id: "user-call".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        arguments: tau_proto::CborValue::Null,
+        agent_id: owner.clone(),
+        originator: tau_proto::PromptOriginator::User,
+    });
+    let mut ordinary = renderer_for_agent_id_tests();
+    ordinary.handle_socket_delivery(&user_start, tau_proto::UnixMicros::new(1), 1);
+    assert_eq!(ordinary.current_agent_id, None);
+    assert_eq!(ordinary.displayed_agent_id, None);
+
+    let mut reconstructed = renderer_for_agent_id_tests();
+    reconstructed.handle_reconstructed_tool_start_socket_delivery(
+        &user_start,
+        &owner,
+        tau_proto::UnixMicros::new(1),
+        1,
+    );
+    assert_eq!(
+        reconstructed.current_agent_id.as_deref(),
+        Some(owner.as_str())
+    );
+    assert_eq!(
+        reconstructed.displayed_agent_id.as_deref(),
+        Some(owner.as_str())
+    );
+
+    let extension_start = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        call_id: "extension-call".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        arguments: tau_proto::CborValue::Null,
+        agent_id: owner.clone(),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: tau_proto::ExtensionName::parse("fixture").expect("valid extension name"),
+            query_id: "query-1".to_owned(),
+        },
+    });
+    let mut extension = renderer_for_agent_id_tests();
+    extension.handle_reconstructed_tool_start_socket_delivery(
+        &extension_start,
+        &owner,
+        tau_proto::UnixMicros::new(1),
+        1,
+    );
+    assert_eq!(extension.current_agent_id, None);
+    assert_eq!(extension.displayed_agent_id, None);
+}
+
 /// Shell progress can omit an explicit target and rely on metadata learned
 /// from the command request. The resolver must still use that map after the
 /// shell-specific branch was extracted out of the large event match.

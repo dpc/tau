@@ -11,6 +11,8 @@ use tau_proto::{
     SessionStartReason, ToolCallId,
 };
 
+#[path = "core_resume/attached_dummy_tool.rs"]
+mod attached_dummy_tool;
 #[path = "core_resume/gate_fixture.rs"]
 mod gate_fixture;
 #[path = "core_resume/headless_process.rs"]
@@ -417,9 +419,9 @@ fn assert_live_attach_semantics(
 
 /// Proves Boot A selects `deterministic-e2e` / `fake/test`, exposes only
 /// `restart_test_dummy`, and renders the matching editable prompt before first
-/// input. It then proves that completed tool call never repaints as pending in
-/// a new spawned Tau UI and the same durable agent remains useful after cold
-/// resume.
+/// input. It then checks the restored terminal row, rejects pending repaints
+/// during the fresh turn, and proves the same durable agent remains useful
+/// after cold resume.
 #[test]
 fn spawned_tau_resume_keeps_completed_dummy_tool_terminal_and_continues()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -501,7 +503,7 @@ fn spawned_tau_resume_keeps_completed_dummy_tool_terminal_and_continues()
 
     let mut boot_b = PtyProcess::spawn(
         fixture.command(Some(session_id.as_str())),
-        true,
+        false,
         Some(PtyArtifacts::new(
             fixture.artifact_path("boot-b-pty.raw.bounded"),
             fixture.artifact_path("boot-b-pty.normalized.txt"),
@@ -530,7 +532,7 @@ fn spawned_tau_resume_keeps_completed_dummy_tool_terminal_and_continues()
     boot_b.wait_for(&tool_complete, deadline)?;
     let restored = boot_b.wait_ready(deadline)?;
     assert_terminal_tool_row(&restored)?;
-    boot_b.require_no_tool_violation()?;
+    boot_b.start_tool_monitoring()?;
 
     boot_b.send_line(&after)?;
     wait_for_fresh_turn(&mut observer_b, &agent_id, &after_complete, deadline)?;

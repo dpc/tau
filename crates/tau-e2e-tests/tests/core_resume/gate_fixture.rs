@@ -2,7 +2,9 @@
 
 use std::cell::Cell;
 use std::fs as path_std_fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -34,6 +36,8 @@ pub(super) struct GateFixture {
     completed: Cell<bool>,
     /// Exact extension names enabled at the universal CLI boundary.
     enabled_extensions: &'static [&'static str],
+    /// Fixture-private release socket and nonce for the releasable dummy mode.
+    dummy_release: Option<(PathBuf, String)>,
 }
 
 impl GateFixture {
@@ -43,6 +47,19 @@ impl GateFixture {
         fake_provider_bin: &Path,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_with_mode(scenario, fake_provider_bin, FixtureMode::DummyTool)
+    }
+
+    /// Creates the dummy-tool configuration whose invocation completes only
+    /// after an exact fixture-private release frame.
+    pub(super) fn new_with_dummy_release(
+        scenario: &ScenarioV2,
+        fake_provider_bin: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_mode(
+            scenario,
+            fake_provider_bin,
+            FixtureMode::ReleasableDummyTool,
+        )
     }
 
     /// Creates the closed S8 production-main/worker configuration.
@@ -122,7 +139,25 @@ impl GateFixture {
                 "config": { "scenario": scenario },
             }),
         );
-        if mode == FixtureMode::DummyTool {
+        let dummy_release = (mode == FixtureMode::ReleasableDummyTool).then(|| {
+            (
+                root.join("dummy-release.sock"),
+                format!("core-resume-release-{}", std::process::id()),
+            )
+        });
+        if matches!(
+            mode,
+            FixtureMode::DummyTool | FixtureMode::ReleasableDummyTool
+        ) {
+            let config = if let Some((socket, nonce)) = &dummy_release {
+                serde_json::json!({
+                    "restart_mode": "hold_until_success_release",
+                    "release_socket_path": socket,
+                    "release_nonce": nonce,
+                })
+            } else {
+                serde_json::json!({ "restart_mode": "success" })
+            };
             extensions.insert(
                 "test-dummy".to_owned(),
                 serde_json::json!({
@@ -131,12 +166,12 @@ impl GateFixture {
                     "command": [tau_bin],
                     "suffix": ["component", "ext-test-dummy"],
                     "role": "tool",
-                    "config": { "restart_mode": "success" },
+                    "config": config,
                 }),
             );
         }
         let (default_role, roles) = match mode {
-            FixtureMode::DummyTool => (
+            FixtureMode::DummyTool | FixtureMode::ReleasableDummyTool => (
                 "deterministic-e2e",
                 serde_json::json!({
                     "deterministic-e2e": {
@@ -217,9 +252,12 @@ impl GateFixture {
             artifacts,
             completed: Cell::new(false),
             enabled_extensions: match mode {
-                FixtureMode::DummyTool => &["e2e-fake-provider", "test-dummy"],
+                FixtureMode::DummyTool | FixtureMode::ReleasableDummyTool => {
+                    &["e2e-fake-provider", "test-dummy"]
+                }
                 FixtureMode::MultiAgent | FixtureMode::PeerEntrypoint => &["e2e-fake-provider"],
             },
+            dummy_release,
         })
     }
 
@@ -356,6 +394,28 @@ impl GateFixture {
         std::fs::read_to_string(self.artifacts.join("fake-provider.trace"))
     }
 
+    /// Sends one bounded, typed release frame for the active dummy invocation.
+    pub(super) fn release_dummy(
+        &self,
+        call_id: &tau_proto::ToolCallId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (socket, nonce) = self
+            .dummy_release
+            .as_ref()
+            .ok_or("fixture does not use releasable dummy mode")?;
+        let mut frame = serde_json::to_vec(&serde_json::json!({
+            "call_id": call_id,
+            "release_nonce": nonce,
+        }))?;
+        frame.push(b'\n');
+        if 4096 < frame.len() {
+            return Err("dummy release frame exceeds protocol bound".into());
+        }
+        let mut stream = UnixStream::connect(socket)?;
+        stream.write_all(&frame)?;
+        Ok(())
+    }
+
     /// Marks all exact assertions and cleanup complete.
     pub(super) fn complete(&self) {
         self.completed.set(true);
@@ -367,6 +427,8 @@ impl GateFixture {
 enum FixtureMode {
     /// Original single-agent gate with the restart dummy tool.
     DummyTool,
+    /// Dummy tool held until the fixture sends one authenticated release.
+    ReleasableDummyTool,
     /// S8 main/worker gate with only harness-owned `agent_start`.
     MultiAgent,
     /// Auto-starting peer receiver without any initial local agent.

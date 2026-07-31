@@ -213,9 +213,16 @@ event log, extension stderr, and bounded semantic provider trace.
 
 The Unix-only `core_resume` target additionally launches the exact universal
 Tau binary under a fixed PTY for a fresh boot and explicit
-`tau resume <session-id>` boot. Its VT model checks the completed dummy row is always
-terminal throughout Boot B historical restoration and the fresh resumed turn;
-Boot A is allowed to show the ordinary live pending state before completion.
+`tau resume <session-id>` boot. Its VT model checks the completed dummy row after
+Boot B historical restoration, then arms sticky monitoring to keep it terminal
+through the fresh resumed turn. Boot A is allowed to show the ordinary live
+pending state before completion.
+Two live-attach variants compare the exact unique dummy-tool row across both
+PTYs after completion and during a release-held invocation. The held variant
+waits for the durable tool request and live correlated dummy readiness, sends one bounded
+authenticated release frame, then compares both post-release `ok` and
+`restart succeeded` snapshots. One typed terminal, durable CBOR snapshots, and the exact
+two-action provider trace remain the lifecycle authorities.
 A second gate creates and completes the production `agent_start` main/worker pair
 through a headless Boot A with exact lane correlations, then starts only Boot B
 under the public PTY. Stable IDs from typed protocol facts drive explicit

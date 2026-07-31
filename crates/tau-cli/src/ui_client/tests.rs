@@ -61,8 +61,8 @@ fn chat_subscription_includes_shell_reconciliation_events() {
 /// Ensures the chat UI subscription stays as an explicit event allow-list so
 /// newly-added protocol events do not silently expand UI traffic or replay
 /// catch-up.
-/// Ensures chat omits the unused tool request, keeps transient starts and
-/// terminal side effects live-only, and still requests durable terminal facts.
+/// Ensures chat reconstructs pending tools from durable dispatched starts and
+/// never subscribes to pre-dispatch requests.
 #[test]
 fn chat_subscription_keeps_runtime_side_effects_live_only() {
     let HarnessInputMessage::Subscribe(subscription) = chat_subscribe_message() else {
@@ -73,7 +73,7 @@ fn chat_subscription_keeps_runtime_side_effects_live_only() {
     assert!(!subscription.live_selectors.contains(&request));
 
     let started = EventSelector::Exact(EventName::TOOL_STARTED);
-    assert!(!subscription.historical_selectors.contains(&started));
+    assert!(subscription.historical_selectors.contains(&started));
     assert!(subscription.live_selectors.contains(&started));
 
     let prompt_failed = EventSelector::Exact(EventName::AGENT_PROMPT_FAILED);

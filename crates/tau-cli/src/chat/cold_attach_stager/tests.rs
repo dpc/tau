@@ -1,10 +1,13 @@
 //! Focused cold-attach staging tests.
 
+mod tool_reconstruction;
+
 use tau_proto::{Event, UnixMicros};
 
 use super::{
     ColdAttachStager, RENDERER_QUEUE_MAX_BYTES, RENDERER_QUEUE_MAX_ITEMS, RendererDelivery,
-    ShellStartPresentation, renderer_event_from_delivery,
+    RendererPresentation, RetainedUsage, ShellStartPresentation, ToolReconciliation,
+    renderer_event_from_delivery, tool_terminal_id,
 };
 
 /// Builds one plain replayable transcript prompt.
@@ -29,7 +32,7 @@ fn replay(event: Event, queue_bytes: usize, delivery_id: u64) -> RendererDeliver
         recorded_at: UnixMicros::new(1),
         queue_bytes,
         delivery_id,
-        standalone_shell_terminal: false,
+        presentation: RendererPresentation::Ordinary,
     }
 }
 
@@ -42,8 +45,16 @@ fn live(event: Event, delivery_id: u64) -> RendererDelivery {
         recorded_at: UnixMicros::new(2),
         queue_bytes: 1,
         delivery_id,
-        standalone_shell_terminal: false,
+        presentation: RendererPresentation::Ordinary,
     }
+}
+
+/// Builds the catch-up boundary used to publish the folded pending baseline.
+fn replay_complete() -> Event {
+    Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+        session_id: "session-1".parse().expect("valid session id"),
+        error: None,
+    })
 }
 
 /// Builds one correlated user-shell start.
@@ -84,7 +95,10 @@ fn deduplicates_live_shell_start_before_replay_snapshot() {
             && old.command == "fixture-block"
             && old.cancelled
     ));
-    assert!(historical[0].standalone_shell_terminal);
+    assert!(matches!(
+        historical[0].presentation,
+        RendererPresentation::StandaloneShellTerminal
+    ));
     assert!(stager.admit(replay(shell_start(), 1, 3)).is_empty());
 
     assert_eq!(stager.admit(live(finished, 3)).len(), 1);
@@ -186,7 +200,7 @@ fn places_state_before_history_and_live_after_boundary() {
         recorded_at: UnixMicros::new(1),
         queue_bytes: 1,
         delivery_id,
-        standalone_shell_terminal: false,
+        presentation: RendererPresentation::Ordinary,
     };
     let mut stager = ColdAttachStager::staging();
 
@@ -220,7 +234,7 @@ fn drains_history_before_disconnect() {
                 recorded_at: UnixMicros::new(1),
                 queue_bytes: 2,
                 delivery_id: 9,
-                standalone_shell_terminal: false,
+                presentation: RendererPresentation::Ordinary,
             })
             .is_empty()
     );
@@ -247,55 +261,6 @@ fn pass_through_preserves_protocol_order() {
     assert!(
         matches!(second_ready.as_slice(), [value] if value.event == second && value.delivery_id == 2)
     );
-}
-
-/// A selected tool response must flush already-held history and disable
-/// staging.
-#[test]
-fn tool_history_keeps_protocol_order() {
-    let prompt = historical_prompt("before tool");
-    let tool = Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
-        agent_prompt_id: "prompt-1".parse().expect("valid prompt id"),
-        agent_id: "agent-1".parse().expect("valid agent id"),
-        output_items: vec![tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
-            call_id: "call-1".into(),
-            name: tau_proto::ToolName::new("test_tool"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: tau_proto::CborValue::Map(Vec::new()),
-            raw_arguments_json: None,
-            responses_envelope: None,
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        originator: tau_proto::PromptOriginator::User,
-        usage: None,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    });
-    let after = historical_prompt("after tool");
-    let mut stager = ColdAttachStager::staging();
-
-    assert!(stager.admit(replay(prompt.clone(), 1, 1)).is_empty());
-    let tool_ready = stager.admit(replay(tool.clone(), 1, 2));
-    let after_ready = stager.admit(replay(after.clone(), 1, 3));
-
-    assert!(matches!(
-        tool_ready.as_slice(),
-        [held, tool_event]
-            if held.event == prompt
-                && held.delivery_id == 1
-                && tool_event.event == tool
-                && tool_event.delivery_id == 2
-    ));
-    assert!(matches!(after_ready.as_slice(), [value] if value.event == after));
 }
 
 /// Item overflow must flush retained history in relative order and stop

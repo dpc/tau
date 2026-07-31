@@ -317,9 +317,7 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::PROVIDER_PROMPT_SUBMITTED),
         EventSelector::Exact(E::PROVIDER_RESPONSE_UPDATED),
         EventSelector::Exact(E::PROVIDER_RESPONSE_FINISHED),
-        // Tool and shell progress shown in generic ToolUseState blocks. The
-        // interactive renderer starts pending tool state from `tool.started`;
-        // it does not consume `tool.request`.
+        // Tool and shell progress shown in generic ToolUseState blocks.
         EventSelector::Exact(E::TOOL_STARTED),
         EventSelector::Exact(E::TOOL_REJECTED),
         EventSelector::Exact(E::TOOL_RESULT_DISPLAY),
@@ -364,15 +362,14 @@ pub(crate) fn subscribe_message(selectors: Vec<EventSelector>) -> HarnessInputMe
     })
 }
 
-/// Builds the production chat subscription with `tool.started` and terminal
-/// side effects restricted to live delivery.
+/// Builds the production chat subscription with terminal side effects
+/// restricted to live delivery.
 pub(crate) fn chat_subscribe_message() -> HarnessInputMessage {
     let live_selectors = chat_subscription_selectors();
     let historical_selectors = live_selectors
         .iter()
         .filter(|selector| {
-            **selector != EventSelector::Exact(EventName::TOOL_STARTED)
-                && **selector != EventSelector::Exact(EventName::AGENT_PROMPT_FAILED)
+            **selector != EventSelector::Exact(EventName::AGENT_PROMPT_FAILED)
                 && **selector != EventSelector::Exact(EventName::TERM_OSC1337_SET_USER_VAR)
                 && **selector != EventSelector::Exact(EventName::TERM_BELL)
         })

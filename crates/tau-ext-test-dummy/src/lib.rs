@@ -6,9 +6,12 @@
 //! supervision, tool dispatch, replay suppression, and prompt interception.
 //! See `ARCH-tau-ext-test-dummy` for the fixture boundary and invariants.
 
+mod release_hold;
+
 use std::error::Error;
 use std::io::{Read, Write};
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -16,6 +19,7 @@ use std::time::Duration;
 use rand::Rng;
 #[cfg(test)]
 use rand::{SeedableRng, rngs::StdRng};
+use release_hold::ReleaseConfig;
 use tau_client::{
     ClientResult, ExtensionBuilder, InterceptDecision, TauExtension, TauExtensionRunner,
 };
@@ -35,7 +39,6 @@ const HOLD_READY_TIMEOUT: Duration = Duration::from_secs(1);
 const HOLD_TERMINAL_TIMEOUT_SECS: u64 = 10;
 /// Hard deadline duration derived from [`HOLD_TERMINAL_TIMEOUT_SECS`].
 const HOLD_TERMINAL_TIMEOUT: Duration = Duration::from_secs(HOLD_TERMINAL_TIMEOUT_SECS);
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RestartMode {
@@ -50,13 +53,20 @@ enum RestartMode {
     Exit,
     /// Acknowledge the invocation and wait without performing side effects.
     HoldNoSideEffect,
+    /// Wait for an authenticated fixture-private socket release.
+    HoldUntilSuccessRelease,
 }
 
+/// Closed configuration accepted by the test-only dummy extension.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ExtConfig {
     /// Test-only deterministic behavior for `restart_test_dummy`.
     restart_mode: Option<RestartMode>,
+    /// Fixture-private Unix socket used by `hold_until_success_release`.
+    release_socket_path: Option<PathBuf>,
+    /// Fixture-generated nonce required by `hold_until_success_release`.
+    release_nonce: Option<String>,
 }
 
 /// Runtime state for the dummy extension.
@@ -65,23 +75,30 @@ struct DummyState<T> {
     rng: T,
     /// Active deterministic restart behavior selected by config.
     restart_mode: RestartMode,
-    /// Sole bounded invocation owned by the closed hold mode.
+    /// Sole bounded invocation owned by either deterministic hold mode.
     pending_hold: Option<PendingHold>,
-    /// Terminal deadline for the closed hold worker.
+    /// Terminal deadline for the no-side-effect hold worker.
     hold_timeout: Duration,
+    /// Validated fixture-private release configuration.
+    release_config: Option<ReleaseConfig>,
 }
 
-/// One bounded no-side-effect tool worker.
-struct PendingHold {
-    /// Correlation identity accepted by the worker.
-    call_id: tau_proto::ToolCallId,
-    /// Cancellation/shutdown signal owned by the reader loop.
-    signal: mpsc::Sender<HoldSignal>,
-    /// Worker joined on cancellation, disconnect, or state teardown.
-    join: thread::JoinHandle<()>,
+/// One bounded deterministic hold worker.
+enum PendingHold {
+    /// Closed no-side-effect worker with its typed lifecycle channel.
+    NoSideEffect {
+        /// Correlation identity accepted by the worker.
+        call_id: tau_proto::ToolCallId,
+        /// Cancellation/shutdown signal owned by the reader loop.
+        signal: mpsc::Sender<HoldSignal>,
+        /// Worker joined on cancellation, disconnect, or state teardown.
+        join: thread::JoinHandle<()>,
+    },
+    /// Authenticated fixture-private release worker.
+    Release(release_hold::ReleaseHold),
 }
 
-/// Closed wake reasons accepted by a hold worker.
+/// Closed wake reasons accepted only by the no-side-effect worker.
 enum HoldSignal {
     /// Emit one correlated cancellation terminal.
     Cancel,
@@ -96,48 +113,61 @@ impl<T> Drop for DummyState<T> {
 }
 
 impl<T> DummyState<T> {
-    /// Reaps a naturally completed timeout worker before another invocation.
+    /// Reaps any naturally completed hold worker before another invocation.
     fn reap_finished_hold(&mut self) -> ClientResult<()> {
-        if self
-            .pending_hold
-            .as_ref()
-            .is_some_and(|hold| hold.join.is_finished())
-        {
+        if self.pending_hold.as_ref().is_some_and(|hold| match hold {
+            PendingHold::NoSideEffect { join, .. } => join.is_finished(),
+            PendingHold::Release(hold) => hold.is_finished(),
+        }) {
             let hold = self
                 .pending_hold
                 .take()
                 .expect("finished hold remains present");
-            hold.join.join().map_err(|_| {
-                tau_client::ClientError::handler("hold_no_side_effect worker panicked")
-            })?;
+            match hold {
+                PendingHold::NoSideEffect { join, .. } => join.join().map_err(|_| {
+                    tau_client::ClientError::handler("deterministic hold worker panicked")
+                })?,
+                PendingHold::Release(hold) => hold.join()?,
+            }
         }
         Ok(())
     }
 
     /// Cancels and joins only the exactly correlated active hold.
     fn cancel_pending_hold(&mut self, target_call_id: &tau_proto::ToolCallId) -> ClientResult<()> {
-        if self
-            .pending_hold
-            .as_ref()
-            .is_none_or(|hold| &hold.call_id != target_call_id)
-        {
+        if self.pending_hold.as_ref().is_none_or(|hold| match hold {
+            PendingHold::NoSideEffect { call_id, .. } => {
+                call_id.as_str() != target_call_id.as_str()
+            }
+            PendingHold::Release(hold) => hold.call_id() != target_call_id,
+        }) {
             return Ok(());
         }
         let hold = self
             .pending_hold
             .take()
             .expect("correlated hold remains present");
-        let _ = hold.signal.send(HoldSignal::Cancel);
-        hold.join
-            .join()
-            .map_err(|_| tau_client::ClientError::handler("hold_no_side_effect worker panicked"))
+        match hold {
+            PendingHold::NoSideEffect { signal, join, .. } => {
+                let _ = signal.send(HoldSignal::Cancel);
+                join.join().map_err(|_| {
+                    tau_client::ClientError::handler("deterministic hold worker panicked")
+                })
+            }
+            PendingHold::Release(hold) => hold.cancel(),
+        }
     }
 
     /// Stops and joins the active hold without emitting terminal tool output.
     fn shutdown_pending_hold(&mut self) {
         if let Some(hold) = self.pending_hold.take() {
-            let _ = hold.signal.send(HoldSignal::Shutdown);
-            let _ = hold.join.join();
+            match hold {
+                PendingHold::NoSideEffect { signal, join, .. } => {
+                    let _ = signal.send(HoldSignal::Shutdown);
+                    let _ = join.join();
+                }
+                PendingHold::Release(hold) => hold.shutdown(),
+            }
         }
     }
 }
@@ -168,6 +198,24 @@ where
         builder
             .configure::<ExtConfig>(|cx| {
                 cx.state.restart_mode = cx.config().restart_mode.unwrap_or_default();
+                if cx.state.restart_mode == RestartMode::HoldUntilSuccessRelease {
+                    let Some(socket_path) = cx.config().release_socket_path.clone() else {
+                        return Err(tau_client::ClientError::handler(
+                            "hold_until_success_release requires release_socket_path and non-empty release_nonce",
+                        ));
+                    };
+                    let Some(nonce) = cx
+                        .config()
+                        .release_nonce
+                        .clone()
+                        .filter(|nonce| !nonce.is_empty())
+                    else {
+                        return Err(tau_client::ClientError::handler(
+                            "hold_until_success_release requires release_socket_path and non-empty release_nonce",
+                        ));
+                    };
+                    cx.state.release_config = Some(ReleaseConfig::new(socket_path, nonce)?);
+                }
                 Ok(())
             })
             .on_output_message(|message, state, _| {
@@ -305,6 +353,7 @@ where
         restart_mode: RestartMode::Random,
         pending_hold: None,
         hold_timeout,
+        release_config: None,
     };
     TauExtensionRunner::new(DummyExtension::<&mut T>::default()).run(reader, writer, state)?;
     Ok(())
@@ -364,7 +413,55 @@ where
         RestartMode::Random | RestartMode::Error => cx.report_error(restart_error(invoke)),
         RestartMode::Success => cx.report_result(restart_success(invoke)),
         RestartMode::HoldNoSideEffect => start_no_side_effect_hold(cx, invoke),
+        RestartMode::HoldUntilSuccessRelease => start_success_release_hold(cx, invoke),
     }
+}
+
+/// Starts one authenticated Unix-socket release worker.
+fn start_success_release_hold<T>(
+    cx: &mut tau_client::ToolContext<'_, DummyState<T>>,
+    invoke: tau_proto::ToolStarted,
+) -> ClientResult<()>
+where
+    T: Rng,
+{
+    cx.state.reap_finished_hold()?;
+    if cx.state.pending_hold.is_some() {
+        return cx.report_error(ToolError {
+            call_id: invoke.call_id,
+            tool_name: invoke.tool_name,
+            tool_type: tau_proto::ToolType::Function,
+            message: "a deterministic hold already has an active invocation".to_owned(),
+            details: None,
+            originator: invoke.originator,
+            display: None,
+        });
+    }
+    let call_id = invoke.call_id.clone();
+    let tool_name = invoke.tool_name.clone();
+    let hold = release_hold::ReleaseHold::start(
+        cx.state
+            .release_config
+            .clone()
+            .expect("release mode configuration validated"),
+        invoke,
+        cx.handle(),
+    )?;
+    cx.state.pending_hold = Some(PendingHold::Release(hold));
+    if let Err(error) = cx.handle().report_tool_progress(tau_proto::ToolProgress {
+        call_id,
+        tool_name,
+        message: Some("hold_until_success_release ready".to_owned()),
+        progress: None,
+        display: None,
+    }) {
+        cx.state.shutdown_pending_hold();
+        return Err(error);
+    }
+    if let Some(PendingHold::Release(hold)) = &cx.state.pending_hold {
+        hold.arm();
+    }
+    Ok(())
 }
 
 /// Starts the sole closed hold worker and publishes its correlated readiness
@@ -430,7 +527,7 @@ where
             "hold_no_side_effect worker did not become ready: {error}"
         )));
     }
-    cx.state.pending_hold = Some(PendingHold {
+    cx.state.pending_hold = Some(PendingHold::NoSideEffect {
         call_id: call_id.clone(),
         signal,
         join,

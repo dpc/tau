@@ -785,11 +785,11 @@ fn enqueue_remote_delivery(
 ) -> bool {
     let delivery_id = delivery.delivery_id;
     let queue_bytes = delivery.queue_bytes;
-    let standalone_shell_terminal = delivery.standalone_shell_terminal;
+    let presentation = delivery.presentation;
     let abandoned_shell_starts = delivery.abandoned_shell_starts;
     let cmd = RendererCmd::Remote {
         event: Box::new(delivery.event),
-        standalone_shell_terminal,
+        presentation,
         abandoned_shell_starts,
         recorded_at: delivery.recorded_at,
         delivery_id,
@@ -1247,7 +1247,7 @@ pub(crate) fn run_chat(
                     match cmd {
                         RendererCmd::Remote {
                             event,
-                            standalone_shell_terminal,
+                            presentation,
                             abandoned_shell_starts,
                             recorded_at,
                             delivery_id,
@@ -1279,16 +1279,40 @@ pub(crate) fn run_chat(
                                 );
                             }
                             renderer.abandon_shell_starts(&abandoned_shell_starts);
-                            if standalone_shell_terminal
-                                && let Event::ShellCommandFinished(finished) = &*event
-                            {
-                                renderer.handle_standalone_socket_shell_finished(
-                                    finished,
-                                    recorded_at,
-                                    delivery_id,
-                                );
-                            } else {
-                                renderer.handle_socket_delivery(&event, recorded_at, delivery_id);
+                            match presentation {
+                                cold_attach_stager::RendererPresentation::Ordinary => {
+                                    renderer.handle_socket_delivery(
+                                        &event,
+                                        recorded_at,
+                                        delivery_id,
+                                    );
+                                }
+                                cold_attach_stager::RendererPresentation::StandaloneShellTerminal => {
+                                    let Event::ShellCommandFinished(finished) = &*event else {
+                                        unreachable!(
+                                            "standalone shell presentation requires a shell terminal"
+                                        );
+                                    };
+                                    renderer.handle_standalone_socket_shell_finished(
+                                        finished,
+                                        recorded_at,
+                                        delivery_id,
+                                    );
+                                }
+                                cold_attach_stager::RendererPresentation::ReconstructedToolStart {
+                                    owner,
+                                } => {
+                                    assert!(
+                                        matches!(&*event, Event::ToolStarted(started) if started.agent_id == owner),
+                                        "reconstructed start presentation requires its validated owner"
+                                    );
+                                    renderer.handle_reconstructed_tool_start_socket_delivery(
+                                        &event,
+                                        &owner,
+                                        recorded_at,
+                                        delivery_id,
+                                    );
+                                }
                             }
                         }
                         RendererCmd::RemoteDisconnect {
@@ -1561,8 +1585,8 @@ enum RendererCmd {
     Remote {
         /// Typed payload interpreted by the event renderer.
         event: Box<Event>,
-        /// Whether a replayed shell terminal must bypass active-id correlation.
-        standalone_shell_terminal: bool,
+        /// Presentation-only interpretation derived during cold-attach staging.
+        presentation: cold_attach_stager::RendererPresentation,
         /// Presentation-only shell starts disproved by the attach snapshot.
         abandoned_shell_starts: Vec<cold_attach_stager::ShellStartPresentation>,
         /// Harness-provided observation time.

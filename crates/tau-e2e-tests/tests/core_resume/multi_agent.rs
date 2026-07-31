@@ -472,7 +472,7 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
 
     let mut boot_b = PtyProcess::spawn(
         fixture.command(Some(session_id.as_str())),
-        true,
+        false,
         Some(PtyArtifacts::new(
             fixture.artifact_path("s8-boot-b-pty.raw.bounded"),
             fixture.artifact_path("s8-boot-b-pty.normalized.txt"),
@@ -509,6 +509,7 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
     boot_b.send_line(&format!(":agent switch {}", identities.worker))?;
     let restored_worker = boot_b.wait_for("This active-auto agent is idle", deadline)?;
     assert_worker_restored_frame(&restored_worker)?;
+    boot_b.start_tool_monitoring()?;
     boot_b.require_no_tool_violation()?;
 
     boot_b.send_line(&format!(":agent switch {}", identities.main))?;

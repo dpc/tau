@@ -1,5 +1,9 @@
 use std::collections as path_std_collections;
+use std::fs::DirBuilder;
 use std::io::{Cursor, Read};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tau_proto::{
@@ -9,6 +13,27 @@ use tau_proto::{
 };
 
 use super::*;
+
+/// Cloneable output sink used while a release client runs concurrently.
+#[derive(Clone, Default)]
+struct SharedWriter {
+    /// Bytes emitted by all cloned writers.
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for SharedWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes
+            .lock()
+            .expect("output lock")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 fn invoke_restart() -> HarnessOutputMessage {
     invoke_restart_with_id("call-1")
@@ -63,6 +88,50 @@ fn restart_config(mode: &str) -> HarnessOutputMessage {
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
     })
+}
+
+fn release_config(socket_path: &std::path::Path, nonce: &str) -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(Configure {
+        tool_prefix: None,
+        instance_name: tau_proto::ExtensionName::parse("test-extension")
+            .expect("test extension name must satisfy the identifier grammar"),
+        config: CborValue::Map(vec![
+            (
+                CborValue::Text("restart_mode".to_owned()),
+                CborValue::Text("hold_until_success_release".to_owned()),
+            ),
+            (
+                CborValue::Text("release_socket_path".to_owned()),
+                CborValue::Text(socket_path.to_string_lossy().into_owned()),
+            ),
+            (
+                CborValue::Text("release_nonce".to_owned()),
+                CborValue::Text(nonce.to_owned()),
+            ),
+        ]),
+        state_dir: None,
+        secrets: path_std_collections::BTreeMap::new(),
+    })
+}
+
+fn unique_socket_path(label: &str) -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let root = std::env::temp_dir().join(format!(
+        "tau-dummy-{label}-{}-{}.sock",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .expect("create private fixture root");
+    root.join("release.sock")
+}
+
+fn send_release_frame(socket_path: &std::path::Path, frame: &[u8]) {
+    let mut stream = UnixStream::connect(socket_path).expect("connect release socket");
+    stream.write_all(frame).expect("write release frame");
 }
 
 fn cancel_restart(call_id: &str) -> HarnessOutputMessage {
@@ -300,6 +369,75 @@ fn invalid_restart_mode_emits_config_error() {
     );
 }
 
+/// Verifies release mode cannot become ready or bind a socket unless both
+/// fixture-private configuration values are present and the nonce is nonempty.
+#[test]
+fn release_mode_requires_complete_configuration() {
+    for config in [
+        CborValue::Map(vec![(
+            CborValue::Text("restart_mode".to_owned()),
+            CborValue::Text("hold_until_success_release".to_owned()),
+        )]),
+        CborValue::Map(vec![
+            (
+                CborValue::Text("restart_mode".to_owned()),
+                CborValue::Text("hold_until_success_release".to_owned()),
+            ),
+            (
+                CborValue::Text("release_nonce".to_owned()),
+                CborValue::Text("fixture-nonce".to_owned()),
+            ),
+        ]),
+        CborValue::Map(vec![
+            (
+                CborValue::Text("restart_mode".to_owned()),
+                CborValue::Text("hold_until_success_release".to_owned()),
+            ),
+            (
+                CborValue::Text("release_socket_path".to_owned()),
+                CborValue::Text("/unused/release.sock".to_owned()),
+            ),
+        ]),
+        CborValue::Map(vec![
+            (
+                CborValue::Text("restart_mode".to_owned()),
+                CborValue::Text("hold_until_success_release".to_owned()),
+            ),
+            (
+                CborValue::Text("release_socket_path".to_owned()),
+                CborValue::Text("/unused/release.sock".to_owned()),
+            ),
+            (
+                CborValue::Text("release_nonce".to_owned()),
+                CborValue::Text(String::new()),
+            ),
+        ]),
+    ] {
+        let frames = run_restart_frames(
+            &[HarnessOutputMessage::Configure(Configure {
+                tool_prefix: None,
+                instance_name: tau_proto::ExtensionName::parse("test-extension")
+                    .expect("extension name"),
+                config,
+                state_dir: None,
+                secrets: path_std_collections::BTreeMap::new(),
+            })],
+            1,
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
+        );
+        assert!(
+            frames
+                .iter()
+                .all(|frame| !matches!(frame, HarnessInputMessage::Ready(_)))
+        );
+        assert!(!std::path::Path::new("/unused/release.sock").exists());
+    }
+}
+
 /// Verifies the closed hold mode acknowledges readiness before a correlated
 /// cancellation and joins its worker before protocol disconnect completes.
 #[test]
@@ -427,6 +565,162 @@ fn hold_no_side_effect_deadline_is_terminal() {
         errors[0].message,
         "hold_no_side_effect reached its 10 second deadline"
     );
+}
+
+/// Verifies an early client cannot release before readiness publication and
+/// malformed, mismatched, and boundary-sized frames cannot release afterward.
+#[test]
+fn hold_until_success_release_requires_exact_typed_frame() {
+    let socket_path = unique_socket_path("exact");
+    let prefix = restart_input(&[
+        release_config(&socket_path, "fixture-nonce"),
+        invoke_restart(),
+    ]);
+    let suffix = restart_input(&[disconnect()]);
+    let reader = DelayedReader {
+        prefix: Cursor::new(prefix),
+        suffix: Cursor::new(suffix),
+        delayed: false,
+    };
+    let output = SharedWriter::default();
+    let output_bytes = Arc::clone(&output.bytes);
+    let client_path = socket_path.clone();
+    let client = std::thread::spawn(move || {
+        for _ in 0..100 {
+            if client_path.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        send_release_frame(&client_path, b"{not-json}\n");
+        send_release_frame(
+            &client_path,
+            b"{\"call_id\":\"call-1\",\"release_nonce\":\"wrong\"}\n",
+        );
+        send_release_frame(
+            &client_path,
+            b"{\"call_id\":\"wrong\",\"release_nonce\":\"fixture-nonce\"}\n",
+        );
+        send_release_frame(
+            &client_path,
+            b"{\"call_id\":\"call-1\",\"release_nonce\":\"fixture-nonce\",\"extra\":1}\n",
+        );
+        const RELEASE_FRAME_LIMIT: usize = 4096;
+        for size in [RELEASE_FRAME_LIMIT, RELEASE_FRAME_LIMIT + 1] {
+            let prefix = b"{\"call_id\":\"call-1\",\"release_nonce\":\"".len();
+            let suffix = b"\"}\n".len();
+            let nonce = "x".repeat(size - prefix - suffix);
+            let frame = format!("{{\"call_id\":\"call-1\",\"release_nonce\":\"{nonce}\"}}\n");
+            assert_eq!(frame.len(), size);
+            send_release_frame(&client_path, frame.as_bytes());
+        }
+        send_release_frame(
+            &client_path,
+            b"{\"call_id\":\"call-1\",\"release_nonce\":\"fixture-nonce\"}\n",
+        );
+    });
+    let mut rng = StdRng::seed_from_u64(1);
+    run_with_rng(reader, output, &mut rng).expect("run release fixture");
+    client.join().expect("release client");
+    let frames = decode_output(output_bytes.lock().expect("output lock").clone());
+    let results = frames
+        .iter()
+        .filter_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolResultReported(result)) => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].call_id.as_str(), "call-1");
+    assert_eq!(
+        results[0].result,
+        CborValue::Text("restart succeeded".to_owned())
+    );
+    let progress_index = frames
+        .iter()
+        .position(|frame| matches!(emitted_event(frame), Some(Event::ToolProgressReported(_))))
+        .expect("readiness progress");
+    let result_index = frames
+        .iter()
+        .position(|frame| matches!(emitted_event(frame), Some(Event::ToolResultReported(_))))
+        .expect("success result");
+    assert!(progress_index < result_index);
+    assert!(!socket_path.exists());
+    std::fs::remove_dir(socket_path.parent().expect("fixture root")).expect("remove fixture root");
+}
+
+/// Verifies bounded connection saturation cannot prevent cancellation, leak the
+/// socket, or synthesize success from partial release frames.
+#[test]
+fn release_hold_saturation_cancels_and_cleans_up_without_success() {
+    let socket_path = unique_socket_path("cancel-partial");
+    let prefix = restart_input(&[
+        release_config(&socket_path, "fixture-nonce"),
+        invoke_restart(),
+    ]);
+    let suffix = restart_input(&[cancel_restart("call-1"), disconnect()]);
+    let reader = DelayedReader {
+        prefix: Cursor::new(prefix),
+        suffix: Cursor::new(suffix),
+        delayed: false,
+    };
+    let client_path = socket_path.clone();
+    let client = std::thread::spawn(move || {
+        for _ in 0..100 {
+            if client_path.exists() {
+                let mut streams = Vec::new();
+                for _ in 0..32 {
+                    if let Ok(mut stream) = UnixStream::connect(&client_path) {
+                        let _ = stream.write_all(b"{\"call_id\":");
+                        streams.push(stream);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                drop(streams);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("release socket never became ready");
+    });
+    let mut output = Vec::new();
+    let mut rng = StdRng::seed_from_u64(1);
+    run_with_rng(reader, &mut output, &mut rng).expect("run cancellation fixture");
+    client.join().expect("partial release client");
+    let frames = decode_output(output);
+    assert!(frames.iter().any(|frame| matches!(
+        emitted_event(frame),
+        Some(Event::ToolCancelledReported(cancelled)) if cancelled.call_id.as_str() == "call-1"
+    )));
+    assert!(
+        frames
+            .iter()
+            .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolResultReported(_))))
+    );
+    assert!(!socket_path.exists());
+    std::fs::remove_dir(socket_path.parent().expect("fixture root")).expect("remove fixture root");
+}
+
+/// Verifies disconnect joins the release worker, removes its socket, and does
+/// not synthesize success when no exact release arrived.
+#[test]
+fn hold_until_success_release_disconnect_cleans_up_without_success() {
+    let socket_path = unique_socket_path("disconnect");
+    let frames = run_restart_frames(
+        &[
+            release_config(&socket_path, "fixture-nonce"),
+            invoke_restart(),
+            disconnect(),
+        ],
+        1,
+    );
+    assert!(
+        frames
+            .iter()
+            .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolResultReported(_))))
+    );
+    assert!(!socket_path.exists());
+    std::fs::remove_dir(socket_path.parent().expect("fixture root")).expect("remove fixture root");
 }
 
 /// Verifies deterministic success replies preserve non-user invocation origin.
