@@ -27,7 +27,7 @@ use terminal_oracles::*;
 use super::gate_fixture::GateFixture;
 use super::headless_process::HeadlessProcess;
 use super::observer::SideObserver;
-use super::pty_process::{PtyArtifacts, PtyProcess};
+use super::pty_process::{PtyArtifacts, PtyProcess, TerminalSize};
 use super::{DEADLINE, FAKE_PROVIDER, discover_daemon};
 
 const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
@@ -51,7 +51,7 @@ const RESTORE_NOTICE: &str = concat!(
 );
 
 /// Proves two attached public UIs share ID-keyed semantic transcripts while
-/// keeping drafts, stable-ID selection, themes, and their redraws local.
+/// keeping drafts, selection, themes, redraws, and terminal dimensions local.
 #[test]
 fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -234,7 +234,79 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     if second.marker_styles(identities.main.as_str())? != second_theme_change.styles {
         return Err("peer repaint changed the themed UI's stable-row style".into());
     }
-    let first_final_frame = first_after_local_repaint;
+
+    second.send_line(&format!(":agent switch {}", identities.worker))?;
+    let second_worker_wide = second.wait_for("This active-auto agent is idle", deadline)?;
+    let second_worker_projection =
+        assert_worker_size_projection(&second_worker_wide, &identities.worker, &identities)?;
+    let second_worker_style = second.marker_styles(identities.worker.as_str())?;
+    let narrow_prompt_prefix = "[tau-internal]: You were started by an agent `main`. Your responses will be delivered to it.";
+    if !second_worker_wide
+        .lines()
+        .any(|line| line.contains(narrow_prompt_prefix))
+    {
+        return Err("120x40 worker baseline did not contain the unwrapped prompt prefix".into());
+    }
+    first.send_line(&format!(":agent switch {}", identities.main))?;
+    first.wait_ready_for(identities.main.as_str(), deadline)?;
+    first.send_line(":agent")?;
+    let first_before_resize = first.wait_for(&format!("current: {}", identities.main), deadline)?;
+    let first_main_rows =
+        assert_transcript_rows(&first_before_resize, &identities.main, &identities)?;
+    let first_main_style = first.marker_styles(identities.main.as_str())?;
+    const WIDE_AGENT_USAGE: &str =
+        ":agent <new|switch|suspend|resume|auto|name> [agent_id]; current: main; active: 1; known:";
+    if !first_before_resize
+        .lines()
+        .any(|line| line.contains(WIDE_AGENT_USAGE))
+    {
+        return Err("120x40 peer omitted the unwrapped agent status signature".into());
+    }
+
+    let before_resize = second.read_generation()?;
+    second.resize(TerminalSize { cols: 80, rows: 24 })?;
+    let prefix_compact = narrow_prompt_prefix
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let second_narrow = second.wait_for_frame_after(before_resize, deadline, |frame| {
+        let compact = frame
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        compact.contains(&prefix_compact)
+            && !frame
+                .lines()
+                .any(|line| line.contains(narrow_prompt_prefix))
+            && assert_worker_size_projection(frame, &identities.worker, &identities).is_ok()
+    })?;
+    let narrow_projection =
+        assert_worker_size_projection(&second_narrow, &identities.worker, &identities)?;
+    if second_worker_projection != narrow_projection {
+        return Err(
+            format!("80x24 projection changed worker semantics: {narrow_projection:?}").into(),
+        );
+    }
+    if second.marker_styles(identities.worker.as_str())? != second_worker_style {
+        return Err("80x24 resize changed the selected worker's critical status style".into());
+    }
+    let first_after_peer_resize =
+        repaint_barrier(&mut first, "wide-peer-resize-barrier", deadline)?;
+    let first_rows_after_resize =
+        assert_transcript_rows(&first_after_peer_resize, &identities.main, &identities)?;
+    if first_main_rows != first_rows_after_resize {
+        return Err("peer resize changed the 120x40 main transcript projection".into());
+    }
+    if !first_after_peer_resize
+        .lines()
+        .any(|line| line.contains(WIDE_AGENT_USAGE))
+    {
+        return Err("peer resize changed the 120x40 unwrapped status signature".into());
+    }
+    if first.marker_styles(identities.main.as_str())? != first_main_style {
+        return Err("peer resize changed the 120x40 selected-main critical status".into());
+    }
+    let first_final_frame = first_after_peer_resize;
 
     let post_presentation_roster =
         observer.roster(&session_id, SessionAgentListScope::Current, deadline)?;

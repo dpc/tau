@@ -1,11 +1,11 @@
-//! Fixed-size Unix PTY child with bounded VT capture and process-group cleanup.
+//! Resizable Unix PTY child with bounded VT capture and process-group cleanup.
 
 #![cfg(unix)]
 
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -25,6 +25,14 @@ const COLS: u16 = 120;
 const ROWS: u16 = 40;
 const MAX_RAW_BYTES: usize = 256 * 1024;
 const MAX_FRAMES: usize = 512;
+
+/// Named terminal cell dimensions shared by the kernel PTY and semantic VT.
+pub(super) struct TerminalSize {
+    /// Visible terminal columns.
+    pub(super) cols: u16,
+    /// Visible terminal rows.
+    pub(super) rows: u16,
+}
 
 /// Monotonic count of PTY reads completed into the semantic VT model.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -119,7 +127,28 @@ impl PtyArtifacts {
 }
 
 impl PtyProcess {
-    /// Spawns `command` in a fresh session with fixed terminal dimensions.
+    /// Resizes the kernel PTY and semantic VT while holding the capture lock.
+    pub(super) fn resize(&mut self, size: TerminalSize) -> Result<(), Box<dyn std::error::Error>> {
+        let writer = self.writer.as_ref().ok_or("PTY writer closed")?;
+        let winsize = Winsize {
+            ws_row: size.rows,
+            ws_col: size.cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let mut capture = self.capture.0.lock().map_err(|_| "PTY capture poisoned")?;
+        // SAFETY: `writer` is the owned PTY master and `winsize` outlives ioctl.
+        #[allow(unsafe_code)]
+        if unsafe { nix::libc::ioctl(writer.as_fd().as_raw_fd(), nix::libc::TIOCSWINSZ, &winsize) }
+            == -1
+        {
+            return Err(path_std_io::Error::last_os_error().into());
+        }
+        capture.parser.screen_mut().set_size(size.rows, size.cols);
+        Ok(())
+    }
+
+    /// Spawns `command` in a fresh session with fixed initial dimensions.
     pub(super) fn spawn(
         mut command: Command,
         tool_latch_armed: bool,
@@ -293,6 +322,34 @@ impl PtyProcess {
             if remaining.is_zero() || capture.closed {
                 return Err(format!(
                     "timed out waiting for `{marker}` to clear; last frame:\n{frame}"
+                )
+                .into());
+            }
+            let (next, _) = wake
+                .wait_timeout(capture, remaining)
+                .map_err(|_| "PTY capture poisoned")?;
+            capture = next;
+        }
+    }
+
+    /// Waits for a newer generation satisfying one complete semantic predicate.
+    pub(super) fn wait_for_frame_after(
+        &self,
+        generation: PtyReadGeneration,
+        deadline: Instant,
+        is_complete: impl Fn(&str) -> bool,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let (lock, wake) = &*self.capture;
+        let mut capture = lock.lock().map_err(|_| "PTY capture poisoned")?;
+        loop {
+            let frame = normalized_screen(&capture.parser);
+            if generation < capture.generation && is_complete(&frame) {
+                return Ok(frame);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || capture.closed {
+                return Err(format!(
+                    "timed out waiting for complete post-resize frame; last frame:\n{frame}"
                 )
                 .into());
             }

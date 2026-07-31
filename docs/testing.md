@@ -226,7 +226,7 @@ remain independent oracles; the VT model proves only selection, terminal
 historical rows, and transcript ordering.
 For those two resume topologies, a side UI observer preserves replay metadata
 and typed CBOR store reads prove identity and prefix/suffix durability.
-A live-attach topology starts two fixed PTYs against one daemon, attaches the
+A live-attach topology starts two PTYs against one daemon, attaches the
 second exact public CLI by explicit session, and exercises both a completed text
 turn and a correlated provider hold. The hold variant attaches only after the
 prompt-specific hold-ready signal, requires both views to preserve the selected
@@ -238,7 +238,12 @@ attachment, selects both agents in opposite orders from both UIs, and compares
 ID-keyed transcript projections while causally checking each connection's local
 selection. It covers only settled transcript materialization and selection
 isolation; it does not extend concurrent prompt, tool, or arbitrary multi-client
-ordering claims. See the
+ordering claims. The presentation variant also resizes one PTY from 120x40 to
+80x24 and derives ordered worker prompt-boundary, response, idle, and selected-ID
+classes while the
+other remains on a distinct main transcript with a wide-only status signature.
+It permits wrapping, spacing, adaptive field elision, and truncation positions
+to differ; it does not claim arbitrary sizes or full-screen identity. See the
 [`tau-e2e-tests` README](../crates/tau-e2e-tests/README.md) for the complete
 coverage ceiling.
 Replay-aware side observers, exact traces, provider stats,

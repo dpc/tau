@@ -85,3 +85,6 @@ Each attached terminal owns its selected transcript, editable prompt draft,
 runtime theme, and redraw state. These visual and editing differences do not
 alter another attached UI or submit provider work. Draft edits can still publish
 the separately specified live prompt-draft liveness observation.
+Terminal dimensions are local too: resizing one attached UI may change wrapping,
+spacing, adaptive field elision, and truncation positions, but not another UI's
+selected agent or the shared semantic transcript.

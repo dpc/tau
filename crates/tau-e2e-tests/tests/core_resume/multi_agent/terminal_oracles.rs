@@ -60,6 +60,76 @@ pub(super) fn assert_transcript_rows(
     Ok(projected)
 }
 
+/// Stable worker classes derived from visible semantic boundaries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum WorkerSemanticClass {
+    /// Exact beginning of the internal worker prompt.
+    InternalPromptStart,
+    /// Exact terminal instruction boundary of that prompt.
+    InternalPromptInstruction,
+    /// Completed worker response.
+    Response,
+    /// Exact idle-navigation state.
+    Idle,
+    /// Selected stable worker identity.
+    Selected(AgentId),
+}
+
+/// Derives exact ordered worker classes across allowed wrapping.
+pub(super) fn assert_worker_size_projection(
+    frame: &str,
+    agent_id: &AgentId,
+    identities: &Identities,
+) -> Result<Vec<WorkerSemanticClass>, Box<dyn std::error::Error>> {
+    assert_transcript_rows(frame, agent_id, identities)?;
+    let semantic = frame.split_whitespace().collect::<Vec<_>>().join(" ");
+    let initial_start = "[tau-internal]: You were started by an agent `main`.";
+    let required = [
+        (initial_start, WorkerSemanticClass::InternalPromptStart),
+        (
+            super::WORKER_PROMPT,
+            WorkerSemanticClass::InternalPromptInstruction,
+        ),
+        (super::WORKER_RESPONSE, WorkerSemanticClass::Response),
+        (
+            "This active-auto agent is idle. Use :resume to keep it in navigation.",
+            WorkerSemanticClass::Idle,
+        ),
+    ];
+    let mut observed = Vec::new();
+    for (text, class) in required {
+        let matches = semantic.match_indices(text).collect::<Vec<_>>();
+        let [(position, _)] = matches.as_slice() else {
+            return Err(format!(
+                "worker projection expected one `{text}` class, found {}",
+                matches.len()
+            )
+            .into());
+        };
+        observed.push((*position, class));
+    }
+    let status_rows = frame
+        .lines()
+        .filter(|line| line.trim_start().starts_with(&format!("@{agent_id} ")))
+        .collect::<Vec<_>>();
+    let [status] = status_rows.as_slice() else {
+        return Err(format!(
+            "worker projection expected one selected status for `{agent_id}`, found {}",
+            status_rows.len()
+        )
+        .into());
+    };
+    let status_position = semantic
+        .find(status.trim())
+        .ok_or("selected status missing from normalized projection")?;
+    observed.push((
+        status_position,
+        WorkerSemanticClass::Selected(agent_id.clone()),
+    ));
+    observed.sort_by_key(|(position, _)| *position);
+    Ok(observed.into_iter().map(|(_, class)| class).collect())
+}
+
 /// Checks the selected main transcript and terminal `agent_start` row.
 pub(super) fn assert_main_terminal_frame(frame: &str) -> Result<(), Box<dyn std::error::Error>> {
     if !frame.contains(MAIN_PROMPT) || !frame.contains("worker completion observed") {

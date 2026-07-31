@@ -122,6 +122,12 @@ continue to project the same ID-keyed semantic transcript rows. Exact provider
 and durable snapshots exclude submission and authoritative journal mutation.
 The observer requires the expected live-only prompt-draft liveness rows; those
 rows are not durable semantic state.
+The narrow projection then resizes only the worker PTY from 120x40 to 80x24.
+Its ordered prompt-boundary, response, idle, and selected-ID classes remain
+exact. The unchanged wide peer stays on main and retains its rows, selected-ID
+style, and wide-only status signature. Wrapping, spacing, adaptive field elision,
+and truncation positions remain presentation-local; provider facts and durable
+stores stay unchanged.
 
 S8 adds a separate topology under that same target. A test-only headless daemon
 first completes the production `agent_start` main/worker flow with exact

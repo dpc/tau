@@ -60,6 +60,10 @@ original theme. Both must
 materialize the same ID-keyed semantic transcript rows without leaking local
 presentation state or changing typed durable event streams, the provider trace,
 or runtime stats.
+It also resizes the worker terminal from 120x40 to 80x24 and compares its exact
+ordered prompt-boundary, response, idle, and selected-ID classes. The unchanged
+wide peer stays on main and retains its main rows, selected-ID style, and
+wide-only status signature without requiring identical wrapping or spacing.
 Its multi-agent case instead creates and completes the S1 production
 main/worker pair in a headless Boot A, then runs the universal resumed Boot B
 under the PTY. It selects both restored transcripts only by stable ID, submits
