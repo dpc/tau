@@ -1,6 +1,64 @@
 //! Narrow VT transcript and terminal-row oracles for S8.
 
-use super::{MAIN_PROMPT, WORKER_PROMPT};
+use tau_proto::AgentId;
+
+use super::{
+    HIDDEN_MODEL_SENTINEL, Identities, MAIN_FINAL_RESPONSE, MAIN_PROMPT, MAIN_START_RESPONSE,
+    WORKER_PROMPT, WORKER_RESPONSE,
+};
+
+/// Projects stable agent-owned prompt/response rows and rejects output owned
+/// exclusively by the other selected transcript.
+pub(super) fn assert_transcript_rows(
+    frame: &str,
+    agent_id: &AgentId,
+    identities: &Identities,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let (required, forbidden) = if agent_id == &identities.main {
+        (
+            [
+                MAIN_PROMPT,
+                MAIN_START_RESPONSE,
+                WORKER_RESPONSE,
+                MAIN_FINAL_RESPONSE,
+            ]
+            .as_slice(),
+            [WORKER_PROMPT].as_slice(),
+        )
+    } else {
+        (
+            [WORKER_PROMPT, WORKER_RESPONSE].as_slice(),
+            [MAIN_PROMPT, MAIN_START_RESPONSE, MAIN_FINAL_RESPONSE].as_slice(),
+        )
+    };
+    let projected = frame
+        .lines()
+        .filter(|row| required.iter().any(|marker| row.contains(marker)))
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let actual_order = projected
+        .iter()
+        .flat_map(|row| {
+            required
+                .iter()
+                .copied()
+                .filter(move |marker| row.contains(marker))
+        })
+        .collect::<Vec<_>>();
+    if actual_order != required
+        || required
+            .iter()
+            .any(|marker| frame.match_indices(marker).count() != 1)
+        || forbidden.iter().any(|marker| frame.contains(marker))
+        || frame.contains(HIDDEN_MODEL_SENTINEL)
+    {
+        return Err(
+            format!("agent {agent_id} transcript materialization mixed rows:\n{frame}").into(),
+        );
+    }
+    Ok(projected)
+}
 
 /// Checks the selected main transcript and terminal `agent_start` row.
 pub(super) fn assert_main_terminal_frame(frame: &str) -> Result<(), Box<dyn std::error::Error>> {

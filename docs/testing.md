@@ -233,6 +233,14 @@ prompt-specific hold-ready signal, requires both views to preserve the selected
 agent, cancels once, and requires both views to settle on its editable status.
 Typed stats prove the correlated running-to-idle transition. Normalized VT row
 classes compare semantic elements rather than byte or cell identity.
+A stable-ID variant completes the deterministic main/worker roster before
+attachment, selects both agents in opposite orders from both UIs, and compares
+ID-keyed transcript projections while causally checking each connection's local
+selection. It covers only settled transcript materialization and selection
+isolation; it does not extend concurrent prompt, tool, or arbitrary multi-client
+ordering claims. See the
+[`tau-e2e-tests` README](../crates/tau-e2e-tests/README.md) for the complete
+coverage ceiling.
 Replay-aware side observers, exact traces, provider stats,
 bounded condition-driven waits, process-group cleanup, and runtime-artifact
 cleanup remain independent oracles.

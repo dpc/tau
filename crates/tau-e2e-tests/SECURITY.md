@@ -153,6 +153,10 @@ correlated readiness and permits one prompt-correlated cancellation. This proves
 selected-agent and settled-status projection parity plus a typed
 running-to-idle transition, not arbitrary multi-client ordering, presentation
 identity, production-provider behavior, or concurrent prompt/tool safety.
+The main/worker selection case attaches only after both typed agents are idle,
+then limits both public UIs to stable-ID selection. Exact provider traces,
+observer provider/stats facts, and typed durable snapshots independently prove
+that this UI-local operation spends no model action and appends no durable event.
 An external uncatchable kill of the test process itself prevents Rust `Drop`
 cleanup; the mandatory Nix/nextest runner remains the outer process/sandbox owner
 for that residual case.

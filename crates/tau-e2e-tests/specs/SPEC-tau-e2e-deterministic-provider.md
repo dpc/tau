@@ -68,6 +68,11 @@ correlation and attaches after completion. The other permits a sole bounded
 then issues one exact cancellation. Both terminal projections must agree on the
 selected agent and settled editable status while typed stats prove runtime;
 attachment consumes no provider action.
+The two-agent attached-UI case first completes the deterministic main/worker
+scenario and correlates both stable IDs and idle readiness through typed facts.
+Each UI then selects both IDs independently. Exact fake traces, typed provider
+and stats observations, and equal typed durable-event snapshots prove that
+selection performs no model work or typed durable-event mutation.
 
 Hermetic embedded and daemon launches bypass ambient Tau startup-role,
 role/config, extension, and secret environment transports, retain that policy

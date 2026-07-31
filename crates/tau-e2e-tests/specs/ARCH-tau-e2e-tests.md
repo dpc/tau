@@ -109,7 +109,11 @@ selected agent, then converge on its editable status after one exact
 cancellation. Typed stats own the running-to-idle transition; provider traces,
 stats snapshots, and side-observer prompt facts
 independently exclude duplicate submission or cancellation. This baseline does
-not cover shell, tool, multi-agent, or other local-presentation behavior.
+not cover shell, tool, or other local-presentation behavior. A separate
+main/worker case attaches two UIs only after the complete typed roster is idle.
+Both select every agent by stable public ID in opposite orders, compare
+ID-keyed semantic transcript rows, and prove selection remains UI-local while
+provider traces, runtime facts, and typed durable event streams remain unchanged.
 
 S8 adds a separate topology under that same target. A test-only headless daemon
 first completes the production `agent_start` main/worker flow with exact
