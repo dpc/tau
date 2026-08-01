@@ -1331,7 +1331,10 @@ pub(crate) fn render_action_output_block(
         value: resolve(theme, names::ACTION_VALUE),
         id: resolve(theme, names::ACTION_ID),
     };
-    let mut spans = Vec::new();
+    let mut spans = vec![Span::new(
+        crate::transcript_markers::NOTICE,
+        resolve(theme, names::PROMPT_MARKER_SUBMITTED),
+    )];
     for line in text.split_inclusive('\n') {
         let body = line.strip_suffix('\n').unwrap_or(line);
         push_action_line(&mut spans, body, styles);
@@ -1352,6 +1355,10 @@ pub(crate) fn render_action_error_block(
     use tau_themes::names;
 
     StyledBlock::new(StyledText::from(vec![
+        Span::new(
+            crate::transcript_markers::NOTICE,
+            resolve(theme, names::PROMPT_MARKER_SUBMITTED),
+        ),
         Span::new(action_id.to_owned(), resolve(theme, names::ACTION_ID)),
         Span::new(": ", resolve(theme, names::ACTION_OUTPUT)),
         Span::new(message.to_owned(), resolve(theme, names::ACTION_ERROR)),
@@ -1499,7 +1506,11 @@ pub(crate) fn render_harness_notice(
         | tau_proto::NoticeLevel::Debug
         | tau_proto::NoticeLevel::Trace => names::SYSTEM_INFO,
     };
-    themed_block(theme, style_name, &info.message)
+    themed_block(
+        theme,
+        style_name,
+        format!("{}{}", crate::transcript_markers::NOTICE, info.message),
+    )
 }
 
 pub(crate) fn ui_dir_block(theme: &tau_themes::Theme, path: &Path) -> tau_cli_term::StyledBlock {
@@ -1518,6 +1529,7 @@ pub(crate) fn session_status_block(
     let lifecycle = text.add_style(names::EXTENSION_LIFECYCLE);
     let status_style = text.add_style(names::SESSION_STATUS);
     let path_style = text.add_style(names::SYSTEM_PATH);
+    text.push(lifecycle, crate::transcript_markers::STATUS_UPDATE);
     text.push(lifecycle, "session dir: ");
     text.push(path_style, format!("{}{}", display_path(path), suffix));
     text.push(lifecycle, " ");
@@ -1536,6 +1548,7 @@ fn system_path_block(
     let mut text = ThemedText::new();
     let info = text.add_style(names::SYSTEM_INFO);
     let path_style = text.add_style(names::SYSTEM_PATH);
+    text.push(info, crate::transcript_markers::STATUS_UPDATE);
     text.push(info, prefix);
     text.push(path_style, format!("{}{}", display_path(path), suffix));
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
@@ -1554,6 +1567,7 @@ pub(crate) fn agent_context_initialized_block(
     let info = text.add_style(names::SYSTEM_INFO);
     let path_style = text.add_style(names::SYSTEM_PATH);
     let stats_style = text.add_style(names::TOOL_STATUS_INFO);
+    text.push(info, crate::transcript_markers::STATUS_UPDATE);
     text.push(info, format!("initialized {}", initialized.agent_id));
     if !initialized.listed_skills.is_empty() || 0 < unadvertised_skill_count {
         text.push(info, "\nskills:");
@@ -1613,6 +1627,7 @@ pub(crate) fn agent_context_ready_block(
     let info = text.add_style(names::SYSTEM_INFO);
     let agent_style = text.add_style(names::STATUS_ROLE);
     let status_style = text.add_style(names::SYSTEM_STATUS);
+    text.push(info, crate::transcript_markers::STATUS_UPDATE);
     text.push(info, "agent ");
     text.push(agent_style, format!("@{agent_id}"));
     text.push(info, " context ");
@@ -1630,6 +1645,7 @@ pub(crate) fn extension_status_block(
     let mut text = ThemedText::new();
     let lifecycle = text.add_style(names::EXTENSION_LIFECYCLE);
     let status_style = text.add_style(names::EXTENSION_STATUS);
+    text.push(lifecycle, crate::transcript_markers::NOTICE);
     text.push(lifecycle, "extension ");
     text.push(lifecycle, extension_name);
     text.push(lifecycle, " ");

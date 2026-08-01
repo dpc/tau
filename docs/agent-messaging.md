@@ -31,19 +31,19 @@ and agent-to-agent message events documented below.
 The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every successful send is recorded as an `agent.message_sent` sender projection; agent recipients also get a separate `agent.message_received` recipient projection with the same `message_id`. User-recipient messages always render fully; agent-to-agent UI display depends on `:set show-messages`. When shown fully in the no-selection overview, a message renders as:
 
 ```text
-Message from <sender> to <recipient>:
+□ Message from <sender> to <recipient>:
 <message>
 ```
 
 In a selected-agent transcript, the selected endpoint is implicit. Incoming
-messages render `Message from <sender>:` and outgoing messages render `Message
+messages render `□ Message from <sender>:` and outgoing messages render `□ Message
 to <recipient>:`. Ordinary directed communication is always labeled `Message`;
 it has no separate response presentation. All full forms preserve the message
 body below the header.
 
 Agent endpoint identity always remains visible. When the CLI knows
 authoritative session metadata, it supplements either endpoint independently,
-for example `Message from @reviewer-YiBh (research findings) to
+for example `□ Message from @reviewer-YiBh (research findings) to
 @reviewer-VVSq (final review)`. Unknown agent endpoints and peers without an
 advertised name keep their existing id-only labels; the human endpoint remains
 the literal `user`. Names are escaped and bounded UI metadata; they do not enter
@@ -56,7 +56,7 @@ Watched-agent working, done, and blocked reports are structured status updates,
 not empty messages. They render as one line:
 
 ```text
-Status update from <sender>: <phase> (<reported task>)
+▤ Status update from <sender>: <phase> (<reported task>)
 ```
 
 `:set show-messages` modes are:

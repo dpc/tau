@@ -962,8 +962,8 @@ fn selected_agent_messages_show_only_the_remote_endpoint() {
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&inbound)),
         format!(
-            "{} Message from @worker (implementation):\ninbound body",
-            renderer.submitted_prompt_symbol
+            "{}Message from @worker (implementation):\ninbound body",
+            crate::transcript_markers::MESSAGE
         )
     );
 
@@ -971,9 +971,23 @@ fn selected_agent_messages_show_only_the_remote_endpoint() {
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&outbound)),
         format!(
-            "{} Message to @worker (implementation):\noutbound body",
-            renderer.submitted_prompt_symbol
+            "{}Message to @worker (implementation):\noutbound body",
+            crate::transcript_markers::MESSAGE
         )
+    );
+}
+
+/// External message facts use the message marker without changing their
+/// already-escaped renderer output.
+#[test]
+fn external_message_facts_use_the_message_marker() {
+    let renderer = renderer_for_agent_id_tests();
+    assert_eq!(
+        block_text(
+            &renderer
+                .submitted_message_fact_block("External `bridge-main` message:\nbody".to_owned())
+        ),
+        "□ External `bridge-main` message:\nbody"
     );
 }
 
@@ -988,8 +1002,8 @@ fn selected_inbound_message_matches_endpoints_with_session_scope() {
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&inbound)),
         format!(
-            "{} Message from remote-session/@same:\nremote body",
-            renderer.submitted_prompt_symbol
+            "{}Message from remote-session/@same:\nremote body",
+            crate::transcript_markers::MESSAGE
         )
     );
 }
@@ -1007,8 +1021,8 @@ fn overview_messages_show_both_endpoint_task_labels() {
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&message)),
         format!(
-            "{} Message from @worker (implementation) to @manager (coordination):\npreserved body",
-            renderer.submitted_prompt_symbol
+            "{}Message from @worker (implementation) to @manager (coordination):\npreserved body",
+            crate::transcript_markers::MESSAGE
         )
     );
 }
@@ -1051,11 +1065,67 @@ fn watch_work_status_renders_all_reportable_states() {
         assert_eq!(
             block_text(&renderer.render_agent_message_block(&event)),
             format!(
-                "{} Status update from @worker (implementation): {label} ({label} task)",
-                renderer.submitted_prompt_symbol
+                "{}Status update from @worker (implementation): {label} ({label} task)",
+                crate::transcript_markers::STATUS_UPDATE
             )
         );
     }
+}
+
+/// Provider-work retains its presentation body, while a long-wait record uses
+/// its typed threshold because production records have an empty body.
+#[test]
+fn watch_provider_and_long_wait_statuses_use_the_status_marker() {
+    let renderer = renderer_for_agent_id_tests();
+    let provider = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("provider-status")
+            .expect("test identifier must satisfy its grammar"),
+        sender_id: agent_id("worker"),
+        sender_session_id: None,
+        recipient_id: agent_id("manager"),
+        kind: tau_proto::AgentMessageKind::WatchProviderStatus,
+        watch_turn_state: None,
+        watch_provider_status: Some(tau_proto::AgentWatchProviderStatusNotification {
+            session_id: tau_proto::SessionId::parse("session-1").expect("valid session id"),
+            subscription_id: "subscription-1".to_owned(),
+            turn_generation: 1,
+            agent_prompt_id: tau_proto::AgentPromptId::parse("prompt-1").expect("valid prompt id"),
+            state: tau_proto::AgentWatchProviderState::Blocked {
+                category: tau_proto::AgentWatchProviderCategory::Account,
+            },
+            initial: false,
+        }),
+        watch_work_status: None,
+        watch_long_wait: None,
+        message: "provider status body".to_owned(),
+    });
+    let long_wait = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("long-wait")
+            .expect("test identifier must satisfy its grammar"),
+        sender_id: agent_id("worker"),
+        sender_session_id: None,
+        recipient_id: agent_id("manager"),
+        kind: tau_proto::AgentMessageKind::WatchLongWait,
+        watch_turn_state: None,
+        watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {
+            session_id: tau_proto::SessionId::parse("session-1").expect("valid session id"),
+            subscription_id: "subscription-1".to_owned(),
+            status_epoch: 1,
+            threshold_minutes: 5,
+        }),
+        message: String::new(),
+    });
+
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&provider)),
+        "▤ provider status body"
+    );
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&long_wait)),
+        "▤ @worker has been working for 5 minutes"
+    );
 }
 
 /// Work-status titles visibly escape bidi controls before entering the trusted

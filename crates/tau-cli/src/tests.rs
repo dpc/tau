@@ -2010,6 +2010,52 @@ fn timer_wakeup_prompt_steered_renders_visible_marker() {
     assert!(!vt.screen_contains(100, "woke this agent: Timer `wake` fired"));
 }
 
+/// An extension-originated steered prompt without a queued user projection
+/// renders as a message rather than a user prompt.
+#[test]
+fn extension_prompt_steered_uses_message_marker() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::Extension {
+            name: tau_proto::ExtensionName::parse("fixture").expect("valid extension name"),
+        },
+        agent_id: agent_id("engineer_abc12345"),
+        text: "extension-steered prompt".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        ctx_id: None,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "□ extension-steered prompt"));
+    assert!(!vt.screen_contains(100, "⬤ extension-steered prompt"));
+}
+
+/// An unqueued harness-originated steered prompt is a message rather than an
+/// inferred user prompt, while queued user prompts retain their own promotion.
+#[test]
+fn unqueued_harness_prompt_steered_uses_message_marker() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        agent_id: agent_id("engineer_abc12345"),
+        text: "harness-steered message".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        ctx_id: None,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "□ harness-steered message"));
+    assert!(!vt.screen_contains(100, "⬤ harness-steered message"));
+}
+
 /// A tagged fresh-turn context-size alert renders exactly once in journal
 /// order, while an otherwise identical untagged internal prompt stays hidden.
 #[test]
@@ -2072,7 +2118,7 @@ fn context_size_alert_prompt_submitted_renders_internal_history_marker() {
         relevant_lines,
         [
             "> before submitted alert",
-            "> [tau-internal]: Use the `compact` tool after finishing your current task.",
+            "■ [tau-internal]: Use the `compact` tool after finishing your current task.",
             "> after submitted alert",
         ]
     );
@@ -2129,13 +2175,14 @@ fn context_size_alert_prompt_steered_renders_internal_history_marker() {
         relevant_lines,
         [
             "> before steered alert",
-            "> [tau-internal]: compact after tools",
+            "■ [tau-internal]: compact after tools",
             "> after steered alert",
         ]
     );
 }
 
-/// Successful compaction lifecycle text uses ordinary status styling.
+/// Successful compaction lifecycle notices retain their info style and gain the
+/// semantic notice marker.
 #[test]
 fn compaction_lifecycle_notice_uses_info_style() {
     let theme = cli_test_theme();
@@ -2149,6 +2196,15 @@ fn compaction_lifecycle_notice_uses_info_style() {
     );
 
     assert_eq!(lifecycle.content.spans()[0].style.fg, Some(Color::Blue));
+    assert_eq!(
+        lifecycle
+            .content
+            .spans()
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>(),
+        "■ Starting compaction request cr-35-0 for reviewer-sOqj (ct-35)"
+    );
 }
 
 /// Manual-compaction lifecycle status belongs only to the target transcript,
@@ -3285,7 +3341,7 @@ fn agent_context_initialization_summary_is_concise_and_literal() {
         .collect::<String>();
     assert_eq!(
         text,
-        "initialized agent-1\nskills:\n  advertised 1L, 28B\n  2 other session skills available\nAGENTS.md:\n  /home/dpc/.config/agents/AGENTS.md 10L, 100B\n  /repo/AGENTS.md 20L, 200B"
+        "▤ initialized agent-1\nskills:\n  advertised 1L, 28B\n  2 other session skills available\nAGENTS.md:\n  /home/dpc/.config/agents/AGENTS.md 10L, 100B\n  /repo/AGENTS.md 20L, 200B"
     );
     assert!(!text.contains("\\n"));
     assert!(!text.contains("description must stay hidden"));
@@ -3345,7 +3401,7 @@ fn agent_context_initialization_skill_stats_measure_prompt_description() {
 
     assert_eq!(
         text,
-        "initialized agent-1\nskills:\n  focused 2L, 6B\n  empty 0L, 0B\nAGENTS.md:\n  /empty/AGENTS.md 0L, 0B"
+        "▤ initialized agent-1\nskills:\n  focused 2L, 6B\n  empty 0L, 0B\nAGENTS.md:\n  /empty/AGENTS.md 0L, 0B"
     );
 }
 
@@ -3369,10 +3425,10 @@ fn agent_context_initialization_summary_omits_empty_sections() {
             .collect::<String>()
     };
 
-    assert_eq!(text(0), "initialized agent-1");
+    assert_eq!(text(0), "▤ initialized agent-1");
     assert_eq!(
         text(1),
-        "initialized agent-1\nskills:\n  1 other session skill available"
+        "▤ initialized agent-1\nskills:\n  1 other session skill available"
     );
 }
 
@@ -5876,22 +5932,27 @@ fn agent_messages_render_all_recipients_as_history() {
         .iter()
         .position(|line| line.contains("Message from @manager_11111111"))
         .expect("message header row") as u16;
-    let sender_col = lines[row as usize]
+    use unicode_width::UnicodeWidthStr as _;
+    let sender_col = lines[row as usize][..lines[row as usize]
         .find("@manager_11111111")
-        .expect("sender column") as u16;
-    let recipient_col = lines[row as usize]
+        .expect("sender column")]
+        .width() as u16;
+    let recipient_col = lines[row as usize][..lines[row as usize]
         .rfind("@engineer_22222222")
-        .expect("recipient column") as u16;
+        .expect("recipient column")]
+        .width() as u16;
     assert!(vt.cell_style(row, sender_col).2);
     assert!(vt.cell_style(row, recipient_col).2);
     assert!(!vt.cell_style(row, sender_col - 1).2);
-    let task_context_col = lines[row as usize]
+    let task_context_col = lines[row as usize][..lines[row as usize]
         .find("(add-all-agent-overview for @engineer_22222222)")
-        .expect("task-name context column") as u16;
+        .expect("task-name context column")]
+        .width() as u16;
     assert!(!vt.cell_style(row, task_context_col).2);
-    let context_id_col = lines[row as usize]
+    let context_id_col = lines[row as usize][..lines[row as usize]
         .find("@engineer_22222222")
-        .expect("routing-id text inside task-name context") as u16;
+        .expect("routing-id text inside task-name context")]
+        .width() as u16;
     assert!(!vt.cell_style(row, context_id_col).2);
 
     for idx in 0..20 {
@@ -6058,12 +6119,38 @@ fn no_agent_overview_excludes_structured_watch_status() {
         },
     ));
     sync(&handle);
-    assert!(!vt.screen_contains(100, provider_status_body));
+    let provider_status_row = format!("▤ {provider_status_body}");
+    assert!(!vt.screen_contains(100, &provider_status_row));
+
+    let long_wait_row = "▤ @watched-agent has been working for 5 minutes";
+    renderer.handle(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("watch-long-wait")
+                .expect("test identifier must satisfy its grammar"),
+            sender_id: agent_id("watched-agent"),
+            sender_session_id: None,
+            recipient_id: agent_id("watcher-agent"),
+            kind: tau_proto::AgentMessageKind::WatchLongWait,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {
+                session_id: test_session_id("s1"),
+                subscription_id: "sub-1".to_owned(),
+                status_epoch: 1,
+                threshold_minutes: 5,
+            }),
+            message: String::new(),
+        },
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, long_wait_row));
 
     renderer.switch_agent("watcher-agent".to_owned());
     sync(&handle);
     assert!(vt.screen_contains(100, "watched-agent · turn started"));
-    assert!(vt.screen_contains(100, provider_status_body));
+    assert!(vt.screen_contains(100, &provider_status_row));
+    assert!(vt.screen_contains(100, long_wait_row));
 
     renderer.handle(&agent_message(
         "watched-agent",
@@ -8949,6 +9036,136 @@ fn queued_prompt_steered_promotes_without_duplicate() {
         "steered queued prompt should be promoted instead of duplicated, got: {:?}",
         vt.screen_text(80)
     );
+}
+
+/// A queued prompt has no provenance, so an extension steering event with the
+/// front-exact text promotes that queued user projection instead of duplicating
+/// it as a message.
+#[test]
+fn extension_steering_promotes_matching_queued_user_prompt() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "queued extension collision".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: tau_proto::PromptSubmissionSource::Extension {
+            name: tau_proto::ExtensionName::parse("fixture").expect("valid extension name"),
+        },
+        text: "queued extension collision".into(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        ctx_id: None,
+    }));
+    sync(&handle);
+
+    assert!(!vt.screen_contains(80, "queued extension collision (queued)"));
+    assert!(vt.screen_contains(80, "⬤ queued extension collision"));
+    assert!(!vt.screen_contains(80, "□ queued extension collision"));
+    assert_eq!(
+        vt.screen_text(80)
+            .iter()
+            .filter(|row| row.contains("queued extension collision"))
+            .count(),
+        1,
+        "front-exact queued projection must be promoted once: {:?}",
+        vt.screen_text(80)
+    );
+}
+
+/// A steered prompt may match a later queued row, but only the front queue row
+/// can be promoted. Retaining that order prevents a later harness or extension
+/// message from consuming an unrelated user prompt.
+#[test]
+fn nonfront_queued_match_remains_a_message_without_consuming_the_front_prompt() {
+    for submission_source in [
+        tau_proto::PromptSubmissionSource::HarnessInternal,
+        tau_proto::PromptSubmissionSource::Extension {
+            name: tau_proto::ExtensionName::parse("fixture").expect("valid extension name"),
+        },
+    ] {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = marker_test_renderer(handle.clone());
+        for text in ["first queued user prompt", "second queued user prompt"] {
+            renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+                text: text.to_owned(),
+                agent_id: agent_id("main"),
+                message_class: tau_proto::PromptMessageClass::User,
+            }));
+        }
+        renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+            self_compaction_terminal: None,
+            inference_activation: false,
+            submission_source,
+            text: "second queued user prompt".to_owned(),
+            agent_id: agent_id("main"),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            ctx_id: None,
+        }));
+        sync(&handle);
+
+        assert!(vt.screen_contains(80, "◯ first queued user prompt (queued)"));
+        assert!(!vt.screen_contains(80, "⬤ first queued user prompt"));
+        assert!(vt.screen_contains(80, "□ second queued user prompt"));
+        assert!(!vt.screen_contains(80, "⬤ second queued user prompt"));
+    }
+}
+
+/// A submitted prompt with non-human provenance promotes its front-exact queued
+/// user projection before the subsequent start event can duplicate it.
+#[test]
+fn submitted_nonhuman_prompt_promotes_matching_front_queue_before_start() {
+    for submission_source in [
+        tau_proto::PromptSubmissionSource::HarnessInternal,
+        tau_proto::PromptSubmissionSource::Extension {
+            name: tau_proto::ExtensionName::parse("fixture").expect("valid extension name"),
+        },
+    ] {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = marker_test_renderer(handle.clone());
+        let text = "accepted queued prompt";
+        renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+            text: text.to_owned(),
+            agent_id: agent_id("main"),
+            message_class: tau_proto::PromptMessageClass::User,
+        }));
+        renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: agent_id("main"),
+            text: text.to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source,
+            display_name: None,
+            ctx_id: None,
+        }));
+        renderer.handle(&Event::AgentPromptStarted(agent_prompt_started(
+            "accepted-queued",
+            "s1",
+        )));
+        sync(&handle);
+
+        assert!(vt.screen_contains(80, "⬤ accepted queued prompt"));
+        assert!(!vt.screen_contains(80, "□ accepted queued prompt"));
+        assert!(!vt.screen_contains(80, "accepted queued prompt (queued)"));
+        assert_eq!(
+            vt.screen_text(80)
+                .iter()
+                .filter(|row| row.contains(text))
+                .count(),
+            1,
+            "submitted queued prompt must render once: {:?}",
+            vt.screen_text(80)
+        );
+    }
 }
 
 #[test]
@@ -12965,6 +13182,8 @@ fn format_turn_stats_line_rejects_invalid_or_inconsistent_cache_counts() {
     );
 }
 
+/// Action output begins with the notice marker while retaining the dedicated
+/// styles that distinguish actionable approval identifiers and labels.
 #[test]
 fn render_action_output_block_highlights_approval_ids_and_labels() {
     let theme = cli_test_theme();
@@ -12975,6 +13194,8 @@ fn render_action_output_block_highlights_approval_ids_and_labels() {
     let spans = block.content.spans();
     let id_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::ACTION_ID);
     let label_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::ACTION_LABEL);
+    let marker_style =
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER_SUBMITTED);
 
     let heading_id = spans
         .iter()
@@ -12997,8 +13218,12 @@ fn render_action_output_block_highlights_approval_ids_and_labels() {
     assert_eq!(row_id.style, id_style);
     assert_eq!(status_label.style, label_style);
     assert_eq!(account_label.style, label_style);
+    assert_eq!(spans[0].text, "■ ");
+    assert_eq!(spans[0].style, marker_style);
 }
 
+/// Action errors begin with the same notice marker without flattening their
+/// identifier and diagnostic styles into the generic feedback style.
 #[test]
 fn render_action_error_block_uses_action_error_styles() {
     let theme = cli_test_theme();
@@ -13006,11 +13231,15 @@ fn render_action_error_block_uses_action_error_styles() {
     let spans = block.content.spans();
     let id_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::ACTION_ID);
     let error_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::ACTION_ERROR);
+    let marker_style =
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER_SUBMITTED);
 
-    assert_eq!(spans[0].text, "7");
-    assert_eq!(spans[0].style, id_style);
-    assert_eq!(spans[2].text, "invalid input");
-    assert_eq!(spans[2].style, error_style);
+    assert_eq!(spans[0].text, "■ ");
+    assert_eq!(spans[0].style, marker_style);
+    assert_eq!(spans[1].text, "7");
+    assert_eq!(spans[1].style, id_style);
+    assert_eq!(spans[3].text, "invalid input");
+    assert_eq!(spans[3].style, error_style);
 }
 
 #[test]

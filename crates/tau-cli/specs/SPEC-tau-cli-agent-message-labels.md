@@ -39,9 +39,9 @@ metadata has folded without rewriting the immutable message event or its body.
 
 Ordinary directed communication, including watched responses, is labeled
 `Message`. In a selected-agent transcript the selected endpoint is implicit:
-received messages show only `Message from <sender>`, and sent messages show only
-`Message to <recipient>`. The no-selection overview shows both endpoints as
-`Message from <sender> to <recipient>`. Message bodies remain below these
+received messages show only `□ Message from <sender>`, and sent messages show only
+`□ Message to <recipient>`. The no-selection overview shows both endpoints as
+`□ Message from <sender> to <recipient>`. Message bodies remain below these
 headers. Watch-prompt projections keep their distinct lifecycle wording while
 using the same endpoint formatter. Canonical transport endpoints retain their
 explicit transport and session qualification.
@@ -105,8 +105,14 @@ single-line status, suppresses any compatibility body, and bypasses
 
 Harness-authored watched-agent `WorkStatus` records are likewise structured
 state rather than ordinary messages. Working, done, and blocked reports render
-as `Status update from <sender>: <phase> (<reported task>)`, suppress their
+as `▤ Status update from <sender>: <phase> (<reported task>)`, suppress their
 empty compatibility body, and bypass `show-messages`.
+
+Harness-authored `WatchProviderStatus` and `WatchLongWait` records also render
+as `▤` status rows. Provider statuses retain their existing bounded
+harness-authored presentation text; long waits derive a nonempty summary from
+their typed threshold because their producer body is empty. Both bypass
+`show-messages` and never become ordinary message blocks.
 
 Genuine watched responses and direct-user-prompt notifications retain their
 `WatchResponse` and `WatchPrompt` kinds, sender/watcher attribution, history

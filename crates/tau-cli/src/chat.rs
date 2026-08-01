@@ -1853,7 +1853,11 @@ impl LocalTerminalOutput {
 
         self.handle.print_output(
             "system-info",
-            themed_block(&self.theme, names::SYSTEM_INFO, message.to_owned()),
+            themed_block(
+                &self.theme,
+                names::SYSTEM_INFO,
+                format!("{}{}", crate::transcript_markers::NOTICE, message),
+            ),
         );
     }
 

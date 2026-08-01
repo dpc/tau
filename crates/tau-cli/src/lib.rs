@@ -33,6 +33,7 @@ mod settings_registry;
 mod skill_commands;
 mod theme;
 mod tool_render;
+mod transcript_markers;
 mod ui_client;
 mod ui_commands;
 mod ui_events;

@@ -3827,9 +3827,11 @@ impl EventRenderer {
         )
     }
 
-    fn submitted_plain_block(
+    /// Renders a non-Markdown semantic transcript row with its fixed marker.
+    fn marked_plain_block(
         &self,
         body_name: &str,
+        marker: &str,
         body_text: impl Into<String>,
     ) -> tau_cli_term::StyledBlock {
         use tau_cli_term::resolve::{convert_color, themed_text};
@@ -3841,10 +3843,7 @@ impl EventRenderer {
         themed.push_tree(SpanTree::span(
             body_style,
             vec![
-                SpanTree::span(
-                    marker_style,
-                    vec![SpanTree::text(format!("{} ", self.submitted_prompt_symbol))],
-                ),
+                SpanTree::span(marker_style, vec![SpanTree::text(marker)]),
                 SpanTree::text(body_text.into()),
             ],
         ));
@@ -3889,7 +3888,7 @@ impl EventRenderer {
             vec![
                 SpanTree::span(
                     marker_style,
-                    vec![SpanTree::text(format!("{} ", self.submitted_prompt_symbol))],
+                    vec![SpanTree::text(crate::transcript_markers::MESSAGE)],
                 ),
                 SpanTree::span(body_style, body),
             ],
@@ -3937,7 +3936,11 @@ impl EventRenderer {
         let reason = reason.as_deref().unwrap_or("disconnected");
         self.handle.print_output(
             "system-disconnect",
-            themed_block(&self.theme, names::SYSTEM_DISCONNECT, reason),
+            themed_block(
+                &self.theme,
+                names::SYSTEM_DISCONNECT,
+                format!("{}{}", crate::transcript_markers::NOTICE, reason),
+            ),
         );
     }
 
@@ -4967,14 +4970,31 @@ impl EventRenderer {
         use_local_names: bool,
     ) -> tau_cli_term::StyledBlock {
         if let Some(summary) =
+            self.watch_provider_or_long_wait_status_summary_with_local_names(event, use_local_names)
+        {
+            return self.marked_plain_block(
+                tau_themes::names::SYSTEM_INFO,
+                crate::transcript_markers::STATUS_UPDATE,
+                summary,
+            );
+        }
+        if let Some(summary) =
             self.watch_work_status_summary_with_local_names(event, use_local_names)
         {
-            return self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, summary);
+            return self.marked_plain_block(
+                tau_themes::names::SYSTEM_INFO,
+                crate::transcript_markers::STATUS_UPDATE,
+                summary,
+            );
         }
         if let Some(summary) =
             self.watch_turn_state_summary_with_local_names(event, use_local_names)
         {
-            return self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, summary);
+            return self.marked_plain_block(
+                tau_themes::names::SYSTEM_INFO,
+                crate::transcript_markers::STATUS_UPDATE,
+                summary,
+            );
         }
         match Self::message_render_mode(self.show_messages, event) {
             MessageRenderMode::Hidden => Self::empty_block(),
@@ -4985,6 +5005,33 @@ impl EventRenderer {
                 self.submitted_agent_message_block(event, use_local_names, true)
             }
         }
+    }
+
+    /// Renders harness-authored provider-work and long-wait records as
+    /// statuses, retaining provider presentation text and deriving wait text
+    /// from the typed threshold.
+    fn watch_provider_or_long_wait_status_summary_with_local_names(
+        &self,
+        event: &Event,
+        use_local_names: bool,
+    ) -> Option<String> {
+        let Event::AgentMessageReceived(message) = event else {
+            return None;
+        };
+        if message.watch_provider_status.is_some() {
+            return Some(message.message.clone());
+        }
+        let long_wait = message.watch_long_wait.as_ref()?;
+        let sender = self.agent_message_received_sender_label(message, use_local_names);
+        let minute_label = if long_wait.threshold_minutes == 1 {
+            "minute"
+        } else {
+            "minutes"
+        };
+        Some(format!(
+            "{sender} has been working for {} {minute_label}",
+            long_wait.threshold_minutes
+        ))
     }
 
     /// Renders routing identities brightly while leaving surrounding header
@@ -5024,7 +5071,7 @@ impl EventRenderer {
             vec![
                 SpanTree::span(
                     marker_style,
-                    vec![SpanTree::text(format!("{} ", self.submitted_prompt_symbol))],
+                    vec![SpanTree::text(crate::transcript_markers::MESSAGE)],
                 ),
                 SpanTree::span(body_style, content),
             ],
@@ -5476,14 +5523,23 @@ impl EventRenderer {
             return;
         }
         if !prompt.message_class.is_internal()
+            && self.front_queued_user_prompt_matches(&prompt.text)
+        {
+            self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
+            return;
+        }
+        if !prompt.message_class.is_internal()
             && matches!(
                 prompt.submission_source,
                 tau_proto::PromptSubmissionSource::Extension { .. }
                     | tau_proto::PromptSubmissionSource::HarnessInternal
             )
         {
-            let block =
-                self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, prompt.text.clone());
+            let block = self.marked_plain_block(
+                tau_themes::names::SYSTEM_INFO,
+                crate::transcript_markers::MESSAGE,
+                prompt.text.clone(),
+            );
             self.handle.print_output("extension-prompt", block);
         } else {
             // Legacy records intentionally retain their historical rendering:
@@ -5503,8 +5559,9 @@ impl EventRenderer {
         {
             return false;
         }
-        let block = self.submitted_plain_block(
+        let block = self.marked_plain_block(
             tau_themes::names::SYSTEM_INFO,
+            crate::transcript_markers::NOTICE,
             format!("[tau-internal]: {text}"),
         );
         self.handle.print_output("context-size-alert", block);
@@ -5524,7 +5581,11 @@ impl EventRenderer {
             return false;
         };
         let summary = timer_wakeup_summary(timer_id, text);
-        let block = self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, summary);
+        let block = self.marked_plain_block(
+            tau_themes::names::SYSTEM_INFO,
+            crate::transcript_markers::NOTICE,
+            summary,
+        );
         self.handle.print_output("timer-wakeup", block);
         true
     }
@@ -5540,11 +5601,7 @@ impl EventRenderer {
 
         use tau_themes::names;
 
-        if self
-            .queued_user_blocks
-            .front()
-            .is_some_and(|(_, queued_text)| queued_text == text)
-        {
+        if self.front_queued_user_prompt_matches(text) {
             let Some((queued_id, queued_text)) = self.queued_user_blocks.pop_front() else {
                 return;
             };
@@ -5631,26 +5688,59 @@ impl EventRenderer {
 
         use tau_themes::names;
 
-        // The harness folded a queued prompt into the current turn's next
-        // round (alongside tool results) instead of waiting for `Idle`.
-        // Promote the "(queued)" rendering to a regular user prompt so the
-        // transcript reads naturally above the agent's continuing response.
-        if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
+        if self.front_queued_user_prompt_matches(&steered.text) {
+            // Queue records lack a submission source. A front-exact match is
+            // therefore authoritative user-prompt projection even if steering
+            // reports extension provenance. Never consume a different queued
+            // item merely because a later item happens to have the same text.
+            let Some((queued_id, text)) = self.queued_user_blocks.pop_front() else {
+                return;
+            };
             self.handle.remove_block(queued_id);
             self.handle.print_output(
                 "user-prompt-steered",
                 self.submitted_prompt_block(names::USER_PROMPT, text),
             );
             self.handle.redraw();
-        } else {
-            // No matching "(queued)" block — fall back to rendering the
-            // steered text directly so the user still sees their message land.
-            self.handle.print_output(
-                "user-prompt-steered",
-                self.submitted_prompt_block(names::USER_PROMPT, steered.text.clone()),
-            );
-            self.handle.redraw();
+            return;
         }
+
+        let is_extension_message = matches!(
+            steered.submission_source,
+            tau_proto::PromptSubmissionSource::Extension { .. }
+        );
+        let is_harness_message = matches!(
+            steered.submission_source,
+            tau_proto::PromptSubmissionSource::HarnessInternal
+        );
+        if is_extension_message || is_harness_message {
+            let block = self.marked_plain_block(
+                names::SYSTEM_INFO,
+                crate::transcript_markers::MESSAGE,
+                steered.text.clone(),
+            );
+            self.handle.print_output("extension-prompt-steered", block);
+            self.handle.redraw();
+            return;
+        }
+
+        // No matching "(queued)" block — render the steered text directly so
+        // the user still sees their message land.
+        self.handle.print_output(
+            "user-prompt-steered",
+            self.submitted_prompt_block(names::USER_PROMPT, steered.text.clone()),
+        );
+        self.handle.redraw();
+    }
+
+    /// Returns whether `text` can promote the next queued user projection.
+    ///
+    /// Queue records lack provenance, so only their front entry can establish
+    /// that a submitted or steered prompt is the user projection to promote.
+    fn front_queued_user_prompt_matches(&self, text: &str) -> bool {
+        self.queued_user_blocks
+            .front()
+            .is_some_and(|(_, queued_text)| queued_text == text)
     }
 
     fn handle_agent_prompt_created(&mut self, prompt: &tau_proto::AgentPromptCreated) {
