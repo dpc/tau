@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use tokio::runtime as path_tokio_runtime;
 
@@ -150,42 +150,80 @@ fn read_http_request(socket: &mut TcpStream) -> (String, Vec<u8>) {
     (head, bytes[header_end..header_end + length].to_vec())
 }
 
-/// A stalled response header must observe cooperative cancellation instead of
-/// retaining a provider worker until the request-phase deadline expires.
+/// A stalled response header must observe cancellation after its peer has
+/// received the request and close that peer instead of retaining the attempt.
+///
+/// The attempt runner signals cancellation only after the server has read
+/// request bytes, which prevents cancellation from racing an unaccepted
+/// connection. Bounded reports then verify that dropping the canceled request
+/// promptly releases the stalled transport without timing-based teardown.
 #[test]
 fn stalled_header_observes_cancellation() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
     let address = listener.local_addr().expect("test server address");
+    let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
+    let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().expect("accept request");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set server read timeout");
         let mut request = [0_u8; 1024];
-        let _ = socket.read(&mut request).expect("read request");
-        std::thread::sleep(Duration::from_secs(2));
+        assert_ne!(socket.read(&mut request).expect("read request"), 0);
+        accepted_tx.send(()).expect("report accepted request");
+        loop {
+            match socket.read(&mut request) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("canceled request was not closed promptly: {error}"),
+            }
+        }
+        dropped_tx.send(()).expect("report dropped request");
     });
     let canceled = Arc::new(AtomicBool::new(false));
-    let trigger = Arc::clone(&canceled);
-    let canceler = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(20));
-        trigger.store(true, Ordering::SeqCst);
+    let attempt_canceled = Arc::clone(&canceled);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let attempt = std::thread::spawn(move || {
+        let outcome = run_attempt(
+            &minimal_prompt(),
+            &AttemptConfig {
+                base_url: format!("http://{address}"),
+                api_key: String::new(),
+                max_output_tokens: 0,
+            },
+            &AttemptModel {
+                id: ModelName::new("test-model"),
+            },
+            &mut |_| {},
+            &mut || attempt_canceled.load(Ordering::SeqCst),
+            &test_network(),
+        );
+        result_tx.send(outcome).expect("report attempt outcome");
     });
-    let started = Instant::now();
-    let outcome = run_attempt(
-        &minimal_prompt(),
-        &AttemptConfig {
-            base_url: format!("http://{address}"),
-            api_key: String::new(),
-            max_output_tokens: 0,
-        },
-        &AttemptModel {
-            id: ModelName::new("test-model"),
-        },
-        &mut |_| {},
-        &mut || canceled.load(Ordering::SeqCst),
-        &test_network(),
-    );
-    canceler.join().expect("join canceler");
-    assert!(matches!(outcome, AttemptOutcome::Canceled { .. }));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    accepted_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("request did not reach local peer");
+    canceled.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("canceled request remained blocked"),
+        AttemptOutcome::Canceled { .. }
+    ));
+    dropped_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("canceled request retained its TCP connection");
+    attempt.join().expect("join attempt");
     server.join().expect("join server");
 }
 
