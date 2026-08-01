@@ -72,10 +72,11 @@ agents:
 ```
 
 Use the same top-level `agents` scope for model defaults shared by every role.
-Within each config layer, Tau applies `agents` provider settings first, then
-role-group settings, then role settings. Higher-precedence config layers repeat
-that ordering, so a later top-level setting replaces settings from an earlier
-layer unless that later layer's group or role overrides it:
+Tau retains source order within each scope, but resolves scopes globally: all
+`agents` provider settings apply first, then all role-group settings, then all
+role settings. A role setting therefore overrides a group setting even when the
+group setting comes from a later drop-in, selected profile, or
+`--harness-config` layer:
 
 ```yaml
 agents:

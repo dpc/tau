@@ -1435,22 +1435,28 @@ impl HarnessSettings {
         groups: RawRoleGroups,
         provider_defaults: &AgentRole,
     ) -> Result<(), SettingsError> {
+        self.apply_role_group_members(&groups, provider_defaults)?;
+        self.apply_role_group_defaults(&groups);
+        self.apply_role_overrides(&groups);
+        Ok(())
+    }
+
+    /// Registers role-group membership without applying group or role patches.
+    ///
+    /// The layered loader first gathers all members, so defaults from an
+    /// earlier source also apply to roles introduced by a later source.
+    fn apply_role_group_members(
+        &mut self,
+        groups: &RawRoleGroups,
+        provider_defaults: &AgentRole,
+    ) -> Result<(), SettingsError> {
         for (group_name, group) in groups {
-            let group_defaults = group.defaults();
-            let existing_role_names = self
+            let group_exists = self
                 .role_groups
                 .iter()
-                .find(|existing_group| existing_group.name == group_name)
-                .map(|existing_group| existing_group.roles.clone());
-            if let Some(role_names) = &existing_role_names {
-                for role_name in role_names {
-                    if let Some(role) = self.roles.get_mut(role_name) {
-                        role.apply_patch(&group_defaults);
-                    }
-                }
-            }
+                .any(|existing_group| existing_group.name == group_name.as_str());
             if group.roles.is_empty() {
-                if existing_role_names.is_none() {
+                if !group_exists {
                     self.role_groups.push(RoleGroup {
                         name: group_name.clone(),
                         roles: Vec::new(),
@@ -1458,24 +1464,49 @@ impl HarnessSettings {
                 }
                 continue;
             }
-            for (role_name, role_overrides) in group.roles {
-                let mut override_role = AgentRole {
+            for role_name in group.roles.keys() {
+                let override_role = AgentRole {
                     context_size_alerts: self.context_size_alerts.clone(),
                     ..provider_defaults.clone()
                 };
-                override_role.apply_patch(&group_defaults);
-                override_role.apply_patch(&role_overrides);
-                self.ensure_role_group_member(&group_name, &role_name)?;
-                self.roles
-                    .entry(role_name)
-                    .and_modify(|role| {
-                        role.apply_patch(&group_defaults);
-                        role.apply_patch(&role_overrides);
-                    })
-                    .or_insert(override_role);
+                self.ensure_role_group_member(group_name, role_name)?;
+                self.roles.entry(role_name.clone()).or_insert(override_role);
             }
         }
         Ok(())
+    }
+
+    /// Applies each source's group defaults after every role has joined its
+    /// group, and before any source's per-role overrides.
+    fn apply_role_group_defaults(&mut self, groups: &RawRoleGroups) {
+        for (group_name, group) in groups {
+            let Some(role_names) = self
+                .role_groups
+                .iter()
+                .find(|existing_group| existing_group.name == group_name.as_str())
+                .map(|existing_group| existing_group.roles.clone())
+            else {
+                continue;
+            };
+            let group_defaults = group.defaults();
+            for role_name in role_names {
+                if let Some(role) = self.roles.get_mut(&role_name) {
+                    role.apply_patch(&group_defaults);
+                }
+            }
+        }
+    }
+
+    /// Applies every per-role patch in one source after all group defaults have
+    /// established the inheritance base.
+    fn apply_role_overrides(&mut self, groups: &RawRoleGroups) {
+        for group in groups.values() {
+            for (role_name, role_overrides) in &group.roles {
+                if let Some(role) = self.roles.get_mut(role_name) {
+                    role.apply_patch(role_overrides);
+                }
+            }
+        }
     }
 
     fn apply_provider_defaults_to_roles(&mut self, defaults: &AgentRolePatch) {
@@ -2540,47 +2571,50 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
         harness_config_overrides,
     )?;
 
-    // Generic YAML layering replaces arrays, but `agents.prompt_fragments`,
-    // `agents.required_skills`, and role-group metadata are additive. Recompute
-    // them through the domain merge path; all other harness fields keep normal
-    // config-layer semantics.
+    // Generic YAML layering replaces arrays, but role metadata is additive.
+    // Recompute it from raw source patches. Source order still controls patches
+    // at one scope, while scope precedence controls the result across sources:
+    // all agent defaults, then all group defaults, then all role overrides.
     let mut role_settings = HarnessSettings::built_in();
+    role_settings.roles.clear();
+    role_settings.role_groups.clear();
+    role_settings.prompt_fragments.clear();
+    role_settings.required_skills.clear();
+    role_settings.context_size_alerts.clear();
+
+    let mut role_layers = vec![parse_built_in_yaml::<HarnessRoleOverrides>(
+        "built-in.harness.yaml",
+        BUILT_IN_HARNESS_YAML,
+    )];
+    role_layers.extend(load_yaml_layer_files::<HarnessRoleOverrides>(
+        dirs.config_dir.as_deref(),
+        "harness",
+    )?);
+    role_layers.extend(profiles.into_iter().map(|profile| HarnessRoleOverrides {
+        agents: profile.agents.into(),
+    }));
+    role_layers.extend(harness_role_cli_override_layers(harness_config_overrides)?);
+
     let mut effective_provider_defaults = AgentRole::default();
-    let built_in_provider_defaults =
-        parse_built_in_yaml::<HarnessRoleOverrides>("built-in.harness.yaml", BUILT_IN_HARNESS_YAML)
-            .agents
-            .provider_defaults();
-    effective_provider_defaults.apply_patch(&built_in_provider_defaults);
-    for overrides in
-        load_yaml_layer_files::<HarnessRoleOverrides>(dirs.config_dir.as_deref(), "harness")?
-    {
+    for overrides in &role_layers {
         let provider_defaults = overrides.agents.provider_defaults();
         effective_provider_defaults.apply_patch(&provider_defaults);
-        role_settings.apply_provider_defaults_to_roles(&provider_defaults);
-        role_settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments);
-        role_settings.apply_required_skill_overrides(overrides.agents.required_skills);
-        role_settings.apply_context_size_alert_overrides(overrides.agents.context_size_alerts);
-        role_settings.apply_role_group_overrides(
-            overrides.agents.role_groups,
+        role_settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments.clone());
+        role_settings.apply_required_skill_overrides(overrides.agents.required_skills.clone());
+        role_settings
+            .apply_context_size_alert_overrides(overrides.agents.context_size_alerts.clone());
+    }
+    for overrides in &role_layers {
+        role_settings.apply_role_group_members(
+            &overrides.agents.role_groups,
             &effective_provider_defaults,
         )?;
     }
-    for profile in profiles {
-        let overrides = HarnessRoleOverrides {
-            agents: profile.agents.into(),
-        };
-        apply_harness_role_overrides(
-            &mut role_settings,
-            &mut effective_provider_defaults,
-            overrides,
-        )?;
+    for overrides in &role_layers {
+        role_settings.apply_role_group_defaults(&overrides.agents.role_groups);
     }
-    for overrides in harness_role_cli_override_layers(harness_config_overrides)? {
-        apply_harness_role_overrides(
-            &mut role_settings,
-            &mut effective_provider_defaults,
-            overrides,
-        )?;
+    for overrides in &role_layers {
+        role_settings.apply_role_overrides(&overrides.agents.role_groups);
     }
     role_settings.apply_role_cli_overrides(role_overrides)?;
     role_settings.remove_disabled_roles();
@@ -2593,21 +2627,6 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     settings.roles = role_settings.roles;
     settings.role_groups = role_settings.role_groups;
     Ok(settings)
-}
-
-/// Replays one raw role patch in source order through domain-specific merging.
-fn apply_harness_role_overrides(
-    settings: &mut HarnessSettings,
-    effective_provider_defaults: &mut AgentRole,
-    overrides: HarnessRoleOverrides,
-) -> Result<(), SettingsError> {
-    let provider_defaults = overrides.agents.provider_defaults();
-    effective_provider_defaults.apply_patch(&provider_defaults);
-    settings.apply_provider_defaults_to_roles(&provider_defaults);
-    settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments);
-    settings.apply_required_skill_overrides(overrides.agents.required_skills);
-    settings.apply_context_size_alert_overrides(overrides.agents.context_size_alerts);
-    settings.apply_role_group_overrides(overrides.agents.role_groups, effective_provider_defaults)
 }
 
 // Legacy harness aliases are accepted for user compatibility, but every alias

@@ -1687,10 +1687,10 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
     assert!(reviewer.disable_tools.is_empty());
 }
 
-/// Ensures group defaults can clear fields on roles inherited from lower
-/// layers.
+/// Ensures narrower role fields remain effective over broader group clears from
+/// a later layer.
 #[test]
-fn harness_role_group_defaults_can_clear_existing_role_fields() {
+fn harness_role_overrides_precede_later_group_clears() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
@@ -1722,8 +1722,8 @@ fn harness_role_group_defaults_can_clear_existing_role_fields() {
     let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     let reviewer = settings.roles.get("reviewer").expect("reviewer role");
 
-    assert_eq!(reviewer.description, None);
-    assert_eq!(reviewer.prompt_override, None);
+    assert_eq!(reviewer.description.as_deref(), Some("Base description"));
+    assert_eq!(reviewer.prompt_override.as_deref(), Some("built-in"));
 }
 
 /// Ensures group defaults apply to inherited group members even when the layer
@@ -1840,8 +1840,8 @@ fn harness_role_required_skills_accumulate_across_layers() {
     assert_eq!(
         settings.roles["reviewer"].required_skills,
         vec![
-            tau_proto::SkillName::from("base-skill"),
             tau_proto::SkillName::from("group-extra"),
+            tau_proto::SkillName::from("base-skill"),
             tau_proto::SkillName::from("role-extra"),
         ]
     );
@@ -2582,11 +2582,10 @@ fn harness_agent_provider_defaults_apply_to_all_roles() {
     );
 }
 
-/// Locks the domain merge order: each layer applies agents defaults, then group
-/// defaults, then role overrides; a later layer therefore replaces earlier
-/// values before its more-specific values are applied.
+/// Locks scope precedence across source layers: all agent defaults resolve
+/// first, then all group defaults, and role overrides resolve last.
 #[test]
-fn harness_agent_provider_defaults_merge_before_group_and_role_overrides() {
+fn harness_agent_provider_defaults_precede_groups_and_roles_across_layers() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
@@ -2636,9 +2635,9 @@ fn harness_agent_provider_defaults_merge_before_group_and_role_overrides() {
         reviewer.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/drop-in-role")
     );
-    assert_eq!(reviewer.effort, Some(tau_proto::Effort::Medium));
+    assert_eq!(reviewer.effort, Some(tau_proto::Effort::High));
     assert_eq!(reviewer.thinking_summary, None);
-    assert_eq!(reviewer.service_tier, Some(tau_proto::ServiceTier::Flex));
+    assert_eq!(reviewer.service_tier, Some(tau_proto::ServiceTier::Fast));
     assert_eq!(
         settings.roles["newcomer"].verbosity,
         Some(tau_proto::Verbosity::High)
@@ -2678,6 +2677,159 @@ fn harness_relative_provider_settings_merge_and_saturate() {
     assert_eq!(
         reviewer.thinking_summary,
         Some(tau_proto::ThinkingSummary::Detailed)
+    );
+}
+
+/// Ensures a role-relative patch from an earlier file resolves after a later
+/// group default rather than being overwritten by that broader setting.
+#[test]
+fn harness_role_overrides_precede_later_group_defaults_across_layers() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    precedence:
+      verbosity: low
+      roles:
+        precedence-junior:
+          effort: decrease
+        precedence:
+          enable: true
+"#,
+    )
+    .expect("write base");
+    std::fs::create_dir(dir.join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        dir.join("harness.d/20-engineer-defaults.yaml"),
+        r#"
+agents:
+  role_groups:
+    precedence:
+      model: chatgpt/gpt-5.6-terra
+      effort: high
+      roles:
+        precedence-senior:
+          model: chatgpt/gpt-5.6-sol
+          effort: medium
+"#,
+    )
+    .expect("write drop-in");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(
+        settings.roles["precedence-junior"].effort,
+        Some(tau_proto::Effort::Medium)
+    );
+    assert_eq!(
+        settings.roles["precedence"].effort,
+        Some(tau_proto::Effort::High)
+    );
+    assert_eq!(
+        settings.roles["precedence-junior"]
+            .model
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("chatgpt/gpt-5.6-terra")
+    );
+    assert_eq!(
+        settings.roles["precedence-senior"]
+            .model
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("chatgpt/gpt-5.6-sol")
+    );
+    assert_eq!(
+        settings.roles["precedence-senior"].effort,
+        Some(tau_proto::Effort::Medium)
+    );
+    assert_eq!(
+        settings.roles["precedence-senior"].verbosity,
+        Some(tau_proto::Verbosity::Low)
+    );
+}
+
+/// Ensures a role introduced by a selected profile inherits the group defaults
+/// established by lower-precedence file layers.
+#[test]
+fn profile_role_inherits_group_defaults_from_file_layers() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    profile-inheritance:
+      verbosity: high
+profiles:
+  focused:
+    agents:
+      role_groups:
+        profile-inheritance:
+          roles:
+            profile-inherited: {}
+"#,
+    )
+    .expect("write profile");
+
+    let profile = profile_name("focused");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+    assert_eq!(
+        settings.roles["profile-inherited"].verbosity,
+        Some(tau_proto::Verbosity::High)
+    );
+}
+
+/// Ensures profile and `--harness-config` group patches retain source order
+/// while an earlier role-relative patch retains narrower-scope precedence.
+#[test]
+fn profile_and_cli_group_defaults_precede_role_overrides() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    precedence:
+      roles:
+        precedence-role:
+          effort: decrease
+profiles:
+  focused:
+    agents:
+      role_groups:
+        precedence:
+          effort: high
+"#,
+    )
+    .expect("write profile");
+    let profile = profile_name("focused");
+    let overrides =
+        [
+            HarnessConfigCliOverride::from_str("agents.role_groups.precedence.effort=increase")
+                .expect("CLI group override"),
+        ];
+
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &overrides,
+    )
+    .expect("load selected profile");
+    assert_eq!(
+        settings.roles["precedence-role"].effort,
+        Some(tau_proto::Effort::High)
     );
 }
 
@@ -3337,7 +3489,7 @@ fn harness_role_groups_load_role_order() {
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
 
-    assert_eq!(s.roles["engineer-junior"].order, Some(40));
+    assert_eq!(s.roles["engineer-junior"].order, Some(10));
     assert_eq!(s.roles["engineer"].order, Some(20));
     assert_eq!(s.roles["engineer-senior"].order, None);
     assert_eq!(s.roles["custom-engineer"].order, Some(40));
@@ -3493,8 +3645,9 @@ agents:
     );
     assert_eq!(settings.roles["task-manager"].inter_session_receiver, None);
     assert_eq!(
-        settings.roles["task-manager"].inter_session_auto_start, None,
-        "later group defaults apply to every existing member"
+        settings.roles["task-manager"].inter_session_auto_start,
+        Some(false),
+        "role override remains effective over the later group clear"
     );
 }
 

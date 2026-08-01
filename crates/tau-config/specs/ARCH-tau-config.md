@@ -92,11 +92,15 @@ can collide with a lower-precedence canonical key instead of overriding it.
 Role metadata is merged through domain-specific logic rather than generic YAML
 array replacement:
 
-- Each config layer applies `agents` provider defaults (`model`, `effort`,
-  `verbosity`, `thinking_summary`, `service_tier`, and `compaction`) to every
-  role before applying that layer's role-group defaults and role overrides.
-- `agents.role_groups.<group>` defaults apply to all existing members of that group and
-  to roles listed in the same layer.
+- Role sources retain their normal order (built-ins, files/drop-ins, selected
+  profile, then ordered `--harness-config` layers) within each scope. After
+  collecting them, `agents` provider defaults (`model`, `effort`, `verbosity`,
+  `thinking_summary`, `service_tier`, and `compaction`) apply to every role,
+  then role-group defaults, then per-role overrides. A narrow role patch
+  therefore remains effective over a broader group/default patch from a later
+  source.
+- `agents.role_groups.<group>` defaults apply to every effective member of that
+  group, including roles introduced by a later source.
 - Per-role overrides are applied after group defaults.
 - Role `order` is ordinary role metadata: lower values sort first within a
   group, with role name as the stable tie-breaker.
