@@ -141,6 +141,13 @@ minutes, plus independent graceful shutdown and safe crash cleanup.
 Caller-requested result limits and grep'"'"'s per-line shortening retain their
 native limit metadata and do not by themselves imply a saved artifact.
 
+`grep` renders matches heading-grouped: each file's path appears once as a
+heading line, followed by `LINE:CONTENT` for match lines and `LINE-CONTENT`
+for context lines. Over-long path headings are truncated to the same
+`GREP_MAX_LINE_LENGTH` (500 chars) as match body lines, with an ellipsis and
+the "Some lines truncated to 500 chars" notice, so every rendered line stays
+within the 500-char budget.
+
 
 ### Tool descriptions
 

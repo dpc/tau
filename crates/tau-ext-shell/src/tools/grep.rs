@@ -145,9 +145,13 @@ impl GrepOptions {
         // like `file-12-34.txt`. The JSON envelope cleanly separates
         // match from context records.
         //
-        // `--with-filename` is still needed to keep the path field
-        // present when searching a single file, so the rendered output
-        // continues to lead with `path:` even in that case.
+        // `--json` always includes the `path` field, even for a single file
+        // and regardless of `--with-filename`, so the renderer can emit a
+        // per-file path heading in all cases; `--with-filename` is kept
+        // defensively for older ripgrep behavior. `--heading` is
+        // deliberately not passed: it only affects rg's human-readable
+        // output and is a no-op under `--json`, so the heading grouping is
+        // done by the renderer below.
         let mut args: Vec<String> = vec![
             "--json".to_owned(),
             "--hidden".to_owned(),
@@ -732,9 +736,10 @@ impl RgText {
     }
 }
 
-/// Stream rg's JSON Lines output, build the legacy
-/// `PATH:LINE:CONTENT` / `PATH-LINE-CONTENT` rendering, and break
-/// early once the match limit is reached.
+/// Stream rg's JSON Lines output into heading-grouped rendering, breaking
+/// early once the match limit is reached. Each file's path is emitted once
+/// as a heading line, followed by `LINE:CONTENT` match lines and
+/// `LINE-CONTENT` context lines.
 fn read_grep_json<R: Read>(stdout: R, limit: usize) -> GrepStreamResult {
     use std::io::BufRead as _;
     let reader = BufReader::new(stdout);
@@ -743,6 +748,7 @@ fn read_grep_json<R: Read>(stdout: R, limit: usize) -> GrepStreamResult {
     let mut lines_truncated = false;
     let mut match_limit_reached = false;
     let mut current_path: Option<String> = None;
+    let mut heading_path: Option<String> = None;
 
     for line in reader.lines() {
         let Ok(line) = line else {
@@ -781,8 +787,20 @@ fn read_grep_json<R: Read>(stdout: R, limit: usize) -> GrepStreamResult {
                     }
                     match_count += 1;
                 }
+                // Emit the file path once as a heading so match and context
+                // lines don't repeat it on every record. This runs after the
+                // limit check so a limit-triggered break leaves no dangling
+                // heading with no body line beneath it.
+                if heading_path.as_deref() != Some(path.as_str()) {
+                    let (heading, heading_truncated) = render_grep_heading(&path);
+                    if heading_truncated {
+                        lines_truncated = true;
+                    }
+                    result_lines.push(heading);
+                    heading_path = Some(path);
+                }
                 let sep = if is_match { ':' } else { '-' };
-                let (rendered, truncated) = render_grep_line(&path, lineno, sep, text);
+                let (rendered, truncated) = render_grep_line(lineno, sep, text);
                 if truncated {
                     lines_truncated = true;
                 }
@@ -840,24 +858,39 @@ pub(crate) fn grep_result_map(
     ])
 }
 
-fn render_grep_line(path: &str, lineno: u64, sep: char, text: &str) -> (String, bool) {
-    let prefix = format!("{path}{sep}{lineno}{sep}");
+/// Render a per-file path heading line, capping over-long paths at the
+/// display budget with an ellipsis so every rendered line, heading included,
+/// stays within `GREP_MAX_LINE_LENGTH`.
+fn render_grep_heading(path: &str) -> (String, bool) {
+    if path.len() <= GREP_MAX_LINE_LENGTH {
+        return (path.to_owned(), false);
+    }
+    let ellipsis = "…";
+    // `GREP_MAX_LINE_LENGTH` (500) far exceeds the ellipsis size, so the
+    // content budget below is always positive.
+    let mut end = (GREP_MAX_LINE_LENGTH - ellipsis.len()).min(path.len());
+    while !path.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}{ellipsis}", &path[..end]), true)
+}
+
+/// Render a single match or context body line beneath a per-file heading, as
+/// `LINE:CONTENT` for matches and `LINE-CONTENT` for context lines. Long
+/// content is truncated at the display budget with an ellipsis.
+fn render_grep_line(lineno: u64, sep: char, text: &str) -> (String, bool) {
+    let prefix = format!("{lineno}{sep}");
     let rendered = format!("{prefix}{text}");
     if rendered.len() <= GREP_MAX_LINE_LENGTH {
         return (rendered, false);
     }
 
     let ellipsis = "…";
-    let Some(text_budget) = GREP_MAX_LINE_LENGTH.checked_sub(prefix.len() + ellipsis.len()) else {
-        let marker = "(truncated)";
-        let mut end = GREP_MAX_LINE_LENGTH
-            .saturating_sub(marker.len())
-            .min(prefix.len());
-        while !prefix.is_char_boundary(end) {
-            end -= 1;
-        }
-        return (format!("{}{marker}", &prefix[..end]), true);
-    };
+    // The prefix (`LINENO:` / `LINENO-`) is at most 21 bytes (20-digit u64
+    // line number plus separator), so with the ellipsis it can never reach
+    // `GREP_MAX_LINE_LENGTH` and the content budget below is always positive;
+    // no `(truncated)` fallback is needed.
+    let text_budget = GREP_MAX_LINE_LENGTH - prefix.len() - ellipsis.len();
     let mut end = text_budget.min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;

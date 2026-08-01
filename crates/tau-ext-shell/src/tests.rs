@@ -7673,10 +7673,8 @@ fn run_grep_no_matches_uses_plain_ok_status() {
 
 #[test]
 fn run_grep_counts_matches_in_single_file() {
-    // Regression: when `path` is a single file, rg drops the
-    // `PATH:` prefix from each line. Without `--with-filename` the
-    // match-line classifier misses every match and `matches` falls
-    // back to 0 even though output clearly contains hits.
+    // `path` may point at a single file; the renderer must still emit the
+    // path heading and count every match in that file.
     let tempdir = TempDir::new().expect("tempdir");
     let file = tempdir.path().join("single.txt");
     fs::write(&file, "alpha\nbeta\nalpha\ngamma\nalpha\n").expect("write");
@@ -7687,16 +7685,20 @@ fn run_grep_counts_matches_in_single_file() {
     assert_eq!(cbor_int_field(&result, "matches"), Some(3));
     let output = cbor_map_text(&result, "output").expect("output");
     assert!(
-        output.contains(&format!("{}:1:alpha", file.display())),
-        "expected PATH:LINE:CONTENT shape, got: {output}"
+        output.contains(&file.display().to_string()),
+        "expected path heading, got: {output}"
+    );
+    assert!(
+        output.contains("1:alpha"),
+        "expected LINE:CONTENT match, got: {output}"
     );
 }
 
 #[test]
 fn run_grep_with_context_counts_only_match_lines() {
-    // Context lines (`PATH-LINE-CONTENT`) must not be counted as
+    // Context lines (`LINE-CONTENT`) must not be counted as
     // matches. Search a single file so we also exercise the
-    // `--with-filename` path.
+    // single-file rendering path.
     let tempdir = TempDir::new().expect("tempdir");
     let file = tempdir.path().join("single.txt");
     fs::write(
@@ -7721,13 +7723,10 @@ fn run_grep_with_context_counts_only_match_lines() {
     assert!(cbor_map_field(&result, "pattern").is_none());
     assert_eq!(cbor_int_field(&result, "matches"), Some(2));
     let output = cbor_map_text(&result, "output").expect("output");
-    assert!(output.contains(":3:alpha"), "first match missing: {output}");
+    assert!(output.contains("3:alpha"), "first match missing: {output}");
+    assert!(output.contains("6:alpha"), "second match missing: {output}");
     assert!(
-        output.contains(":6:alpha"),
-        "second match missing: {output}"
-    );
-    assert!(
-        output.contains("-2-filler 2"),
+        output.contains("2-filler 2"),
         "context line missing: {output}"
     );
 }

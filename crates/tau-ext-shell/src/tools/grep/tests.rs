@@ -189,7 +189,7 @@ fn grep_escapes_control_characters_in_paths() {
     });
     let output = read_grep_json(json.to_string().as_bytes(), 10);
 
-    assert_eq!(output.result_lines, vec!["line\\nbreak.txt:7:needle"]);
+    assert_eq!(output.result_lines, vec!["line\\nbreak.txt", "7:needle"]);
 }
 
 /// Ensures grep handles ripgrep byte paths without silently dropping the
@@ -212,7 +212,7 @@ fn grep_renders_invalid_utf8_byte_paths() {
 
     assert_eq!(
         output.result_lines,
-        vec!["(invalid-utf8) bad�name.txt:3:needle"]
+        vec!["(invalid-utf8) bad�name.txt", "3:needle"]
     );
 }
 
@@ -242,33 +242,137 @@ fn grep_limit_reports_rendered_match_count() {
 
     assert_eq!(output.match_count, 1);
     assert!(output.match_limit_reached);
-    assert_eq!(output.result_lines, vec!["file.txt:1:needle one"]);
+    assert_eq!(output.result_lines, vec!["file.txt", "1:needle one"]);
 }
 
-/// Ensures grep long-line shortening preserves the path and line number
-/// prefix instead of replacing the whole rendered match with a marker.
+/// Ensures grep long-line shortening preserves the line number prefix
+/// instead of replacing the whole rendered match with a marker.
 #[test]
 fn grep_long_line_truncation_preserves_location_prefix() {
-    let (line, truncated) = render_grep_line("path/to/file.txt", 42, ':', &"x".repeat(1000));
+    let (line, truncated) = render_grep_line(42, ':', &"x".repeat(1000));
 
     assert!(truncated);
-    assert!(
-        line.starts_with("path/to/file.txt:42:"),
-        "line was {line:?}"
-    );
+    assert!(line.starts_with("42:"), "line was {line:?}");
     assert!(line.ends_with('…'));
     assert!(line.len() <= GREP_MAX_LINE_LENGTH);
 }
 
-/// Ensures very long path prefixes are capped too, while preserving as much
-/// location information as possible.
+/// Ensures read_grep_json groups match lines under a single per-file path
+/// heading, using `:` for matches and `-` for context lines.
 #[test]
-fn grep_long_prefix_truncation_stays_within_line_cap() {
-    let (line, truncated) = render_grep_line(&"p".repeat(1000), 42, ':', "match");
+fn grep_renders_heading_grouped_matches_and_context() {
+    let match_rec = serde_json::json!({
+        "type": "match",
+        "data": {
+            "path": { "text": "src/a.rs" },
+            "lines": { "text": "needle here\n" },
+            "line_number": 7
+        }
+    });
+    let context_rec = serde_json::json!({
+        "type": "context",
+        "data": {
+            "path": { "text": "src/a.rs" },
+            "lines": { "text": "context line\n" },
+            "line_number": 8
+        }
+    });
+    let second_match = serde_json::json!({
+        "type": "match",
+        "data": {
+            "path": { "text": "src/b.rs" },
+            "lines": { "text": "needle two\n" },
+            "line_number": 3
+        }
+    });
+    let input = format!("{match_rec}\n{context_rec}\n{second_match}\n");
+    let output = read_grep_json(input.as_bytes(), 10);
 
-    assert!(truncated);
-    assert!(line.ends_with("(truncated)"));
-    assert!(line.len() <= GREP_MAX_LINE_LENGTH);
+    assert_eq!(
+        output.result_lines,
+        vec![
+            "src/a.rs",
+            "7:needle here",
+            "8-context line",
+            "src/b.rs",
+            "3:needle two",
+        ]
+    );
+    assert_eq!(output.match_count, 2);
+}
+
+/// Ensures hitting the match limit on a new file's first match does not
+/// leave a dangling path heading with no body line beneath it.
+#[test]
+fn grep_limit_break_leaves_no_dangling_heading() {
+    let first = serde_json::json!({
+        "type": "match",
+        "data": {
+            "path": { "text": "a.rs" },
+            "lines": { "text": "needle one\n" },
+            "line_number": 1
+        }
+    });
+    let second = serde_json::json!({
+        "type": "match",
+        "data": {
+            "path": { "text": "b.rs" },
+            "lines": { "text": "needle two\n" },
+            "line_number": 2
+        }
+    });
+    let input = format!("{first}\n{second}\n");
+
+    let output = read_grep_json(input.as_bytes(), 1);
+
+    assert!(output.match_limit_reached);
+    assert_eq!(output.match_count, 1);
+    // a.rs heading + its body line; b.rs must not leave a dangling heading.
+    assert_eq!(output.result_lines, vec!["a.rs", "1:needle one"]);
+}
+
+/// Ensures over-long path headings are capped at the display budget with an
+/// ellipsis, matching how match body lines are truncated, so every rendered
+/// line stays within `GREP_MAX_LINE_LENGTH`.
+#[test]
+fn grep_heading_caps_overlong_path() {
+    let long_path = format!("{}pad", "p".repeat(GREP_MAX_LINE_LENGTH));
+    let json = serde_json::json!({
+        "type": "match",
+        "data": {
+            "path": { "text": long_path },
+            "lines": { "text": "needle\n" },
+            "line_number": 7
+        }
+    });
+    let output = read_grep_json(json.to_string().as_bytes(), 10);
+
+    assert!(output.lines_truncated);
+    assert_eq!(output.result_lines.len(), 2);
+    assert!(output.result_lines[0].ends_with('…'));
+    assert!(output.result_lines[0].len() <= GREP_MAX_LINE_LENGTH);
+    assert_eq!(output.result_lines[1], "7:needle");
+}
+
+/// Ensures the per-file heading falls back to the `begin` record's path when
+/// a match/context record omits the path field.
+#[test]
+fn grep_heading_uses_begin_record_path_fallback() {
+    let begin = serde_json::json!({
+        "type": "begin",
+        "data": { "path": { "text": "src/lib.rs" } }
+    });
+    let match_rec = serde_json::json!({
+        "type": "match",
+        "data": {
+            "lines": { "text": "needle\n" },
+            "line_number": 4
+        }
+    });
+    let input = format!("{begin}\n{match_rec}\n");
+    let output = read_grep_json(input.as_bytes(), 10);
+
+    assert_eq!(output.result_lines, vec!["src/lib.rs", "4:needle"]);
 }
 
 /// Ensures grep notices are included without exceeding the documented 10
