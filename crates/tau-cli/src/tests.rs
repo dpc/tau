@@ -3131,10 +3131,12 @@ fn clearing_selected_agent_clears_response_editor_context() {
     assert_eq!(no_agent_context.last_response, None);
 }
 
+/// Ensures transcript re-rendering retains the bounded cache estimate after
+/// switching away from and back to the agent that produced the response.
 #[test]
-fn switching_agents_preserves_unknown_cache_efficiency() {
-    // Switching away and back must not invent a denominator when the durable
-    // provider usage has no validated cache-read ceiling.
+fn switching_agents_preserves_estimated_cache_efficiency() {
+    // Switching away and back must retain the bounded reusable-prefix estimate
+    // when durable provider usage has no exact cache-read ceiling.
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -3168,14 +3170,16 @@ fn switching_agents_preserves_unknown_cache_efficiency() {
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "Δ? 19k/?"));
+    assert!(vt.screen_contains(80, "Δ95%? 19k/20k?"));
 }
 
+/// Ensures a hidden agent's cached response retains the same bounded estimate
+/// when a later selection reconstructs that agent's transcript.
 #[test]
-fn switching_to_hidden_agent_preserves_unknown_cache_efficiency() {
+fn switching_to_hidden_agent_preserves_estimated_cache_efficiency() {
     // Regression: hidden side-agent responses are recorded in that agent's UI
     // state and later replayed by a full transcript re-render when selected, so
-    // they must also retain the absence of a provider-authored denominator.
+    // they must retain the bounded reusable-prefix estimate.
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -3208,7 +3212,7 @@ fn switching_to_hidden_agent_preserves_unknown_cache_efficiency() {
     renderer.switch_agent("worker-2".to_owned());
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "Δ? 19k/?"));
+    assert!(vt.screen_contains(80, "Δ95%? 19k/20k?"));
 }
 
 #[test]
@@ -12640,6 +12644,45 @@ fn format_turn_stats_line_uses_previous_turn_for_hit_percent() {
     assert_eq!(line, "Δ95% 19k/20k ↑100 ↓0 Σ↑19k/40.1k ↓0");
 }
 
+/// Ensures a missing provider ceiling uses the existing bounded reusable-prefix
+/// calculation and visibly marks both the derived ratio and denominator.
+#[test]
+fn format_turn_stats_line_estimates_unknown_cache_ceiling() {
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 121_300,
+        prompt_cached_tokens: 120_300,
+        ..Default::default()
+    };
+    let previous_usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 120_000,
+        response_received_tokens: 1_300,
+        ..Default::default()
+    };
+
+    let line = format_turn_stats_line(&usage, Some(&previous_usage), None, None);
+
+    assert_eq!(line, "Δ99%? 120.3k/121.3k? ↑0 ↓0 Σ↑0/0 ↓0");
+}
+
+/// Ensures a nonzero reusable prefix with no provider cache read remains a
+/// visibly approximate zero-percent estimate rather than an exact cache miss.
+#[test]
+fn format_turn_stats_line_marks_estimated_zero_cache_read() {
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 121_300,
+        ..Default::default()
+    };
+    let previous_usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 120_000,
+        response_received_tokens: 1_300,
+        ..Default::default()
+    };
+
+    let line = format_turn_stats_line(&usage, Some(&previous_usage), None, None);
+
+    assert_eq!(line, "Δ0%? 0/121.3k? ↑0 ↓0 Σ↑0/0 ↓0");
+}
+
 /// Ensures a provider chain reset cannot show more cacheable tokens than the
 /// current full-replay request contains.
 #[test]
@@ -12676,7 +12719,7 @@ fn format_turn_stats_line_shows_zero_hit_when_nothing_could_be_cached() {
     };
     let line = format_turn_stats_line(&usage, None, None, None);
 
-    assert_eq!(line, "Δ? 0/? ↑1k ↓0 Σ↑0/1k ↓0");
+    assert_eq!(line, "Δ—? 0/0? ↑1k ↓0 Σ↑0/1k ↓0");
 }
 
 #[test]
@@ -12684,7 +12727,37 @@ fn format_turn_stats_line_shows_zero_hit_when_no_prompt_sent() {
     let usage = tau_proto::ProviderTokenUsage::default();
     let line = format_turn_stats_line(&usage, None, None, None);
 
-    assert_eq!(line, "Δ? 0/? ↑0 ↓0 Σ↑0/0 ↓0");
+    assert_eq!(line, "Δ—? 0/0? ↑0 ↓0 Σ↑0/0 ↓0");
+}
+
+/// Ensures malformed totals and cache counts that exceed the bounded estimate
+/// retain invalid rendering instead of displaying an impossible percentage.
+#[test]
+fn format_turn_stats_line_rejects_invalid_or_inconsistent_cache_counts() {
+    let malformed = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 1_000,
+        prompt_cached_tokens: 1_001,
+        ..Default::default()
+    };
+    let inconsistent = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 20_000,
+        prompt_cached_tokens: 15_000,
+        ..Default::default()
+    };
+    let previous_usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 10_000,
+        response_received_tokens: 1,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        format_turn_stats_line(&malformed, None, None, None),
+        "Δ! 1k/? ↑1k ↓0 Σ↑0/0 ↓0"
+    );
+    assert_eq!(
+        format_turn_stats_line(&inconsistent, Some(&previous_usage), None, None),
+        "Δ! 15k/? ↑9.9k ↓0 Σ↑0/0 ↓0"
+    );
 }
 
 #[test]
@@ -12862,8 +12935,10 @@ fn render_turn_stats_block_highlights_cache_hit_at_or_below_90_percent() {
     assert_eq!(spans[1].style.fg, Some(Color::Red));
 }
 
+/// Ensures cached tokens without any reusable predecessor are treated as
+/// invalid for an estimated ceiling, just like an invalid exact ceiling.
 #[test]
-fn format_turn_stats_line_distinguishes_unknown_and_invalid_cache_opportunity() {
+fn format_turn_stats_line_rejects_cache_without_reusable_prefix() {
     let unknown = tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 2_000,
         prompt_cached_tokens: 1_500,
@@ -12875,7 +12950,7 @@ fn format_turn_stats_line_distinguishes_unknown_and_invalid_cache_opportunity() 
         prompt_cache_read_ceiling_tokens: Some(1_000),
         ..Default::default()
     };
-    assert!(format_turn_stats_line(&unknown, None, None, None).starts_with("Δ? 1.5k/?"));
+    assert!(format_turn_stats_line(&unknown, None, None, None).starts_with("Δ! 1.5k/?"));
     assert!(format_turn_stats_line(&invalid, None, None, None).starts_with("Δ! 1.5k/?"));
 }
 

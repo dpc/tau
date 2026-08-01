@@ -50,10 +50,13 @@ enum CacheEfficiency {
         ceiling: u64,
         percent: u8,
     },
-    NoOpportunity,
-    Unknown {
+    Estimated {
         cached: u64,
+        ceiling: u64,
+        percent: u8,
     },
+    NoOpportunity,
+    EstimatedNoOpportunity,
     Invalid {
         cached: u64,
     },
@@ -81,15 +84,11 @@ fn turn_stats_parts(
 ) -> Vec<TurnStatsPart> {
     use tau_themes::names;
 
-    let previous_sent_tokens = previous_usage.map_or(0, |usage| usage.prompt_sent_tokens);
-    let previous_received_tokens = previous_usage.map_or(0, |usage| usage.response_received_tokens);
-    let turn_cache_possible = previous_sent_tokens
-        .saturating_add(previous_received_tokens)
-        .min(usage.prompt_sent_tokens);
+    let turn_cache_possible = reusable_prompt_prefix_tokens(usage, previous_usage);
     let new_prompt_tokens = usage.prompt_sent_tokens.saturating_sub(turn_cache_possible);
     let mut parts = Vec::new();
 
-    let efficiency = cache_efficiency(usage);
+    let efficiency = cache_efficiency(usage, turn_cache_possible);
     let (marker, detail, style) = match efficiency {
         CacheEfficiency::Exact {
             cached,
@@ -104,15 +103,28 @@ fn turn_stats_parts(
             ),
             cache_hit_style_name(percent),
         ),
+        CacheEfficiency::Estimated {
+            cached,
+            ceiling,
+            percent,
+        } => (
+            format!("Δ{percent}%?"),
+            format!(
+                " {}/{}?",
+                format_token_count(cached),
+                format_token_count(ceiling)
+            ),
+            cache_hit_style_name(percent),
+        ),
         CacheEfficiency::NoOpportunity => (
             "Δ—".to_owned(),
             " 0/0".to_owned(),
             names::TOKEN_STATS_CACHE_HIT,
         ),
-        CacheEfficiency::Unknown { cached } => (
-            "Δ?".to_owned(),
-            format!(" {}/?", format_token_count(cached)),
-            names::TOKEN_STATS_CACHE_MISS,
+        CacheEfficiency::EstimatedNoOpportunity => (
+            "Δ—?".to_owned(),
+            " 0/0?".to_owned(),
+            names::TOKEN_STATS_CACHE_HIT,
         ),
         CacheEfficiency::Invalid { cached } => (
             "Δ!".to_owned(),
@@ -193,14 +205,43 @@ fn cache_hit_style_name(percent: u8) -> &'static str {
     }
 }
 
-fn cache_efficiency(usage: &tau_proto::ProviderTokenUsage) -> CacheEfficiency {
+/// Returns the current prompt prefix that can be reused from the preceding
+/// turn.
+fn reusable_prompt_prefix_tokens(
+    usage: &tau_proto::ProviderTokenUsage,
+    previous_usage: Option<&tau_proto::ProviderTokenUsage>,
+) -> u64 {
+    previous_usage
+        .map_or(0, |usage| {
+            usage
+                .prompt_sent_tokens
+                .saturating_add(usage.response_received_tokens)
+        })
+        .min(usage.prompt_sent_tokens)
+}
+
+fn cache_efficiency(
+    usage: &tau_proto::ProviderTokenUsage,
+    estimated_ceiling: u64,
+) -> CacheEfficiency {
     let cached = usage.prompt_cached_tokens;
     let sent = usage.prompt_sent_tokens;
     if sent < cached {
         return CacheEfficiency::Invalid { cached };
     }
     let Some(ceiling) = usage.prompt_cache_read_ceiling_tokens else {
-        return CacheEfficiency::Unknown { cached };
+        if estimated_ceiling < cached {
+            return CacheEfficiency::Invalid { cached };
+        }
+        if estimated_ceiling == 0 {
+            return CacheEfficiency::EstimatedNoOpportunity;
+        }
+        let percent = (u128::from(cached) * 100 / u128::from(estimated_ceiling)) as u8;
+        return CacheEfficiency::Estimated {
+            cached,
+            ceiling: estimated_ceiling,
+            percent,
+        };
     };
     if sent < ceiling || ceiling < cached {
         return CacheEfficiency::Invalid { cached };

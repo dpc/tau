@@ -67,10 +67,10 @@ fn upgrade_error_extracts_allowlisted_request_id_precedence() {
 use crate::responses::ResponsesMode;
 use crate::{NeverAbort, TurnAbortWaker};
 
-/// The initial ChatGPT capability must preserve its exact empirical minimum,
+/// Every allow-listed ChatGPT model must preserve the exact empirical minimum,
 /// offset, and step boundaries rather than drifting to generic block rounding.
 #[test]
-fn cache_read_ceiling_uses_sol_provider_geometry() {
+fn cache_read_ceiling_uses_shared_provider_geometry() {
     assert_eq!(WsConn::cache_read_ceiling(0), 0);
     assert_eq!(WsConn::cache_read_ceiling(1_535), 0);
     assert_eq!(WsConn::cache_read_ceiling(1_536), 1_536);
@@ -78,15 +78,18 @@ fn cache_read_ceiling_uses_sol_provider_geometry() {
     assert_eq!(WsConn::cache_read_ceiling(2_560), 2_560);
 }
 
-/// Capability matching must stay exact and reject compaction results.
+/// Capability matching must accept only the documented model allow-list and
+/// reject every other cache-geometry precondition.
 #[test]
 fn cache_read_ceiling_capability_is_narrow() {
     let mut config = test_responses_config();
     config.base_url = "https://chatgpt.com/backend-api".to_owned();
-    config.model_id = "gpt-5.6-sol".to_owned();
     config.mode = ResponsesMode::Standard;
-    assert!(supports_cache_read_ceiling(&config, false));
-    assert!(!supports_cache_read_ceiling(&config, true));
+    for model in CHATGPT_CACHE_READ_GEOMETRY_MODELS {
+        config.model_id = (*model).to_owned();
+        assert!(supports_cache_read_ceiling(&config, false));
+        assert!(!supports_cache_read_ceiling(&config, true));
+    }
 
     config.mode = ResponsesMode::LiteCompatibility;
     assert!(!supports_cache_read_ceiling(&config, false));

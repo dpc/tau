@@ -628,13 +628,17 @@ impl WsConn {
     }
 }
 
-/// Matches the single initial route contract that can establish an exact
-/// cache-read ceiling for a non-compaction response.
+/// ChatGPT models with the observed WebSocket cache-read geometry.
+const CHATGPT_CACHE_READ_GEOMETRY_MODELS: &[&str] =
+    &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+
+/// Matches the exact route contract that can establish an exact cache-read
+/// ceiling for a non-compaction response.
 fn supports_cache_read_ceiling(config: &ResponsesConfig, compaction: bool) -> bool {
     !compaction
         && config.base_url == "https://chatgpt.com/backend-api"
         && config.mode == super::ResponsesMode::Standard
-        && config.model_id == "gpt-5.6-sol"
+        && CHATGPT_CACHE_READ_GEOMETRY_MODELS.contains(&config.model_id.as_str())
 }
 
 fn prewarm_shape(
