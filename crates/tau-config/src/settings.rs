@@ -707,6 +707,16 @@ struct HarnessSettingsWire {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentsSettings {
+    /// Whether roles default to enabled before group and role overrides apply.
+    ///
+    /// Omission keeps the built-in enabled baseline. Explicit `null` clears
+    /// this patch and leaves the role's default behavior in effect.
+    #[serde(
+        default = "agent_enable_default",
+        alias = "enabled",
+        deserialize_with = "present_option"
+    )]
+    enable: Option<Option<bool>>,
     #[serde(default, alias = "defaultRole")]
     default_role: Option<String>,
     #[serde(alias = "idTemplate")]
@@ -750,7 +760,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         for extension_name in wire.extensions.keys() {
             validate_extension_name(extension_name).map_err(D::Error::custom)?;
         }
-        let provider_defaults = wire.agents.provider_defaults();
+        let agent_defaults = wire.agents.role_defaults();
         let mut settings = Self {
             session_retention_days: wire.session_retention_days,
             diagnostic_retention_days: wire.diagnostic_retention_days,
@@ -766,12 +776,12 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             agent_id_template: wire.agents.id_template,
             agent_display_name_template: wire.agents.display_name_template,
         };
-        let mut effective_provider_defaults = AgentRole::default();
-        effective_provider_defaults.apply_patch(&provider_defaults);
-        settings.apply_provider_defaults_to_roles(&provider_defaults);
+        let mut effective_agent_defaults = AgentRole::default();
+        effective_agent_defaults.apply_patch(&agent_defaults);
+        settings.apply_agent_defaults_to_roles(&agent_defaults);
         settings.apply_context_size_alert_overrides(wire.agents.context_size_alerts);
         settings
-            .apply_role_group_overrides(wire.agents.role_groups, &effective_provider_defaults)
+            .apply_role_group_overrides(wire.agents.role_groups, &effective_agent_defaults)
             .map_err(D::Error::custom)?;
         validate_custom_prompts(&settings.custom_prompts).map_err(D::Error::custom)?;
         settings.remove_disabled_roles();
@@ -966,6 +976,9 @@ struct HarnessProfile {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct HarnessProfileAgentOverrides {
+    /// Default enablement patch applied to every role.
+    #[serde(alias = "enabled", deserialize_with = "present_option")]
+    enable: Option<Option<bool>>,
     /// Role groups and their member role patches.
     #[serde(alias = "roleGroups")]
     role_groups: RawRoleGroups,
@@ -1005,6 +1018,7 @@ struct HarnessProfileAgentOverrides {
 impl From<HarnessProfileAgentOverrides> for HarnessAgentRoleOverrides {
     fn from(profile: HarnessProfileAgentOverrides) -> Self {
         Self {
+            enable: profile.enable,
             role_groups: profile.role_groups,
             prompt_fragments: profile.prompt_fragments,
             required_skills: profile.required_skills,
@@ -1039,6 +1053,10 @@ struct HarnessProfiles {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct HarnessAgentRoleOverrides {
+    /// Agent-global role enablement patch replayed before group and role
+    /// patches.
+    #[serde(alias = "enabled", deserialize_with = "present_option")]
+    enable: Option<Option<bool>>,
     #[serde(alias = "roleGroups")]
     role_groups: RawRoleGroups,
     #[serde(alias = "promptFragments")]
@@ -1068,9 +1086,10 @@ struct HarnessAgentRoleOverrides {
 }
 
 impl AgentsSettings {
-    /// Returns the provider settings that apply before group and role patches.
-    fn provider_defaults(&self) -> AgentRolePatch {
+    /// Returns agent defaults that apply before group and role patches.
+    fn role_defaults(&self) -> AgentRolePatch {
         AgentRolePatch {
+            enable: self.enable,
             model: self.model.clone(),
             effort: self.effort,
             verbosity: self.verbosity,
@@ -1083,9 +1102,10 @@ impl AgentsSettings {
 }
 
 impl HarnessAgentRoleOverrides {
-    /// Returns the provider settings that apply before group and role patches.
-    fn provider_defaults(&self) -> AgentRolePatch {
+    /// Returns agent defaults that apply before group and role patches.
+    fn role_defaults(&self) -> AgentRolePatch {
         AgentRolePatch {
+            enable: self.enable,
             model: self.model.clone(),
             effort: self.effort,
             verbosity: self.verbosity,
@@ -1314,6 +1334,10 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
+fn agent_enable_default() -> Option<Option<bool>> {
+    Some(Some(true))
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct AgentRolePatch {
@@ -1433,9 +1457,9 @@ impl HarnessSettings {
     fn apply_role_group_overrides(
         &mut self,
         groups: RawRoleGroups,
-        provider_defaults: &AgentRole,
+        agent_defaults: &AgentRole,
     ) -> Result<(), SettingsError> {
-        self.apply_role_group_members(&groups, provider_defaults)?;
+        self.apply_role_group_members(&groups, agent_defaults)?;
         self.apply_role_group_defaults(&groups);
         self.apply_role_overrides(&groups);
         Ok(())
@@ -1448,7 +1472,7 @@ impl HarnessSettings {
     fn apply_role_group_members(
         &mut self,
         groups: &RawRoleGroups,
-        provider_defaults: &AgentRole,
+        agent_defaults: &AgentRole,
     ) -> Result<(), SettingsError> {
         for (group_name, group) in groups {
             let group_exists = self
@@ -1467,7 +1491,7 @@ impl HarnessSettings {
             for role_name in group.roles.keys() {
                 let override_role = AgentRole {
                     context_size_alerts: self.context_size_alerts.clone(),
-                    ..provider_defaults.clone()
+                    ..agent_defaults.clone()
                 };
                 self.ensure_role_group_member(group_name, role_name)?;
                 self.roles.entry(role_name.clone()).or_insert(override_role);
@@ -1509,7 +1533,7 @@ impl HarnessSettings {
         }
     }
 
-    fn apply_provider_defaults_to_roles(&mut self, defaults: &AgentRolePatch) {
+    fn apply_agent_defaults_to_roles(&mut self, defaults: &AgentRolePatch) {
         for role in self.roles.values_mut() {
             role.apply_patch(defaults);
         }
@@ -2595,20 +2619,21 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     }));
     role_layers.extend(harness_role_cli_override_layers(harness_config_overrides)?);
 
-    let mut effective_provider_defaults = AgentRole::default();
+    let mut effective_agent_defaults = AgentRole {
+        enable: Some(true),
+        ..AgentRole::default()
+    };
     for overrides in &role_layers {
-        let provider_defaults = overrides.agents.provider_defaults();
-        effective_provider_defaults.apply_patch(&provider_defaults);
+        let agent_defaults = overrides.agents.role_defaults();
+        effective_agent_defaults.apply_patch(&agent_defaults);
         role_settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments.clone());
         role_settings.apply_required_skill_overrides(overrides.agents.required_skills.clone());
         role_settings
             .apply_context_size_alert_overrides(overrides.agents.context_size_alerts.clone());
     }
     for overrides in &role_layers {
-        role_settings.apply_role_group_members(
-            &overrides.agents.role_groups,
-            &effective_provider_defaults,
-        )?;
+        role_settings
+            .apply_role_group_members(&overrides.agents.role_groups, &effective_agent_defaults)?;
     }
     for overrides in &role_layers {
         role_settings.apply_role_group_defaults(&overrides.agents.role_groups);
@@ -2764,6 +2789,7 @@ fn normalize_harness_config_value(
         normalize_tool_policy_config_keys(tool_policy, source, "tool_policy")?;
     }
     if let Some(serde_json::Value::Object(agents)) = map.get_mut("agents") {
+        normalize_alias_key(agents, "enabled", "enable", source, "agents")?;
         normalize_alias_key(agents, "defaultRole", "default_role", source, "agents")?;
         normalize_alias_key(agents, "idTemplate", "id_template", source, "agents")?;
         normalize_alias_key(
@@ -3076,6 +3102,7 @@ fn canonical_top_level_key(key: &str) -> &str {
 
 fn canonical_agents_key(key: &str) -> &str {
     match key {
+        "enabled" => "enable",
         "defaultRole" => "default_role",
         "idTemplate" => "id_template",
         "displayNameTemplate" => "display_name_template",

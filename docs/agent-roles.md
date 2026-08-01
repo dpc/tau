@@ -72,9 +72,11 @@ agents:
 ```
 
 Use the same top-level `agents` scope for model defaults shared by every role.
+`agents.enable` defaults to `true`; set it to `false` to disable every role,
+then use a group or role `enable: true` override to retain the roles you need.
 Tau retains source order within each scope, but resolves scopes globally: all
-`agents` provider settings apply first, then all role-group settings, then all
-role settings. A role setting therefore overrides a group setting even when the
+`agents` settings apply first, then all role-group settings, then all role
+settings. A role setting therefore overrides a group setting even when the
 group setting comes from a later drop-in, selected profile, or
 `--harness-config` layer:
 
@@ -118,7 +120,7 @@ profiles:
               verbosity: high
 ```
 
-Profiles support agent defaults, global role metadata, role groups, and role
+Profiles support agent defaults including `agents.enable`, global role metadata, role groups, and role
 patches. They do not expose unrelated harness settings; keep those in base files
 or use a normal command-line override.
 

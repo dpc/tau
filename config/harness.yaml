@@ -15,6 +15,9 @@
 # with `{{#if agent_id}}`. Priorities below
 # 100 render before generated context such as skills and AGENTS.md.
 # agents:
+#   # Roles default enabled. Set false to disable all, then use narrower group or
+#   # role `enable: true` settings to retain selected roles.
+#   enable: false
 #   prompt_fragments:
 #     - name: user.short-plain-style
 #       priority: 65

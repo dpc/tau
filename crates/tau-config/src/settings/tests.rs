@@ -804,6 +804,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
         .pointer_mut("/agents")
         .and_then(serde_json::Value::as_object_mut)
         .expect("agents map");
+    agents.insert("enabled".to_owned(), serde_json::Value::Bool(true));
     agents.insert(
         "thinkingSummary".to_owned(),
         serde_json::Value::String("auto".to_owned()),
@@ -822,6 +823,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
             .pointer("/tool_policy/rules/builtin.chatgpt-shell/enable")
             .is_some()
     );
+    assert!(value.pointer("/agents/enable").is_some());
     assert!(value.pointer("/agents/default_role").is_some());
     assert!(value.pointer("/agents/id_template").is_some());
     assert!(value.pointer("/agents/display_name_template").is_some());
@@ -865,6 +867,7 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
     let cases = [
         ("customPrompts", "custom_prompts"),
         ("toolPolicy", "tool_policy"),
+        ("agents.enabled", "agents.enable"),
         ("extensions.work.toolPrefix", "extensions.work.tool_prefix"),
         ("agents.defaultRole", "agents.default_role"),
         ("agents.promptFragments", "agents.prompt_fragments"),
@@ -3806,8 +3809,11 @@ fn missing_user_files_load_the_built_in_baseline() {
     assert!(harness.roles.contains_key("engineer-junior"));
     assert!(harness.roles.contains_key("engineer"));
     assert_eq!(harness.default_role.as_deref(), Some("engineer"));
+    assert_eq!(harness.roles["engineer-junior"].enable, Some(true));
+    assert_eq!(harness.roles["engineer"].enable, Some(true));
     assert!(!harness.roles.contains_key("assistant"));
     assert!(harness.roles.contains_key("engineer-senior"));
+    assert_eq!(harness.roles["engineer-senior"].enable, Some(true));
     assert_eq!(
         harness.roles["engineer-senior"].effort,
         Some(tau_proto::Effort::High)
@@ -3853,6 +3859,153 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
     assert!(!s.roles.contains_key("assistant"));
     assert_eq!(s.default_role.as_deref(), Some("engineer"));
     assert!(s.role_groups.is_empty());
+}
+
+/// Ensures agent, group, and role enablement use their ordinary scope
+/// precedence, with each narrower scope overriding the broader one.
+#[test]
+fn harness_agent_enable_precedes_group_and_role_enablement() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  enable: false
+  role_groups:
+    precedence:
+      enable: true
+      roles:
+        group-enabled: {}
+        role-disabled:
+          enable: false
+"#,
+    )
+    .expect("write config");
+
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load");
+    assert_eq!(settings.roles["group-enabled"].enable, Some(true));
+    assert!(!settings.roles.contains_key("role-disabled"));
+}
+
+/// Ensures an explicit higher-layer `null` clears an earlier global disable and
+/// restores the ordinary enabled role behavior without adding a reset barrier.
+#[test]
+fn harness_agent_enable_null_clears_an_earlier_disable() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  enable: false
+"#,
+    )
+    .expect("write base config");
+    std::fs::create_dir(td.path().join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        td.path().join("harness.d/10-clear-enable.yaml"),
+        r#"
+agents:
+  enable: null
+"#,
+    )
+    .expect("write drop-in");
+
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load");
+    assert!(settings.roles.contains_key("engineer"));
+    assert_eq!(settings.roles["engineer"].enable, None);
+}
+
+/// Ensures a selected profile can disable the normal role catalog globally and
+/// explicitly retain only roles it re-enables at the narrow role scope.
+#[test]
+fn profile_can_disable_all_roles_and_selectively_reenable_roles() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+profiles:
+  focused:
+    agents:
+      enable: false
+      role_groups:
+        engineer:
+          roles:
+            engineer:
+              enable: true
+"#,
+    )
+    .expect("write profile");
+
+    let profile = profile_name("focused");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+    assert_eq!(settings.roles.len(), 1);
+    assert_eq!(settings.roles["engineer"].enable, Some(true));
+}
+
+/// Ensures explicit base group and role enables remain narrower than a selected
+/// profile's later agent-wide disablement.
+#[test]
+fn base_group_and_role_enablement_override_profile_agent_disable() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  enable: false
+  role_groups:
+    group-pinned:
+      enable: true
+      roles:
+        group-role: {}
+    role-pinned:
+      roles:
+        role-role:
+          enable: true
+profiles:
+  focused:
+    agents:
+      enable: false
+"#,
+    )
+    .expect("write config");
+
+    let profile = profile_name("focused");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+    assert_eq!(settings.roles.len(), 2);
+    assert_eq!(settings.roles["group-role"].enable, Some(true));
+    assert_eq!(settings.roles["role-role"].enable, Some(true));
+}
+
+/// Ensures normal top-level `--harness-config` paths participate in agent
+/// enablement and can pair a broad disable with a role-level re-enable.
+#[test]
+fn harness_config_cli_can_disable_agents_and_reenable_one_role() {
+    let td = TempDir::new().expect("tempdir");
+    let overrides = [
+        HarnessConfigCliOverride::from_str("agents.enable=false").expect("disable agents"),
+        HarnessConfigCliOverride::from_str(
+            "agents.role_groups.engineer.roles.engineer.enable=true",
+        )
+        .expect("enable engineer"),
+    ];
+
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(td.path()), &[], &overrides)
+            .expect("load CLI overrides");
+    assert_eq!(settings.roles.len(), 1);
+    assert_eq!(settings.roles["engineer"].enable, Some(true));
 }
 
 /// Ensures legacy `enabled` role fields continue to disable roles in old config

@@ -94,9 +94,10 @@ array replacement:
 
 - Role sources retain their normal order (built-ins, files/drop-ins, selected
   profile, then ordered `--harness-config` layers) within each scope. After
-  collecting them, `agents` provider defaults (`model`, `effort`, `verbosity`,
+  collecting them, `agents` defaults (`enable`, `model`, `effort`, `verbosity`,
   `thinking_summary`, `service_tier`, and `compaction`) apply to every role,
-  then role-group defaults, then per-role overrides. A narrow role patch
+  then role-group defaults, then per-role overrides. `agents.enable` defaults
+  to true. A narrow role patch
   therefore remains effective over a broader group/default patch from a later
   source.
 - `agents.role_groups.<group>` defaults apply to every effective member of that
@@ -123,7 +124,7 @@ array replacement:
 ## Selectable configuration profiles
 
 `profiles` is a raw configuration-only map, not part of effective
-`HarnessSettings`. A selected profile supports agent provider defaults,
+`HarnessSettings`. A selected profile supports agent defaults,
 agent/global role metadata, role groups and roles, plus `extensions.<name>.enable`
 for a built-in or base-configured extension. This explicit subset avoids a second
 universal recursive merge schema. Its role patches replay after base file layers,
