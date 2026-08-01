@@ -1,15 +1,15 @@
 // Built-in "tau-plain-dark" theme.
 //
 // This is a conservative subset of the richer `tau-dpc` theme. It keeps semantic
-// emphasis attributes and only uses default terminal color plus yellow, cyan,
-// green, and red foregrounds, which are considered generally safe terminal
-// colors, plus dark yellow for passive watched-agent indicators. Other `tau-dpc`
-// colors are dropped or mapped to one of those colors.
+// emphasis attributes and only uses default terminal color plus bright white,
+// yellow, cyan, green, and red foregrounds, which are considered generally safe
+// terminal colors, plus dark yellow for passive watched-agent indicators. Other
+// `tau-dpc` colors are dropped or mapped to one of those colors.
 {
   description: "Conservative dark built-in theme using broadly safe terminal colors.",
   styles: {
     // -- User input --
-    "user.prompt":          { bold: true },
+    "user.prompt":          { fg: "white", bold: true },
 
     // -- Agent responses --
     "agent.response":       { fg: "cyan" },

@@ -188,15 +188,15 @@ fn nested_spans_inherit_and_override_styles() {
     assert!(resolved[1].style.italic);
 }
 
-/// Ensures the default built-in theme parses and keeps representative colors
-/// inside its intentionally small safe-color set.
+/// Ensures the default built-in theme resolves submitted user prompts to bright
+/// white, keeping them distinct from terminal-default assistant text.
 #[test]
-fn builtin_default_theme_parses_and_uses_safe_colors() {
+fn builtin_default_theme_resolves_submitted_user_prompts_as_bright_white() {
     let theme = Theme::builtin();
 
     let prompt = theme.resolve_style(&StyleName::new("user.prompt"));
     assert!(prompt.bold);
-    assert!(prompt.fg.is_none());
+    assert_eq!(prompt.fg, Some(Color::White));
     assert!(prompt.bg.is_none());
 
     let tool_err = theme.resolve_style(&StyleName::new("tool.status.error"));
@@ -290,6 +290,7 @@ fn builtin_default_theme_styles_stay_palette_safe() {
                     | Some(Color::Cyan)
                     | Some(Color::Green)
                     | Some(Color::Red)
+                    | Some(Color::White)
             ),
             "{name} sets an unsafe foreground color: {:?}",
             style.fg

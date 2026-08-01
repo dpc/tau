@@ -1409,6 +1409,22 @@ fn sync(handle: &TermHandle) {
     handle.redraw_sync();
 }
 
+fn assert_rendered_bright_white(vt: &VtWriter, width: u16, text: &str) {
+    let rows = vt.screen_text(width);
+    let (row, column) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| line.find(text).map(|column| (row as u16, column as u16)))
+        .unwrap_or_else(|| panic!("missing submitted prompt {text:?}: {rows:?}"));
+    let foreground = vt.cell_style(row, column).0;
+    let expected = if std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
+        vt100::Color::Default
+    } else {
+        vt100::Color::Idx(15)
+    };
+    assert_eq!(foreground, expected, "submitted prompt {text:?}");
+}
+
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> Event {
     Event::AgentMessageSent(tau_proto::AgentMessageSent {
         message_id: tau_proto::AgentMessageId::parse(format!("msg-{sender_id}-{recipient}"))
@@ -1944,6 +1960,70 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
             .is_live("engineer_abc12345")
     );
     assert!(vt.screen_contains(80, "hello"));
+}
+
+/// Ensures every submitted-user-prompt projection renders ANSI bright white in
+/// the default theme while custom `user.prompt` themes keep their own style.
+#[test]
+fn submitted_prompt_projections_render_default_bright_white() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    let ui_prompt = |text: &str| {
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("s1"),
+            text: text.to_owned(),
+            agent_id: agent_id("main"),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        })
+    };
+
+    renderer.handle(&ui_prompt("immediate submitted prompt"));
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "promoted queued prompt".to_owned(),
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&ui_prompt("promoted queued prompt"));
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: Default::default(),
+        agent_id: agent_id("main"),
+        text: "steered submitted prompt".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent_id("main"),
+        text: "replayed submitted prompt".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: Default::default(),
+        display_name: None,
+        ctx_id: None,
+    }));
+    renderer.switch_agent("other".to_owned());
+    renderer.switch_agent("main".to_owned());
+    sync(&handle);
+
+    for text in [
+        "immediate submitted prompt",
+        "promoted queued prompt",
+        "steered submitted prompt",
+        "replayed submitted prompt",
+    ] {
+        assert_rendered_bright_white(&vt, 100, text);
+    }
 }
 
 /// Timer-created internal prompt submissions render a visible wakeup marker so

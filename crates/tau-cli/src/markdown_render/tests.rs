@@ -5,7 +5,7 @@ fn markdown_test_theme() -> tau_themes::Theme {
         r##"{
             styles: {
                 "shell.output": { },
-                "user.prompt": { fg: "white", bg: "#101010" },
+                "user.prompt": { fg: "magenta", bg: "#101010" },
                 "agent.response": { fg: "cyan", bg: "#101010" },
                 "prompt.marker.submitted": { fg: "red" },
                 "markdown.strong": { bold: true, underline: true },
@@ -503,7 +503,7 @@ fn nested_ordered_list_items_are_not_indented_code() {
 fn structural_emphasis_preserves_transcript_base_styles() {
     let theme = markdown_test_theme();
     for (base, expected_fg) in [
-        (names::USER_PROMPT, tau_cli_term::Color::White),
+        (names::USER_PROMPT, tau_cli_term::Color::Magenta),
         (names::AGENT_RESPONSE, tau_cli_term::Color::Cyan),
     ] {
         let block = markdown_block(&theme, base, "# Heading\n12. item\nplain");
@@ -1026,7 +1026,7 @@ fn prompt_marker_uses_submitted_marker_style() {
         .iter()
         .find(|span| span.text == "-")
         .expect("expected styled markdown span");
-    assert_eq!(list_marker.style.fg, Some(tau_cli_term::Color::White));
+    assert_eq!(list_marker.style.fg, Some(tau_cli_term::Color::Magenta));
 }
 
 /// Ensures the live cache carries fenced-code parser state across sealed
