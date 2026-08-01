@@ -1213,6 +1213,7 @@ fn representative_events() -> Vec<Event> {
             },
             context: AgentContextStats::default(),
             estimated_api_cost: Default::default(),
+            work_status: Default::default(),
         }),
         Event::SessionStarted(SessionStarted {
             session_id: test_session_id("s1"),
@@ -2188,10 +2189,13 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
                         role: "engineer".to_owned(),
                         display_name: Some("Agent one".to_owned()),
                     },
-                    work_status: Some(SessionAgentWorkStatus {
-                        phase: AgentWorkStatusPhase::Working,
-                        title: Some("testing roster status".to_owned()),
-                    }),
+                    work_status: Some(
+                        SessionAgentWorkStatus::new(
+                            AgentWorkStatusPhase::Working,
+                            Some("testing roster status".to_owned()),
+                        )
+                        .expect("valid status"),
+                    ),
                 }],
             },
         })),
@@ -4209,13 +4213,18 @@ fn agent_watches_updated_serde_round_trip() {
     assert_eq!(round_trip, Event::AgentWatchesUpdated(update));
 }
 
-/// Ensures generic agent stats snapshots support partial/unknown context usage
-/// while carrying runtime state and complete tool counters.
+/// Ensures generic agent stats snapshots preserve work status alongside
+/// partial/unknown context usage, runtime state, and complete tool counters.
 #[test]
 fn agent_stats_updated_serde_round_trip() {
     let update = AgentStatsUpdated {
         session_id: test_session_id("session_123"),
         agent_id: agent_id("engineer_child"),
+        work_status: SessionAgentWorkStatus::new(
+            AgentWorkStatusPhase::Working,
+            Some("trace lifecycle".to_owned()),
+        )
+        .expect("valid status"),
         navigation_mode: AgentNavigationMode::Active,
         runtime_state: AgentRuntimeState::Running,
         tools: AgentToolStats {
@@ -4234,8 +4243,73 @@ fn agent_stats_updated_serde_round_trip() {
         serde_json::to_value(Event::AgentStatsUpdated(update.clone())).expect("serialize stats");
     assert_eq!(value["event"], "agent.stats_updated");
     assert!(value["payload"]["context"].get("cached_tokens").is_none());
+    assert_eq!(value["payload"]["work_status"]["phase"], "working");
+    assert_eq!(value["payload"]["work_status"]["title"], "trace lifecycle");
     let round_trip = serde_json::from_value::<Event>(value).expect("decode stats");
     assert_eq!(round_trip, Event::AgentStatsUpdated(update));
+}
+
+/// Work-status serde accepts every approved phase/title shape and preserves its
+/// canonical wire representation.
+#[test]
+fn session_agent_work_status_serde_accepts_valid_phase_title_shapes() {
+    let cases = [
+        ("unreported", AgentWorkStatusPhase::Unreported, None),
+        (
+            "working",
+            AgentWorkStatusPhase::Working,
+            Some("inspect logs"),
+        ),
+        ("done", AgentWorkStatusPhase::Done, Some("ship fix")),
+        (
+            "blocked",
+            AgentWorkStatusPhase::Blocked,
+            Some("await approval"),
+        ),
+        ("unknown", AgentWorkStatusPhase::Unknown, None),
+        (
+            "unknown",
+            AgentWorkStatusPhase::Unknown,
+            Some("last known task"),
+        ),
+    ];
+
+    for (wire_phase, phase, title) in cases {
+        let wire = serde_json::json!({ "phase": wire_phase, "title": title });
+        let decoded = serde_json::from_value::<SessionAgentWorkStatus>(wire.clone())
+            .expect("valid work-status wire shape");
+        assert_eq!(decoded.phase(), phase);
+        assert_eq!(decoded.title(), title);
+        assert_eq!(
+            serde_json::to_value(decoded).expect("serialize canonical work status"),
+            wire
+        );
+    }
+}
+
+/// Work-status serde rejects invalid phase/title shapes and noncanonical
+/// titles.
+#[test]
+fn session_agent_work_status_serde_rejects_invalid_phase_title_shapes() {
+    let invalid = [
+        serde_json::json!({ "phase": "unreported", "title": "unexpected task" }),
+        serde_json::json!({ "phase": "working", "title": null }),
+        serde_json::json!({ "phase": "done", "title": null }),
+        serde_json::json!({ "phase": "blocked", "title": null }),
+        serde_json::json!({ "phase": "unknown", "title": "" }),
+        serde_json::json!({ "phase": "unknown", "title": " leading space" }),
+        serde_json::json!({ "phase": "unknown", "title": "trailing space " }),
+        serde_json::json!({ "phase": "unknown", "title": "two\nlines" }),
+        serde_json::json!({ "phase": "unknown", "title": "two\u{2028}lines" }),
+        serde_json::json!({ "phase": "unknown", "title": "x".repeat(161) }),
+    ];
+
+    for wire in invalid {
+        assert!(
+            serde_json::from_value::<SessionAgentWorkStatus>(wire).is_err(),
+            "invalid wire must fail decoding"
+        );
+    }
 }
 
 /// Ensures the provider repetition stop reason has a stable protocol spelling.

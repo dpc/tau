@@ -15,8 +15,8 @@ use tau_client::{
 };
 use tau_proto::{Event, EventSelector};
 use tau_swarm_api::{
-    Agent, AgentActivity, AgentId, AgentNavigationMode, ApplicationIncarnationId, Hostname,
-    SessionId, SessionIdentity,
+    Agent, AgentActivity, AgentId, AgentNavigationMode, AgentWorkStatus, ApplicationIncarnationId,
+    Hostname, SessionId, SessionIdentity, TaskName,
 };
 use tau_swarm_client::{Client, ExpectedPeer};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -35,6 +35,8 @@ pub const LOG_TARGET: &str = "std-swarm";
 struct AgentDraft {
     /// Latest display name, defaulting to the Tau agent ID.
     name: String,
+    /// Latest canonical semantic work status.
+    work_status: AgentWorkStatus,
     /// Latest independent running/waiting state.
     activity: AgentActivity,
     /// Latest faithful navigation classification.
@@ -51,6 +53,7 @@ impl AgentDraft {
     fn new(id: &AgentId) -> Self {
         Self {
             name: id.as_str().to_owned(),
+            work_status: AgentWorkStatus::Unreported,
             activity: AgentActivity::Waiting,
             navigation_mode: AgentNavigationMode::Active,
             watches: BTreeSet::new(),
@@ -63,6 +66,7 @@ impl AgentDraft {
         Agent {
             id,
             name: self.name.clone(),
+            work_status: self.work_status.clone(),
             activity: self.activity,
             navigation_mode: self.navigation_mode,
             watches: self.watches.clone(),
@@ -664,6 +668,8 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
                 .agents
                 .entry(id.clone())
                 .or_insert_with(|| AgentDraft::new(&id));
+            draft.work_status =
+                swarm_work_status(&event.work_status).map_err(ClientError::handler)?;
             draft.activity = match event.runtime_state {
                 tau_proto::AgentRuntimeState::Running => AgentActivity::Running,
                 tau_proto::AgentRuntimeState::Idle => AgentActivity::Waiting,
@@ -706,6 +712,42 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
         _ => {}
     }
     Ok(())
+}
+
+/// Converts Tau's canonical work-status snapshot into the validated Swarm v4
+/// domain representation.
+fn swarm_work_status(
+    status: &tau_proto::SessionAgentWorkStatus,
+) -> Result<AgentWorkStatus, String> {
+    let task_name = |title: Option<&str>| {
+        title
+            .ok_or_else(|| "reported work status is missing its task name".to_owned())
+            .and_then(canonical_task_name)
+    };
+    match status.phase() {
+        tau_proto::AgentWorkStatusPhase::Unreported => Ok(AgentWorkStatus::Unreported),
+        tau_proto::AgentWorkStatusPhase::Working => Ok(AgentWorkStatus::Working {
+            task_name: task_name(status.title())?,
+        }),
+        tau_proto::AgentWorkStatusPhase::Done => Ok(AgentWorkStatus::Done {
+            task_name: task_name(status.title())?,
+        }),
+        tau_proto::AgentWorkStatusPhase::Blocked => Ok(AgentWorkStatus::Blocked {
+            task_name: task_name(status.title())?,
+        }),
+        tau_proto::AgentWorkStatusPhase::Unknown => Ok(AgentWorkStatus::Unknown {
+            last_task_name: status.title().map(canonical_task_name).transpose()?,
+        }),
+    }
+}
+
+/// Validates a task name without accepting a noncanonical source spelling.
+fn canonical_task_name(title: &str) -> Result<TaskName, String> {
+    let task_name = TaskName::new(title).map_err(|error| error.to_string())?;
+    if task_name.as_str() != title {
+        return Err("reported work status task name is not canonical".to_owned());
+    }
+    Ok(task_name)
 }
 
 fn handle_canonical_prompt(cx: RawEventContext<'_, SwarmRuntime>) -> Result<(), ClientError> {

@@ -62,10 +62,13 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
     ));
     assert_eq!(
         current[0].work_status,
-        Some(tau_proto::SessionAgentWorkStatus {
-            phase: tau_proto::AgentWorkStatusPhase::Working,
-            title: Some("implement picker status".to_owned()),
-        })
+        Some(
+            tau_proto::SessionAgentWorkStatus::new(
+                tau_proto::AgentWorkStatusPhase::Working,
+                Some("implement picker status".to_owned()),
+            )
+            .expect("valid status"),
+        )
     );
 
     harness

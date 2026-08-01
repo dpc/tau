@@ -276,6 +276,7 @@ fn session_switch_clears_incarnation_state_before_replay() {
         Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
             session_id: "old".parse().expect("session ID"),
             agent_id: tau_proto::AgentId::parse("stale").expect("agent ID"),
+            work_status: Default::default(),
             navigation_mode: tau_proto::AgentNavigationMode::Active,
             runtime_state: tau_proto::AgentRuntimeState::Running,
             tools: tau_proto::AgentToolStats::default(),
@@ -300,8 +301,9 @@ fn session_switch_clears_incarnation_state_before_replay() {
     assert!(state.agents.is_empty());
 }
 
-/// Stats and watch replacement folds converge exactly in the published agent,
-/// and unload removes that agent from current Swarm state.
+/// Stats and watch replacement folds preserve a canonical v4 work status in
+/// each published snapshot, and unload removes that agent from current Swarm
+/// state.
 #[test]
 fn stats_watches_and_unload_converge_projection() {
     let mut state = SwarmRuntime::new();
@@ -328,6 +330,11 @@ fn stats_watches_and_unload_converge_projection() {
         Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
             session_id: session_id.clone(),
             agent_id: agent_id.clone(),
+            work_status: tau_proto::SessionAgentWorkStatus::new(
+                tau_proto::AgentWorkStatusPhase::Working,
+                Some("publish status".to_owned()),
+            )
+            .expect("valid status"),
             navigation_mode: tau_proto::AgentNavigationMode::Suspended,
             runtime_state: tau_proto::AgentRuntimeState::Running,
             tools: tau_proto::AgentToolStats::default(),
@@ -346,6 +353,12 @@ fn stats_watches_and_unload_converge_projection() {
     }
     let snapshot = state.projection.blocking_lock().snapshot();
     let agent = snapshot.snapshot.agents.first().expect("published agent");
+    assert_eq!(
+        agent.work_status,
+        tau_swarm_api::AgentWorkStatus::Working {
+            task_name: tau_swarm_api::TaskName::new("publish status").expect("valid task name"),
+        }
+    );
     assert_eq!(agent.activity, tau_swarm_api::AgentActivity::Running);
     assert_eq!(
         agent.navigation_mode,
@@ -372,6 +385,73 @@ fn stats_watches_and_unload_converge_projection() {
             .agents
             .is_empty()
     );
+}
+
+/// Converts every valid Tau phase to the corresponding v4 Swarm state and
+/// rejects malformed snapshots before they can be published.
+#[test]
+fn work_status_conversion_enforces_v4_invariants() {
+    let valid = [
+        (
+            tau_proto::SessionAgentWorkStatus::default(),
+            tau_swarm_api::AgentWorkStatus::Unreported,
+        ),
+        (
+            tau_proto::SessionAgentWorkStatus::new(
+                tau_proto::AgentWorkStatusPhase::Working,
+                Some("working task".to_owned()),
+            )
+            .expect("valid status"),
+            tau_swarm_api::AgentWorkStatus::Working {
+                task_name: tau_swarm_api::TaskName::new("working task").expect("valid task name"),
+            },
+        ),
+        (
+            tau_proto::SessionAgentWorkStatus::new(
+                tau_proto::AgentWorkStatusPhase::Done,
+                Some("done task".to_owned()),
+            )
+            .expect("valid status"),
+            tau_swarm_api::AgentWorkStatus::Done {
+                task_name: tau_swarm_api::TaskName::new("done task").expect("valid task name"),
+            },
+        ),
+        (
+            tau_proto::SessionAgentWorkStatus::new(
+                tau_proto::AgentWorkStatusPhase::Blocked,
+                Some("blocked task".to_owned()),
+            )
+            .expect("valid status"),
+            tau_swarm_api::AgentWorkStatus::Blocked {
+                task_name: tau_swarm_api::TaskName::new("blocked task").expect("valid task name"),
+            },
+        ),
+        (
+            tau_proto::SessionAgentWorkStatus::new(
+                tau_proto::AgentWorkStatusPhase::Unknown,
+                Some("previous task".to_owned()),
+            )
+            .expect("valid status"),
+            tau_swarm_api::AgentWorkStatus::Unknown {
+                last_task_name: Some(
+                    tau_swarm_api::TaskName::new("previous task").expect("valid task name"),
+                ),
+            },
+        ),
+    ];
+    for (tau, swarm) in valid {
+        assert_eq!(swarm_work_status(&tau).expect("valid status"), swarm);
+    }
+    for invalid in [
+        serde_json::json!({"phase": "unreported", "title": "unexpected task"}),
+        serde_json::json!({"phase": "working", "title": null}),
+        serde_json::json!({"phase": "unknown", "title": "invalid\nlast task"}),
+        serde_json::json!({"phase": "working", "title": " noncanonical task"}),
+        serde_json::json!({"phase": "blocked", "title": format!(" {}", "a".repeat(160))}),
+        serde_json::json!({"phase": "unknown", "title": " previous task"}),
+    ] {
+        assert!(serde_json::from_value::<tau_proto::SessionAgentWorkStatus>(invalid).is_err());
+    }
 }
 
 /// Canonical Tau loopback completes only an exact agent/context/text match.

@@ -9,7 +9,7 @@ use tau_swarm_client::{
 };
 use tau_swarm_client_api::{
     AnswerBlockerRequest, AnswerBlockerResponse, DeliverPromptRequest, DeliverPromptResponse,
-    v2 as path_tau_swarm_client_api_v2,
+    v4 as path_tau_swarm_client_api_v4,
 };
 use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 
@@ -367,7 +367,7 @@ impl Application for SwarmApplication {
         }
         drop(projection);
         match request.kind {
-            path_tau_swarm_client_api_v2::BlockerAnswerKind::ApprovedRecommendation
+            path_tau_swarm_client_api_v4::BlockerAnswerKind::ApprovedRecommendation
                 if blocker
                     .as_ref()
                     .and_then(|value| value.recommended_answer.as_ref())
@@ -377,7 +377,7 @@ impl Application for SwarmApplication {
                     "approved recommendation must exactly match the active recommendation".into(),
                 ));
             }
-            path_tau_swarm_client_api_v2::BlockerAnswerKind::Custom
+            path_tau_swarm_client_api_v4::BlockerAnswerKind::Custom
                 if request.response.is_empty() =>
             {
                 return Ok(AnswerBlockerResponse::Rejected(
@@ -387,10 +387,10 @@ impl Application for SwarmApplication {
             _ => {}
         }
         let answer_kind = match request.kind {
-            path_tau_swarm_client_api_v2::BlockerAnswerKind::ApprovedRecommendation => {
+            path_tau_swarm_client_api_v4::BlockerAnswerKind::ApprovedRecommendation => {
                 "approved_recommendation"
             }
-            path_tau_swarm_client_api_v2::BlockerAnswerKind::Custom => "custom",
+            path_tau_swarm_client_api_v4::BlockerAnswerKind::Custom => "custom",
         };
         let text = blocker_answer_xml(
             &request.blocker_id,
@@ -450,10 +450,10 @@ impl Application for SwarmApplication {
                         record.state = BlockerState::Answered;
                         record.answer = Some(request.response.clone());
                         record.answer_kind = Some(match request.kind {
-                            path_tau_swarm_client_api_v2::BlockerAnswerKind::ApprovedRecommendation => {
+                            path_tau_swarm_client_api_v4::BlockerAnswerKind::ApprovedRecommendation => {
                                 tau_swarm_api::BlockerAnswerKind::ApprovedRecommendation
                             }
-                            path_tau_swarm_client_api_v2::BlockerAnswerKind::Custom => {
+                            path_tau_swarm_client_api_v4::BlockerAnswerKind::Custom => {
                                 tau_swarm_api::BlockerAnswerKind::Custom
                             }
                         });
@@ -513,10 +513,10 @@ impl SwarmApplication {
         record.state = BlockerState::Answered;
         record.answer = Some(request.response.clone());
         record.answer_kind = Some(match request.kind {
-            path_tau_swarm_client_api_v2::BlockerAnswerKind::ApprovedRecommendation => {
+            path_tau_swarm_client_api_v4::BlockerAnswerKind::ApprovedRecommendation => {
                 tau_swarm_api::BlockerAnswerKind::ApprovedRecommendation
             }
-            path_tau_swarm_client_api_v2::BlockerAnswerKind::Custom => {
+            path_tau_swarm_client_api_v4::BlockerAnswerKind::Custom => {
                 tau_swarm_api::BlockerAnswerKind::Custom
             }
         });

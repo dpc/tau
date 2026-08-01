@@ -9522,9 +9522,12 @@ impl Harness {
             let work_status = matches!(&lifecycle, tau_proto::SessionAgentLifecycle::Live { .. })
                 .then(|| self.agents.get(&agent_id))
                 .flatten()
-                .map(|agent| tau_proto::SessionAgentWorkStatus {
-                    phase: agent.work_status.phase(),
-                    title: agent.work_status.title().map(ToOwned::to_owned),
+                .map(|agent| {
+                    tau_proto::SessionAgentWorkStatus::new(
+                        agent.work_status.phase(),
+                        agent.work_status.title().map(ToOwned::to_owned),
+                    )
+                    .expect("harness work status is canonical")
                 });
             agents.push(tau_proto::SessionAgentListEntry {
                 agent_id: agent_id.clone(),
@@ -18127,6 +18130,11 @@ impl Harness {
         Some(AgentStatsUpdated {
             session_id: self.current_session_id.clone(),
             agent_id: crate::parse_agent_id(agent_id),
+            work_status: tau_proto::SessionAgentWorkStatus::new(
+                agent.work_status.phase(),
+                agent.work_status.title().map(ToOwned::to_owned),
+            )
+            .expect("harness work status is canonical"),
             navigation_mode: self
                 .agent_navigation_modes
                 .get(&crate::parse_agent_id(agent_id))
@@ -26520,6 +26528,7 @@ impl Harness {
         for watcher_id in self.watchers_for_agent(&agent_id) {
             self.notify_agent_watcher_work_status(&watcher_id, &agent_id, false);
         }
+        self.emit_agent_stats_updated(cid);
     }
 
     /// Publish one accepted ordinary final to each current watcher after the

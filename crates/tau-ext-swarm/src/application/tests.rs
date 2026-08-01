@@ -5,13 +5,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use iroh::endpoint as path_iroh_endpoint;
 use tau_swarm_api::{
-    Agent, AgentActivity, AgentNavigationMode, ApplicationIncarnationId, CorrelationId,
-    DeliveryOutcome, Hostname, PromptRequest, SessionId,
+    Agent, AgentActivity, AgentNavigationMode, AgentWorkStatus, ApplicationIncarnationId,
+    CorrelationId, DeliveryOutcome, Hostname, PromptRequest, SessionId,
 };
 use tau_swarm_client::{
     Backoff, Connector, ErrorKind, ExpectedPeer, IncomingCommand, SessionTransport,
 };
-use tau_swarm_client_api::v2::{BlockerAnswerKind, PromptRequest as WirePromptRequest};
+use tau_swarm_client_api::v4::{BlockerAnswerKind, PromptRequest as WirePromptRequest};
 use tau_swarm_client_api::{
     AuthenticateRequest, AuthenticateResponse, CURRENT_PROTOCOL_VERSION, Credential, CredentialId,
     DeclareSessionRequest, DeclareSessionResponse, Secret, SubmitChangeRequest,
@@ -51,6 +51,7 @@ fn application(
                 activity: AgentActivity::Waiting,
                 navigation_mode: AgentNavigationMode::Active,
                 watches: BTreeSet::new(),
+                work_status: AgentWorkStatus::Unreported,
             })
             .expect("agent publication");
     }
@@ -523,6 +524,7 @@ async fn synchronized_reconnect_installs_fresh_snapshot() {
             activity: AgentActivity::Running,
             navigation_mode: AgentNavigationMode::Active,
             watches: BTreeSet::new(),
+            work_status: AgentWorkStatus::Unreported,
         })
         .expect("new projection head");
     let expected_after = SubmitSnapshotRequest {

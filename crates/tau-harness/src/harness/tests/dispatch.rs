@@ -28086,6 +28086,77 @@ fn agent_watch_reports_structured_work_status() {
     h.shutdown().expect("shutdown");
 }
 
+/// Work-status reports and invalidations publish complete live and replay stats
+/// snapshots, preserving the last canonical title when Working becomes Unknown.
+#[test]
+fn agent_stats_snapshots_publish_work_status_transitions_and_replay() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let live = connect_test_tool(&mut h, "work-status-live");
+    h.complete_subscription(
+        &crate::test_connection_id("work-status-live"),
+        Vec::new(),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+    )
+    .expect("subscribe");
+    drain_stats_updated(&live);
+    let cid = ensure_test_user_agent(&mut h);
+    let public_id = durable_agent_id_for_conversation(&h, &cid);
+    drain_stats_updated(&live);
+
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "publish lifecycle".to_owned(),
+        )
+        .expect("valid working report"),
+    )
+    .expect("publish working status");
+    let working = drain_stats_updated(&live);
+    assert!(working.iter().any(|snapshot| {
+        snapshot.agent_id == public_id
+            && snapshot.work_status.phase() == tau_proto::AgentWorkStatusPhase::Working
+            && snapshot.work_status.title() == Some("publish lifecycle")
+    }));
+
+    assert!(
+        h.agents
+            .get_mut(&cid)
+            .expect("loaded agent")
+            .work_status
+            .invalidate_working(),
+        "working state must invalidate"
+    );
+    h.notify_work_status_transition(&cid);
+    let unknown = drain_stats_updated(&live);
+    assert!(unknown.iter().any(|snapshot| {
+        snapshot.agent_id == public_id
+            && snapshot.work_status.phase() == tau_proto::AgentWorkStatusPhase::Unknown
+            && snapshot.work_status.title() == Some("publish lifecycle")
+    }));
+
+    let replay = connect_test_tool(&mut h, "work-status-replay");
+    h.complete_subscription(
+        &crate::test_connection_id("work-status-replay"),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+        Vec::new(),
+    )
+    .expect("subscribe for replay");
+    let replayed = drain_stats_updated(&replay);
+    assert!(replayed.iter().any(|snapshot| {
+        snapshot.agent_id == public_id
+            && snapshot.work_status.phase() == tau_proto::AgentWorkStatusPhase::Unknown
+            && snapshot.work_status.title() == Some("publish lifecycle")
+    }));
+    h.shutdown().expect("shutdown");
+}
+
 /// The production response handler durably challenges exactly two ordinary
 /// finals, then accepts one Unknown terminal with one harness-owned response.
 #[test]

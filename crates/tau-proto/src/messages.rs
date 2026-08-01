@@ -710,15 +710,105 @@ pub struct SessionAgentListEntry {
 
 /// Current canonical self-reported work status for one live roster agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    try_from = "SessionAgentWorkStatusWire",
+    into = "SessionAgentWorkStatusWire"
+)]
 pub struct SessionAgentWorkStatus {
     /// Closed self-reported task phase.
-    pub phase: crate::AgentWorkStatusPhase,
-    /// Canonical model-authored title: absent for `Unreported`; otherwise
-    /// present, nonempty, trimmed, single-line, control-free, and at most
-    /// 160 UTF-8 bytes.
+    phase: crate::AgentWorkStatusPhase,
+    /// Canonical model-authored title: absent for `Unreported`; required for
+    /// `Working`, `Done`, and `Blocked`; optional valid last title for
+    /// `Unknown`. Every present title is nonempty, trimmed, single-line,
+    /// control-free, and at most 160 UTF-8 bytes.
     ///
     /// Consumers must treat the title as untrusted display metadata.
-    pub title: Option<String>,
+    title: Option<String>,
+}
+
+impl Default for SessionAgentWorkStatus {
+    fn default() -> Self {
+        Self {
+            phase: crate::AgentWorkStatusPhase::Unreported,
+            title: None,
+        }
+    }
+}
+
+impl SessionAgentWorkStatus {
+    /// Validates one canonical work-status phase and optional task title.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the phase/title combination is invalid or a title
+    /// is not a canonical task name.
+    pub fn new(phase: crate::AgentWorkStatusPhase, title: Option<String>) -> Result<Self, String> {
+        let title_shape_valid = match phase {
+            crate::AgentWorkStatusPhase::Unreported => title.is_none(),
+            crate::AgentWorkStatusPhase::Working
+            | crate::AgentWorkStatusPhase::Done
+            | crate::AgentWorkStatusPhase::Blocked => title.is_some(),
+            crate::AgentWorkStatusPhase::Unknown => true,
+        };
+        if !title_shape_valid {
+            return Err(
+                "work-status title must be absent for unreported and present for working, done, and blocked"
+                    .to_owned(),
+            );
+        }
+        if title.as_ref().is_some_and(|title| {
+            title.is_empty()
+                || 160 < title.len()
+                || title.trim() != title
+                || title.chars().any(|character| {
+                    character.is_control() || matches!(character, '\u{2028}' | '\u{2029}')
+                })
+        }) {
+            return Err(
+                "work-status title must be nonempty, trimmed, one line, control-free, and at most 160 UTF-8 bytes"
+                    .to_owned(),
+            );
+        }
+        Ok(Self { phase, title })
+    }
+
+    /// Returns the closed canonical work-status phase.
+    #[must_use]
+    pub fn phase(&self) -> crate::AgentWorkStatusPhase {
+        self.phase
+    }
+
+    /// Returns the canonical task title, if this phase retains one.
+    #[must_use]
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+}
+
+/// Wire form used to validate a work-status snapshot before exposing it.
+#[derive(Serialize, Deserialize)]
+struct SessionAgentWorkStatusWire {
+    /// Closed self-reported task phase.
+    phase: crate::AgentWorkStatusPhase,
+    /// Potential canonical model-authored task title.
+    title: Option<String>,
+}
+
+impl From<SessionAgentWorkStatus> for SessionAgentWorkStatusWire {
+    fn from(status: SessionAgentWorkStatus) -> Self {
+        Self {
+            phase: status.phase,
+            title: status.title,
+        }
+    }
+}
+
+impl TryFrom<SessionAgentWorkStatusWire> for SessionAgentWorkStatus {
+    type Error = String;
+
+    fn try_from(status: SessionAgentWorkStatusWire) -> Result<Self, Self::Error> {
+        Self::new(status.phase, status.title)
+    }
 }
 
 /// Stable whole-request error category for an agent-roster snapshot.

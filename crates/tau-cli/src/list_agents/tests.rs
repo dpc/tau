@@ -32,10 +32,7 @@ fn entry(id: &str, parent: Option<&str>, started_at: Option<u64>) -> SessionAgen
             role: "engineer".to_owned(),
             display_name: None,
         },
-        work_status: Some(tau_proto::SessionAgentWorkStatus {
-            phase: tau_proto::AgentWorkStatusPhase::Unreported,
-            title: None,
-        }),
+        work_status: Some(tau_proto::SessionAgentWorkStatus::default()),
     }
 }
 
@@ -163,10 +160,13 @@ fn all_picker_includes_suspended_agents_and_preserves_runtime_column() {
 fn picker_rows_append_canonical_cost_and_status() {
     let zero = entry("zero", None, Some(1));
     let mut nonzero = entry("nonzero", None, Some(2));
-    nonzero.work_status = Some(tau_proto::SessionAgentWorkStatus {
-        phase: tau_proto::AgentWorkStatusPhase::Working,
-        title: Some("verify \\ picker\u{202e} rows".to_owned()),
-    });
+    nonzero.work_status = Some(
+        tau_proto::SessionAgentWorkStatus::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            Some("verify \\ picker\u{202e} rows".to_owned()),
+        )
+        .expect("valid status"),
+    );
     let unavailable = entry("unavailable", None, Some(3));
     let output = format_picker_rows(&[zero, nonzero, unavailable], |agent_id| {
         match agent_id.as_str() {

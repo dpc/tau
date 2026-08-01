@@ -229,8 +229,9 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   disable; late subscribers receive only current non-empty snapshots.
 - **`agent.stats_updated`** — Transient, content-free operational snapshot for
   one loaded agent: runtime state, current/cumulative tool counters, and latest
-  context usage, plus runtime-only estimated equivalent API cost. It replaces the
-  old delegation-specific progress stream.
+  context usage, plus runtime-only estimated equivalent API cost and current
+  canonical work-status phase/title. It replaces the old delegation-specific
+  progress stream.
 - **`agent.prompt_terminated`** — A prompt ended without an accepted
   `provider.response_finished` (stale or canceled). Runtime lifecycle state.
   Canceling exact ordinary checkpointed inference also releases its runtime
@@ -900,8 +901,8 @@ context without restarting timers or live fanout.
 
 `agent.stats_updated` is a transient, must-pass, immutable complete operational
 snapshot for one loaded agent. Its required `navigation_mode` is independent of
-`runtime_state`, and current snapshots are delivered during catch-up before
-replay completion.
+`runtime_state`; it also carries the current canonical work-status phase/title.
+Current snapshots are delivered during catch-up before replay completion.
 
 UI clients request absolute `set_active`, `set_active_auto`, or `set_suspended`
 writes with transient `ui.set_agent_navigation_mode`. The harness validates the

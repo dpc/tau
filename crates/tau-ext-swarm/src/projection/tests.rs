@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use tau_swarm_api::{
-    AgentActivity, AgentNavigationMode, TaskId, Timestamp, UpdateId, UpdatePublication,
+    AgentActivity, AgentNavigationMode, AgentWorkStatus, TaskId, Timestamp, UpdateId,
+    UpdatePublication,
 };
 
 use super::*;
@@ -17,6 +18,7 @@ fn publishes_agent_replacement() {
         activity: AgentActivity::Waiting,
         navigation_mode: AgentNavigationMode::ActiveAuto,
         watches: BTreeSet::new(),
+        work_status: AgentWorkStatus::Unreported,
     };
     projection
         .upsert_agent(agent.clone())
@@ -46,6 +48,7 @@ fn rejects_stale_revision() {
                 activity: AgentActivity::Running,
                 navigation_mode: AgentNavigationMode::Active,
                 watches: BTreeSet::new(),
+                work_status: AgentWorkStatus::Unreported,
             })
             .expect("publication fits");
     }
@@ -94,6 +97,7 @@ fn evicts_change_history_by_logical_string_bytes() {
             activity: AgentActivity::Waiting,
             navigation_mode: AgentNavigationMode::Active,
             watches: BTreeSet::new(),
+            work_status: AgentWorkStatus::Unreported,
         })
         .expect("publication");
     assert!(projection.changes_after(PublicationRevision(0)).is_none());

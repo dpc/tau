@@ -2905,6 +2905,8 @@ pub struct AgentStatsUpdated {
     pub session_id: SessionId,
     /// Agent described by this snapshot.
     pub agent_id: AgentId,
+    /// Current harness-owned semantic work status.
+    pub work_status: crate::SessionAgentWorkStatus,
     /// Current harness-owned navigation classification.
     pub navigation_mode: AgentNavigationMode,
     /// Current harness runtime state for the agent.

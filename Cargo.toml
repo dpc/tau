@@ -222,11 +222,11 @@ serde_yaml_ng = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 similar = { version = "2", default-features = false, features = ["text"] }
 socket2 = { version = "0.6", default-features = false }
-tau-swarm-api = { version = "0.2.0" }
-tau-swarm-client = { version = "0.2.0" }
-tau-swarm-client-api = { version = "0.2.0" }
-tau-swarm-core = { version = "0.2.0" }
-tau-swarm-iroh = { version = "0.2.0" }
+tau-swarm-api = { git = "https://radicle.dpc.pw/z314Jo4iWg73MqBtsKDiJPvZHdZV7.git", rev = "b135666818aaf5822aaee18b55ad16412a72d5ac" }
+tau-swarm-client = { git = "https://radicle.dpc.pw/z314Jo4iWg73MqBtsKDiJPvZHdZV7.git", rev = "b135666818aaf5822aaee18b55ad16412a72d5ac" }
+tau-swarm-client-api = { git = "https://radicle.dpc.pw/z314Jo4iWg73MqBtsKDiJPvZHdZV7.git", rev = "b135666818aaf5822aaee18b55ad16412a72d5ac" }
+tau-swarm-core = { git = "https://radicle.dpc.pw/z314Jo4iWg73MqBtsKDiJPvZHdZV7.git", rev = "b135666818aaf5822aaee18b55ad16412a72d5ac" }
+tau-swarm-iroh = { git = "https://radicle.dpc.pw/z314Jo4iWg73MqBtsKDiJPvZHdZV7.git", rev = "b135666818aaf5822aaee18b55ad16412a72d5ac" }
 tempfile = { version = "3", default-features = false }
 time = { version = "0.3", default-features = false, features = [
   "formatting",

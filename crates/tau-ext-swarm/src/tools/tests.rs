@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync as path_std_sync;
 
 use tau_proto::SecretValue;
-use tau_swarm_api::{Agent, AgentActivity, AgentNavigationMode};
+use tau_swarm_api::{Agent, AgentActivity, AgentNavigationMode, AgentWorkStatus};
 use tau_swarm_client::Application;
-use tau_swarm_client_api::v2::BlockerAnswerKind;
+use tau_swarm_client_api::v4::BlockerAnswerKind;
 use tau_swarm_client_api::{AnswerBlockerRequest, AnswerBlockerResponse};
 use tokio::sync as path_tokio_sync;
 
@@ -96,6 +96,7 @@ fn configured_runtime() -> SwarmRuntime {
             activity: AgentActivity::Waiting,
             navigation_mode: AgentNavigationMode::Active,
             watches: BTreeSet::new(),
+            work_status: AgentWorkStatus::Unreported,
         })
         .expect("owner projection");
     state

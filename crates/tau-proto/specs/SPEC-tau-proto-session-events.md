@@ -140,7 +140,10 @@ uses the same authority and persistence contract. See
 ## Shared agent navigation mode
 
 Every `agent.stats_updated` complete operational snapshot carries a required
-navigation mode independently of runtime state. Transient
+navigation mode independently of runtime state and the harness-owned canonical
+work-status phase/title. The status is `unreported` without an accepted report;
+reported phases require the validated canonical title, while `unknown` retains
+an optional last valid title after the harness invalidates prior work. Transient
 `ui.set_agent_navigation_mode` requests absolute changes; requester-directed
 results acknowledge processing but do not replace the authoritative snapshot.
 Successful admission of an authenticated visible human `ui.prompt_submitted` to

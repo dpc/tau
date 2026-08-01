@@ -4259,6 +4259,7 @@ fn agent_stats_does_not_overwrite_display_name() {
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
 
     let display_names = renderer.agent_display_names();
@@ -4290,6 +4291,7 @@ fn agent_cost_projection_tracks_renderer_session_authority() {
             tools: tau_proto::AgentToolStats::default(),
             context: tau_proto::AgentContextStats::default(),
             estimated_api_cost: cost,
+            work_status: Default::default(),
         })
     };
 
@@ -4355,6 +4357,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         literal: false,
@@ -4398,6 +4401,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
     let navigation = renderer.agent_navigation();
     let navigation = navigation.lock().expect("agent navigation");
@@ -4468,6 +4472,7 @@ fn apply_test_navigation_mode(renderer: &mut EventRenderer, mode: tau_proto::Age
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
 }
 
@@ -4567,6 +4572,7 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
@@ -4618,6 +4624,7 @@ fn delegated_agent_effectiveness_follows_stats_not_start_result() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
     renderer.handle(&Event::StartAgentResult(tau_proto::StartAgentResult {
         query_id: "q-worker".to_owned(),
@@ -4675,6 +4682,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
     renderer.handle(&Event::AgentPromptSubmitted(prompt.clone()));
     assert_eq!(
@@ -4719,6 +4727,7 @@ fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
         tools: Default::default(),
         context: Default::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
     apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Active);
     renderer.handle(&Event::SessionAgentUnloaded(
@@ -4957,6 +4966,7 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
     sync(&handle);
     assert!(!vt.screen_contains(90, "running [engineer_1]"));
@@ -7708,6 +7718,7 @@ fn model_status_shows_selected_agent_estimated_cost() {
         tools: tau_proto::AgentToolStats::default(),
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: tau_proto::EstimatedApiCost::from_picodollars(2_140_000_000_000),
+        work_status: Default::default(),
     }));
     sync(&handle);
 
@@ -8332,6 +8343,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
     sync(&handle);
     let status_row = vt
@@ -9569,6 +9581,7 @@ fn watched_agent_stats_redraw_active_indicator() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
 
     assert!(
@@ -9821,6 +9834,7 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
     sync(&handle);
     assert!(eventually_screen_contains(
@@ -9842,6 +9856,7 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
     sync(&handle);
 
@@ -9912,6 +9927,7 @@ fn watched_agent_response_finished_removes_active_indicator() {
         },
         context: tau_proto::AgentContextStats::default(),
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     }));
 
     assert!(eventually_screen_contains(
@@ -12487,6 +12503,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
             percent_used: Some(67),
         },
         estimated_api_cost: Default::default(),
+        work_status: Default::default(),
     };
     let status = tau_proto::AgentWatchWorkStatusNotification {
         session_id: test_session_id("s1"),

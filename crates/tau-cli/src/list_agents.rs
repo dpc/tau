@@ -246,10 +246,9 @@ pub(crate) fn format_picker_rows(
             || ("-".to_owned(), dash()),
             |status| {
                 (
-                    work_status_phase_name(status.phase).to_owned(),
+                    work_status_phase_name(status.phase()).to_owned(),
                     status
-                        .title
-                        .as_deref()
+                        .title()
                         .map(tau_proto::visible_escape_metadata)
                         .as_deref()
                         .map(crate::line_output::escape_field)

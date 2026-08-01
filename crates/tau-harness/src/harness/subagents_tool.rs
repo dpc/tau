@@ -1215,6 +1215,7 @@ impl Harness {
                 self.notify_agent_watcher_work_status(&watcher_id, &watched_agent_id, false);
             }
         }
+        self.emit_agent_stats_updated(conversation_id);
         Ok(changed)
     }
 

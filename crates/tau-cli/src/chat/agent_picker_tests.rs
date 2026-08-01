@@ -17,10 +17,13 @@ fn auto_entry(runtime_state: tau_proto::AgentRuntimeState) -> tau_proto::Session
             role: "engineer".to_owned(),
             display_name: None,
         },
-        work_status: Some(tau_proto::SessionAgentWorkStatus {
-            phase: tau_proto::AgentWorkStatusPhase::Working,
-            title: Some("shipping picker status".to_owned()),
-        }),
+        work_status: Some(
+            tau_proto::SessionAgentWorkStatus::new(
+                tau_proto::AgentWorkStatusPhase::Working,
+                Some("shipping picker status".to_owned()),
+            )
+            .expect("valid status"),
+        ),
     }
 }
 
