@@ -57,6 +57,36 @@ pub enum ScenarioActionV2 {
         /// Complete assistant response.
         response: String,
     },
+    /// Return a validated standalone-compaction replacement window.
+    StandaloneCompaction {
+        /// Exact complete six-section summary returned by the provider.
+        summary: String,
+    },
+    /// Return text only after the prior standalone replacement is visible in
+    /// the next ordinary provider prompt.
+    CompactedText {
+        /// Exact latest user text.
+        user_text: String,
+        /// Exact summary that must survive in replacement context.
+        summary: String,
+        /// Earlier user text that the replacement must remove from context.
+        removed_user_text: String,
+        /// Complete assistant response.
+        response: String,
+    },
+    /// Complete a standalone compaction request with one terminal provider
+    /// error.
+    StandaloneCompactionError {
+        /// Safe machine-readable failure classification.
+        failure_kind: ProviderFailureKind,
+        /// Bounded synthetic diagnostic.
+        error: String,
+    },
+    /// Remain in a standalone compaction request until exact cancellation.
+    StandaloneCompactionHold {
+        /// Maximum hold duration before a typed timeout error is emitted.
+        timeout_ms: u64,
+    },
     /// Request the one allowlisted no-side-effect dummy tool.
     DummyToolCall {
         /// Exact latest user text.

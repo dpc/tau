@@ -284,6 +284,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                     ));
                 }
                 ScenarioActionV2::HoldUntilCancel { timeout_ms, .. }
+                | ScenarioActionV2::StandaloneCompactionHold { timeout_ms }
                     if !(100..=10_000).contains(timeout_ms) =>
                 {
                     return Err(ClientError::handler(
@@ -324,8 +325,10 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                 }
                 ScenarioActionV2::Error { error, .. }
                 | ScenarioActionV2::Disconnect { reason: error, .. }
-                    if error.is_empty() || error.len() > 256 =>
-                {
+                | ScenarioActionV2::StandaloneCompactionError {
+                    failure_kind: _,
+                    error,
+                } if error.is_empty() || error.len() > 256 => {
                     return Err(ClientError::handler(
                         "synthetic diagnostic must contain 1..=256 bytes",
                     ));

@@ -1,5 +1,55 @@
+use tau_proto::ProviderFailureKind;
+
 use super::*;
 use crate::ScenarioLaneV2;
+
+/// Ensures standalone-compaction capability stays disabled for ordinary
+/// scenarios and is published only by each dedicated closed action type.
+#[test]
+fn standalone_compaction_capability_requires_a_dedicated_action() {
+    let v1 = ScenarioConfig::V1(ScenarioV1::text_v1("ordinary", "ordinary"));
+    let ordinary_v2 = ScenarioConfig::V2(ScenarioV2::new(
+        "ordinary-v2",
+        vec![ScenarioLaneV2 {
+            ctx_id: "ordinary".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "ordinary".to_owned(),
+                response: "ordinary".to_owned(),
+            }],
+        }],
+    ));
+    for scenario in [&v1, &ordinary_v2] {
+        assert!(!scenario.enables_standalone_compaction());
+        assert!(
+            !model_snapshot(scenario.enables_standalone_compaction()).models[0]
+                .supports_standalone_compaction
+        );
+    }
+
+    for action in [
+        ScenarioActionV2::StandaloneCompaction {
+            summary: "Goal:\nsummary".to_owned(),
+        },
+        ScenarioActionV2::StandaloneCompactionError {
+            failure_kind: ProviderFailureKind::RequestRejected,
+            error: "rejected".to_owned(),
+        },
+        ScenarioActionV2::StandaloneCompactionHold { timeout_ms: 100 },
+    ] {
+        let scenario = ScenarioConfig::V2(ScenarioV2::new(
+            "standalone-enabled",
+            vec![ScenarioLaneV2 {
+                ctx_id: "standalone".to_owned(),
+                actions: vec![action],
+            }],
+        ));
+        assert!(scenario.enables_standalone_compaction());
+        assert!(
+            model_snapshot(scenario.enables_standalone_compaction()).models[0]
+                .supports_standalone_compaction
+        );
+    }
+}
 
 /// HumanUi fixture matching projects expected typed text and never invents a
 /// decoded semantic value from the intentionally non-injective provider form.

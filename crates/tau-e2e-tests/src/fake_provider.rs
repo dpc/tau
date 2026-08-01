@@ -77,6 +77,28 @@ enum ScenarioConfig {
     V2(ScenarioV2),
 }
 
+impl ScenarioConfig {
+    /// Returns whether the closed scenario explicitly exercises standalone
+    /// compaction, the fake's sole opt-in capability expansion.
+    fn enables_standalone_compaction(&self) -> bool {
+        matches!(
+            self,
+            Self::V2(scenario)
+                if scenario.lanes.iter().flat_map(|lane| &lane.actions).any(|action| {
+                    matches!(
+                        action,
+                        ScenarioActionV2::StandaloneCompaction { summary: _ }
+                            | ScenarioActionV2::StandaloneCompactionError {
+                                failure_kind: _,
+                                error: _,
+                            }
+                            | ScenarioActionV2::StandaloneCompactionHold { timeout_ms: _ }
+                    )
+                })
+        )
+    }
+}
+
 /// Mutable validated scenario, lane, hold, barrier, and checkpoint state.
 #[derive(Default)]
 struct FakeState {
@@ -315,6 +337,8 @@ impl TauExtension for FakeProvider {
                     .map_err(|error| ClientError::handler(format!("write trace: {error}")))?;
                 let checkpoint = cx.state_dir().map(|dir| dir.join("scenario-cursor.json"));
                 let restored = cx.config.scenario.restore_state(checkpoint.as_deref())?;
+                let supports_standalone_compaction =
+                    cx.config.scenario.enables_standalone_compaction();
                 cx.state.scenario = Some(cx.config.scenario);
                 cx.state.lane_cursors = restored.cursors;
                 cx.state.agent_lanes = restored.agent_lanes;
@@ -322,7 +346,9 @@ impl TauExtension for FakeProvider {
                 cx.state.checkpoint = checkpoint;
                 cx.state.trace = Some(Arc::new(Mutex::new(trace)));
                 cx.handle
-                    .emit_transient(Event::ProviderModelsDeclared(model_snapshot()))?;
+                    .emit_transient(Event::ProviderModelsDeclared(model_snapshot(
+                        supports_standalone_compaction,
+                    )))?;
                 Ok(())
             })
             .on_raw_routed_live(
@@ -375,7 +401,7 @@ impl FakeConfig {
     }
 }
 
-fn model_snapshot() -> ProviderModelsDeclared {
+fn model_snapshot(supports_standalone_compaction: bool) -> ProviderModelsDeclared {
     ProviderModelsDeclared {
         models: vec![ProviderModelInfo {
             id: FAKE_MODEL_ID.into(),
@@ -391,7 +417,7 @@ fn model_snapshot() -> ProviderModelsDeclared {
             verbosities: vec![Verbosity::Low],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
-            supports_standalone_compaction: false,
+            supports_standalone_compaction,
             standalone_compaction_threshold: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
@@ -1082,10 +1108,7 @@ impl FakeState {
         prompt: &tau_proto::AgentPromptCreated,
         handle: &tau_client::ClientHandle,
     ) -> ClientResult<()> {
-        if prompt.model.provider.as_str() != "fake"
-            || prompt.model.model.as_str() != "test"
-            || !prompt.operation.is_inference()
-        {
+        if prompt.model.provider.as_str() != "fake" || prompt.model.model.as_str() != "test" {
             return Err(self.mismatch(0, "model/operation mismatch"));
         }
         let lane_index = self.select_v2_lane(prompt)?;
@@ -1104,6 +1127,9 @@ impl FakeState {
                 "scenario first mismatch: lane {lane_id} already consumed"
             )));
         };
+        if !action.matches_operation(prompt.operation) {
+            return Err(self.mismatch(cursor, "prompt operation mismatch"));
+        }
         let action = match action {
             ScenarioActionV2::WatchNotifications {
                 notifications,
@@ -1276,6 +1302,35 @@ impl FakeState {
                     vec![assistant_message(response)],
                     ProviderStopReason::EndTurn,
                 )))
+            }
+            ScenarioActionV2::StandaloneCompaction { summary } => {
+                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+                    prompt,
+                    vec![assistant_message(summary)],
+                    ProviderStopReason::EndTurn,
+                )))
+            }
+            ScenarioActionV2::CompactedText {
+                user_text: _,
+                summary: _,
+                removed_user_text: _,
+                response,
+            } => handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+                prompt,
+                vec![assistant_message(response)],
+                ProviderStopReason::EndTurn,
+            ))),
+            ScenarioActionV2::StandaloneCompactionError {
+                failure_kind,
+                error,
+            } => {
+                let mut terminal = finished(prompt, Vec::new(), ProviderStopReason::Error);
+                terminal.error = Some(error);
+                terminal.failure_kind = Some(failure_kind);
+                handle.emit_transient(Event::ProviderResponseFinishedReported(terminal))
+            }
+            ScenarioActionV2::StandaloneCompactionHold { timeout_ms } => {
+                self.emit_hold_until_cancel(prompt, handle, timeout_ms)
             }
             ScenarioActionV2::DummyToolCall { call_id, .. } => {
                 let tool_name = ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME);
@@ -1674,6 +1729,39 @@ impl FakeState {
                 require_repaired_dummy_result(prompt, call_id, diagnostic)
                     .map_err(|detail| self.mismatch(cursor, detail))?;
             }
+            ScenarioActionV2::StandaloneCompaction { summary: _ }
+            | ScenarioActionV2::StandaloneCompactionError {
+                failure_kind: _,
+                error: _,
+            }
+            | ScenarioActionV2::StandaloneCompactionHold { timeout_ms: _ } => {
+                // The Chat Completions adapter owns static no-tools lowering.
+                // This provider seam instead proves the harness supplied the
+                // standalone operation and nonempty compactable transcript.
+                if prompt.context.blocks.is_empty() {
+                    return Err(self.mismatch(
+                        cursor,
+                        "standalone compaction request lacks transcript context",
+                    ));
+                }
+            }
+            ScenarioActionV2::CompactedText {
+                user_text: _,
+                summary,
+                removed_user_text,
+                response: _,
+            } => {
+                let context = serde_json::to_string(&prompt.context)
+                    .map_err(|error| ClientError::handler(error.to_string()))?;
+                if !context.contains(&summary.replace('\n', "\\n"))
+                    || context.contains(removed_user_text)
+                {
+                    return Err(self.mismatch(
+                        cursor,
+                        "replacement window did not replace prior transcript",
+                    ));
+                }
+            }
             ScenarioActionV2::AgentStartCall { .. } => {
                 let expects_agent_watch = self.v2()?.lanes.iter().any(|lane| {
                     lane.actions
@@ -2058,6 +2146,12 @@ impl ScenarioActionV2 {
     fn binding_user_text(&self) -> Option<&str> {
         match self {
             Self::Text { user_text, .. }
+            | Self::CompactedText {
+                user_text,
+                summary: _,
+                removed_user_text: _,
+                response: _,
+            }
             | Self::DummyToolCall { user_text, .. }
             | Self::DummyToolResult { user_text, .. }
             | Self::DummyToolRepair { user_text, .. }
@@ -2074,7 +2168,30 @@ impl ScenarioActionV2 {
             | Self::HoldUntilCancel { user_text, .. }
             | Self::Disconnect { user_text, .. }
             | Self::BarrierText { user_text, .. } => Some(user_text),
-            Self::WatchNotifications { .. } | Self::WatchNotificationChains { .. } => None,
+            Self::StandaloneCompaction { summary: _ }
+            | Self::StandaloneCompactionError {
+                failure_kind: _,
+                error: _,
+            }
+            | Self::StandaloneCompactionHold { timeout_ms: _ }
+            | Self::WatchNotifications { .. }
+            | Self::WatchNotificationChains { .. } => None,
+        }
+    }
+
+    /// Returns whether this closed action admits the provider operation it
+    /// explicitly models.
+    fn matches_operation(&self, operation: tau_proto::PromptOperation) -> bool {
+        match self {
+            Self::StandaloneCompaction { summary: _ }
+            | Self::StandaloneCompactionError {
+                failure_kind: _,
+                error: _,
+            }
+            | Self::StandaloneCompactionHold { timeout_ms: _ } => {
+                operation == tau_proto::PromptOperation::StandaloneCompaction
+            }
+            _ => operation.is_inference(),
         }
     }
 }

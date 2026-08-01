@@ -17,7 +17,9 @@ TAU_E2E_TAU_BIN=target/debug/tau cargo nextest run -p tau-e2e-tests --test core_
 ```
 
 The acceptance cases cover streaming/final text, a successful tool round
-through `tau-ext-test-dummy`, typed errors followed by an explicit later turn,
+through `tau-ext-test-dummy`, explicit local-only standalone-compaction
+replacement plus terminal provider-error/cancellation recovery and later
+continuation, typed errors followed by an explicit later turn,
 exact cancellation with same-agent post-cancel liveness, bounded holds, fatal
 provider disconnect without restart,
 clean resume, concurrent lane isolation, one production-`agent_start`

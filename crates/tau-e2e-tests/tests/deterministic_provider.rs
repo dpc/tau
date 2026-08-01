@@ -9,6 +9,8 @@ use tau_proto::{CborValue, Event, ProviderFailureKind, ToolResultKind};
 mod daemon_support;
 #[path = "deterministic_provider/session_restore.rs"]
 mod session_restore;
+#[path = "deterministic_provider/standalone_compaction.rs"]
+mod standalone_compaction;
 
 use daemon_support::*;
 

@@ -123,6 +123,14 @@ ownership. Provider cursor and harness journal writes are not transactional, so
 crash-exact replay is explicitly outside this boundary. The fixture does not
 claim broad terminal rendering or universal packaging.
 
+The local-summary-compaction acceptance actions are the fake's sole
+standalone-compaction opt-in: all other scenarios continue publishing that
+capability as false. They accept only a nonempty harness-owned compact
+transcript, bounded terminal error or cancellation hold, and one bounded
+replacement summary. The production Chat Completions adapter, not this generic
+provider seam, owns static no-tools wire lowering and transcript-v1 request
+materialization.
+
 S5 observes the existing bounded hold's prompt-correlated `hold_ready` trace
 only after its wait worker starts. The test correlates that live record with the
 same durable harness dispatch prompt and a separately decoded fake lane cursor,

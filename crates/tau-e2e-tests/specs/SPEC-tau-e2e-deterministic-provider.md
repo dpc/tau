@@ -230,6 +230,17 @@ standalone-compaction ownership is preserved. The cancellation terminal remains
 transient and late provider responses remain discarded. This proves
 warm-process liveness, not crash-exact cancellation persistence.
 
+The local-summary-compaction acceptance grammar is equally narrow. Only a V2
+scenario containing one of its dedicated standalone actions causes the fake to
+publish `supports_standalone_compaction`; every other scenario remains opted
+out. The actions accept a harness-owned compact prompt, a bounded complete
+replacement summary, terminal provider error, or exact cancellation hold. A
+following ordinary action validates that the replacement text remains while the
+discarded user text is absent. This proves harness transaction, durable
+replacement, and continuation semantics through the provider extension seam;
+the Chat Completions adapter's private static no-tools wire lowering and
+transcript-v1 request materialization stay covered at its production boundary.
+
 This boundary validates extension supervision, CBOR lifecycle, model routing,
 prompt assembly, provider-event validation, one real tool continuation, typed
 terminal error projection, exact cancellation with same-agent post-cancel
