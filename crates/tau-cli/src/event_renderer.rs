@@ -1271,9 +1271,9 @@ fn response_stats_indicator_suffix(stats: &tau_proto::ProviderResponseStats) -> 
         .first_semantic_output_elapsed_micros
         .map(path_std_time::Duration::from_micros)
         .map_or_else(String::new, |duration| {
-            format!(", first output {}", format_compact_duration(duration))
+            format!("{}, ", format_compact_duration(duration))
         });
-    format!(" ({elapsed_seconds}s{first_output}, {bytes}, Δ{delta_rate}, {total_rate})")
+    format!(" ({first_output}{elapsed_seconds}s, {bytes}, Δ{delta_rate}, {total_rate})")
 }
 
 fn format_compact_duration(duration: std::time::Duration) -> String {

@@ -7757,7 +7757,7 @@ fn provider_response_stats_update_suffixes_live_indicator_until_finish() {
         .first_semantic_output_elapsed_micros = Some(820_000);
     renderer.handle(&Event::ProviderResponseUpdated(first_output));
     sync(&handle);
-    assert!(vt.screen_contains(80, "… (2s, first output 820ms, 12KB, Δ8KB/s, 6KB/s)"));
+    assert!(vt.screen_contains(80, "… (820ms, 2s, 12KB, Δ8KB/s, 6KB/s)"));
     assert!(!vt.screen_contains(80, "shell_command"));
     assert!(!vt.screen_contains(80, "tool args"));
     assert!(!vt.screen_contains(80, "tools,"));
@@ -7777,7 +7777,7 @@ fn provider_response_stats_update_suffixes_live_indicator_until_finish() {
     }));
     sync(&handle);
     assert!(
-        vt.screen_contains(80, "… (2s, first output 820ms, 12KB, Δ8KB/s, 6KB/s)"),
+        vt.screen_contains(80, "… (820ms, 2s, 12KB, Δ8KB/s, 6KB/s)"),
         "updates without a fresh stats sample must not clear cached stats: {:?}",
         vt.screen_text(80)
     );
@@ -7798,7 +7798,7 @@ fn provider_response_stats_update_suffixes_live_indicator_until_finish() {
     renderer.handle(&Event::ProviderResponseUpdated(repeated));
     sync(&handle);
     assert!(
-        vt.screen_contains(80, "… (3s, first output 820ms, 12KB, Δ0B/s, 4KB/s)"),
+        vt.screen_contains(80, "… (820ms, 3s, 12KB, Δ0B/s, 4KB/s)"),
         "idle stats samples must show elapsed time, zero interval rate, and total rate: {:?}",
         vt.screen_text(80)
     );
@@ -7817,14 +7817,14 @@ fn provider_response_stats_update_suffixes_live_indicator_until_finish() {
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
-    assert!(!vt.screen_contains(80, "first output"));
+    assert!(!vt.screen_contains(80, "… (820ms,"));
 
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-progress",
         Vec::new(),
     )));
     sync(&handle);
-    assert!(!vt.screen_contains(80, "first output"));
+    assert!(!vt.screen_contains(80, "… (820ms,"));
 }
 
 /// First-output durations switch units at the approved five-second and
@@ -7845,13 +7845,13 @@ fn first_output_duration_uses_compact_boundaries() {
         main_provider_response_stats_update("sp-first-output-format", 0, 0),
     ));
     sync(&handle);
-    assert!(!vt.screen_contains(100, "first output"));
+    assert!(vt.screen_contains(100, "… (2s, 0B, Δ0B/s, 0B/s)"));
 
     for (micros, expected) in [
-        (4_999_999, "first output 4999ms"),
-        (5_000_000, "first output 5s"),
-        (299_999_999, "first output 299s"),
-        (300_000_000, "first output 5m"),
+        (4_999_999, "… (4999ms, 600s, 1B"),
+        (5_000_000, "… (5s, 600s, 1B"),
+        (299_999_999, "… (299s, 600s, 1B"),
+        (300_000_000, "… (5m, 600s, 1B"),
     ] {
         let mut update = provider_response_stats_update(
             "sp-first-output-format",
@@ -7939,12 +7939,12 @@ fn hidden_provider_response_stats_do_not_update_visible_response_indicator() {
         "hidden agent B stats must not render in agent A's view: {:?}",
         vt.screen_text(80)
     );
-    assert!(!vt.screen_contains(80, "first output"));
+    assert!(!vt.screen_contains(80, "… (820ms,"));
 
     renderer.switch_agent("agent_b".to_owned());
     sync(&handle);
     assert!(
-        vt.screen_contains(80, "… (2s, first output 820ms, 12KB, Δ8KB/s, 6KB/s)"),
+        vt.screen_contains(80, "… (820ms, 2s, 12KB, Δ8KB/s, 6KB/s)"),
         "hidden stats should be visible when switching to their owning agent: {:?}",
         vt.screen_text(80)
     );
@@ -8048,7 +8048,7 @@ fn late_provider_response_stats_after_finish_does_not_recreate_live_indicator() 
 
     assert!(vt.screen_contains(80, "done"));
     assert!(!vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
-    assert!(!vt.screen_contains(80, "first output"));
+    assert!(!vt.screen_contains(80, "… (820ms,"));
     assert!(!in_progress.load(std::sync::atomic::Ordering::Relaxed));
     assert!(!renderer.main_agent_turn_active_for_test());
 }
