@@ -61,14 +61,13 @@ agents:
           enable: true
           order: 10
           description: Lower-reasoning but fast individual contributor. Best for straightforward coding tasks.
-          effort: low
+          effort: decrease
         engineer:
           enable: true
           order: 20
           description: Capable individual contributor. Good default for most tasks.
-          effort: medium
         engineer-senior:
           enable: true
           order: 30
+          effort: increase
           description: Slow and expensive individual contributor using maximum reasoning. Use only for the hardest tasks without prior planning, or when specifically requested.
-          effort: high
