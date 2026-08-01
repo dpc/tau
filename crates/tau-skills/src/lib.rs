@@ -770,9 +770,16 @@ pub fn discover_skill_paths(root: &Path) -> Vec<PathBuf> {
 }
 
 fn discover_skill_paths_with_diagnostics(root: &Path) -> (Vec<PathBuf>, Vec<SkillDiagnostic>) {
+    discover_skill_paths_with_entry_limit(root, MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR)
+}
+
+fn discover_skill_paths_with_entry_limit(
+    root: &Path,
+    entry_limit: usize,
+) -> (Vec<PathBuf>, Vec<SkillDiagnostic>) {
     let mut paths = Vec::new();
     let mut state = DiscoveryState::new();
-    discover_skill_paths_inner(root, true, 0, &mut paths, &mut state);
+    discover_skill_paths_inner(root, true, 0, entry_limit, &mut paths, &mut state);
     (paths, state.diagnostics)
 }
 
@@ -780,6 +787,7 @@ fn discover_skill_paths_inner(
     dir: &Path,
     is_root: bool,
     depth: usize,
+    entry_limit: usize,
     out: &mut Vec<PathBuf>,
     state: &mut DiscoveryState,
 ) {
@@ -822,11 +830,11 @@ fn discover_skill_paths_inner(
 
     let mut children = Vec::new();
     for entry in entries.flatten() {
-        if children.len() >= MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR {
+        if children.len() >= entry_limit {
             state.push_warning(
                 dir,
                 format!(
-                    "skipping skill directory: entry budget exceeded (max {MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR} per directory)"
+                    "skipping skill directory: entry budget exceeded (max {entry_limit} per directory)"
                 ),
             );
             return;
@@ -881,7 +889,7 @@ fn discover_skill_paths_inner(
         };
 
         if metadata.is_dir() {
-            discover_skill_paths_inner(&path, false, depth + 1, out, state);
+            discover_skill_paths_inner(&path, false, depth + 1, entry_limit, out, state);
         } else if metadata.is_file() && is_root && name_str.ends_with(".md") {
             out.push(path);
         }
@@ -982,6 +990,13 @@ fn read_skill_discovery_content(path: &Path) -> Result<String, SkillDiagnostic> 
 /// diagnostic. Output skills are sorted by name so successive runs see the same
 /// order.
 pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> LoadSkillsResult {
+    load_skills_from_dirs_with_entry_limit(dirs, MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR)
+}
+
+fn load_skills_from_dirs_with_entry_limit(
+    dirs: &[PathBuf],
+    entry_limit: usize,
+) -> LoadSkillsResult {
     let dirs = dirs
         .iter()
         .cloned()
@@ -991,7 +1006,7 @@ pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> LoadSkillsResult {
             source_precedence: None,
         })
         .collect::<Vec<_>>();
-    load_skills_from_skill_dirs(&dirs)
+    load_skills_from_skill_dirs_with_entry_limit(&dirs, entry_limit)
 }
 
 /// Load skills from scoped directories, deduplicating by name.
@@ -1001,11 +1016,19 @@ pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> LoadSkillsResult {
 /// current repository. When both colliding roots provide explicit source
 /// precedence, lower precedence wins before modified time is considered.
 pub fn load_skills_from_skill_dirs(dirs: &[SkillDir]) -> LoadSkillsResult {
+    load_skills_from_skill_dirs_with_entry_limit(dirs, MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR)
+}
+
+fn load_skills_from_skill_dirs_with_entry_limit(
+    dirs: &[SkillDir],
+    entry_limit: usize,
+) -> LoadSkillsResult {
     let mut skills_by_name: BTreeMap<String, SelectedSkill> = BTreeMap::new();
     let mut all_diagnostics = Vec::new();
 
     for dir in dirs {
-        let (paths, discovery_diagnostics) = discover_skill_paths_with_diagnostics(&dir.path);
+        let (paths, discovery_diagnostics) =
+            discover_skill_paths_with_entry_limit(&dir.path, entry_limit);
         all_diagnostics.extend(discovery_diagnostics);
         for path in paths {
             let content = match read_skill_discovery_content(&path) {

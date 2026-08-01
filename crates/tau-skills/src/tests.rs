@@ -3,6 +3,7 @@ use std::{fs as path_std_fs, time as path_std_time};
 use super::*;
 
 const TOOL_VERIFICATION_ROOT: &str = "tau-tool-verification";
+const TEST_DIRECTORY_ENTRY_LIMIT: usize = 3;
 
 fn repository_tool_verification_skills() -> Vec<Skill> {
     let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1182,8 +1183,8 @@ fn load_from_dirs_follows_symlinked_root() {
 }
 
 fn create_entry_budget_overflow_fixture(dir: &Path) {
-    for index in 0..=MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR {
-        fs::create_dir(dir.join(format!("entry-{index:04}"))).expect("mkdir entry");
+    for index in 0..=TEST_DIRECTORY_ENTRY_LIMIT {
+        fs::write(dir.join(format!("entry-{index:04}")), b"entry").expect("write entry");
     }
 }
 
@@ -1191,10 +1192,14 @@ fn create_entry_budget_overflow_fixture(dir: &Path) {
 /// instead of allowing discovery to traverse an unbounded directory.
 #[test]
 fn load_from_dirs_diagnoses_overlarge_skill_root() {
+    assert_eq!(MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR, 1_024);
     let tmp = tempfile::tempdir().expect("tempdir");
     create_entry_budget_overflow_fixture(tmp.path());
 
-    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    let result = load_skills_from_dirs_with_entry_limit(
+        &[tmp.path().to_owned()],
+        TEST_DIRECTORY_ENTRY_LIMIT,
+    );
     assert!(result.skills.is_empty());
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.kind == DiagnosticKind::Warning
@@ -1208,12 +1213,16 @@ fn load_from_dirs_diagnoses_overlarge_skill_root() {
 fn load_from_dirs_diagnoses_overlarge_symlinked_directory() {
     use std::os::unix::fs::symlink;
 
+    assert_eq!(MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR, 1_024);
     let tmp = tempfile::tempdir().expect("tempdir");
     let outside = tempfile::tempdir().expect("outside tempdir");
     create_entry_budget_overflow_fixture(outside.path());
     symlink(outside.path(), tmp.path().join("link")).expect("symlink");
 
-    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    let result = load_skills_from_dirs_with_entry_limit(
+        &[tmp.path().to_owned()],
+        TEST_DIRECTORY_ENTRY_LIMIT,
+    );
     assert!(result.skills.is_empty());
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.kind == DiagnosticKind::Warning

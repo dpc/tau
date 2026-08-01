@@ -6,6 +6,8 @@ use tempfile::TempDir;
 
 use super::*;
 
+const TEST_DIRECTORY_ENTRY_LIMIT: usize = 3;
+
 fn runtime_override(temp: &TempDir) -> RuntimeDirOverride {
     override_test_runtime_dir(temp.path())
 }
@@ -630,15 +632,17 @@ fn running_session_list_sorts_and_retains_duplicate_identities() {
 /// than returning a partial set after a stale-file flood.
 #[test]
 fn running_session_list_fails_at_directory_entry_bound() {
+    assert_eq!(SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES, 4_096);
     let temp = TempDir::new().expect("temp runtime");
     let _guard = runtime_override(&temp);
     std::fs::create_dir_all(harnesses_dir()).expect("harnesses dir");
-    for index in 0..=SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES {
+    for index in 0..=TEST_DIRECTORY_ENTRY_LIMIT {
         std::fs::write(harnesses_dir().join(format!("junk-{index}")), b"junk")
             .expect("junk runtime entry");
     }
 
-    let error = list_running_sessions().expect_err("bounded listing");
+    let error = list_running_sessions_with_entry_limit(TEST_DIRECTORY_ENTRY_LIMIT)
+        .expect_err("bounded listing");
     assert!(
         error
             .to_string()
@@ -961,11 +965,12 @@ fn incomplete_scan_preserves_proven_ambiguity() {
 /// live claimant because an omitted entry could advertise the same session.
 #[test]
 fn find_harness_for_session_fails_closed_when_scan_is_incomplete() {
+    assert_eq!(SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES, 4_096);
     let temp = TempDir::new().expect("temp runtime");
     let _guard = runtime_override(&temp);
     let dir = harnesses_dir();
     std::fs::create_dir_all(&dir).expect("harnesses dir");
-    for index in 0..=SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES {
+    for index in 0..=TEST_DIRECTORY_ENTRY_LIMIT {
         std::fs::write(dir.join(format!("junk-{index:04}")), b"x").expect("junk entry");
     }
     let claimant = dir.join("claimant");
@@ -973,7 +978,12 @@ fn find_harness_for_session_fails_closed_when_scan_is_incomplete() {
     write_peer_metadata(&claimant, "bounded-session", temp.path(), true);
 
     assert!(matches!(
-        find_harness_for_session("bounded-session"),
+        find_harness_for_session_until_with_entry_limit(
+            "bounded-session",
+            Instant::now() + SESSION_DISCOVERY_TOTAL_TIMEOUT,
+            &AtomicBool::new(false),
+            TEST_DIRECTORY_ENTRY_LIMIT,
+        ),
         Err(FindHarnessForSessionError::Incomplete { .. })
     ));
     assert!(socket_path(&claimant).exists());

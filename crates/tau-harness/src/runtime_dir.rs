@@ -942,6 +942,12 @@ pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
 /// spawned, or the total probe deadline expires before every candidate is
 /// resolved.
 pub fn list_running_sessions() -> Result<Vec<RunningSession>, std::io::Error> {
+    list_running_sessions_with_entry_limit(SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES)
+}
+
+fn list_running_sessions_with_entry_limit(
+    entry_limit: usize,
+) -> Result<Vec<RunningSession>, std::io::Error> {
     let permit = DiscoveryCallPermit::try_acquire()
         .ok_or_else(|| running_session_list_incomplete("runtime scan capacity is busy"))?;
     let deadline = Instant::now() + SESSION_DISCOVERY_TOTAL_TIMEOUT;
@@ -954,7 +960,12 @@ pub fn list_running_sessions() -> Result<Vec<RunningSession>, std::io::Error> {
         .name("tau-running-session-scan".to_owned())
         .spawn(move || {
             let _permit = scan_permit;
-            let result = scan_running_session_candidates(&runtime_dir, deadline, &scan_cancelled);
+            let result = scan_running_session_candidates(
+                &runtime_dir,
+                deadline,
+                &scan_cancelled,
+                entry_limit,
+            );
             let _ = scan_tx.send(result);
         })
         .map_err(|error| {
@@ -1003,6 +1014,7 @@ fn scan_running_session_candidates(
     runtime_dir: &Path,
     deadline: Instant,
     cancelled: &AtomicBool,
+    entry_limit: usize,
 ) -> Result<Vec<PathBuf>, std::io::Error> {
     #[cfg(test)]
     let delay_ms = TEST_DISCOVERY_SCAN_DELAY
@@ -1020,14 +1032,14 @@ fn scan_running_session_candidates(
     }
     let mut entries = std::fs::read_dir(runtime_dir)?;
     let mut candidates = Vec::new();
-    for entries_visited in 0..=SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES {
+    for entries_visited in 0..=entry_limit {
         if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
             return Err(running_session_list_incomplete("runtime scan timed out"));
         }
         let Some(entry) = entries.next() else {
             return Ok(candidates);
         };
-        if entries_visited == SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES {
+        if entries_visited == entry_limit {
             return Err(running_session_list_incomplete(
                 "runtime directory entry limit reached",
             ));
@@ -1137,6 +1149,20 @@ pub(crate) fn find_harness_for_session_until(
     deadline: Instant,
     cancelled: &AtomicBool,
 ) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
+    find_harness_for_session_until_with_entry_limit(
+        session_id,
+        deadline,
+        cancelled,
+        SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES,
+    )
+}
+
+fn find_harness_for_session_until_with_entry_limit(
+    session_id: &str,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    entry_limit: usize,
+) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
     #[cfg(test)]
     if let Some(path) = TEST_SESSION_HARNESSES
         .lock()
@@ -1181,7 +1207,7 @@ pub(crate) fn find_harness_for_session_until(
         let Ok(entries) = std::fs::read_dir(&runtime_dir) else {
             return Err(incomplete_or_ambiguous(session_id, &matches));
         };
-        for entry in entries.take(SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES) {
+        for entry in entries.take(entry_limit) {
             if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
                 return Err(incomplete_or_ambiguous(session_id, &matches));
             }
@@ -1250,7 +1276,7 @@ pub(crate) fn find_harness_for_session_until(
                 return Err(incomplete_or_ambiguous(session_id, &matches));
             }
         }
-        scan_exhausted |= entries_visited == SESSION_LOOKUP_MAX_DIRECTORY_ENTRIES;
+        scan_exhausted |= entries_visited == entry_limit;
     }
     if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
         return Err(incomplete_or_ambiguous(session_id, &matches));
