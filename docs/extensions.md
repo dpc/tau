@@ -102,14 +102,17 @@ Tau-managed secrets, but it does not make them an operating-system sandbox. See
 
 Built-in defaults load first, followed by `harness.yaml`, lexically sorted
 `harness.d/*.yaml` or `*.yml` drop-ins, the selected profile, and ordered
-command-line overrides. Tau selects its built-in empty `profiles.default` when
-neither `--profile NAME` nor `TAU_PROFILE=NAME` selects one; the flag wins when
-both select a name. Named profiles do not inherit `profiles.default`: each
-profile independently patches the base layers. A profile can change only
+command-line overrides. `--profile NAME` wins over `TAU_PROFILE=NAME`; when
+neither selects a name, top-level `default_profile: NAME` selects a fallback.
+Omit `default_profile`, or set it to `null`, to load only base layers. Named
+profiles do not inherit the fallback profile: each profile independently
+patches the base layers. A profile can change only
 `enable` for a base-configured or built-in extension, and CLI overrides still
 win:
 
 ```yaml
+default_profile: focused
+
 profiles:
   focused:
     extensions:

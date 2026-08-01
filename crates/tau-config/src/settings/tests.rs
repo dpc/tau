@@ -69,33 +69,48 @@ fn enable_extensions_env_rejects_non_utf8() {
     assert!(parse_enable_extensions_env(Some(OsString::from_vec(vec![0xff]))).is_err());
 }
 
-/// Ensures an explicit CLI selection overrides `TAU_PROFILE`, while absent
-/// selection resolves the built-in default profile.
+/// Ensures explicit CLI and environment selectors take precedence over the
+/// layered top-level fallback, while no selector leaves no selected profile.
 #[test]
 fn selected_profile_prefers_cli_over_environment() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "default_profile: configured\n",
+    )
+    .expect("write default profile");
+    let dirs = dirs_with_config(td.path());
     assert_eq!(
-        selected_profile_from_sources(Some("cli"), Some("environment".into()))
+        selected_profile_in_from_sources(&dirs, Some("cli"), Some("environment".into()))
             .expect("valid profile selection")
+            .expect("CLI selection")
             .as_str(),
         "cli"
     );
     assert_eq!(
-        selected_profile_from_sources(None, Some("environment".into()))
+        selected_profile_in_from_sources(&dirs, None, Some("environment".into()))
             .expect("valid environment profile")
+            .expect("environment selection")
             .as_str(),
         "environment"
     );
     assert_eq!(
-        selected_profile_from_sources(None, None)
-            .expect("implicit default profile")
+        selected_profile_in_from_sources(&dirs, None, None)
+            .expect("configured fallback profile")
+            .expect("configured selection")
             .as_str(),
-        DEFAULT_PROFILE
+        "configured"
     );
     assert_eq!(
-        selected_profile_from_sources(Some(DEFAULT_PROFILE), None)
+        selected_profile_in_from_sources(&dirs, Some("configured"), None)
             .expect("explicit default profile")
+            .expect("explicit selection")
             .as_str(),
-        DEFAULT_PROFILE
+        "configured"
+    );
+    assert_eq!(
+        selected_profile_from_sources(None, None).expect("absent selection"),
+        None
     );
 }
 
@@ -2835,20 +2850,20 @@ agents:
     );
 }
 
-/// Ensures the built-in empty default profile makes an otherwise absent user
-/// profile selectable, so ordinary startup does not report `default` unknown.
+/// Ensures absent profile configuration loads only base settings instead of
+/// assuming a profile named `default`.
 #[test]
-fn implicit_default_profile_loads_without_user_profile_configuration() {
+fn absent_default_profile_loads_only_base_configuration() {
     let td = TempDir::new().expect("tempdir");
 
     let settings = load_harness_settings_in(&dirs_with_config(td.path()))
-        .expect("built-in default profile should load");
+        .expect("base configuration should load");
 
     assert!(settings.roles.contains_key("engineer"));
 }
 
-/// Ensures user and drop-in patches to the default profile merge, and that
-/// implicit selection has the same result as explicit `--profile default`.
+/// Ensures user and drop-in patches to the configured fallback profile merge,
+/// and that normal loading has the same result as explicit selection.
 #[test]
 fn default_profile_merges_user_and_drop_in_patches() {
     let td = TempDir::new().expect("tempdir");
@@ -2859,6 +2874,7 @@ extensions:
   local-tool:
     command: [tool]
     enable: true
+default_profile: default
 profiles:
   default:
     agents:
@@ -2884,8 +2900,8 @@ profiles:
     .expect("write default profile drop-in");
 
     let dirs = dirs_with_config(td.path());
-    let implicit = load_harness_settings_in(&dirs).expect("load implicit default profile");
-    let default = ProfileName::default();
+    let implicit = load_harness_settings_in(&dirs).expect("load configured default profile");
+    let default = profile_name("default");
     let explicit =
         load_harness_settings_with_profile_and_cli_overrides_in(&dirs, Some(&default), &[], &[])
             .expect("load explicit default profile");
@@ -2899,8 +2915,56 @@ profiles:
     );
 }
 
+/// Ensures an explicit null in a later base layer clears an earlier fallback
+/// selection, so callers load only base configuration.
+#[test]
+fn default_profile_null_clears_an_earlier_layer() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+default_profile: focused
+profiles:
+  focused:
+    agents:
+      default_role: engineer-senior
+"#,
+    )
+    .expect("write fallback profile");
+    std::fs::create_dir(td.path().join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        td.path().join("harness.d/20-clear.yaml"),
+        "default_profile: null\n",
+    )
+    .expect("clear fallback profile");
+
+    let dirs = dirs_with_config(td.path());
+    assert_eq!(
+        default_profile_in(&dirs).expect("read cleared fallback"),
+        None
+    );
+    let settings = load_harness_settings_in(&dirs).expect("load base settings");
+    assert_eq!(settings.default_role.as_deref(), Some("engineer"));
+}
+
+/// Ensures a configured fallback still validates its named profile rather than
+/// silently falling back to base settings when its target is absent.
+#[test]
+fn default_profile_reports_an_unknown_target() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(td.path().join("harness.yaml"), "default_profile: missing\n")
+        .expect("write missing fallback");
+
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("unknown fallback profile");
+    assert_eq!(
+        error.to_string(),
+        "unknown configuration profile: `missing`"
+    );
+}
+
 /// Ensures an explicit named profile remains an independent base-layer patch
-/// rather than inheriting the fallback default profile.
+/// rather than inheriting the configured fallback profile.
 #[test]
 fn explicit_named_profile_does_not_inherit_default_profile() {
     let td = TempDir::new().expect("tempdir");
@@ -2911,6 +2975,7 @@ extensions:
   local-tool:
     command: [tool]
     enable: true
+default_profile: default
 profiles:
   default:
     extensions:

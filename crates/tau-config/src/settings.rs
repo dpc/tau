@@ -703,6 +703,10 @@ struct HarnessSettingsWire {
     /// effective settings, so they never enter [`HarnessSettings`].
     #[serde(default, rename = "profiles")]
     _profiles: BTreeMap<String, HarnessProfile>,
+    /// Base-layer fallback profile selection. The loader consumes this before
+    /// applying a profile, so it never enters [`HarnessSettings`].
+    #[serde(default, rename = "default_profile")]
+    _default_profile: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1085,6 +1089,17 @@ struct HarnessProfileExtension {
 struct HarnessProfiles {
     /// Raw profile patches keyed by the selectable profile name.
     profiles: BTreeMap<String, HarnessProfile>,
+}
+
+/// Top-level base configuration used only to select a fallback profile.
+///
+/// This intentionally does not deserialize the effective harness schema:
+/// selection must finish before any selected-profile patch is considered.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct HarnessDefaultProfile {
+    /// Named profile selected when no CLI or environment selector is present.
+    default_profile: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -2320,10 +2335,8 @@ impl std::error::Error for SettingsError {
 /// Environment variable selecting a named harness configuration profile.
 pub const TAU_PROFILE_ENV: &str = "TAU_PROFILE";
 
-/// Built-in profile selected when neither the CLI nor environment selects one.
-pub const DEFAULT_PROFILE: &str = "default";
-
-/// A validated profile name selected from the CLI or environment.
+/// A validated profile name selected from the CLI, environment, or base
+/// configuration fallback.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProfileName(String);
 
@@ -2353,26 +2366,45 @@ impl fmt::Display for ProfileName {
     }
 }
 
-impl Default for ProfileName {
-    fn default() -> Self {
-        Self(DEFAULT_PROFILE.to_owned())
-    }
-}
-
 /// Resolves the profile selected by a CLI flag or [`TAU_PROFILE_ENV`].
 ///
-/// An explicit CLI value wins over the environment; otherwise this returns the
-/// built-in [`DEFAULT_PROFILE`]. Empty selections fail so typoed shell
-/// expansions do not silently select the fallback profile.
-pub fn selected_profile(cli_profile: Option<&str>) -> Result<ProfileName, SettingsError> {
-    selected_profile_from_sources(cli_profile, std::env::var_os(TAU_PROFILE_ENV))
+/// An explicit CLI value wins over the environment, which both win over the
+/// top-level `default_profile` from layered base configuration. Empty
+/// selections fail so typoed shell expansions do not silently select no
+/// profile.
+pub fn selected_profile(cli_profile: Option<&str>) -> Result<Option<ProfileName>, SettingsError> {
+    selected_profile_in(&TauDirs::default(), cli_profile)
+}
+
+/// Resolves a profile for one explicit directory layout.
+///
+/// This reads only base configuration while finding `default_profile`, so a
+/// profile cannot influence which profile is selected.
+pub fn selected_profile_in(
+    dirs: &TauDirs,
+    cli_profile: Option<&str>,
+) -> Result<Option<ProfileName>, SettingsError> {
+    selected_profile_in_from_sources(dirs, cli_profile, std::env::var_os(TAU_PROFILE_ENV))
+}
+
+/// Resolves a profile from an explicit directory layout and already-read
+/// command-line and environment sources.
+fn selected_profile_in_from_sources(
+    dirs: &TauDirs,
+    cli_profile: Option<&str>,
+    environment_profile: Option<OsString>,
+) -> Result<Option<ProfileName>, SettingsError> {
+    match selected_profile_from_sources(cli_profile, environment_profile)? {
+        Some(profile) => Ok(Some(profile)),
+        None => default_profile_in(dirs),
+    }
 }
 
 /// Resolves a profile from already-read CLI and environment sources.
 fn selected_profile_from_sources(
     cli_profile: Option<&str>,
     environment_profile: Option<OsString>,
-) -> Result<ProfileName, SettingsError> {
+) -> Result<Option<ProfileName>, SettingsError> {
     let profile = match cli_profile {
         Some(profile) => Some(profile.to_owned()),
         None => environment_profile
@@ -2386,8 +2418,8 @@ fn selected_profile_from_sources(
             .transpose()?,
     };
     match profile {
-        Some(profile) => ProfileName::parse(profile),
-        None => Ok(ProfileName::default()),
+        Some(profile) => ProfileName::parse(profile).map(Some),
+        None => Ok(None),
     }
 }
 
@@ -2584,7 +2616,7 @@ pub fn load_testing_settings(dirs: &TauDirs) -> Result<Option<TestingSettings>, 
     Ok(Some(settings))
 }
 
-/// Loads the implicit [`DEFAULT_PROFILE`] over `harness.yaml` and
+/// Loads a configured fallback profile, if any, over `harness.yaml` and
 /// `harness.d/*.yaml` overrides.
 pub fn load_harness_settings() -> Result<HarnessSettings, SettingsError> {
     load_harness_settings_in(&TauDirs::default())
@@ -2612,22 +2644,39 @@ pub fn load_harness_settings_with_cli_overrides_in(
     role_overrides: &[RoleCliOverride],
     harness_config_overrides: &[HarnessConfigCliOverride],
 ) -> Result<HarnessSettings, SettingsError> {
-    let profile = ProfileName::default();
+    let profile = default_profile_in(dirs)?;
     load_harness_settings_with_profile_and_cli_overrides_in(
         dirs,
-        Some(&profile),
+        profile.as_ref(),
         role_overrides,
         harness_config_overrides,
     )
+}
+
+/// Reads the top-level profile fallback from built-in, user, and drop-in base
+/// layers without applying any profile or command-line override.
+///
+/// An absent or explicit-null value selects no profile. A nonempty value names
+/// one profile which the caller must load and validate normally.
+pub fn default_profile_in(dirs: &TauDirs) -> Result<Option<ProfileName>, SettingsError> {
+    let fallback: HarnessDefaultProfile = load_yaml_layered_with_builtin_and_harness_overrides(
+        BUILT_IN_HARNESS_YAML,
+        dirs.config_dir.as_deref(),
+        "harness",
+        &[],
+        &[],
+    )?;
+    fallback.default_profile.map(ProfileName::parse).transpose()
 }
 
 /// Loads settings with an optional explicitly supplied profile after file
 /// layers and before command-line configuration and role overrides.
 ///
 /// Callers that select profiles through process environment should resolve that
-/// selection with [`selected_profile`] and pass the result here. This explicit
-/// boundary keeps deterministic callers independent from ambient environment;
-/// `None` deliberately loads only base layers for profile validation.
+/// selection with [`selected_profile_in`] for the same directory layout and
+/// pass the result here. This explicit boundary keeps deterministic callers
+/// independent from ambient environment; `None` deliberately loads only base
+/// layers for profile validation.
 pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     dirs: &TauDirs,
     profile_name: Option<&ProfileName>,

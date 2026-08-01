@@ -42,12 +42,13 @@
 # first role.
 #   default_role: engineer
 
-# Optional startup profile patches apply after base config/drop-ins and before
-# CLI overrides. Tau selects `default` when neither `--profile` nor
-# `TAU_PROFILE` selects another profile, so use it for ordinary local defaults
-# while keeping shared base configuration here.
-# Profiles do not inherit from `default`; `--profile focused` applies only
+# `default_profile` optionally selects a named fallback after base config/drop-ins
+# and before CLI overrides. `--profile` and `TAU_PROFILE` take precedence. Omit
+# it (or set it to `null`) to load only base configuration when neither explicit
+# selector is present.
+# Profiles do not inherit from the fallback; `--profile focused` applies only
 # `profiles.focused`.
+# default_profile: default
 # profiles:
 #   default:
 #     agents:

@@ -2,11 +2,11 @@
 
 Agent roles are named aliases for the model and model-behavior settings Tau should use for agent turns.
 
-Harness configuration can place role-default patches under
-`profiles.default`. Tau selects that built-in profile whenever neither
-`--profile` nor `TAU_PROFILE` names one, so it is a useful place for ordinary
-local defaults without repeating base configuration. `--profile focused`
-selects only `profiles.focused`; it does not inherit `profiles.default`.
+Harness configuration can name a fallback profile with top-level
+`default_profile: local`. Tau uses it when neither `--profile` nor
+`TAU_PROFILE` names one; omit it, or set it to `null`, to use only base
+configuration. `--profile focused` selects only `profiles.focused`; it does
+not inherit the fallback profile.
 
 `agents`, a role group, and a role can set these provider/model fields:
 
@@ -106,8 +106,10 @@ for example `--harness-config 'agents.promptFragments=[{ name: "run.policy", pri
 
 Use `profiles` for named, opt-in role adjustments without replacing normal base
 configuration. `tau --profile focused` selects a profile; `TAU_PROFILE=focused`
-does the same when the flag is absent. Tau rejects an unknown name. The selected
-profile loads after `harness.yaml` and `harness.d` files, but before
+does the same when the flag is absent. Otherwise, `default_profile: focused`
+selects a fallback; omit it or set it to `null` to source no profile. Tau
+rejects an unknown selected name. The selected profile loads after
+`harness.yaml` and `harness.d` files, but before
 `--harness-config` and role CLI overrides, so a relative profile setting uses the
 base setting as its starting point:
 
@@ -136,7 +138,8 @@ Profiles do not expose unrelated harness settings; keep those in base files or
 use a normal command-line override.
 
 `tau component harness` runs in the current process, so it cannot apply
-`--profile`; set `TAU_PROFILE` before launching that component instead. Normal
+`--profile`; its normal base-configured `default_profile` still applies, and
+set `TAU_PROFILE` before launching it to override that fallback. Normal
 `tau --profile NAME` startup and render commands forward the resolved selection
 to their spawned harness daemon.
 

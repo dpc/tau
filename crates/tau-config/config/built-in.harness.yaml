@@ -18,10 +18,6 @@ tool_policy:
         - shell:exec:shell_command
         - shell:workdir
         - shell:lock
-profiles:
-  # The loader selects this profile when --profile and TAU_PROFILE are absent.
-  # User config and drop-ins can patch it without duplicating base settings.
-  default: {}
 agents:
   default_role: engineer
   id_template: "{{random_alphanumeric 6}}"

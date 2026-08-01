@@ -20,8 +20,9 @@ overrides.
   config layers and must preserve command-line order.
 - A selected `profiles.<name>` patch loads after built-in/user/drop-in files and
   before `--harness-config` layers. `--profile <name>` wins over `TAU_PROFILE`;
-  when neither selects a name, Tau selects the built-in `profiles.default: {}`
-  profile. An unknown selected name is an explicit error.
+  when neither selects a name, top-level base-layer `default_profile` selects a
+  fallback profile. An absent or null `default_profile` sources no profile. An
+  unknown selected name is an explicit error.
 - Config discovery is fallible: unreadable base paths, unreadable drop-in
   directories, bad directory entries, and non-directory `*.d` paths are explicit
   config errors.
@@ -136,10 +137,11 @@ explicit subset avoids a second universal recursive merge schema. Its role
 patches replay after base file layers, so relative values resolve against base
 settings, and before CLI role or `--harness-config` patches.
 
-Tau ships `profiles.default: {}` and selects it when no CLI or environment
-profile is named. User `harness.yaml` and ordered `harness.d` files can patch
-that profile normally. Selecting another profile does not also apply
-`profiles.default`; profiles remain independent patches over the base layers.
+`default_profile` is base selection configuration, evaluated from built-in,
+user, and ordered `harness.d` layers before profile loading. A later null value
+clears an earlier fallback. It is not read from a profile. Selecting a named
+profile does not also apply the fallback profile; profiles remain independent
+patches over the base layers.
 
 ## Extension names and paths
 

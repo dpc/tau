@@ -96,6 +96,37 @@ fn resolve_config_in_uses_supplied_config_dir() {
     );
 }
 
+/// Ensures deterministic direct-harness startup uses the configured fallback
+/// profile through its no-environment settings loader.
+#[test]
+fn resolve_config_without_environment_uses_configured_default_profile() {
+    let tempdir = TempDir::new().expect("tempdir");
+    std::fs::write(
+        tempdir.path().join("harness.yaml"),
+        r#"
+default_profile: focused
+profiles:
+  focused:
+    extensions:
+      core-shell:
+        enable: false
+"#,
+    )
+    .expect("write harness config");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(tempdir.path().to_path_buf()),
+        state_dir: None,
+    };
+
+    let (settings, error) = load_harness_settings_without_environment_or_warn(&dirs);
+    assert!(error.is_none());
+    assert_eq!(settings.extensions["core-shell"].enable, Some(false));
+
+    let config = resolve_config_in_without_environment(&dirs).expect("resolve configured fallback");
+
+    assert!(!config.extensions.contains_key("core-shell"));
+}
+
 /// Ensures profile extension toggles name real built-ins or base-configured
 /// extensions, so a disabled typo cannot leave the actual built-in enabled.
 #[test]
