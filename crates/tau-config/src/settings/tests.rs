@@ -69,27 +69,33 @@ fn enable_extensions_env_rejects_non_utf8() {
     assert!(parse_enable_extensions_env(Some(OsString::from_vec(vec![0xff]))).is_err());
 }
 
-/// Ensures an explicit CLI selection overrides `TAU_PROFILE`, while an absent
-/// flag preserves the environment selection for direct harness startup.
+/// Ensures an explicit CLI selection overrides `TAU_PROFILE`, while absent
+/// selection resolves the built-in default profile.
 #[test]
 fn selected_profile_prefers_cli_over_environment() {
     assert_eq!(
         selected_profile_from_sources(Some("cli"), Some("environment".into()))
             .expect("valid profile selection")
-            .as_ref()
-            .map(ProfileName::as_str),
-        Some("cli")
+            .as_str(),
+        "cli"
     );
     assert_eq!(
         selected_profile_from_sources(None, Some("environment".into()))
             .expect("valid environment profile")
-            .as_ref()
-            .map(ProfileName::as_str),
-        Some("environment")
+            .as_str(),
+        "environment"
     );
     assert_eq!(
-        selected_profile_from_sources(None, None).expect("absent profile"),
-        None
+        selected_profile_from_sources(None, None)
+            .expect("implicit default profile")
+            .as_str(),
+        DEFAULT_PROFILE
+    );
+    assert_eq!(
+        selected_profile_from_sources(Some(DEFAULT_PROFILE), None)
+            .expect("explicit default profile")
+            .as_str(),
+        DEFAULT_PROFILE
     );
 }
 
@@ -2785,6 +2791,106 @@ agents:
         settings.roles["precedence-senior"].verbosity,
         Some(tau_proto::Verbosity::Low)
     );
+}
+
+/// Ensures the built-in empty default profile makes an otherwise absent user
+/// profile selectable, so ordinary startup does not report `default` unknown.
+#[test]
+fn implicit_default_profile_loads_without_user_profile_configuration() {
+    let td = TempDir::new().expect("tempdir");
+
+    let settings = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect("built-in default profile should load");
+
+    assert!(settings.roles.contains_key("engineer"));
+}
+
+/// Ensures user and drop-in patches to the default profile merge, and that
+/// implicit selection has the same result as explicit `--profile default`.
+#[test]
+fn default_profile_merges_user_and_drop_in_patches() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+extensions:
+  local-tool:
+    command: [tool]
+    enable: true
+profiles:
+  default:
+    agents:
+      default_role: default-role
+      role_groups:
+        default:
+          roles:
+            default-role: {}
+"#,
+    )
+    .expect("write default profile");
+    std::fs::create_dir(td.path().join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        td.path().join("harness.d/20-default.yaml"),
+        r#"
+profiles:
+  default:
+    extensions:
+      local-tool:
+        enable: false
+"#,
+    )
+    .expect("write default profile drop-in");
+
+    let dirs = dirs_with_config(td.path());
+    let implicit = load_harness_settings_in(&dirs).expect("load implicit default profile");
+    let default = ProfileName::default();
+    let explicit =
+        load_harness_settings_with_profile_and_cli_overrides_in(&dirs, Some(&default), &[], &[])
+            .expect("load explicit default profile");
+
+    assert_eq!(implicit.default_role.as_deref(), Some("default-role"));
+    assert_eq!(implicit.extensions["local-tool"].enable, Some(false));
+    assert_eq!(explicit.default_role, implicit.default_role);
+    assert_eq!(
+        explicit.extensions["local-tool"].enable,
+        implicit.extensions["local-tool"].enable
+    );
+}
+
+/// Ensures an explicit named profile remains an independent base-layer patch
+/// rather than inheriting the fallback default profile.
+#[test]
+fn explicit_named_profile_does_not_inherit_default_profile() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+extensions:
+  local-tool:
+    command: [tool]
+    enable: true
+profiles:
+  default:
+    extensions:
+      local-tool:
+        enable: false
+  focused:
+    agents:
+      default_role: engineer-senior
+"#,
+    )
+    .expect("write independent profiles");
+
+    let dirs = dirs_with_config(td.path());
+    let implicit = load_harness_settings_in(&dirs).expect("load implicit default profile");
+    let focused = profile_name("focused");
+    let explicit =
+        load_harness_settings_with_profile_and_cli_overrides_in(&dirs, Some(&focused), &[], &[])
+            .expect("load explicit named profile");
+
+    assert_eq!(implicit.extensions["local-tool"].enable, Some(false));
+    assert_eq!(explicit.extensions["local-tool"].enable, Some(true));
+    assert_eq!(explicit.default_role.as_deref(), Some("engineer-senior"));
 }
 
 /// Ensures a role introduced by a selected profile inherits the group defaults

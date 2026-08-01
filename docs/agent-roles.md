@@ -2,6 +2,12 @@
 
 Agent roles are named aliases for the model and model-behavior settings Tau should use for agent turns.
 
+Harness configuration can place role-default patches under
+`profiles.default`. Tau selects that built-in profile whenever neither
+`--profile` nor `TAU_PROFILE` names one, so it is a useful place for ordinary
+local defaults without repeating base configuration. `--profile focused`
+selects only `profiles.focused`; it does not inherit `profiles.default`.
+
 `agents`, a role group, and a role can set these provider/model fields:
 
 - `model`: qualified model id, in `provider/model` form

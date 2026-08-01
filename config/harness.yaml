@@ -42,6 +42,20 @@
 # first role.
 #   default_role: engineer
 
+# Optional startup profile patches apply after base config/drop-ins and before
+# CLI overrides. Tau selects `default` when neither `--profile` nor
+# `TAU_PROFILE` selects another profile, so use it for ordinary local defaults
+# while keeping shared base configuration here.
+# Profiles do not inherit from `default`; `--profile focused` applies only
+# `profiles.focused`.
+# profiles:
+#   default:
+#     agents:
+#       effort: high
+#   focused:
+#     agents:
+#       default_role: engineer-senior
+
 # Optional grouped role defaults. Role names are globally unique across all
 # groups. Tab cycles roles within the current group; Shift-Tab cycles to the
 # next role group. Group-level fields are defaults for every role in `roles`.

@@ -5,7 +5,6 @@
 //! Transcript presentation follows `SPEC-tau-cli-transcript-styling`.
 
 use tau_config::settings as path_tau_config_settings;
-use tau_config::settings::ProfileName;
 
 pub mod cli;
 
@@ -696,6 +695,8 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         }
         let selected_profile = tau_config::settings::selected_profile(harness.profile.as_deref())
             .map_err(|error| CliError::Participant(error.to_string()))?;
+        let profile_was_explicitly_selected = harness.profile.is_some()
+            || std::env::var_os(tau_config::settings::TAU_PROFILE_ENV).is_some();
         let reads_extension_environment = match &command {
             DispatchCommand::Startup { .. } => true,
             DispatchCommand::Other(cli::Command::Dev {
@@ -760,7 +761,8 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 command: cli::DevCommand::Tmux { .. },
             }) => {
                 reject_dev_tmux_startup_overrides(
-                    selected_profile.as_ref().map(ProfileName::as_str),
+                    profile_was_explicitly_selected
+                        .then_some(tau_config::settings::DEFAULT_PROFILE),
                     harness.role.as_deref(),
                     &role_cli_overrides,
                     &extension_cli_overrides,
@@ -793,7 +795,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         }
 
         tau_harness::validate_cli_overrides_with_profile(
-            selected_profile.as_ref(),
+            Some(&selected_profile),
             &role_cli_overrides,
             &extension_cli_overrides,
             &harness_config_overrides,
@@ -801,7 +803,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         .map_err(|error| CliError::Participant(error.to_string()))?;
         if reads_extension_environment {
             tau_harness::validate_extension_environment_and_cli_overrides_with_profile(
-                selected_profile.as_ref(),
+                Some(&selected_profile),
                 &environment_extension_names,
                 &extension_cli_overrides,
                 &role_cli_overrides,
@@ -843,7 +845,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         session_status,
                         harness.role.as_deref(),
                         crate::daemon::DaemonCliOverrides {
-                            profile: selected_profile.as_ref(),
+                            profile: Some(&selected_profile),
                             role: &role_cli_overrides,
                             extension: &extension_cli_overrides,
                             extension_environment: None,
@@ -858,7 +860,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         session_status,
                         harness.role.as_deref(),
                         crate::daemon::DaemonCliOverrides {
-                            profile: selected_profile.as_ref(),
+                            profile: Some(&selected_profile),
                             role: &role_cli_overrides,
                             extension: &extension_cli_overrides,
                             extension_environment: None,
@@ -984,7 +986,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     print_prompt::run_print_prompt(
                         role,
                         enable_agents_md,
-                        selected_profile.as_ref(),
+                        Some(&selected_profile),
                         &role_cli_overrides,
                         &extension_cli_overrides,
                         &environment_extension_names,
@@ -996,7 +998,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         required_harness_role(harness.role.as_deref(), "print-system-prompt")?;
                     print_prompt::run_print_system_prompt(
                         role,
-                        selected_profile.as_ref(),
+                        Some(&selected_profile),
                         &role_cli_overrides,
                         &extension_cli_overrides,
                         &environment_extension_names,
@@ -1007,7 +1009,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     let role = required_harness_role(harness.role.as_deref(), "print-tools")?;
                     print_tools::run_print_tools(
                         role,
-                        selected_profile.as_ref(),
+                        Some(&selected_profile),
                         &role_cli_overrides,
                         &extension_cli_overrides,
                         &environment_extension_names,
