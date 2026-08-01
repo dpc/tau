@@ -175,7 +175,7 @@ fn register_swarm_tools(harness: &mut Harness, prefix: Option<&str>) {
         name: ToolGroupName::new(scoped_name("swarm")),
         prompt_fragment: None,
     };
-    for name in ["blocker", "swarm_update"] {
+    for name in ["blocker", "update"] {
         harness.registry.register_with_prompt_fragment(
             &crate::test_connection_id("swarm"),
             ToolRegistration {
@@ -286,7 +286,7 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
         .harness
         .gather_effective_tool_specs_for_role_model(ROLE, default.harness.selected_model.as_ref());
     assert!(!default_tools.iter().any(|tool| tool.name == "blocker"));
-    assert!(!default_tools.iter().any(|tool| tool.name == "swarm_update"));
+    assert!(!default_tools.iter().any(|tool| tool.name == "update"));
 
     let mut group_enabled = policy_harness(
         &[],
@@ -303,7 +303,8 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
             group_enabled.harness.selected_model.as_ref(),
         );
     assert!(group_tools.iter().any(|tool| tool.name == "blocker"));
-    assert!(group_tools.iter().any(|tool| tool.name == "swarm_update"));
+    assert!(group_tools.iter().any(|tool| tool.name == "update"));
+    assert!(!group_tools.iter().any(|tool| tool.name == "swarm_update"));
 
     let mut exact_enabled = policy_harness(
         &[],
@@ -320,7 +321,7 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
             exact_enabled.harness.selected_model.as_ref(),
         );
     assert!(exact_tools.iter().any(|tool| tool.name == "blocker"));
-    assert!(!exact_tools.iter().any(|tool| tool.name == "swarm_update"));
+    assert!(!exact_tools.iter().any(|tool| tool.name == "update"));
 
     let mut prefixed = policy_harness(
         &[],
@@ -338,8 +339,9 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
             .iter()
             .any(|tool| tool.name == "work_blocker")
     );
+    assert!(prefixed_tools.iter().any(|tool| tool.name == "work_update"));
     assert!(
-        prefixed_tools
+        !prefixed_tools
             .iter()
             .any(|tool| tool.name == "work_swarm_update")
     );

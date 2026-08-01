@@ -18,6 +18,9 @@ use crate::runtime::SwarmRuntime;
 /// Logical tool group shared by Tau Swarm's model-visible tools.
 pub const TOOL_GROUP_NAME: &str = "swarm";
 
+/// Public name of Tau Swarm's immutable status-update tool.
+const UPDATE_TOOL_NAME: &str = "update";
+
 /// One process-memory blocker record exposed by `blocker(action="list")`.
 #[derive(Clone)]
 pub(crate) struct BlockerRecord {
@@ -121,7 +124,7 @@ enum BlockerArgs {
     List {},
 }
 
-/// Strict immutable payload accepted by `swarm_update`.
+/// Strict immutable payload accepted by `update`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateArgs {
@@ -143,7 +146,7 @@ pub(crate) fn register(builder: &mut ExtensionBuilder<SwarmRuntime>) {
             handle_blocker,
         )
         .scoped_tool(
-            tau_proto::ToolName::new("swarm_update"),
+            tau_proto::ToolName::new(UPDATE_TOOL_NAME),
             |_| Ok(declaration(update_spec())),
             handle_update,
         );
@@ -202,7 +205,7 @@ fn blocker_spec() -> ToolSpec {
 
 fn update_spec() -> ToolSpec {
     common_spec(
-        "swarm_update",
+        UPDATE_TOOL_NAME,
         "Publish an immutable process-memory status update to Tau Swarm.",
         serde_json::json!({
             "type":"object",

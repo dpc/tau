@@ -5,7 +5,7 @@
 The bundled `std-swarm` instance is disabled by default and optional
 (`require: false`). See the [authoritative configuration, bounds, retry, and
 process-memory semantics](../crates/tau-ext-swarm/README.md). The extension
-registers the agent-scoped `blocker` action tool and `swarm_update`, but neither
+registers the agent-scoped `blocker` action tool and `update`, but neither
 is model-visible by default even after the extension starts. Opt in deliberately
 for selected roles:
 
@@ -16,10 +16,10 @@ agents:
       enable_tool_groups: [swarm]
 ```
 
-Use `enable_tools: [blocker]` or `enable_tools: [swarm_update]` for one exact
+Use `enable_tools: [blocker]` or `enable_tools: [update]` for one exact
 tool instead. These are unprefixed instance names. If the extension uses
 `tool_prefix: work`, use the final names `work_swarm`, `work_blocker`, and
-`work_swarm_update` in role policy instead.
+`work_update` in role policy instead.
 
 
 

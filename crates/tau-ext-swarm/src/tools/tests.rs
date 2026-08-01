@@ -11,11 +11,12 @@ use tokio::sync as path_tokio_sync;
 use super::*;
 use crate::application::SwarmApplication;
 
-/// Ensures connecting Tau Swarm does not expose its tools until a role opts
-/// into their shared group or exact names.
+/// Ensures Tau Swarm exposes the public `update` name, never the retired
+/// `swarm_update` name, while keeping both public tools disabled until a role
+/// opts into their shared group or exact names.
 #[test]
 fn swarm_tools_are_grouped_and_disabled_by_default() {
-    for (expected_name, tool) in [("blocker", blocker_spec()), ("swarm_update", update_spec())] {
+    for (expected_name, tool) in [("blocker", blocker_spec()), ("update", update_spec())] {
         assert_eq!(tool.name.as_str(), expected_name);
         assert_eq!(
             tool.model_visible_name
@@ -33,6 +34,8 @@ fn swarm_tools_are_grouped_and_disabled_by_default() {
             Some(TOOL_GROUP_NAME)
         );
     }
+    assert_eq!(UPDATE_TOOL_NAME, "update");
+    assert_ne!(UPDATE_TOOL_NAME, "swarm_update");
 }
 
 /// Ensures instance prefixes qualify the Swarm tool and group policy names
@@ -49,11 +52,7 @@ fn swarm_tool_declarations_apply_instance_prefixes() {
     let scope = tau_client::ToolNameScope::from_configure(&configure);
     for (expected_tool, expected_group, declaration) in [
         ("work_blocker", "work_swarm", declaration(blocker_spec())),
-        (
-            "work_swarm_update",
-            "work_swarm",
-            declaration(update_spec()),
-        ),
+        ("work_update", "work_swarm", declaration(update_spec())),
     ] {
         let declaration = scope
             .scope_registration(declaration)

@@ -25,7 +25,7 @@ This uses the existing
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md)
 interface rather than defining another prompt protocol.
 
-The extension registers `blocker` and `swarm_update` in the `swarm` tool group
+The extension registers `blocker` and `update` in the `swarm` tool group
 with default model exposure disabled. Starting or connecting the extension does
 not grant those tools to a role; role `enable_tool_groups: [swarm]` or exact
 `enable_tools` configuration opts in through the ordinary tool policy order.

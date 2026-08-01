@@ -17,7 +17,7 @@ discovery. Hints never replace or weaken the `peer_id` pin.
 
 The `blocker` tool supports `add`, `cancel`, and `list`. Listing returns the
 invoking agent's active, answered, and cancelled blockers for recovery after
-compaction. `swarm_update` publishes an immutable title/description and
+compaction. `update` publishes an immutable title/description and
 optional task ID. Ownership always comes from the invoking Tau agent, not tool
 arguments.
 
