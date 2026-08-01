@@ -1000,6 +1000,50 @@ fn agent_fzf_command_treats_cancel_statuses_as_cancel() {
     }
 }
 
+/// An empty agent roster still releases the terminal and starts fzf, so the
+/// picker action has the same observable path for every candidate count.
+#[cfg(unix)]
+#[test]
+fn agent_picker_empty_roster_still_invokes_fzf() {
+    let _guard = AGENT_FZF_TEST_LOCK.lock().expect("agent fzf test lock");
+    let program = fake_fzf("cat >/dev/null\nexit 1");
+    let (term, _handle, _input_tx) = new_test_term(vec![]);
+    let pause_count = path_std_rc::Rc::new(path_std_cell::Cell::new(0));
+    let resume_count = path_std_rc::Rc::new(path_std_cell::Cell::new(0));
+    let spawned = path_std_rc::Rc::new(path_std_cell::Cell::new(false));
+    let pause_state = pause_count.clone();
+    let resume_state = resume_count.clone();
+    let spawned_state = spawned.clone();
+
+    let selected = term
+        .pick_agent_row_with_command_and_terminal(
+            program.as_os_str(),
+            "",
+            AGENT_PICKER_TIMEOUT,
+            ProcessOwnership::ProcessGroup,
+            AgentPickerHooks {
+                pause: move || {
+                    pause_state.set(pause_state.get() + 1);
+                    Ok(())
+                },
+                resume: move || {
+                    resume_state.set(resume_state.get() + 1);
+                    Ok(())
+                },
+                after_spawn: move || {
+                    spawned_state.set(true);
+                    Ok(())
+                },
+            },
+        )
+        .expect("empty picker cancels");
+
+    assert_eq!(selected, None);
+    assert!(spawned.get());
+    assert_eq!(pause_count.get(), 1);
+    assert_eq!(resume_count.get(), 1);
+}
+
 /// Spawn failures and non-cancel statuses remain visible picker errors.
 #[cfg(unix)]
 #[test]

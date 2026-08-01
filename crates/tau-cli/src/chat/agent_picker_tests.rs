@@ -74,41 +74,72 @@ fn picker_orchestration_revalidates_with_initiating_category() {
     );
 }
 
-/// A sole eligible row is selected directly without invoking the external
-/// picker, while still passing through fresh-snapshot revalidation.
+/// Both picker categories launch the external picker for an empty roster, so
+/// cancellation preserves the current agent instead of producing a local
+/// notice.
 #[test]
-fn picker_selects_single_row_without_launching_external_picker() {
-    let running = auto_entry(tau_proto::AgentRuntimeState::Running);
-    let mut ineligible = auto_entry(tau_proto::AgentRuntimeState::Idle);
-    ineligible.agent_id =
-        tau_proto::AgentId::parse("ineligible").expect("valid ineligible agent id");
-    let picker_launched = path_std_cell::Cell::new(false);
-    let refresh_called = path_std_cell::Cell::new(false);
-
-    let result = resolve_agent_picker(
-        vec![running.clone(), ineligible],
+fn picker_launches_for_zero_candidates() {
+    for filter in [
         path_crate_list_agents::AgentPickerFilter::Active,
-        |_| None,
-        |_| {
-            picker_launched.set(true);
-            Ok(None)
-        },
-        || {
-            refresh_called.set(true);
-            Some(vec![running])
-        },
-        || true,
-        |agent_id| agent_id == "auto",
-    );
+        path_crate_list_agents::AgentPickerFilter::All,
+    ] {
+        let picker_launched = path_std_cell::Cell::new(false);
+        let refresh_called = path_std_cell::Cell::new(false);
+        let result = resolve_agent_picker(
+            Vec::new(),
+            filter,
+            |_| None,
+            |rows| {
+                picker_launched.set(true);
+                assert!(rows.is_empty());
+                Ok(None)
+            },
+            || {
+                refresh_called.set(true);
+                Some(Vec::new())
+            },
+            || true,
+            |_| false,
+        );
 
-    assert_eq!(
-        result,
-        AgentPickerResolution::Select(
-            tau_proto::AgentId::parse("auto").expect("valid selected agent id")
-        )
-    );
-    assert!(!picker_launched.get());
-    assert!(refresh_called.get());
+        assert_eq!(result, AgentPickerResolution::NoChange);
+        assert!(picker_launched.get());
+        assert!(!refresh_called.get());
+    }
+}
+
+/// Both picker categories launch the external picker for one candidate, so
+/// cancellation never automatically switches to that candidate.
+#[test]
+fn picker_launches_for_one_candidate() {
+    let running = auto_entry(tau_proto::AgentRuntimeState::Running);
+    for filter in [
+        path_crate_list_agents::AgentPickerFilter::Active,
+        path_crate_list_agents::AgentPickerFilter::All,
+    ] {
+        let picker_launched = path_std_cell::Cell::new(false);
+        let refresh_called = path_std_cell::Cell::new(false);
+        let result = resolve_agent_picker(
+            vec![running.clone()],
+            filter,
+            |_| None,
+            |rows| {
+                picker_launched.set(true);
+                assert!(rows.starts_with("auto\tlive\trunning\tactive_auto\t"));
+                Ok(None)
+            },
+            || {
+                refresh_called.set(true);
+                Some(vec![running.clone()])
+            },
+            || true,
+            |agent_id| agent_id == "auto",
+        );
+
+        assert_eq!(result, AgentPickerResolution::NoChange);
+        assert!(picker_launched.get());
+        assert!(!refresh_called.get());
+    }
 }
 
 /// A timed-out current-harness roster request must surface its error before the

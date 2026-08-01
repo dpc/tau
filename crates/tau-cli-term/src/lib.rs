@@ -380,10 +380,10 @@ impl HighTerm {
     /// mode.
     ///
     /// `rows` must be headerless TSV with the stable agent id in field one.
-    /// Cancellation and an empty input return `Ok(None)`. The external `fzf`
-    /// interaction uses a five-minute command timeout. Tau attempts to restore
-    /// terminal input afterward; a restoration failure supersedes the picker
-    /// error.
+    /// Cancellation returns `Ok(None)`. The external `fzf` interaction uses a
+    /// five-minute command timeout, including for an empty input roster. Tau
+    /// attempts to restore terminal input afterward; a restoration failure
+    /// supersedes the picker error.
     pub fn pick_agent_row_with_fzf(&self, rows: &str) -> Result<Option<String>, String> {
         self.pick_agent_row_with_command(
             path_std_ffi::OsStr::new("fzf"),
@@ -428,9 +428,6 @@ impl HighTerm {
             impl FnOnce() -> Result<(), String>,
         >,
     ) -> Result<Option<String>, String> {
-        if rows.is_empty() {
-            return Ok(None);
-        }
         let picker_rows = format_agent_picker_rows(rows, self.handle.size().0)?;
         (hooks.pause)().map_err(|error| format!("could not release terminal: {error}"))?;
         let guard = ExternalResumeGuard::new(hooks.resume);
