@@ -112,6 +112,81 @@ fn partially_priced_model_uses_per_category_fallbacks() {
     assert_eq!(rates.output, tau_proto::ESTIMATED_API_COST_FALLBACK.output);
 }
 
+/// Known compatible model ids without explicit profile prices resolve the
+/// built-in default pricing instead of the central GPT-5.6-equivalent fallback.
+#[test]
+fn known_model_without_explicit_prices_uses_builtin_default() {
+    let provider = ChatCompletionsProvider {
+        models: vec![ChatCompletionsModel {
+            id: ModelName::new("deepseek-v4-flash"),
+            display_name: None,
+            context_window: 4096,
+            compat: None,
+            tags: Vec::new(),
+            supports_parallel_tool_calls: true,
+            est_uncached_input_cost_1m_usd: None,
+            est_cached_input_cost_1m_usd: None,
+            est_output_cost_1m_usd: None,
+        }],
+        ..ChatCompletionsProvider::default()
+    };
+
+    let published = models_for_provider(&tau_proto::ProviderName::new("deepseek"), &provider);
+    let rates = published[0].estimated_api_cost_rates();
+
+    assert_eq!(rates.uncached_input.as_micro_usd(), 140_000);
+    assert_eq!(rates.cached_input.as_micro_usd(), 2_800);
+    assert_eq!(rates.output.as_micro_usd(), 280_000);
+}
+
+/// Explicit profile prices override the built-in default pricing for the same
+/// model id.
+#[test]
+fn explicit_profile_prices_override_builtin_defaults() {
+    let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "deepseek-v4-flash",
+        "context_window": 4096,
+        "est_uncached_input_cost_1m_usd": "1.5",
+        "est_cached_input_cost_1m_usd": "0.05",
+        "est_output_cost_1m_usd": "3"
+    }))
+    .expect("priced deepseek model");
+    let provider = ChatCompletionsProvider {
+        models: vec![model],
+        ..ChatCompletionsProvider::default()
+    };
+
+    let published = models_for_provider(&tau_proto::ProviderName::new("deepseek"), &provider);
+    let rates = published[0].estimated_api_cost_rates();
+
+    assert_eq!(rates.uncached_input.as_micro_usd(), 1_500_000);
+    assert_eq!(rates.cached_input.as_micro_usd(), 50_000);
+    assert_eq!(rates.output.as_micro_usd(), 3_000_000);
+}
+
+/// Omitted profile categories on a known model id fall back to the built-in
+/// default per category, never to the central GPT-5.6-equivalent fallback.
+#[test]
+fn partial_profile_prices_keep_builtin_defaults_for_omitted_categories() {
+    let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "deepseek-v4-flash",
+        "context_window": 4096,
+        "est_output_cost_1m_usd": "9"
+    }))
+    .expect("partially priced deepseek model");
+    let provider = ChatCompletionsProvider {
+        models: vec![model],
+        ..ChatCompletionsProvider::default()
+    };
+
+    let published = models_for_provider(&tau_proto::ProviderName::new("deepseek"), &provider);
+    let rates = published[0].estimated_api_cost_rates();
+
+    assert_eq!(rates.uncached_input.as_micro_usd(), 140_000);
+    assert_eq!(rates.cached_input.as_micro_usd(), 2_800);
+    assert_eq!(rates.output.as_micro_usd(), 9_000_000);
+}
+
 /// Ensures an explicit false publication capability survives serialization
 /// independently from request-field compatibility.
 #[test]

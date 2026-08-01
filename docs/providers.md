@@ -129,10 +129,11 @@ million tokens. Decimal strings preserve fixed-point values on the provider wire
 the built-in Chat Completions profile parser also accepts non-negative integer
 JSON numbers. Fractional configured prices must use decimal strings with at most
 six fractional digits so validation never rounds through binary floating point.
-Missing fields use the central
-GPT-5.6-equivalent fallback: `$5` uncached input, `$.50` cached input, and `$30`
-output per million tokens. This fallback intentionally applies to local and free
-models too.
+Missing fields resolve built-in default prices for known compatible model ids
+(documented below for the built-in Chat Completions provider) and otherwise use
+the central GPT-5.6-equivalent fallback: `$5`
+uncached input, `$.50` cached input, and `$30` output per million tokens. This
+fallback intentionally applies to local and free models too.
 
 The harness applies the serving model's prices to each accepted usage record and
 accumulates a runtime-only estimate per loaded agent. If a provider reports total
@@ -147,7 +148,12 @@ The display rounds aggressively to fit `$` plus three characters (`$.03`, `$2.1`
 Hardcoded ChatGPT/Codex model prices come from OpenAI's provider-owned
 [API pricing table](https://developers.openai.com/api/docs/pricing). Configured
 compatible providers own their explicit values; refresh those profile fields from
-that provider's basic public pricing table.
+that provider's basic public pricing table. The built-in Chat Completions
+provider ships default prices for known compatible model ids without explicit
+profile fields: `deepseek-v4-flash` uses DeepSeek's
+[standard API prices](https://api-docs.deepseek.com/quick_start/pricing)
+(`$0.14` uncached input, `$0.0028` cached input, `$0.28` output per million
+tokens).
 
 The harness records which extension sent the snapshot and uses that as routing state.
 If multiple snapshots advertise the same provider-qualified `ModelId`, the

@@ -65,10 +65,13 @@ Compatible model entries may also set
 `est_uncached_input_cost_1m_usd`, `est_cached_input_cost_1m_usd`, and
 `est_output_cost_1m_usd` to non-negative decimal USD prices per million
 tokens. Use quoted decimal strings for fractional prices; integer JSON numbers
-are also accepted. Missing values use the central GPT-5.6-equivalent `$5`/`$.50`/`$30`
-fallback, including local and free models. Hardcoded ChatGPT model values follow
-OpenAI's basic public API pricing table. The harness accumulates this deliberately
-rough equivalent-API estimate per agent for the current runtime only.
+are also accepted. Missing values resolve built-in default prices for known
+compatible model ids (currently `deepseek-v4-flash` from DeepSeek's standard API
+pricing) and otherwise use the central GPT-5.6-equivalent `$5`/`$.50`/`$30`
+fallback, including local and free models; explicit profile prices always take
+precedence. Hardcoded ChatGPT model values follow OpenAI's basic public API
+pricing table. The harness accumulates this deliberately rough equivalent-API
+estimate per agent for the current runtime only.
 
 ChatGPT's full account quota snapshot is acquired best-effort from `/wham/usage`
 and reconciled with sparse in-band WebSocket `codex.rate_limits` observations

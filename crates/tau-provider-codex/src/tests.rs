@@ -63,6 +63,21 @@ fn chatgpt_models_publish_provider_owned_basic_prices() {
         .find(|model| model.id.model.as_str() == "gpt-5.6-sol")
         .expect("sol model")
         .estimated_api_cost_rates();
+    let terra = models
+        .iter()
+        .find(|model| model.id.model.as_str() == "gpt-5.6-terra")
+        .expect("terra model")
+        .estimated_api_cost_rates();
+    let luna = models
+        .iter()
+        .find(|model| model.id.model.as_str() == "gpt-5.6-luna")
+        .expect("luna model")
+        .estimated_api_cost_rates();
+    let gpt_5_4 = models
+        .iter()
+        .find(|model| model.id.model.as_str() == "gpt-5.4")
+        .expect("gpt-5.4 model")
+        .estimated_api_cost_rates();
     let mini = models
         .iter()
         .find(|model| model.id.model.as_str() == "gpt-5.4-mini")
@@ -72,6 +87,15 @@ fn chatgpt_models_publish_provider_owned_basic_prices() {
     assert_eq!(sol.uncached_input.as_micro_usd(), 5_000_000);
     assert_eq!(sol.cached_input.as_micro_usd(), 500_000);
     assert_eq!(sol.output.as_micro_usd(), 30_000_000);
+    assert_eq!(terra.uncached_input.as_micro_usd(), 2_000_000);
+    assert_eq!(terra.cached_input.as_micro_usd(), 200_000);
+    assert_eq!(terra.output.as_micro_usd(), 12_000_000);
+    assert_eq!(luna.uncached_input.as_micro_usd(), 200_000);
+    assert_eq!(luna.cached_input.as_micro_usd(), 20_000);
+    assert_eq!(luna.output.as_micro_usd(), 1_200_000);
+    assert_eq!(gpt_5_4.uncached_input.as_micro_usd(), 2_500_000);
+    assert_eq!(gpt_5_4.cached_input.as_micro_usd(), 250_000);
+    assert_eq!(gpt_5_4.output.as_micro_usd(), 15_000_000);
     assert_eq!(mini.uncached_input.as_micro_usd(), 750_000);
     assert_eq!(mini.cached_input.as_micro_usd(), 75_000);
     assert_eq!(mini.output.as_micro_usd(), 4_500_000);

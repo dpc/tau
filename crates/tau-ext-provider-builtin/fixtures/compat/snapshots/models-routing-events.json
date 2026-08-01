@@ -334,9 +334,9 @@
         "xhigh",
         "max"
       ],
-      "est_cached_input_cost_1m_usd": "0.25",
-      "est_output_cost_1m_usd": "15",
-      "est_uncached_input_cost_1m_usd": "2.5",
+      "est_cached_input_cost_1m_usd": "0.2",
+      "est_output_cost_1m_usd": "12",
+      "est_uncached_input_cost_1m_usd": "2",
       "id": "chatgpt/gpt-5.6-terra",
       "input_modalities": [
         "text",
@@ -382,9 +382,9 @@
         "xhigh",
         "max"
       ],
-      "est_cached_input_cost_1m_usd": "0.1",
-      "est_output_cost_1m_usd": "6",
-      "est_uncached_input_cost_1m_usd": "1",
+      "est_cached_input_cost_1m_usd": "0.02",
+      "est_output_cost_1m_usd": "1.2",
+      "est_uncached_input_cost_1m_usd": "0.2",
       "id": "chatgpt/gpt-5.6-luna",
       "input_modalities": [
         "text",

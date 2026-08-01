@@ -71,6 +71,34 @@ pub struct ChatCompletionsModel {
     pub est_output_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
 }
 
+/// Built-in default estimated prices for compatible models whose profile omits
+/// explicit pricing, keyed by wire model id.
+///
+/// This mirrors how the ChatGPT/Codex provider special-cases its own model
+/// names: a known id publishes provider pricing even without profile fields,
+/// while unknown ids keep the central GPT-5.6-equivalent fallback. Explicit
+/// profile `est_*` fields always take precedence over this table.
+fn builtin_estimated_prices(
+    model: &ModelName,
+) -> Option<(
+    tau_proto::EstimatedUsdPerMillion,
+    tau_proto::EstimatedUsdPerMillion,
+    tau_proto::EstimatedUsdPerMillion,
+)> {
+    let (uncached, cached, output) = match model.as_str() {
+        // DeepSeek standard API prices from
+        // <https://api-docs.deepseek.com/quick_start/pricing>: $0.14 uncached
+        // input, $0.0028 cached input, $0.28 output per million tokens.
+        "deepseek-v4-flash" => (140_000, 2_800, 280_000),
+        _ => return None,
+    };
+    Some((
+        tau_proto::EstimatedUsdPerMillion::from_micro_usd(uncached),
+        tau_proto::EstimatedUsdPerMillion::from_micro_usd(cached),
+        tau_proto::EstimatedUsdPerMillion::from_micro_usd(output),
+    ))
+}
+
 /// Serialized OpenAI-compatible request controls.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

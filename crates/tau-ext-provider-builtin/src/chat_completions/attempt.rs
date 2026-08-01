@@ -19,6 +19,10 @@ pub fn models_for_provider(
                 }
             }
             let compat = model.compat.unwrap_or(provider.compat);
+            let builtin = super::builtin_estimated_prices(&model.id);
+            let builtin_uncached = builtin.map(|prices| prices.0);
+            let builtin_cached = builtin.map(|prices| prices.1);
+            let builtin_output = builtin.map(|prices| prices.2);
             tau_proto::ProviderModelInfo {
                 id: tau_proto::ModelId::new(provider_name.clone(), model.id.clone()),
                 display_name: model.display_name.clone(),
@@ -46,9 +50,11 @@ pub fn models_for_provider(
                 supports_compaction: false,
                 supports_standalone_compaction: false,
                 standalone_compaction_threshold: None,
-                est_uncached_input_cost_1m_usd: model.est_uncached_input_cost_1m_usd,
-                est_cached_input_cost_1m_usd: model.est_cached_input_cost_1m_usd,
-                est_output_cost_1m_usd: model.est_output_cost_1m_usd,
+                est_uncached_input_cost_1m_usd: model
+                    .est_uncached_input_cost_1m_usd
+                    .or(builtin_uncached),
+                est_cached_input_cost_1m_usd: model.est_cached_input_cost_1m_usd.or(builtin_cached),
+                est_output_cost_1m_usd: model.est_output_cost_1m_usd.or(builtin_output),
             }
         })
         .collect()

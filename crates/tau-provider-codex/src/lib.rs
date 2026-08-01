@@ -1095,8 +1095,9 @@ fn estimated_api_prices(model: &str) -> tau_proto::EstimatedApiCostRates {
 
     let (uncached, cached, output) = match model {
         "gpt-5.6-sol" | "gpt-5.5" => (5_000_000, 500_000, 30_000_000),
-        "gpt-5.6-terra" | "gpt-5.4" => (2_500_000, 250_000, 15_000_000),
-        "gpt-5.6-luna" => (1_000_000, 100_000, 6_000_000),
+        "gpt-5.6-terra" => (2_000_000, 200_000, 12_000_000),
+        "gpt-5.6-luna" => (200_000, 20_000, 1_200_000),
+        "gpt-5.4" => (2_500_000, 250_000, 15_000_000),
         "gpt-5.4-mini" => (750_000, 75_000, 4_500_000),
         "gpt-5.3-codex" => (1_750_000, 175_000, 14_000_000),
         _ => return tau_proto::ESTIMATED_API_COST_FALLBACK,
