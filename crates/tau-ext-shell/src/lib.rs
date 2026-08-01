@@ -1,7 +1,7 @@
 //! Filesystem and shell tool extension.
 //!
-//! Provides `read`, `edit`, `apply_patch`, `dir_lock`, `grep`, `find`, `ls`,
-//! `workdir`, `shell`, and `gpt_shell` tools.
+//! Provides `read`, `edit`, `replace`, `apply_patch`, `dir_lock`, `grep`,
+//! `find`, `ls`, `workdir`, `shell`, and `gpt_shell` tools.
 //!
 //! The `echo` tool is available under `cfg(test)` or the
 //! `echo-agent` cargo feature for harness-side echo-agent tests.
@@ -60,8 +60,8 @@ use crate::tools::ECHO_TOOL_NAME;
 use crate::tools::shell::{ShellAccessMode, ShellCommandMode};
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, GREP_TOOL_NAME,
-    LS_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, WORKDIR_TOOL_NAME,
-    execute_tool,
+    LS_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, REPLACE_TOOL_NAME, SHELL_TOOL_NAME,
+    WORKDIR_TOOL_NAME, execute_tool,
 };
 
 /// Cloneable shell output adapter.
@@ -489,6 +489,45 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         background_support: None,
         examples: Vec::new(),
     };
+    let replace_tool = ToolSpec {
+        name: tau_proto::ToolName::new(REPLACE_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Replace exact text in one existing UTF-8 file. Each oldText must occur exactly \
+             once in the same original file snapshot; all edits apply atomically. Matching \
+             ignores only an initial UTF-8 BOM and normalizes CRLF/CR to LF. Use newText \
+             as an empty string to delete text."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "oldText": { "type": "string", "minLength": 1 },
+                            "newText": { "type": "string" }
+                        },
+                        "required": ["oldText", "newText"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["path", "edits"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&["shell:edit", "shell:edit:replace", "shell:mutates-files"]),
+        enabled_by_default: false,
+        background_support: None,
+        examples: Vec::new(),
+    };
     let dir_lock_tool = dir_lock_tool_spec(dir_lock_enabled);
     let grep_tool = ToolSpec {
         name: tau_proto::ToolName::new(GREP_TOOL_NAME),
@@ -770,6 +809,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
         read_tool,
         read_image_tool,
         edit_tool,
+        replace_tool,
         apply_patch_tool,
         dir_lock_tool,
         grep_tool,
@@ -1136,8 +1176,8 @@ fn rewrite_invoke_for_cwd(
     let field = match invoke.tool_name.as_str() {
         SHELL_TOOL_NAME => path_crate_tools::ShellSurface::Generic.directory_argument(),
         GPT_SHELL_TOOL_NAME => path_crate_tools::ShellSurface::ChatGpt.directory_argument(),
-        READ_TOOL_NAME | READ_IMAGE_TOOL_NAME | EDIT_TOOL_NAME | FIND_TOOL_NAME
-        | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
+        READ_TOOL_NAME | READ_IMAGE_TOOL_NAME | EDIT_TOOL_NAME | REPLACE_TOOL_NAME
+        | FIND_TOOL_NAME | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
         DIR_LOCK_TOOL_NAME => "directory",
         _ => return invoke,
     };
@@ -2248,6 +2288,7 @@ fn is_shell_tool(name: &str) -> bool {
         READ_TOOL_NAME
             | READ_IMAGE_TOOL_NAME
             | EDIT_TOOL_NAME
+            | REPLACE_TOOL_NAME
             | APPLY_PATCH_TOOL_NAME
             | GREP_TOOL_NAME
             | FIND_TOOL_NAME
@@ -2270,7 +2311,11 @@ fn is_dir_lock_update_invocation(arguments: &CborValue) -> bool {
 fn is_dir_lock_update_tool(name: &str) -> bool {
     matches!(
         name,
-        EDIT_TOOL_NAME | APPLY_PATCH_TOOL_NAME | SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME
+        EDIT_TOOL_NAME
+            | REPLACE_TOOL_NAME
+            | APPLY_PATCH_TOOL_NAME
+            | SHELL_TOOL_NAME
+            | GPT_SHELL_TOOL_NAME
     )
 }
 

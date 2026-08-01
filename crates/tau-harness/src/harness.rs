@@ -16,6 +16,7 @@ use std::{
     io as path_std_io, io, sync as path_std_sync,
 };
 
+use path_tau_config_settings::ShellToolStyle;
 use rand::rngs::StdRng;
 use rand::{RngCore as _, SeedableRng as _};
 use tau_config::settings as path_tau_config_settings;
@@ -23774,6 +23775,11 @@ impl Harness {
         let tree = agent_id_for_tree
             .as_deref()
             .and_then(|agent_id| self.agent_store.agent(agent_id));
+        if let Some(message) = self.shell_tool_style_error(Some(&model)) {
+            self.emit_harness_failure(&message);
+            self.terminalize_owned_dispatch_error(cid, message);
+            return None;
+        }
         let tool_specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
         if let Some(name) = duplicate_model_visible_tool_name(&tool_specs) {
             let message = format!(
@@ -23937,6 +23943,14 @@ impl Harness {
             conv.originator,
             tau_proto::PromptOriginator::Extension { .. }
         ) && conv.parent_tool_call_id.is_none();
+        if let Some(message) = self.shell_tool_style_error(Some(&model)) {
+            self.emit_harness_failure(&message);
+            self.fail_initial_prompt_materialization(
+                cid,
+                "failed to validate initial prompt tool surface",
+            );
+            return false;
+        }
         let specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
         if let Some(name) = duplicate_model_visible_tool_name(&specs) {
             self.emit_harness_failure(&format!(
@@ -24504,6 +24518,42 @@ impl Harness {
             .and_then(|model| self.provider_model_info.get(model))
             .map(|info| info.tags.as_slice())
             .unwrap_or(&[]);
+        match self.shell_tool_style_for_base_enablement(model, model_tags) {
+            Some(ShellToolStyle::Codex)
+                if spec
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_str().starts_with("shell:")) =>
+            {
+                enabled = spec.tags.iter().any(|tag| {
+                    matches!(
+                        tag.as_str(),
+                        "shell:edit:apply_patch"
+                            | "shell:read:image"
+                            | "shell:exec:shell_command"
+                            | "shell:workdir"
+                            | "shell:lock"
+                    )
+                });
+            }
+            Some(style) if spec.tags.iter().any(|tag| tag.as_str() == "shell:edit") => {
+                enabled = spec.tags.iter().any(|tag| {
+                    tag.as_str()
+                        == match style {
+                            ShellToolStyle::Edit => "shell:edit:line",
+                            ShellToolStyle::Replace => "shell:edit:replace",
+                            ShellToolStyle::Codex => unreachable!("handled above"),
+                        }
+                });
+            }
+            Some(_) => {}
+            None if self.shell_tool_style(model, model_tags).is_none()
+                && spec.tags.iter().any(|tag| tag.as_str() == "shell:edit") =>
+            {
+                enabled = false;
+            }
+            None => {}
+        }
         let mut rules: Vec<_> = self.tool_policy.rules.iter().collect();
         rules.sort_by(|(left_name, left), (right_name, right)| {
             left.priority
@@ -24562,6 +24612,92 @@ impl Harness {
             enabled = true;
         }
         enabled
+    }
+
+    /// Resolves the requested shell surface before ordinary policy and role
+    /// controls.
+    fn shell_tool_style(
+        &self,
+        model: Option<&ModelId>,
+        model_tags: &[tau_proto::ModelTag],
+    ) -> Option<ShellToolStyle> {
+        if let Some(style) = self.tool_policy.default_shell_tool_style {
+            return Some(style);
+        }
+        let explicit: HashSet<_> = model_tags
+            .iter()
+            .filter_map(|tag| match tag.as_str() {
+                "shell:tool-style:codex" => Some(ShellToolStyle::Codex),
+                "shell:tool-style:edit" => Some(ShellToolStyle::Edit),
+                "shell:tool-style:replace" => Some(ShellToolStyle::Replace),
+                _ => None,
+            })
+            .collect();
+        match explicit.len() {
+            0 => {
+                if model_tags.iter().any(|tag| tag.as_str() == "shell:chatgpt") {
+                    Some(ShellToolStyle::Codex)
+                } else if model.is_some_and(|id| id.model.as_str() == "deepseek-v4-flash") {
+                    Some(ShellToolStyle::Replace)
+                } else {
+                    Some(ShellToolStyle::Edit)
+                }
+            }
+            1 => explicit.iter().copied().next(),
+            _ => None,
+        }
+    }
+
+    /// Leaves legacy ChatGPT/Codex models to their existing configurable policy
+    /// rule, preserving the documented escape hatch that disables that bundle.
+    fn shell_tool_style_for_base_enablement(
+        &self,
+        model: Option<&ModelId>,
+        model_tags: &[tau_proto::ModelTag],
+    ) -> Option<ShellToolStyle> {
+        (self.tool_policy.default_shell_tool_style.is_some()
+            || model_tags.iter().any(|tag| {
+                matches!(
+                    tag.as_str(),
+                    "shell:tool-style:codex" | "shell:tool-style:edit" | "shell:tool-style:replace"
+                )
+            })
+            || !model_tags.iter().any(|tag| tag.as_str() == "shell:chatgpt"))
+        .then(|| self.shell_tool_style(model, model_tags))
+        .flatten()
+    }
+
+    /// Returns a prompt error for invalid style metadata or unavailable forced
+    /// Codex support.
+    fn shell_tool_style_error(&self, model: Option<&ModelId>) -> Option<String> {
+        let info = model.and_then(|id| self.provider_model_info.get(id))?;
+        let explicit: HashSet<_> = info
+            .tags
+            .iter()
+            .filter_map(|tag| match tag.as_str() {
+                "shell:tool-style:codex" => Some("codex"),
+                "shell:tool-style:edit" => Some("edit"),
+                "shell:tool-style:replace" => Some("replace"),
+                _ => None,
+            })
+            .collect();
+        if 1 < explicit.len() {
+            return Some("conflicting shell tool style tags".to_owned());
+        }
+        (self.codex_style_is_forced(&info.tags)
+            && !info
+                .supported_tool_types
+                .contains(&tau_proto::ToolType::Custom))
+        .then_some("Codex shell tool style requires Custom tool support".to_owned())
+    }
+
+    /// Returns whether config or an explicit model style tag, rather than the
+    /// legacy ChatGPT default, required the Custom/Text Codex surface.
+    fn codex_style_is_forced(&self, model_tags: &[tau_proto::ModelTag]) -> bool {
+        self.tool_policy.default_shell_tool_style == Some(ShellToolStyle::Codex)
+            || model_tags
+                .iter()
+                .any(|tag| tag.as_str() == "shell:tool-style:codex")
     }
 
     fn resolve_enabled_tool_spec_for_role(

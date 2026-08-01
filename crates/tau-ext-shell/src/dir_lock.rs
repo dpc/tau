@@ -42,7 +42,9 @@ use crate::Output;
 use crate::argument::{argument_text, optional_argument_text};
 use crate::config::{DirLockBackendConfig, DirLockConfig};
 use crate::display::{ToolFailure, ok_display};
-use crate::tools::{APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, GPT_SHELL_TOOL_NAME, SHELL_TOOL_NAME};
+use crate::tools::{
+    APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, GPT_SHELL_TOOL_NAME, REPLACE_TOOL_NAME, SHELL_TOOL_NAME,
+};
 
 /// Agent-facing name of the directory locking tool.
 pub(crate) const DIR_LOCK_TOOL_NAME: &str = "dir_lock";
@@ -1427,6 +1429,12 @@ pub(crate) fn automatic_lock_dirs_for_tool_in_dir(
         EDIT_TOOL_NAME => {
             let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
             Ok(vec![canonical_write_lock_dir(Path::new(&path))?])
+        }
+        REPLACE_TOOL_NAME => {
+            let path = path_crate_tools::replace::replace_lock_path(arguments)?;
+            canonical_existing_file_parent(&path)
+                .map(|parent| vec![parent])
+                .map_err(|_| ToolFailure::new("file could not be read"))
         }
         SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME => {
             let surface = path_crate_tools::ShellSurface::for_tool_name(tool_name)

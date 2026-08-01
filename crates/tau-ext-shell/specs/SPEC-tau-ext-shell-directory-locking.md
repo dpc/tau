@@ -54,6 +54,7 @@ execution:
 
 - `edit` locks the edited file's resolved parent, or the deepest existing
   ancestor for a create beneath missing parents.
+- `replace` locks its existing file's resolved parent.
 - `apply_patch` locks all source and destination directories as one request.
 - shell calls are read-write only when their effective cwd is covered by the
   caller's manual lock; otherwise they run as inferred read-only calls without

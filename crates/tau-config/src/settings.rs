@@ -799,9 +799,42 @@ impl<'de> Deserialize<'de> for HarnessSettings {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolPolicy {
+    /// Optional global shell edit surface override. `None` uses the selected
+    /// model's declared preference or legacy model default.
+    #[serde(default, deserialize_with = "deserialize_shell_tool_style")]
+    pub default_shell_tool_style: Option<ShellToolStyle>,
     /// Rules keyed by stable names so higher-precedence config can override or
     /// disable built-in behavior.
     pub rules: IndexMap<String, ToolPolicyRule>,
+}
+
+/// One provider-visible shell editing surface selected before role controls.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellToolStyle {
+    /// Use the Custom/Text Codex patch surface.
+    Codex,
+    /// Use Tau's line-coordinate editor.
+    Edit,
+    /// Use exact snapshot-based text replacement.
+    Replace,
+}
+
+/// Deserializes an optional style, treating whitespace-only text as a reset.
+fn deserialize_shell_tool_style<'de, D>(deserializer: D) -> Result<Option<ShellToolStyle>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some("codex") => Ok(Some(ShellToolStyle::Codex)),
+        Some("edit") => Ok(Some(ShellToolStyle::Edit)),
+        Some("replace") => Ok(Some(ShellToolStyle::Replace)),
+        Some(_) => Err(D::Error::custom(
+            "tool_policy.default_shell_tool_style must be codex, edit, or replace",
+        )),
+    }
 }
 
 /// One declarative tool policy rule evaluated against model/tool tags.

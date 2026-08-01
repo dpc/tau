@@ -16,6 +16,7 @@ pub(crate) mod grep;
 pub(crate) mod ls;
 pub(crate) mod read;
 pub(crate) mod read_image;
+pub(crate) mod replace;
 pub(crate) mod shell;
 pub(crate) mod workdir;
 pub(crate) mod world;
@@ -25,6 +26,7 @@ pub const ECHO_TOOL_NAME: &str = "echo";
 pub const READ_TOOL_NAME: &str = "read";
 pub const READ_IMAGE_TOOL_NAME: &str = "read_image";
 pub const EDIT_TOOL_NAME: &str = "edit";
+pub const REPLACE_TOOL_NAME: &str = "replace";
 pub const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
 pub const SHELL_TOOL_NAME: &str = "shell";
 pub const WORKDIR_TOOL_NAME: &str = "workdir";
@@ -94,6 +96,9 @@ pub(crate) fn execute_tool(invoke: tau_proto::ToolStarted, world: world::ShellWo
     }
     if invoke.tool_name == EDIT_TOOL_NAME {
         return wrap_pure(invoke, world, edit::edit_file);
+    }
+    if invoke.tool_name == REPLACE_TOOL_NAME {
+        return wrap_pure(invoke, world, replace::replace_file);
     }
     if invoke.tool_name == APPLY_PATCH_TOOL_NAME {
         return wrap_pure(invoke, world, apply_patch::apply_patch);
@@ -237,7 +242,7 @@ pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUse
             format!("{path} {ranges}")
         }
         READ_IMAGE_TOOL_NAME => cbor_text_field(&invoke.arguments, "path").unwrap_or_default(),
-        EDIT_TOOL_NAME | APPLY_PATCH_TOOL_NAME => {
+        EDIT_TOOL_NAME | REPLACE_TOOL_NAME | APPLY_PATCH_TOOL_NAME => {
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_default();
             let ranges = cbor_array_field(&invoke.arguments, "edits")
                 .map(format_requested_edit_line_ranges)

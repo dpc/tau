@@ -35,8 +35,8 @@ use crate::tools::shell::{
 };
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
-    READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, shell as path_crate_tools_shell,
-    world as path_crate_tools_world,
+    READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, REPLACE_TOOL_NAME, SHELL_TOOL_NAME,
+    shell as path_crate_tools_shell, world as path_crate_tools_world,
 };
 use crate::truncate::{
     MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, mark_line, truncate_head, truncate_tail,
@@ -271,6 +271,42 @@ fn read_image_schema_exposes_bounded_overview_and_complete_region() {
     assert_eq!(
         parameters["properties"]["region"]["additionalProperties"],
         serde_json::json!(false)
+    );
+}
+
+/// Locks the provider-visible replace schema to its strict, non-legacy
+/// snapshot-replacement contract so model repair cannot widen the surface.
+#[test]
+fn replace_schema_is_strict_and_default_disabled() {
+    let tool = registered_tool_specs(false)
+        .into_iter()
+        .find(|tool| tool.name == REPLACE_TOOL_NAME)
+        .expect("replace tool");
+    assert!(!tool.enabled_by_default);
+    assert_eq!(
+        tool.parameters.expect("parameters"),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "oldText": { "type": "string", "minLength": 1 },
+                            "newText": { "type": "string" }
+                        },
+                        "required": ["oldText", "newText"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["path", "edits"],
+            "additionalProperties": false
+        })
     );
 }
 
@@ -534,6 +570,19 @@ fn edit_arguments(path: &Path, edits: Vec<CborValue>) -> CborValue {
     ])
 }
 
+fn replace_arguments(path: &Path, old_text: &str, new_text: &str) -> CborValue {
+    cbor_map(vec![
+        ("path", CborValue::Text(path.display().to_string())),
+        (
+            "edits",
+            CborValue::Array(vec![cbor_map(vec![
+                ("oldText", CborValue::Text(old_text.to_owned())),
+                ("newText", CborValue::Text(new_text.to_owned())),
+            ])]),
+        ),
+    ])
+}
+
 fn line_edit(start_line: i64, end_line: i64, new_text: &str) -> CborValue {
     cbor_map(vec![
         ("start_line", CborValue::Integer(start_line.into())),
@@ -688,6 +737,7 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
         EventName::TOOL_REGISTRATION_DECLARED,                  // read
         EventName::TOOL_REGISTRATION_DECLARED,                  // read_image
         EventName::TOOL_REGISTRATION_DECLARED,                  // edit
+        EventName::TOOL_REGISTRATION_DECLARED,                  // replace
         EventName::TOOL_REGISTRATION_DECLARED,                  // apply_patch
         EventName::TOOL_REGISTRATION_DECLARED,                  // dir_lock
         EventName::TOOL_REGISTRATION_DECLARED,                  // grep
@@ -801,6 +851,7 @@ fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
         READ_TOOL_NAME,
         READ_IMAGE_TOOL_NAME,
         EDIT_TOOL_NAME,
+        REPLACE_TOOL_NAME,
         APPLY_PATCH_TOOL_NAME,
         DIR_LOCK_TOOL_NAME,
         GREP_TOOL_NAME,
@@ -905,7 +956,7 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
     let mut found_read_image_foreground_only = false;
     let mut found_edit_schema = false;
     let mut found_write = false;
-    for _ in 0..12 {
+    for _ in 0..13 {
         let event = reader
             .read_event()
             .expect("read")
@@ -1023,7 +1074,7 @@ fn startup_registers_schema_valid_tool_examples() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut checked = Vec::new();
-    for _ in 0..12 {
+    for _ in 0..13 {
         let event = reader
             .read_event()
             .expect("read")
@@ -1187,7 +1238,7 @@ fn startup_registers_dir_lock_disabled_by_default() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut found_dir_lock = false;
-    for _ in 0..12 {
+    for _ in 0..13 {
         let event = reader
             .read_event()
             .expect("read")
@@ -1217,7 +1268,7 @@ fn startup_publishes_shell_dir_force_unlock_action() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut found_schema = false;
-    for _ in 0..16 {
+    for _ in 0..17 {
         let event = reader
             .read_event()
             .expect("read")
@@ -2709,7 +2760,7 @@ fn startup_registers_surface_specific_shell_workdir_schemas() {
 
     let mut found_shell = false;
     let mut found_gpt_shell = false;
-    for _ in 0..12 {
+    for _ in 0..13 {
         let event = reader
             .read_event()
             .expect("read")
@@ -2789,7 +2840,7 @@ fn startup_registers_shell_workdir_prompt_fragment() {
     let mut found_context_provider = false;
     let mut found_fragment = false;
     let mut saw_tool_fragment = false;
-    for _ in 0..15 {
+    for _ in 0..16 {
         let event = reader
             .read_event()
             .expect("read")
@@ -3485,6 +3536,86 @@ fn extension_read_missing_file_reports_error() {
         "read errors should not echo arguments"
     );
 
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+/// Ensures an advertised replace invocation passes runtime admission and emits
+/// one terminal result instead of being silently ignored by the dispatcher.
+#[test]
+fn extension_replace_dispatches_to_a_terminal_result() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("source.txt");
+    fs::write(&path, "before\n").expect("write source");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&tool_started(
+            "replace-terminal",
+            REPLACE_TOOL_NAME,
+            replace_arguments(&path, "before", "after"),
+            "agent-replace",
+        ))
+        .expect("replace");
+    writer.flush().expect("flush replace");
+
+    loop {
+        match reader.read_event().expect("read").expect("event") {
+            Event::ToolResult(result) if result.call_id.as_str() == "replace-terminal" => {
+                assert_eq!(result.tool_name, REPLACE_TOOL_NAME);
+                break;
+            }
+            Event::ToolError(error) if error.call_id.as_str() == "replace-terminal" => {
+                panic!("replace unexpectedly failed: {error:?}");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(fs::read_to_string(&path).expect("read result"), "after\n");
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+/// Ensures lock-enabled replace admission preserves strict validation and its
+/// compact error contract instead of leaking a rewritten absolute path.
+#[test]
+fn locked_replace_rejects_malformed_request_without_path_disclosure() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("secret.txt");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
+    writer
+        .write_event(&tool_started(
+            "replace-malformed",
+            REPLACE_TOOL_NAME,
+            cbor_map(vec![
+                ("path", CborValue::Text(path.display().to_string())),
+                ("legacy", CborValue::Text("forbidden".to_owned())),
+            ]),
+            "agent-replace",
+        ))
+        .expect("replace");
+    writer.flush().expect("flush replace");
+
+    loop {
+        match reader.read_event().expect("read").expect("event") {
+            Event::ToolError(error) if error.call_id.as_str() == "replace-malformed" => {
+                assert_eq!(error.message, "request contains an unknown field");
+                assert!(!error.message.contains(path.to_str().expect("UTF-8 path")));
+                break;
+            }
+            Event::ToolResult(result) if result.call_id.as_str() == "replace-malformed" => {
+                panic!("malformed replace unexpectedly succeeded: {result:?}");
+            }
+            _ => {}
+        }
+    }
     writer
         .write_frame(&disconnect_frame(None))
         .expect("disconnect");
@@ -8772,6 +8903,27 @@ fn gpt_shell_workdir_selects_automatic_lock_directory() {
     assert_eq!(
         dirs,
         vec![workdir.path().canonicalize().expect("canonical workdir")]
+    );
+}
+
+/// Ensures replace selects the existing file parent for automatic update-lock
+/// coordination instead of rejecting lock-enabled dispatch.
+#[test]
+fn replace_selects_existing_file_parent_for_automatic_lock() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("source.txt");
+    fs::write(&path, "before\n").expect("write source");
+
+    let dirs = crate::dir_lock::automatic_lock_dirs_for_tool_in_dir(
+        REPLACE_TOOL_NAME,
+        &replace_arguments(&path, "before", "after"),
+        tempdir.path(),
+    )
+    .expect("replace lock directory");
+
+    assert_eq!(
+        dirs,
+        vec![tempdir.path().canonicalize().expect("canonical parent")]
     );
 }
 

@@ -88,6 +88,10 @@ escaping scheme is added. Rule aliases such as `enabled` must normalize inside
 each keyed rule before source layers merge, otherwise a higher-precedence alias
 can collide with a lower-precedence canonical key instead of overriding it.
 
+`tool_policy.default_shell_tool_style` selects `codex`, `edit`, or `replace`
+before rules and role controls run. Missing, null, or whitespace-only values
+reset to the selected model default; any other nonblank value is a config error.
+
 ## Harness role merging
 
 Role metadata is merged through domain-specific logic rather than generic YAML

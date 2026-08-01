@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 
-use tau_config::settings::{AgentRole, TauDirs, ToolPolicy};
+use tau_config::settings::{AgentRole, ShellToolStyle, TauDirs, ToolPolicy};
 use tau_core::ToolRegistration;
 use tau_proto::{
     BackgroundSupport, Effort, ModelId, ModelName, ModelTag, ProviderModelInfo, ProviderName,
@@ -110,8 +110,13 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
         prompt_fragment: None,
     };
     for spec in [
-        tagged_tool("edit", true, &["shell:edit:line"]),
-        tagged_tool("apply_patch", false, &["shell:edit:apply_patch"]),
+        tagged_tool("edit", true, &["shell:edit", "shell:edit:line"]),
+        tagged_tool("replace", false, &["shell:edit", "shell:edit:replace"]),
+        tagged_tool(
+            "apply_patch",
+            false,
+            &["shell:edit", "shell:edit:apply_patch"],
+        ),
         tagged_tool("shell", true, &["shell:exec:generic"]),
         tagged_tool("gpt_shell", false, &["shell:exec:shell_command"]),
         tagged_tool("read", true, &["shell:read"]),
@@ -225,6 +230,7 @@ fn image_tool_requires_exact_route_modalities() {
 fn effective_tool_names(harness: &Harness) -> Vec<String> {
     let relevant = [
         "edit",
+        "replace",
         "apply_patch",
         "shell",
         "gpt_shell",
@@ -241,6 +247,115 @@ fn effective_tool_names(harness: &Harness) -> Vec<String> {
         .map(|spec| spec.name.into_string())
         .filter(|name| relevant.contains(&name.as_str()))
         .collect()
+}
+
+/// Ensures provider style tags choose exactly one editing surface before role
+/// controls, including the DeepSeek wire-name default when no tag is present.
+#[test]
+fn shell_tool_style_selects_one_edit_surface() {
+    let tagged = policy_harness(&["shell:tool-style:replace"], AgentRole::default());
+    let tools = effective_tool_names(&tagged.harness);
+    assert!(tools.contains(&"replace".to_owned()));
+    assert!(!tools.contains(&"edit".to_owned()));
+    assert!(!tools.contains(&"apply_patch".to_owned()));
+
+    let mut deepseek = policy_harness(&[], AgentRole::default());
+    let model = deepseek.harness.selected_model.clone().expect("model");
+    deepseek
+        .harness
+        .provider_model_info
+        .get_mut(&model)
+        .expect("model info")
+        .id
+        .model = ModelName::new("deepseek-v4-flash");
+    deepseek.harness.selected_model = Some(ModelId::new(
+        ProviderName::new("provider"),
+        ModelName::new("deepseek-v4-flash"),
+    ));
+    let tools = effective_tool_names(&deepseek.harness);
+    assert!(tools.contains(&"replace".to_owned()));
+    assert!(!tools.contains(&"edit".to_owned()));
+}
+
+/// Ensures a configured global style wins over the model default while ordinary
+/// role policy still runs after that base selection.
+#[test]
+fn configured_shell_tool_style_overrides_model_default() {
+    let mut policy = policy_harness(&["shell:tool-style:replace"], AgentRole::default());
+    policy.harness.tool_policy = ToolPolicy {
+        default_shell_tool_style: Some(ShellToolStyle::Edit),
+        ..ToolPolicy::default()
+    };
+
+    let tools = effective_tool_names(&policy.harness);
+    assert!(tools.contains(&"edit".to_owned()));
+    assert!(!tools.contains(&"replace".to_owned()));
+}
+
+/// Ensures forced Codex never silently loses its Custom patch tool when model
+/// capability metadata is empty or Function-only, and rejects conflicting
+/// explicit style tags even when a global style is configured.
+#[test]
+fn forced_codex_requires_custom_support_and_style_tags_cannot_conflict() {
+    let mut forced = policy_harness(&["shell:tool-style:codex"], AgentRole::default());
+    let model = forced.harness.selected_model.clone().expect("model");
+    assert_eq!(
+        forced.harness.shell_tool_style_error(Some(&model)),
+        Some("Codex shell tool style requires Custom tool support".to_owned())
+    );
+    forced
+        .harness
+        .provider_model_info
+        .get_mut(&model)
+        .expect("model info")
+        .supported_tool_types = vec![ToolType::Function];
+    assert_eq!(
+        forced.harness.shell_tool_style_error(Some(&model)),
+        Some("Codex shell tool style requires Custom tool support".to_owned())
+    );
+    forced
+        .harness
+        .provider_model_info
+        .get_mut(&model)
+        .expect("model info")
+        .supported_tool_types
+        .push(ToolType::Custom);
+    assert_eq!(forced.harness.shell_tool_style_error(Some(&model)), None);
+
+    let mut conflicting = policy_harness(
+        &["shell:tool-style:codex", "shell:tool-style:replace"],
+        AgentRole::default(),
+    );
+    conflicting.harness.tool_policy = ToolPolicy {
+        default_shell_tool_style: Some(ShellToolStyle::Edit),
+        ..ToolPolicy::default()
+    };
+    let model = conflicting.harness.selected_model.as_ref().expect("model");
+    assert_eq!(
+        conflicting.harness.shell_tool_style_error(Some(model)),
+        Some("conflicting shell tool style tags".to_owned())
+    );
+}
+
+/// Ensures repeated identical provider tags select their one intended surface
+/// rather than being mistaken for conflicting style declarations.
+#[test]
+fn duplicate_identical_shell_style_tags_select_one_surface() {
+    let policy = policy_harness(
+        &["shell:tool-style:replace", "shell:tool-style:replace"],
+        AgentRole::default(),
+    );
+
+    let tools = effective_tool_names(&policy.harness);
+
+    assert!(tools.contains(&"replace".to_owned()));
+    assert!(!tools.contains(&"edit".to_owned()));
+    assert_eq!(
+        policy
+            .harness
+            .shell_tool_style_error(policy.harness.selected_model.as_ref()),
+        None
+    );
 }
 
 /// Self-compaction is present by default, can be disabled independently, and

@@ -322,6 +322,48 @@ fn builtin_tool_policy_rule_is_keyed_and_enabled_by_default() {
     assert_eq!(rule.enable_tool_tags.len(), 5);
 }
 
+/// Ensures shell style config accepts the three explicit surfaces and treats a
+/// whitespace-only higher-precedence value as a model-default reset.
+#[test]
+fn tool_policy_shell_style_accepts_values_and_blank_reset() {
+    let replace: ToolPolicy =
+        serde_yaml_ng::from_str("default_shell_tool_style: replace\n").expect("replace style");
+    assert_eq!(
+        replace.default_shell_tool_style,
+        Some(ShellToolStyle::Replace)
+    );
+    let reset: ToolPolicy =
+        serde_yaml_ng::from_str("default_shell_tool_style: '   '\n").expect("blank reset");
+    assert_eq!(reset.default_shell_tool_style, None);
+    let invalid = serde_yaml_ng::from_str::<ToolPolicy>("default_shell_tool_style: fuzzy\n");
+    assert!(
+        invalid.is_err(),
+        "unknown shell style must be a config error"
+    );
+}
+
+/// Ensures a higher-precedence null or blank style clears a lower-layer choice
+/// rather than retaining it through generic config layering.
+#[test]
+fn tool_policy_shell_style_drop_in_resets_lower_value() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "tool_policy:\n  default_shell_tool_style: codex\n",
+    )
+    .expect("write base");
+    std::fs::create_dir_all(td.path().join("harness.d")).expect("mkdir dropins");
+    std::fs::write(
+        td.path().join("harness.d/10-reset.yaml"),
+        "tool_policy:\n  default_shell_tool_style: null\n",
+    )
+    .expect("write reset");
+
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load reset");
+
+    assert_eq!(settings.tool_policy.default_shell_tool_style, None);
+}
+
 /// Ensures the `toolPolicy` and nested `enabled` aliases are normalized before
 /// config layers merge with built-in canonical fields.
 #[test]

@@ -1,7 +1,7 @@
 ---
 name: tau-tool-verification-file-shell
 description: >
-  Use this skill when verifying Tau file and command tools: read, edit, apply_patch, shell, or shell_command, including ranges, UTF-8, truncation, diffs, timeouts, mutation safety, and shell lock coverage.
+  Use this skill when verifying Tau file and command tools: read, edit, replace, apply_patch, shell, or shell_command, including ranges, UTF-8, truncation, diffs, timeouts, mutation safety, and shell lock coverage.
 advertise: false
 ---
 
@@ -128,6 +128,18 @@ that tool schema.
 
 `edit` requires a per-entry `context_line` string matching the original line immediately before `start_line`, excluding any line ending. Use an empty `context_line` when `start_line` is 1. EOF appends to a non-empty file must use the original last line as `context_line`; empty/missing-file creation uses an empty `context_line`. For ease of agent use, trailing literal `\r` and `\n` characters in the supplied context line are accepted and trimmed before matching; embedded `\r` or `\n` characters remain malformed. A malformed context line, missing context line, or context-line mismatch must leave the file unchanged. A mismatch returns read-like `line-numbered content` details around the expected context line plus up to 10 existing lines before and after it, with invalid UTF-8 and truncation handled like `read`; the BOF virtual context line is not rendered as a fake numbered line and is reported as `context_line_number: 0`.
 `edit` allows at most 100 edit entries per call. Requests with more entries must error out immediately before reading, writing, or creating parent directories. Invalid ranges, overlapping ranges, missing `newText`, missing or malformed `context_line`, malformed line fields, and context-line mismatches must leave the file unchanged. Error details should not echo raw edit requests; only purpose-built recovery details such as context-line mismatch context should be included.
+
+`replace` accepts exactly `{path, edits:[{oldText,newText}]}` for one existing
+UTF-8 file and at most 100 entries. Verify it rejects unknown fields, empty
+`oldText`, invalid UTF-8, duplicate/nonmatching/overlapping targets, and files
+over 10 MiB without writing. It must match all targets in one original snapshot,
+after CRLF/CR-to-LF normalization and ignoring only an initial UTF-8 BOM; do not
+accept fuzzy Unicode, whitespace, punctuation, legacy aliases, or JSON-string
+preprocessing. Verify BOM and untouched mixed-ending bytes survive, inserted
+newlines use local source endings with LF fallback, success exposes only
+`edits`, `changed`, and `total_bytes`, and changed UTF-8 files attach the normal
+structured diff while no-ops attach none. With directory locking enabled it must
+wait on the same automatic update lock class as `edit`.
 `apply_patch` should follow safe patch semantics rather than shell `patch` clobber semantics. Verify `Add File` rejects an already-existing destination and preserves its original content. Verify move hunks reject moves whose destination already exists, preserving both the source and the existing destination; a move is distinct from an explicit update/delete and must not silently clobber another file. Context, line, hunk, add, delete, and move validation failures should not silently mutate unrelated content, and all file changes that are applied before a later partial failure must be reported clearly.
 
 `apply_patch` output should stay compact and should not echo the full patch text back to the agent. For UTF-8 files it mutates, the tool should attach structured UI-only diffs; multi-file patches should attach one structured diff per changed file. When a later hunk fails after earlier hunks have already been applied, the agent-visible error must include structured partial-mutation details for the files/paths that changed where applicable, while the UI still receives diffs for those applied UTF-8 changes. Invalid UTF-8 or binary-like files should not produce misleading text diffs; report any missing, duplicated, or agent-visible raw diff payloads as tool-output regressions.

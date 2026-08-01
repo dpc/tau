@@ -46,11 +46,16 @@ change winner selection.
 ## Tool prompt-surface policy
 
 Extensions and providers publish metadata only: tools declare neutral `ToolTag`s
-(such as `shell:edit:line`, `shell:edit:apply_patch`, `shell:exec:generic`,
-`shell:exec:shell_command`, and `shell:workdir`) and providers publish model
-`ModelTag`s (such as `shell:chatgpt`). The harness owns all matching policy.
+(such as `shell:edit:line`, `shell:edit:replace`, `shell:edit:apply_patch`,
+`shell:exec:generic`, `shell:exec:shell_command`, and `shell:workdir`) and
+providers publish model `ModelTag`s (such as `shell:chatgpt` and
+`shell:tool-style:replace`). The harness owns all matching policy.
 
-Tool enablement starts from each extension's `enabled_by_default`, then matching
+Before ordinary policy, the harness selects one shell edit surface from
+`tool_policy.default_shell_tool_style`, one explicit `shell:tool-style:*` model
+tag, or the legacy model default. Conflicting explicit style tags fail closed.
+Tool enablement then starts from that selected surface and each extension's
+`enabled_by_default`, then matching
 harness `tool_policy.rules` run deterministically by `(priority, rule name)`,
 with each rule applying `disable_tool_tags` before `enable_tool_tags`. Built-in
 and user policy share the same evaluator; the built-in `builtin.chatgpt-shell`

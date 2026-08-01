@@ -145,7 +145,7 @@ manual runtime be finished so the protocol writer can flush and join.
 ## Tool tags
 
 `tau-ext-shell` tags tools with neutral capability metadata such as
-`shell:edit:line`, `shell:edit:apply_patch`, `shell:exec:generic`,
+`shell:edit:line`, `shell:edit:replace`, `shell:edit:apply_patch`, `shell:exec:generic`,
 `shell:exec:shell_command`, and `shell:workdir`. The extension must not decide which
 model gets which
 surface; `workdir` carries `shell:workdir`. The harness interprets these tags together with provider-published
