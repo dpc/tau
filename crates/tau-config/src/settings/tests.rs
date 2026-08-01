@@ -3036,6 +3036,134 @@ profiles:
     assert_eq!(settings.extensions["core-shell"].enable, Some(true));
 }
 
+/// Ensures a selected profile can choose a role that it adds after base
+/// settings have loaded, so role construction completes before startup
+/// selection observes the profile default.
+#[test]
+fn selected_profile_default_role_selects_profile_created_role() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  default_role: base-role
+  role_groups:
+    base:
+      roles:
+        base-role: {}
+profiles:
+  focused:
+    agents:
+      default_role: profile-role
+      role_groups:
+        profile:
+          roles:
+            profile-role: {}
+"#,
+    )
+    .expect("write profile");
+
+    let profile = profile_name("focused");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+
+    assert_eq!(settings.default_role.as_deref(), Some("profile-role"));
+    assert!(settings.roles.contains_key("profile-role"));
+}
+
+/// Ensures profile defaults replay in source order, accept the established
+/// alias, and remain lower precedence than a later harness-config override.
+#[test]
+fn selected_profile_default_role_preserves_source_and_cli_precedence() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    roles:
+      roles:
+        base-role: {}
+        first-profile-role: {}
+        final-profile-role: {}
+        cli-role: {}
+profiles:
+  focused:
+    agents:
+      defaultRole: first-profile-role
+"#,
+    )
+    .expect("write base profile");
+    std::fs::create_dir(td.path().join("harness.d")).expect("create drop-ins");
+    std::fs::write(
+        td.path().join("harness.d/20-focused.yaml"),
+        r#"
+profiles:
+  focused:
+    agents:
+      default_role: final-profile-role
+"#,
+    )
+    .expect("write profile drop-in");
+
+    let profile = profile_name("focused");
+    let base = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load profile sources");
+    assert_eq!(base.default_role.as_deref(), Some("final-profile-role"));
+
+    let overrides = [
+        HarnessConfigCliOverride::from_str("agents.default_role=cli-role").expect("CLI override"),
+    ];
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &overrides,
+    )
+    .expect("load profile with CLI override");
+    assert_eq!(settings.default_role.as_deref(), Some("cli-role"));
+}
+
+/// Ensures an explicit null in a selected profile clears the base startup role,
+/// matching the top-level nullable default-role configuration semantics.
+#[test]
+fn selected_profile_default_role_null_clears_base_default() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  default_role: base-role
+profiles:
+  focused:
+    agents:
+      default_role: null
+"#,
+    )
+    .expect("write profile");
+
+    let profile = profile_name("focused");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&profile),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+
+    assert_eq!(settings.default_role, None);
+}
+
 /// Ensures profiles accept only their explicit role and extension-enable
 /// surface rather than becoming a recursive second harness configuration.
 #[test]

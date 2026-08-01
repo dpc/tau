@@ -1822,6 +1822,94 @@ fn missing_default_role_emits_mandatory_warning_notice_and_falls_back() {
     );
 }
 
+/// Ensures a profile-selected missing default role reaches the existing startup
+/// fallback path instead of being ignored while profiles are applied.
+#[test]
+fn profile_missing_default_role_retains_startup_fallback() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+profiles:
+  focused:
+    agents:
+      default_role: ghost
+"#,
+    )
+    .expect("write profile");
+    let dirs = path_tau_config_settings::TauDirs {
+        config_dir: Some(td.path().to_path_buf()),
+        state_dir: None,
+    };
+    let profile = path_tau_config_settings::ProfileName::parse("focused").expect("profile");
+    let settings =
+        path_tau_config_settings::load_harness_settings_with_profile_and_cli_overrides_in(
+            &dirs,
+            Some(&profile),
+            &[],
+            &[],
+        )
+        .expect("load selected profile");
+
+    let loaded = load_roles(&settings);
+
+    assert_eq!(loaded.selected_role, "engineer-junior");
+    assert_eq!(
+        loaded.missing_default_role,
+        Some(crate::model::MissingDefaultRole {
+            requested: "ghost".to_owned(),
+            fallback: "engineer-junior".to_owned(),
+        })
+    );
+}
+
+/// Ensures a profile can enable the role that it selects as default, so
+/// disabled base roles survive role filtering before startup selection runs.
+#[test]
+fn profile_default_role_selects_profile_enabled_role() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    focused:
+      roles:
+        focused-role:
+          enable: false
+profiles:
+  focused:
+    agents:
+      default_role: focused-role
+      role_groups:
+        focused:
+          roles:
+            focused-role:
+              enable: true
+"#,
+    )
+    .expect("write profile");
+    let dirs = path_tau_config_settings::TauDirs {
+        config_dir: Some(td.path().to_path_buf()),
+        state_dir: None,
+    };
+    let profile = path_tau_config_settings::ProfileName::parse("focused").expect("profile");
+    let settings =
+        path_tau_config_settings::load_harness_settings_with_profile_and_cli_overrides_in(
+            &dirs,
+            Some(&profile),
+            &[],
+            &[],
+        )
+        .expect("load selected profile");
+
+    let loaded = load_roles(&settings);
+
+    assert!(loaded.roles.contains_key("focused-role"));
+    assert_eq!(loaded.selected_role, "focused-role");
+    assert_eq!(loaded.missing_default_role, None);
+}
+
 /// Provider snapshots are the only source for effort choices. The harness
 /// should expose exactly what the provider published and report no choices for
 /// unknown models rather than reviving config-derived defaults.

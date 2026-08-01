@@ -124,12 +124,12 @@ array replacement:
 ## Selectable configuration profiles
 
 `profiles` is a raw configuration-only map, not part of effective
-`HarnessSettings`. A selected profile supports agent defaults,
-agent/global role metadata, role groups and roles, plus `extensions.<name>.enable`
-for a built-in or base-configured extension. This explicit subset avoids a second
-universal recursive merge schema. Its role patches replay after base file layers,
-so relative values resolve against base settings, and before CLI role or
-`--harness-config` patches.
+`HarnessSettings`. A selected profile supports `agents.default_role`, agent
+provider defaults, agent/global role metadata, role groups and roles, plus
+`extensions.<name>.enable` for a built-in or base-configured extension. This
+explicit subset avoids a second universal recursive merge schema. Its role
+patches replay after base file layers, so relative values resolve against base
+settings, and before CLI role or `--harness-config` patches.
 
 ## Extension names and paths
 

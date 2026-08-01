@@ -959,7 +959,8 @@ struct HarnessRoleOverrides {
 
 /// Raw, selected-profile patches kept separate from effective harness settings.
 ///
-/// Profiles deliberately expose only role metadata and extension enablement.
+/// Profiles deliberately expose only the startup default role, role metadata,
+/// and extension enablement.
 /// This avoids making a profile a second, recursively-merged copy of the
 /// complete harness configuration schema.
 #[derive(Default, Deserialize)]
@@ -976,6 +977,9 @@ struct HarnessProfile {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct HarnessProfileAgentOverrides {
+    /// Startup role patch applied after base files and before CLI overrides.
+    #[serde(default, alias = "defaultRole", deserialize_with = "present_option")]
+    default_role: Option<Option<String>>,
     /// Default enablement patch applied to every role.
     #[serde(alias = "enabled", deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
@@ -2877,7 +2881,7 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
         )?);
     }
     for profile in profiles {
-        builder = builder.add_source(profile_extension_source(profile)?);
+        builder = builder.add_source(profile_config_source(profile)?);
     }
     let normalized_overrides = normalized_harness_config_overrides(overrides)?;
     for override_ in &normalized_overrides {
@@ -2889,8 +2893,9 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
         .map_err(|error| SettingsError::Config(config::ConfigError::Message(error.to_string())))
 }
 
-/// Serializes the intentionally small generic subset of a selected profile.
-fn profile_extension_source(
+/// Serializes the intentionally small non-role-replay subset of a selected
+/// profile.
+fn profile_config_source(
     profile: &HarnessProfile,
 ) -> Result<config::File<config::FileSourceString, config::FileFormat>, SettingsError> {
     let extensions = profile
@@ -2907,10 +2912,21 @@ fn profile_extension_source(
             })
         })
         .collect::<serde_json::Map<_, _>>();
-    let value = serde_json::json!({ "extensions": extensions });
+    let mut values = serde_json::Map::new();
+    values.insert(
+        "extensions".to_owned(),
+        serde_json::Value::Object(extensions),
+    );
+    if let Some(default_role) = &profile.agents.default_role {
+        values.insert(
+            "agents".to_owned(),
+            serde_json::json!({ "default_role": default_role }),
+        );
+    }
+    let value = serde_json::Value::Object(values);
     let yaml = serde_yaml_ng::to_string(&value).map_err(|error| {
         SettingsError::Config(config::ConfigError::Message(format!(
-            "failed to serialize selected profile extensions: {error}"
+            "failed to serialize selected profile settings: {error}"
         )))
     })?;
     Ok(config::File::from_str(&yaml, config::FileFormat::Yaml).required(true))
