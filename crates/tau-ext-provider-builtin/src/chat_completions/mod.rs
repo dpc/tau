@@ -2,6 +2,7 @@
 //! events.
 
 use std::collections::BTreeMap;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::ModelName;
@@ -60,6 +61,11 @@ pub struct ChatCompletionsModel {
     /// Whether this model may produce multiple Function calls in one turn.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_parallel_tool_calls: bool,
+    /// Optional Tau-owned summary compactor configuration.
+    ///
+    /// Absence keeps standalone compaction unsupported for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_summary_compaction: Option<LocalSummaryCompactionConfig>,
     /// Estimated USD price per million uncached input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_uncached_input_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
@@ -69,6 +75,46 @@ pub struct ChatCompletionsModel {
     /// Estimated USD price per million output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_output_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
+}
+
+/// Explicit limits and serialization profile for Tau summary compaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalSummaryCompactionConfig {
+    /// Versioned canonical transcript serialization accepted by the model.
+    pub serialization_profile: LocalSummaryCompactionSerializationProfile,
+    /// Explicit context window for this local compactor; must match the model.
+    pub context_window_tokens: NonZeroU64,
+    /// Maximum serialized compactor input size in bytes.
+    pub max_input_bytes: NonZeroU64,
+    /// Maximum requested summary output tokens.
+    pub max_output_tokens: NonZeroU32,
+    /// Maximum accepted summary output size in bytes.
+    pub max_output_bytes: NonZeroU64,
+}
+
+/// Canonical transcript serialization supported by Tau's summary compactor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalSummaryCompactionSerializationProfile {
+    /// Tau's canonical JSON transcript serialization version 1.
+    LocalTranscriptV1,
+}
+
+impl LocalSummaryCompactionConfig {
+    /// Convert this serialized profile into validated provider request limits.
+    fn validated_for(
+        self,
+        model_context_window: u64,
+    ) -> Option<tau_provider_chat_completions::LocalSummaryCompactionConfig> {
+        tau_provider_chat_completions::LocalSummaryCompactionConfig::new(
+            self.context_window_tokens,
+            model_context_window,
+            self.max_input_bytes,
+            self.max_output_tokens,
+            self.max_output_bytes,
+        )
+    }
 }
 
 /// Built-in default estimated prices for compatible models whose profile omits

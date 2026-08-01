@@ -21,3 +21,13 @@ blocks provider work to guarantee persistence.
 Tau does not intentionally include auth headers or API-key configuration, but
 provider-controlled responses/errors and configured request fields can reflect
 credentials, so every capture must be treated as potentially credential-bearing.
+
+## Local summary compactor boundary
+
+Only a model with an explicit `local_summary_compaction` profile may run Tau's
+transcript-v1 summary compactor. The dedicated exact-model request has no tools,
+omits image bytes while retaining typed metadata and an explicit loss marker,
+and is excluded from durable provider debug capture. Only a bounded, validated
+six-section result persists, as untrusted synthetic user-role history. Failures
+after semantic output terminalize without resend. Revisit this boundary when
+changing compactor serialization, capture, retries, validation, or eligibility.

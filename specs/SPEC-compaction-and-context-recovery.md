@@ -13,6 +13,14 @@ data-URL request bounds. A compacted replacement may summarize an old image
 away like any other input fact. This behavior is confirmed by
 [GATE-typed-image-tool-results](GATE-typed-image-tool-results.md).
 
+The explicitly opted-in local Chat Completions summary compactor is the narrow
+transcript-v1 exception to byte-identical provider conversion. Its dedicated
+no-tools request serializes typed history as canonical JSON, intentionally omits
+image bytes while retaining image metadata and an explicit loss marker, and
+persists only a bounded validated synthetic user-role checkpoint. The complete
+compactor request is never persisted, including in provider debug captures.
+Failures after semantic output are terminal and never ambiguously resent.
+
 ## Recovery authority
 
 The CLI `:compact` command is human/UI authority. The model-callable `compact`

@@ -1,5 +1,9 @@
 //! Chat Completions extension ownership regression tests.
 
+use std::collections::BTreeMap;
+use std::io::{Read as _, Write as _};
+use std::net::TcpListener;
+use std::num::NonZeroU64;
 use std::{io as path_std_io, time as path_std_time};
 
 use super::sampling::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
@@ -17,6 +21,222 @@ fn parallel_capability_defaults_true_and_is_omitted() {
     assert!(model.supports_parallel_tool_calls);
     let value = serde_json::to_value(model).expect("serialized model");
     assert!(value.get("supports_parallel_tool_calls").is_none());
+}
+
+/// Ensures generic compatible models remain unsupported while a fully declared
+/// per-model summary profile opts in only that exact model.
+#[test]
+fn local_summary_compaction_requires_explicit_model_profile() {
+    let disabled: ChatCompletionsModel =
+        serde_json::from_value(serde_json::json!({"id": "disabled"})).expect("disabled model");
+    let enabled: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "enabled",
+        "context_window": 8192,
+        "local_summary_compaction": {
+            "serialization_profile": "local_transcript_v1",
+            "context_window_tokens": 8192,
+            "max_input_bytes": 4096,
+            "max_output_tokens": 512,
+            "max_output_bytes": 4096
+        }
+    }))
+    .expect("enabled model");
+    let provider = ChatCompletionsProvider {
+        models: vec![disabled, enabled],
+        ..ChatCompletionsProvider::default()
+    };
+
+    let published = models_for_provider(&tau_proto::ProviderName::new("local"), &provider);
+    assert!(!published[0].supports_standalone_compaction);
+    assert!(published[1].supports_standalone_compaction);
+    assert!(published.iter().all(|model| !model.supports_compaction));
+
+    let mut incompatible = provider.models[1].clone();
+    incompatible
+        .local_summary_compaction
+        .as_mut()
+        .expect("local profile")
+        .context_window_tokens = NonZeroU64::new(4096).expect("positive");
+    let incompatible_provider = ChatCompletionsProvider {
+        models: vec![incompatible],
+        ..ChatCompletionsProvider::default()
+    };
+    assert!(
+        !models_for_provider(
+            &tau_proto::ProviderName::new("local"),
+            &incompatible_provider
+        )[0]
+        .supports_standalone_compaction
+    );
+}
+
+/// Ensures malformed or unbounded summary opt-ins are rejected at profile load
+/// rather than turning generic compatibility into compaction support.
+#[test]
+fn local_summary_compaction_profile_rejects_unknown_fields() {
+    let error = serde_json::from_value::<ChatCompletionsModel>(serde_json::json!({
+        "id": "invalid",
+        "local_summary_compaction": {
+            "serialization_profile": "local_transcript_v1",
+            "context_window_tokens": 128000,
+            "max_input_bytes": 1,
+            "max_output_tokens": 1,
+            "max_output_bytes": 1,
+            "future_profile_guess": true
+        }
+    }))
+    .expect_err("unknown summary profile field");
+    assert!(error.to_string().contains("unknown field"));
+
+    let zero = serde_json::from_value::<ChatCompletionsModel>(serde_json::json!({
+        "id": "zero",
+        "local_summary_compaction": {
+            "serialization_profile": "local_transcript_v1",
+            "context_window_tokens": 128000,
+            "max_input_bytes": 1,
+            "max_output_tokens": 0,
+            "max_output_bytes": 1
+        }
+    }));
+    assert!(zero.is_err(), "zero limits must fail profile decoding");
+}
+
+/// Ensures the known-remote OpenRouter route cannot inherit a model's local
+/// compactor assertion.
+#[test]
+fn openrouter_suppresses_local_summary_compaction() {
+    let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "remote",
+        "context_window": 8192,
+        "local_summary_compaction": {
+            "serialization_profile": "local_transcript_v1",
+            "context_window_tokens": 8192,
+            "max_input_bytes": 4096,
+            "max_output_tokens": 512,
+            "max_output_bytes": 4096
+        }
+    }))
+    .expect("configured remote model");
+    let profile = OpenRouterProfile {
+        api_key: String::new(),
+        models: vec![model],
+    };
+    let provider = profile.to_chat_completions();
+
+    assert!(provider.models[0].local_summary_compaction.is_none());
+    assert!(
+        !models_for_provider(&tau_proto::ProviderName::new("openrouter"), &provider)[0]
+            .supports_standalone_compaction
+    );
+}
+
+/// Ensures a provider output-token stop cannot commit a truncated checkpoint.
+#[test]
+fn run_prompt_attempt_terminalizes_truncated_local_summary() {
+    let outcome = run_scripted_local_summary_attempt(concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Goal:\\ngoal\\nConstraints:\\nnone\\nDecisions:\\none\\nProgress:\\ndone\\nOpen Work:\\nnext\\nCritical Facts:\\nfact\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        "data: [DONE]\n\n"
+    ));
+    assert!(matches!(
+        outcome,
+        super::attempt::PromptAttemptOutcome::Terminal { .. }
+    ));
+}
+
+/// Ensures semantic output followed by a retryable provider failure terminates
+/// without returning the standalone job to the retry scheduler.
+#[test]
+fn run_prompt_attempt_terminalizes_parsed_retryable_local_summary() {
+    let outcome = run_scripted_local_summary_attempt(concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Goal:\\ngoal\"}}]}\n\n",
+        "data: {\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"retry\"}}\n\n"
+    ));
+    assert!(matches!(
+        outcome,
+        super::attempt::PromptAttemptOutcome::Terminal { .. }
+    ));
+}
+
+fn run_scripted_local_summary_attempt(
+    events: &'static str,
+) -> super::attempt::PromptAttemptOutcome {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept request");
+        let mut request = [0_u8; 16 * 1024];
+        let _ = socket.read(&mut request).expect("read request");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            events.len(),
+            events
+        );
+        socket
+            .write_all(response.as_bytes())
+            .expect("write response");
+    });
+    let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "local",
+        "context_window": 8192,
+        "local_summary_compaction": {
+            "serialization_profile": "local_transcript_v1",
+            "context_window_tokens": 8192,
+            "max_input_bytes": 4096,
+            "max_output_tokens": 512,
+            "max_output_bytes": 4096
+        }
+    }))
+    .expect("local model");
+    let provider = ChatCompletionsProvider {
+        base_url: format!("http://{address}/v1"),
+        models: vec![model.clone()],
+        ..ChatCompletionsProvider::default()
+    };
+    let prompt = tau_proto::AgentPromptCreated {
+        agent_prompt_id: tau_proto::AgentPromptId::parse("ap-summary-test").expect("prompt id"),
+        agent_id: tau_proto::AgentId::parse("agent-summary-test").expect("agent id"),
+        session_id: tau_proto::SessionId::parse("session-summary-test").expect("session id"),
+        system_prompt: String::new(),
+        context: tau_proto::PromptContext {
+            blocks: vec![tau_proto::ContextBlock::UserInput(
+                tau_proto::UserInputBlock {
+                    items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                        role: tau_proto::ContextRole::User,
+                        content: vec![tau_proto::ContentPart::Text {
+                            text: "history".to_owned(),
+                        }],
+                        phase: None,
+                        responses_raw_json: None,
+                    })],
+                },
+            )],
+        },
+        tools: Vec::new(),
+        tools_ref: None,
+        model: tau_proto::ModelId::new(tau_proto::ProviderName::new("local"), model.id.clone()),
+        model_params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::None,
+        originator: tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: None,
+        compaction: None,
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+    };
+    let mut bytes = Vec::new();
+    let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+    let outcome = super::attempt::run_prompt_attempt(
+        &prompt.agent_prompt_id,
+        &prompt,
+        &provider,
+        &model,
+        false,
+        &mut writer,
+        &mut || false,
+        &tau_provider::OutboundNetworkPolicy::from_environment(BTreeMap::new(), None),
+    );
+    server.join().expect("join fixture");
+    outcome
 }
 
 /// Explicit compatible-model prices validate as fixed-point decimals and
@@ -71,6 +291,7 @@ fn unpriced_local_model_uses_central_fallback() {
             compat: None,
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
+            local_summary_compaction: None,
             est_uncached_input_cost_1m_usd: None,
             est_cached_input_cost_1m_usd: None,
             est_output_cost_1m_usd: None,
@@ -124,6 +345,7 @@ fn known_model_without_explicit_prices_uses_builtin_default() {
             compat: None,
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
+            local_summary_compaction: None,
             est_uncached_input_cost_1m_usd: None,
             est_cached_input_cost_1m_usd: None,
             est_output_cost_1m_usd: None,
@@ -202,6 +424,7 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
             }),
             tags: Vec::new(),
             supports_parallel_tool_calls: false,
+            local_summary_compaction: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
             est_output_cost_1m_usd: Default::default(),

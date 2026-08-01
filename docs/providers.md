@@ -305,6 +305,36 @@ The extension owns its serialized profiles, model publication, OpenRouter
 discovery, public stream sampling, retry scheduling, and provider events; the
 backend performs one finite typed attempt.
 
+Generic Chat Completions models do not support standalone compaction. A local
+model can opt in to Tau summary compaction by declaring its context window plus
+an explicit `local_summary_compaction` object:
+
+```json
+{
+  "id": "local-model",
+  "context_window": 32768,
+  "local_summary_compaction": {
+    "serialization_profile": "local_transcript_v1",
+    "context_window_tokens": 32768,
+    "max_input_bytes": 16384,
+    "max_output_tokens": 1024,
+    "max_output_bytes": 8192
+  }
+}
+```
+
+Tau then sends one dedicated no-tools Chat Completions request to that exact
+model. It commits only a validated summary as untrusted synthetic historical
+context; it never adds model text to the system prompt. Public Responses and
+models without this declaration remain unsupported.
+The context window must match the model field. Input and output limits must be
+positive and fit conservatively within that window; units are bytes, tokens,
+and bytes respectively, with an additional 1,024-token worst-case request and
+chat-template reserve. Known-remote OpenRouter profiles discard this local-only
+declaration. Transcript-v1 deliberately removes image bytes while
+retaining image metadata and a loss marker. Empty, malformed, truncated, or
+over-limit summaries fail the durable transaction without fallback or resend.
+
 `tau-provider-responses` implements `POST /responses` over API-key HTTP/SSE
 for the `responses` profile. `tau provider add` labels the existing generic
 Chat Completions choice `completions API` and this choice `responses API`.

@@ -637,8 +637,10 @@ impl PromptContext {
     /// Replaces typed provider image bytes with empty shared buffers while
     /// retaining safe metadata and transcript structure.
     ///
-    /// This is for incidental diagnostics and generic projections only. Durable
-    /// transcript and provider-directed paths must retain the canonical bytes.
+    /// This is for incidental diagnostics and generic projections. Provider
+    /// paths retain canonical bytes except the explicitly opted-in local
+    /// Chat Completions transcript-v1 summary compactor, whose versioned lossy
+    /// projection carries metadata plus an explicit image-loss marker.
     pub fn clear_provider_image_bytes(&mut self) {
         for block in &mut self.blocks {
             match block {

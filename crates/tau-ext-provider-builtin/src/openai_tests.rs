@@ -913,6 +913,7 @@ fn chat_model(id: &str) -> ChatCompletionsModel {
         compat: None,
         tags: Vec::new(),
         supports_parallel_tool_calls: true,
+        local_summary_compaction: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),
         est_output_cost_1m_usd: Default::default(),

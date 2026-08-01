@@ -99,7 +99,17 @@ impl OpenRouterProfile {
         ChatCompletionsProvider {
             base_url: "https://openrouter.ai/api/v1".to_owned(),
             api_key: self.api_key.clone(),
-            models: self.models.clone(),
+            models: self
+                .models
+                .iter()
+                .cloned()
+                .map(|mut model| {
+                    // OpenRouter is a known remote route; the explicit local
+                    // compactor assertion has no authority on this profile.
+                    model.local_summary_compaction = None;
+                    model
+                })
+                .collect(),
             tags: Vec::new(),
             max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
             extra_body: BTreeMap::new(),
@@ -273,6 +283,7 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
         }),
         tags: Vec::new(),
         supports_parallel_tool_calls: true,
+        local_summary_compaction: None,
         est_uncached_input_cost_1m_usd: None,
         est_cached_input_cost_1m_usd: None,
         est_output_cost_1m_usd: None,

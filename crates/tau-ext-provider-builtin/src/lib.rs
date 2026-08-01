@@ -29,8 +29,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use chat_completions::{
-    ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider, OpenRouterDiscoveryError,
-    OpenRouterProfile,
+    ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider,
+    LocalSummaryCompactionConfig, LocalSummaryCompactionSerializationProfile,
+    OpenRouterDiscoveryError, OpenRouterProfile,
 };
 use chat_completions::{
     PromptAttemptOutcome as ChatCompletionsAttemptOutcome, fetch_openrouter_models,
@@ -975,6 +976,7 @@ fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<d
             compat: None,
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
+            local_summary_compaction: None,
             est_uncached_input_cost_1m_usd: None,
             est_cached_input_cost_1m_usd: None,
             est_output_cost_1m_usd: None,

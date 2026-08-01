@@ -84,3 +84,14 @@ canonical provider facts and directed retry outcomes. Terminal report image byte
 cleared from generic live/debug projections; canonical provider transcript handling
 retains its existing policy. See
 [SPEC-provider-execution-reports-and-canonical-facts](../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
+
+## Local Chat Completions summary compaction
+
+Standalone summary compaction is available only through an exact model's
+explicit `local_summary_compaction` declaration with a matching context window
+and bounded input/output limits. The provider runtime never persists the full
+compactor request, including debug capture, and never retries after semantic
+output. Only validated bounded text can become an explicitly untrusted
+user-role historical checkpoint. Re-review locality, budgeting, capture, and
+terminalization whenever this profile or dispatch path changes.
+Known-remote OpenRouter conversion strips the local-only declaration.

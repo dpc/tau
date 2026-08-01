@@ -9,6 +9,10 @@ succeeds, is canceled, the process/session shuts down, or the unchanged request
 is positively proven deterministic and invalid. Unknown remote failures retry;
 classification selects cadence, shared cooldown, visible explanation, and
 profile reload behavior rather than default termination.
+The local Chat Completions summary compactor is a narrow exception: once any
+semantic output has arrived, any retryable outcome terminalizes the
+standalone transaction rather than risking an ambiguous summary resend. Only
+pre-semantic-output failures enter the scheduler.
 Provider adapters attach a machine-readable terminal failure category to the
 single final `ProviderResponseFinished`. Terminal request rejections bypass the
 logical-work retry scheduler even when its configured retry budget is

@@ -53,6 +53,10 @@ UI replay converts the durable provider event to a payload-free
 `tool.result_display` projection.
 Recursive debug and TRACE projections clear image buffers before JSON
 serialization, including prompt contexts and compaction replacement windows.
+The explicitly opted-in local Chat Completions transcript-v1 summary compactor
+also clears image bytes in its dedicated provider request while retaining typed
+metadata and an explicit loss marker. Normal inference and all other directed
+provider paths retain canonical bytes.
 
 An agent may retain at most 128 MiB of logical canonical image bytes across its
 complete append-only history, including branches and compaction replacement

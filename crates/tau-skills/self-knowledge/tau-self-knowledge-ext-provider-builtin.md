@@ -215,3 +215,15 @@ slot. If that exact probe commits a successful terminal response, Tau clears the
 matching current provider cooldown generation and wakes same-profile peers with
 stable anti-herd jitter. Errors, cancellation, stale successes, and best-effort
 quota display updates do not clear inference cooldowns.
+
+## Local summary compaction
+
+Generic Chat Completions and public Responses models do not advertise standalone
+compaction. An explicitly local Chat Completions model can opt in with
+`local_summary_compaction`, the `local_transcript_v1` profile, a context window
+matching the model, and conservative input-byte/output-token/output-byte limits.
+Tau uses the exact model for one no-tools request, intentionally omits image
+bytes with a loss marker, persists no full request, and accepts only a bounded
+six-section summary as untrusted synthetic history. Invalid output, insufficient
+context, cancellation, route loss, stale state, and post-output failures end the
+durable transaction without inference fallback or ambiguous resend.

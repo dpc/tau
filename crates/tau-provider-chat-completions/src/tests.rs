@@ -1,4 +1,5 @@
 use std::io::Write as _;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::atomic as path_std_sync_atomic;
 use std::{
     collections as path_std_collections, io as path_std_io, net as path_std_net,
@@ -94,6 +95,7 @@ fn resolved_provider(provider: &TestProvider) -> AttemptConfig {
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
         max_output_tokens: provider.max_output_tokens,
+        local_summary_compaction: None,
         extra_body: provider.extra_body.clone(),
         compat: provider.compat,
     }
@@ -586,6 +588,140 @@ fn chat_request_rejects_custom_tool_definition() {
         result,
         Err(LlmError::UnsupportedToolType(tau_proto::ToolType::Custom))
     ));
+}
+
+/// Ensures summary compaction uses a dedicated static, no-tools request rather
+/// than silently reusing ordinary inference request construction.
+#[test]
+fn local_summary_compaction_builds_dedicated_bounded_request() {
+    let mut created = prompt();
+    created.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    created.system_prompt = "ordinary agent authority must not leak".to_owned();
+    created.tools.push(tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("dangerous"),
+        model_visible_name: None,
+        description: None,
+        tool_type: tau_proto::ToolType::Function,
+        parameters: None,
+        format: None,
+    });
+    created
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::ToolResults(
+            tau_proto::ToolResultsBlock {
+                items: vec![tau_proto::ToolResultItem {
+                    call_id: tau_proto::ToolCallId::new("call-image"),
+                    tool_type: tau_proto::ToolType::Function,
+                    status: tau_proto::ToolResultStatus::Success,
+                    output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                        "image result".to_owned(),
+                    )),
+                    provider_content: vec![tau_proto::ToolResultContentPart::Image(
+                        tau_proto::ImageContent {
+                            media_type: tau_proto::ImageMediaType::Png,
+                            data: std::sync::Arc::from([11_u8, 22, 33]),
+                            width: 17,
+                            height: 19,
+                            detail: tau_proto::ImageDetail::High,
+                        },
+                    )],
+                }],
+            },
+        ));
+    let mut config = resolved_provider(&provider());
+    config.local_summary_compaction = Some(LocalSummaryCompactionConfig {
+        context_window_tokens: NonZeroU64::new(8192).expect("positive"),
+        max_input_bytes: NonZeroU64::new(4096).expect("positive"),
+        max_output_tokens: NonZeroU32::new(321).expect("positive"),
+        max_output_bytes: NonZeroU64::new(2048).expect("positive"),
+    });
+
+    let request = try_build_request(&config, &provider().models[0], &created)
+        .expect("enabled summary request");
+
+    assert!(request.tools.is_empty());
+    assert_eq!(request.tool_choice, Some("none"));
+    assert_eq!(request.max_completion_tokens, Some(321));
+    assert_eq!(request.prompt_cache_key, None);
+    assert_eq!(request.reasoning_effort, None);
+    let messages = serde_json::to_value(&request.messages).expect("messages");
+    assert!(
+        !messages
+            .to_string()
+            .contains("ordinary agent authority must not leak"),
+        "ordinary system prompt must not become compactor authority"
+    );
+    let input = messages[1]["content"].as_str().expect("compactor input");
+    assert!(input.contains("\"tau_compaction_transcript_version\":1"));
+    assert!(input.contains("canonical image bytes omitted intentionally"));
+    assert!(input.contains("\"media_type\":\"png\""));
+    assert!(input.contains("\"width\":17"));
+    assert!(input.contains("\"height\":19"));
+    assert!(input.contains("\"detail\":\"high\""));
+    assert!(!input.contains("11"));
+    assert!(!input.contains("22"));
+    assert!(!input.contains("33"));
+}
+
+/// Ensures an oversized canonical transcript fails before request dispatch
+/// instead of shrinking the already selected compaction input.
+#[test]
+fn local_summary_compaction_rejects_oversized_input_without_truncation() {
+    let mut created = prompt();
+    created.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    let mut config = resolved_provider(&provider());
+    config.local_summary_compaction = Some(LocalSummaryCompactionConfig {
+        context_window_tokens: NonZeroU64::new(8192).expect("positive"),
+        max_input_bytes: NonZeroU64::new(1).expect("positive"),
+        max_output_tokens: NonZeroU32::new(1).expect("positive"),
+        max_output_bytes: NonZeroU64::new(1).expect("positive"),
+    });
+
+    assert!(matches!(
+        try_build_request(&config, &provider().models[0], &created),
+        Err(LlmError::InvalidCompaction(_))
+    ));
+}
+
+/// Ensures even explicitly enabled durable provider diagnostics never persist a
+/// full standalone compactor input.
+#[test]
+fn local_summary_compaction_suppresses_request_debug_capture() {
+    let mut created = prompt();
+    assert!(debug_capture_enabled_for_prompt(&created, true));
+    created.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    assert!(!debug_capture_enabled_for_prompt(&created, true));
+    assert!(!debug_capture_enabled_for_prompt(&created, false));
+}
+
+/// Ensures conservative one-byte-per-token accounting accepts the exact
+/// declared boundary and rejects one token less before dispatch.
+#[test]
+fn local_summary_compaction_enforces_complete_context_budget_boundary() {
+    let mut created = prompt();
+    created.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    let mut config = resolved_provider(&provider());
+    let overhead = LOCAL_SUMMARY_COMPACTION_REQUEST_OVERHEAD_TOKENS;
+    config.local_summary_compaction = LocalSummaryCompactionConfig::new(
+        NonZeroU64::new(4096 + 1 + overhead).expect("positive"),
+        4096 + 1 + overhead,
+        NonZeroU64::new(4096).expect("positive"),
+        NonZeroU32::new(1).expect("positive"),
+        NonZeroU64::new(1).expect("positive"),
+    );
+    assert!(try_build_request(&config, &provider().models[0], &created).is_ok());
+
+    assert!(
+        LocalSummaryCompactionConfig::new(
+            NonZeroU64::new(4096 + overhead).expect("positive"),
+            4096 + overhead,
+            NonZeroU64::new(4096).expect("positive"),
+            NonZeroU32::new(1).expect("positive"),
+            NonZeroU64::new(1).expect("positive"),
+        )
+        .is_none()
+    );
 }
 
 /// Ensures request emission depends only on wire compatibility and tool
