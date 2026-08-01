@@ -95,8 +95,6 @@ pub enum ScenarioActionV2 {
         prompt: String,
         /// Exact child role.
         role: String,
-        /// Exact user-visible child task name.
-        task_name: String,
     },
     /// Accept the correlated immediate `agent_start` result and finish with
     /// text.

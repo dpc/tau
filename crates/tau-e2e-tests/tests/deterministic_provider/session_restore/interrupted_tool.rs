@@ -13,7 +13,7 @@ use super::{
 /// Exact provider-authored foreground tool identity.
 const TOOL_CALL_ID: &str = "s6-interrupted-tool";
 /// Exact compact JSON size of the reviewed S6 scenario grammar.
-const SCENARIO_BYTES: usize = 1_120;
+const SCENARIO_BYTES: usize = 1_072;
 
 /// Proves a worker's acknowledged but unterminated foreground tool is repaired
 /// once on resume and remains balanced across a second cold resume.
@@ -171,7 +171,6 @@ fn interrupted_tool_scenario(diagnostic: &str) -> ScenarioV2 {
                         call_id: "s6-agent-start".into(),
                         prompt: WORKER_PROMPT.to_owned(),
                         role: "deterministic-worker".to_owned(),
-                        task_name: "tool-holding deterministic worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
                         user_text: "start the tool-holding deterministic worker".to_owned(),

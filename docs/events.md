@@ -598,7 +598,7 @@ transient runtime observations and never enter semantic replay. See
 - **`agent.start_request`** — An extension or harness-owned tool asks
   the harness to start a side/sub-agent conversation: instruction text,
   correlation `query_id`, optional requested `role`, optional tool-call
-  attribution, and human-readable task name (used by the `agent_start` tool).
+  attribution, and optional extension-supplied human-readable task name.
   Configured extension requests default to `persist=false` and commit through ordinary
   interception before role/parent validation, duplicate route rebinding,
   acceptance/rejection, or child creation. Unconfigured and socket peers may not

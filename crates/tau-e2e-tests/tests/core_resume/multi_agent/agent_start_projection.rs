@@ -9,10 +9,6 @@ pub(super) fn arguments_match(arguments: &CborValue) -> bool {
     arguments
         == &CborValue::Map(vec![
             (
-                CborValue::Text("task_name".to_owned()),
-                CborValue::Text("deterministic worker".to_owned()),
-            ),
-            (
                 CborValue::Text("prompt".to_owned()),
                 CborValue::Text(WORKER_PROMPT.to_owned()),
             ),

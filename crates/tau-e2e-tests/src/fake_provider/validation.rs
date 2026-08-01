@@ -150,14 +150,11 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                     call_id,
                     prompt,
                     role,
-                    task_name,
                     ..
                 } if call_id.is_empty()
                     || call_id.len() > 256
                     || prompt.is_empty()
                     || prompt.len() > 4 * 1024
-                    || task_name.is_empty()
-                    || task_name.len() > 256
                     || role.is_empty()
                     || role.len() > 256
                     || !agent_start_call_ids.insert(call_id.as_str())

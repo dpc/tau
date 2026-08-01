@@ -144,9 +144,7 @@ pub(super) fn assert_boot_a(
         .iter()
         .find(|event| event.agent_id == identities.worker)
         .ok_or("S8 worker creation missing")?;
-    if worker.parent_agent.as_ref() != Some(&identities.main)
-        || worker.display_name.as_deref() != Some("deterministic worker")
-    {
+    if worker.parent_agent.as_ref() != Some(&identities.main) || worker.display_name.is_some() {
         return Err("S8 worker creation facts changed".into());
     }
     for agent_id in identities.all() {
@@ -744,7 +742,7 @@ pub(super) fn assert_roster(
             &identities.worker,
             "deterministic-worker",
             Some(&identities.main),
-            Some("deterministic worker"),
+            None,
             AgentNavigationMode::ActiveAuto,
         ),
     ] {

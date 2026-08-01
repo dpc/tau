@@ -577,7 +577,6 @@ fn scenario() -> ScenarioV2 {
                         call_id: "s8-agent-start".into(),
                         prompt: WORKER_PROMPT.to_owned(),
                         role: "deterministic-worker".to_owned(),
-                        task_name: "deterministic worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
                         user_text: MAIN_PROMPT.to_owned(),

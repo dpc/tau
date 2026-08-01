@@ -38,7 +38,7 @@ const HOLD_TIMEOUT_MS: u64 = 10_000;
 const TOOL_CALL_ID: &str = "s7-interrupted-tool";
 const BOOT_A_CURSORS: [usize; 4] = [5, 1, 1, 1];
 const COMPLETE_CURSORS: [usize; 4] = [5, 1, 1, 2];
-const SCENARIO_BYTES: usize = 2_223;
+const SCENARIO_BYTES: usize = 2_152;
 const MAX_CHECKPOINT_BYTES: usize = 64 * 1024;
 
 /// Decoded fake-provider checkpoint used to prove all four immutable lane
@@ -350,7 +350,6 @@ fn mixed_state_scenario(diagnostic: &str) -> ScenarioV2 {
                         call_id: "s7-start-quiescent".into(),
                         prompt: QUIESCENT_PROMPT.to_owned(),
                         role: QUIESCENT_ROLE.to_owned(),
-                        task_name: "quiescent worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
                         user_text: "start the quiescent deterministic worker".to_owned(),
@@ -368,7 +367,6 @@ fn mixed_state_scenario(diagnostic: &str) -> ScenarioV2 {
                         call_id: "s7-start-uncertain".into(),
                         prompt: UNCERTAIN_PROMPT.to_owned(),
                         role: UNCERTAIN_ROLE.to_owned(),
-                        task_name: "dispatch-uncertain worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
                         user_text: "start the dispatch-uncertain deterministic worker".to_owned(),
@@ -591,13 +589,13 @@ fn assert_boot_a_durable_state(
             &identities.quiescent,
             QUIESCENT_ROLE,
             Some(&identities.main),
-            Some("quiescent worker"),
+            None,
         ),
         (
             &identities.uncertain,
             UNCERTAIN_ROLE,
             Some(&identities.main),
-            Some("dispatch-uncertain worker"),
+            None,
         ),
         (
             &identities.repair,
@@ -834,14 +832,14 @@ fn assert_mixed_roster(
             AgentNavigationMode::ActiveAuto,
             QUIESCENT_ROLE,
             Some(&identities.main),
-            Some("quiescent worker"),
+            None,
         ),
         (
             &identities.uncertain,
             AgentNavigationMode::ActiveAuto,
             UNCERTAIN_ROLE,
             Some(&identities.main),
-            Some("dispatch-uncertain worker"),
+            None,
         ),
         (
             &identities.repair,

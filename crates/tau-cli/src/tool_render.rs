@@ -277,7 +277,7 @@ pub(crate) fn format_token_count(tokens: u64) -> String {
     format!("{whole}.{tenth}m")
 }
 
-/// Which status-suffix style the completion block should use.
+/// Semantic style for one compact tool-line segment.
 #[derive(Clone, Copy)]
 pub(crate) enum ToolStatus {
     Success,
@@ -285,6 +285,7 @@ pub(crate) enum ToolStatus {
     Error,
     Pending,
     Info,
+    WorkTitle,
     Agent,
     Counter,
     Progress,
@@ -304,8 +305,9 @@ pub(crate) enum CompactionStatus {
     Progress,
 }
 
+/// One generic compact header segment, renderable before or after tool fields.
 #[derive(Clone)]
-pub(crate) struct ToolSuffixSegment {
+pub(crate) struct ToolLineSegment {
     pub(crate) text: String,
     pub(crate) status: ToolStatus,
     /// When true, suppress the implicit space the renderer normally
@@ -316,15 +318,17 @@ pub(crate) struct ToolSuffixSegment {
 }
 
 /// Decomposed compact tool-block label, painted as themed spans:
-/// `<tool_name> <mode> <args> <range> <suffix...>`.
+/// `<tool_name> <leading...> <mode> <args> <range> <suffix...>`.
 #[derive(Clone)]
 pub(crate) struct ToolCallDisplay {
     pub(crate) tool_name: String,
     pub(crate) tool_name_style: Option<&'static str>,
+    /// Generic compact segments rendered directly after the stable identity.
+    pub(crate) leading_segments: Vec<ToolLineSegment>,
     pub(crate) mode: String,
     pub(crate) args: String,
     pub(crate) range: Option<String>,
-    pub(crate) suffixes: Vec<ToolSuffixSegment>,
+    pub(crate) suffixes: Vec<ToolLineSegment>,
     pub(crate) payload: Option<ToolUsePayload>,
 }
 
@@ -392,8 +396,8 @@ fn delegate_response_text(details: &CborValue) -> &str {
     }
 }
 
-fn tool_suffix(text: String, status: ToolStatus) -> ToolSuffixSegment {
-    ToolSuffixSegment {
+fn tool_suffix(text: String, status: ToolStatus) -> ToolLineSegment {
+    ToolLineSegment {
         text,
         status,
         no_leading_space: false,
@@ -404,6 +408,7 @@ pub(crate) fn pending_tool_call_display(tool_name: &str) -> ToolCallDisplay {
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
         tool_name_style: None,
+        leading_segments: Vec::new(),
         mode: String::new(),
         args: String::new(),
         range: None,
@@ -411,11 +416,11 @@ pub(crate) fn pending_tool_call_display(tool_name: &str) -> ToolCallDisplay {
         payload: None,
     }
 }
-fn info_suffix(text: String) -> ToolSuffixSegment {
+fn info_suffix(text: String) -> ToolLineSegment {
     tool_suffix(text, ToolStatus::Info)
 }
 
-fn counter_suffix(text: String) -> ToolSuffixSegment {
+fn counter_suffix(text: String) -> ToolLineSegment {
     tool_suffix(text, ToolStatus::Counter)
 }
 
@@ -483,7 +488,7 @@ pub(crate) fn streaming_block_with_indicator_suffix(
     block
 }
 
-pub(crate) fn tool_duration_suffix(duration: Duration) -> ToolSuffixSegment {
+pub(crate) fn tool_duration_suffix(duration: Duration) -> ToolLineSegment {
     tool_suffix(format_tool_duration(duration), ToolStatus::Time)
 }
 
@@ -541,7 +546,7 @@ fn render_tool_use_state_inner(
     display: &ToolUseState,
     include_status: bool,
 ) -> ToolCallDisplay {
-    let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
+    let mut suffixes: Vec<ToolLineSegment> = Vec::new();
     let (added, removed) = display
         .payload
         .as_ref()
@@ -551,7 +556,7 @@ fn render_tool_use_state_inner(
         suffixes.push(tool_suffix(format!("+{added}"), ToolStatus::DiffAdded));
     }
     if 0 < removed {
-        suffixes.push(ToolSuffixSegment {
+        suffixes.push(ToolLineSegment {
             text: format!("-{removed}"),
             status: ToolStatus::DiffRemoved,
             no_leading_space: 0 < added,
@@ -602,6 +607,7 @@ fn render_tool_use_state_inner(
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
         tool_name_style: None,
+        leading_segments: Vec::new(),
         mode: display.mode.clone(),
         args: display.args.clone(),
         range: display.range.as_ref().and_then(format_tool_use_range),
@@ -616,7 +622,7 @@ fn is_agent_id_chip(chip: &str) -> bool {
         .is_some_and(|agent_id| tau_proto::AgentId::parse(agent_id).is_ok())
 }
 
-fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolSuffixSegment {
+fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolLineSegment {
     let body = match counter.unit {
         tau_proto::ProgressUnit::Count => match (counter.complete, counter.total) {
             (Some(c), Some(t)) => format!("{c}/{t}"),
@@ -733,7 +739,7 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
         ));
     }
     if 0 < summary.removed {
-        suffixes.push(ToolSuffixSegment {
+        suffixes.push(ToolLineSegment {
             text: format!("-{}", summary.removed),
             status: ToolStatus::DiffRemoved,
             no_leading_space: 0 < summary.added,
@@ -768,6 +774,7 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
     ToolCallDisplay {
         tool_name: "tools".to_owned(),
         tool_name_style: None,
+        leading_segments: Vec::new(),
         mode: String::new(),
         args: format!("{}/{}", summary.completed, summary.total),
         range: None,
@@ -822,7 +829,8 @@ pub(crate) fn render_compaction_block(
 /// The externally requested bands are identity `0`, result status `10`, error
 /// details `20`, arguments `30`, and agent ids `40`. The remaining existing
 /// fields use mode `50`, range `60`, diff/progress counters `70`, generic info
-/// `80`, and duration `90`.
+/// `80`, and duration `90`. Self-reported task titles use `75`, so a watched
+/// row drops its display name before its title and both before telemetry.
 #[derive(Clone, Copy)]
 pub(crate) enum ToolLineElement {
     /// Tool name or watched-row identity.
@@ -839,6 +847,8 @@ pub(crate) enum ToolLineElement {
     Mode,
     /// Structured range associated with the arguments.
     Range,
+    /// Self-reported task title following a stable activity state.
+    WorkTitle,
     /// Diff statistics or structured progress counters.
     Counter,
     /// Other informational suffix chips.
@@ -859,6 +869,7 @@ impl ToolLineElement {
             Self::Mode => 50,
             Self::Range => 60,
             Self::Counter => 70,
+            Self::WorkTitle => 75,
             Self::Info => 80,
             Self::Duration => 90,
         };
@@ -895,6 +906,7 @@ fn tool_status_style(status: ToolStatus) -> &'static str {
         ToolStatus::Warning
         | ToolStatus::Pending
         | ToolStatus::Info
+        | ToolStatus::WorkTitle
         | ToolStatus::Agent
         | ToolStatus::Counter => names::TOOL_STATUS_INFO,
         ToolStatus::Error => names::TOOL_STATUS_ERROR,
@@ -919,6 +931,7 @@ fn tool_suffix_element(status: ToolStatus) -> ToolLineElement {
         | ToolStatus::Context
         | ToolStatus::Tools
         | ToolStatus::Counter => ToolLineElement::Counter,
+        ToolStatus::WorkTitle => ToolLineElement::WorkTitle,
         ToolStatus::Info => ToolLineElement::Info,
         ToolStatus::Time => ToolLineElement::Duration,
         ToolStatus::Error => ToolLineElement::ResultStatus,
@@ -964,6 +977,32 @@ pub(crate) fn render_tool_block(
         ),
         IDENTITY_BOUNDS,
     );
+    for segment in &display.leading_segments {
+        let element = tool_suffix_element(segment.status);
+        let text = tool_line_text(
+            theme,
+            tool_status_style(segment.status),
+            segment.text.clone(),
+        );
+        let attached = segment.no_leading_space || segment.text.starts_with(':');
+        match element {
+            ToolLineElement::AgentId => {
+                if attached {
+                    line.push_truncated_attached(element.priority(), left, text, AGENT_ID_BOUNDS);
+                } else {
+                    line.push_truncated(element.priority(), left, text, AGENT_ID_BOUNDS);
+                }
+            }
+            ToolLineElement::WorkTitle | ToolLineElement::Info if !attached => {
+                line.push_truncated(element.priority(), left, text, ARGUMENT_BOUNDS);
+            }
+            ToolLineElement::WorkTitle | ToolLineElement::Info => {
+                line.push_truncated_attached(element.priority(), left, text, ARGUMENT_BOUNDS);
+            }
+            _ if attached => line.push_attached(element.priority(), left, text),
+            _ => line.push(element.priority(), left, text),
+        }
+    }
     if !display.mode.is_empty() {
         line.push_truncated(
             ToolLineElement::Mode.priority(),

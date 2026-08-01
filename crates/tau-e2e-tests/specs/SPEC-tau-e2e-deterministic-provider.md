@@ -100,7 +100,7 @@ next explicit worker continuation only while the balanced call/error pair
 remains in context. S1 adds one
 distinct adjacent `AgentStartCall`/`AgentStartResult` pair; S4 raises that
 closed bound to two unique adjacent pairs. The fake requires
-exact bounded instruction, required role, task name, call id, production tool
+exact bounded instruction, required role, call id, production tool
 name/type/schema, one sole successful result in the latest continuation block
 with an exact two-field payload,
 and harness-minted distinct
@@ -189,6 +189,8 @@ abandon, cancel, or otherwise recover the uncertain work.
 
 S6 uses the closed hold boundary from
 [ARCH-tau-ext-test-dummy](../../tau-ext-test-dummy/specs/ARCH-tau-ext-test-dummy.md).
+Its compact 1,072-byte scenario JSON contains two main actions and two worker
+actions.
 Boot A requires exactly one correlated worker `tool.request` followed by canonical
 `tool.started` in the typed execution-restore stream and one live readiness fact
 before the process-group kill. Boot B requires one durable
@@ -199,16 +201,16 @@ complete tool-result context is exactly that balanced error. Boot C receives no
 input and must add no repair; its current/history membership, execution restore,
 current-agent journals, and separately loaded worker journal equal Boot B.
 
-S7 uses four lanes and compact 2,445-byte scenario JSON: six main actions, one
-completed-worker action, one uncertain hold, and the two-action dummy repair
-pair. Boot A consumes eight main turns and one turn per worker, checkpointing
-exact cursors `[6, 1, 1, 1]`, four immutable lane bindings, and two contiguous
+S7 uses four lanes and compact 2,152-byte scenario JSON: five main actions, one
+quiescent-worker action, one uncertain hold, and the two-action dummy repair
+pair. Boot A consumes eight of nine actions, checkpointing exact cursors
+`[5, 1, 1, 1]`, four immutable lane bindings, and two contiguous
 production child ordinals before the combined crash cut. Boot B and the
 no-input portion of Boot C consume no provider action. Only the uncertain worker
 may own the exact per-generation warning, only the repair worker journal may
 gain Boot B's provider error, and Boot C's durable snapshot must equal Boot B.
 One explicit repair-worker continuation after that equality check advances only
-its cursor to `[6, 1, 1, 2]`; the uncertain dispatch remains unfinished.
+its cursor to `[5, 1, 1, 2]`; the uncertain dispatch remains unfinished.
 
 Daemon acceptance uses the normal local socket protocol and real supervised
 subprocess. Its `ServeOptions` explicitly bypass ambient startup override
@@ -266,15 +268,15 @@ remains at one consumed worker action throughout, while the durable worker
 journal retains the one unfinished dispatch checkpoint. This proves
 conservative harness recovery at the established cut, not exactly-once external
 work or crash-transactional fake cursor recovery.
-S6 uses two lanes and compact 1,259-byte scenario JSON: three main actions and two
-worker actions. Boot A consumes three main turns and one worker turn before four
+S6 uses two lanes and compact 1,072-byte scenario JSON: two main actions and two
+worker actions. Boot A consumes two main turns and one worker turn before three
 matched actions; Boot B consumes one worker turn; Boot C consumes none. Extra
 repair events, terminals, starts, provider prompts, or actions fail closed.
-S7 consumes nine of ten actions before its crash: eight main turns and one turn
+S7 consumes eight of nine actions before its crash: five main turns and one turn
 in each worker lane. Two no-input resumed generations consume no provider turns;
 the first owns the sole durable repair and both own one exact uncertain-worker
 warning. The second snapshot equals the first before one explicit repair-worker
-continuation consumes the tenth action. Exact checkpoint bindings, per-agent
+continuation consumes the ninth action. Exact checkpoint bindings, per-agent
 journals, and provider budgets reject warning-to-model delivery, lane rebinding,
 repair leakage, or automatic redispatch.
 S8 uses two lanes and five scenario actions. Headless Boot A consumes three main

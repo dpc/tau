@@ -4,8 +4,6 @@ use super::*;
 
 const ALPHA_ROLE: &str = "deterministic-worker-alpha";
 const BETA_ROLE: &str = "deterministic-worker-beta";
-const ALPHA_NAME: &str = "alpha worker";
-const BETA_NAME: &str = "beta worker";
 const ALPHA_INSTRUCTION: &str = "Complete alpha instruction.";
 const BETA_INSTRUCTION: &str = "Complete beta instruction.";
 const ALPHA_INITIAL: &str = concat!(
@@ -31,10 +29,10 @@ fn cold_resume_multiple_workers_is_order_independent() -> Result<(), Box<dyn std
         .map(|lane| lane.actions.len())
         .collect::<Vec<_>>();
     let encoded_bytes = serde_json::to_vec(&scenario)?.len();
-    if action_counts != [6, 2, 2] || encoded_bytes != 1_757 {
+    if action_counts != [6, 2, 2] || encoded_bytes != 1_704 {
         return Err(format!(
             "S4 scenario no longer matches its three-lane [6, 2, 2]-action, \
-             1,757-byte budget: actions={action_counts:?}, bytes={encoded_bytes}"
+             1,704-byte budget: actions={action_counts:?}, bytes={encoded_bytes}"
         )
         .into());
     }
@@ -199,7 +197,6 @@ fn s4_scenario() -> ScenarioV2 {
                         call_id: "s4-start-alpha".into(),
                         prompt: ALPHA_INSTRUCTION.to_owned(),
                         role: ALPHA_ROLE.to_owned(),
-                        task_name: ALPHA_NAME.to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
                         user_text: "start worker alpha".to_owned(),
@@ -212,7 +209,6 @@ fn s4_scenario() -> ScenarioV2 {
                         call_id: "s4-start-beta".into(),
                         prompt: BETA_INSTRUCTION.to_owned(),
                         role: BETA_ROLE.to_owned(),
-                        task_name: BETA_NAME.to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
                         user_text: "start worker beta".to_owned(),
@@ -402,18 +398,8 @@ fn assert_s4_boot_a_lifecycle(
     }
     for (agent_id, parent, role, name) in [
         (&identities.main, None, "deterministic-main", None),
-        (
-            &identities.alpha,
-            Some(&identities.main),
-            ALPHA_ROLE,
-            Some(ALPHA_NAME),
-        ),
-        (
-            &identities.beta,
-            Some(&identities.main),
-            BETA_ROLE,
-            Some(BETA_NAME),
-        ),
+        (&identities.alpha, Some(&identities.main), ALPHA_ROLE, None),
+        (&identities.beta, Some(&identities.main), BETA_ROLE, None),
     ] {
         let started = starts
             .iter()
@@ -587,14 +573,14 @@ fn assert_s4_roster(
             AgentNavigationMode::ActiveAuto,
             ALPHA_ROLE,
             Some(&identities.main),
-            Some(ALPHA_NAME),
+            None,
         ),
         (
             &identities.beta,
             AgentNavigationMode::ActiveAuto,
             BETA_ROLE,
             Some(&identities.main),
-            Some(BETA_NAME),
+            None,
         ),
     ] {
         let row = roster

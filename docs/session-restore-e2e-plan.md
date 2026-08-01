@@ -138,7 +138,7 @@ Keep the fake provider closed and data-driven:
   generated role/model/tool configuration before spawning processes.
 - Add a closed adjacent V2 `AgentStartCall`/`AgentStartResult` pair.
   `AgentStartCall` matches exact user text and emits only the built-in
-  `agent_start` tool with exact instruction, required role, task name, and call
+  `agent_start` tool with exact instruction, required role, and call
   ID. `AgentStartResult` accepts only the correlated successful result,
   validates harness-minted `self_agent_id` and `sub_agent_id`, and emits its
   configured terminal response.
@@ -195,13 +195,13 @@ worker turn, totaling seven main and two worker turns. Add a focused failure if 
 setup produces an unexpected extra provider prompt; do not silently add an
 unbounded action.
 
-S3 reuses S1's two lanes and compact 1,151-byte scenario JSON: four main actions
+S3 reuses S1's two lanes and compact 1,116-byte scenario JSON: four main actions
 and two worker actions, below the 16 KiB ceiling. Boot A spends three main and one
 worker provider turn; Boot B spends one main and one worker turn, totaling four
 main and two worker turns. Promptless ephemeral creation, typed store seeding,
 roster queries, and absent-route probes consume no fake-provider action.
 
-S4 uses three lanes and compact 1,757-byte scenario JSON: exactly six main
+S4 uses three lanes and compact 1,704-byte scenario JSON: exactly six main
 actions (two adjacent start call/result pairs and two ordered response watch
 actions) and two actions in each distinct worker lane, below the 16 KiB ceiling.
 Boot A spends six main and one provider turn per worker. Boot B activates only
@@ -210,14 +210,14 @@ totaling six main and two turns per worker. Roster queries and replay consume no
 fake-provider action. Boot C receives no input and consumes no provider action
 while proving cold restore recomputes both delegated workers as `active_auto`.
 
-S5 uses two lanes and compact 1,061-byte scenario JSON: exactly four main
+S5 uses two lanes and compact 1,026-byte scenario JSON: exactly four main
 actions (the Boot A start pair and Boot B's explicit watch call/result pair) and one worker hold action, below the 16 KiB
 ceiling. Boot A spends two main and one worker provider turn. Boot B spends
 two main turns and zero worker turns; Boot C spends zero provider turns. The
 initial dispatch-uncertain watch snapshot, roster queries, replay, and the
 synchronized crash cut consume no additional fake-provider action.
 
-S6 uses two lanes and compact 1,120-byte scenario JSON: exactly two main
+S6 uses two lanes and compact 1,072-byte scenario JSON: exactly two main
 actions (Boot A's start pair) and two worker
 actions (the foreground dummy call and Boot B's repair-aware continuation).
 Boot A spends two main turns and one worker turn before three actions have
@@ -225,7 +225,7 @@ matched. Boot B spends one worker turn after the eager repair pair; Boot C spend
 zero provider turns. Roster queries, typed store reads, the crash cut, and repair
 observation consume no additional fake-provider action.
 
-S7 uses four lanes and compact 2,223-byte scenario JSON: five main actions, one
+S7 uses four lanes and compact 2,152-byte scenario JSON: five main actions, one
 quiescent-worker action, one dispatch-uncertain hold action, and two repair-worker
 actions. The main uses the existing two-start maximum for the quiescent and
 uncertain workers; the fixture creates the durable repair child through one exact
@@ -288,7 +288,7 @@ Assert:
   and, for each ID, exactly one durable `session.agent_loaded`, zero
   `session.agent_unloaded`, and current composed membership;
 - the worker creation fact retains `parent_agent = <main ID>`, the selected
-  `role`, and `display_name` equal to the supplied task name; replay does not
+  `role`, and no display name from the start request; replay does not
   append a second creation or membership fact;
 - both routes and both transcripts are available after resume, the main is
   `active`, the worker is `active_auto`, and both initially report `Idle`;
@@ -365,12 +365,12 @@ negative route probes.
 
 ### S4 — Multiple workers and ordering independence
 
-Create at least two durable workers with distinct roles, task names,
+Create at least two durable workers with distinct roles,
 instructions, and fake lanes. Record the observed completion order without
 treating it as authority, resume all agents, then activate the workers in an
 explicit order different from creation.
 
-Assert exact parent/role/name retention and, for every ID, one sequence-zero
+Assert exact parent/role retention and, for every ID, one sequence-zero
 creation, one durable load, no unload, and current composed membership. Require
 one agent boundary per current member, no lane rebinding, no cross-agent
 transcript suffix, and an ID-keyed roster result independent of the observed

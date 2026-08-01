@@ -31,7 +31,7 @@ pub(super) fn assert_snapshot_a(
         || snapshot.session_events.len() != 2
         || snapshot.restore_events.len() != 2
         || snapshot.agent_events[&identities.main].len() != 24
-        || snapshot.agent_events[&identities.worker].len() != 10
+        || snapshot.agent_events[&identities.worker].len() != 9
     {
         return Err(format!(
             "S8 Boot A durable record counts changed: session={}, restore={}, main={}, worker={}",
@@ -153,7 +153,6 @@ fn assert_exact_event_names(
     let worker_expected = [
         E::AGENT_STARTED,
         E::AGENT_INITIALIZATION_CONTEXT_SET,
-        E::AGENT_DISPLAY_NAME_SET,
         E::AGENT_ACTIVATION_QUEUED,
         E::AGENT_PROMPT_SUBMITTED,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
@@ -208,7 +207,7 @@ fn assert_boot_a_agent_payloads(
             if started.agent_id == identities.worker
                 && started.parent_agent.as_ref() == Some(&identities.main)
                 && started.role == "deterministic-worker"
-                && started.display_name.as_deref() == Some("deterministic worker")
+                && started.display_name.is_none()
                 && started.metadata.is_empty()
                 && !started.ephemeral
     ) || !matches!(
@@ -216,11 +215,6 @@ fn assert_boot_a_agent_payloads(
         Event::AgentInitializationContextSet(context)
             if context.agent_id == identities.worker
                 && context.session_id == snapshot.session_id
-    ) || !matches!(
-        &worker[2].event,
-        Event::AgentDisplayNameSet(name)
-            if name.agent_id == identities.worker
-                && name.display_name == "deterministic worker"
     ) {
         return Err("S8 exact durable creation payloads changed".into());
     }
@@ -257,7 +251,7 @@ fn assert_boot_a_agent_payloads(
                     }
             })
         || !matches!(
-            &worker[4].event,
+            &worker[3].event,
             Event::AgentPromptSubmitted(prompt)
                 if prompt.agent_id == identities.worker
                     && prompt.inference_activation
@@ -271,11 +265,11 @@ fn assert_boot_a_agent_payloads(
                     )
                     && prompt.submission_source
                         == tau_proto::PromptSubmissionSource::HarnessInternal
-                    && prompt.display_name.as_deref() == Some("deterministic worker")
+                    && prompt.display_name.as_deref() == Some(identities.worker.as_str())
                     && prompt.ctx_id.is_none()
         )
         || !exact_text_response(
-            &worker[8].event,
+            &worker[7].event,
             &identities.worker,
             "worker boot-a complete",
             false,
@@ -622,7 +616,7 @@ pub(super) fn assert_snapshot_suffix(
                 && value.text == super::RESTORE_NOTICE
                 && value.internal_kind.is_none()
                 && value.originator == tau_proto::PromptOriginator::User
-                && value.display_name.as_deref() == Some("deterministic worker")
+                && value.display_name.as_deref() == Some(identities.worker.as_str())
                     && value.ctx_id.is_none()
     ) || !matches!(
         &prompt.event,
@@ -634,7 +628,7 @@ pub(super) fn assert_snapshot_suffix(
                 && value.submission_source == tau_proto::PromptSubmissionSource::HumanUi
                 && value.internal_kind.is_none()
                 && value.originator == tau_proto::PromptOriginator::User
-                && value.display_name.as_deref() == Some("deterministic worker")
+                && value.display_name.as_deref() == Some(identities.worker.as_str())
                 && value.ctx_id.is_none()
     ) {
         return Err(format!("S8 worker durable pre-dispatch suffix changed: {suffix:?}").into());

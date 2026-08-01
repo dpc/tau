@@ -1508,11 +1508,9 @@ impl FakeState {
                 call_id,
                 prompt: child_prompt,
                 role,
-                task_name,
                 ..
             } => {
                 let fields = vec![
-                    ("task_name", CborValue::Text(task_name)),
                     ("prompt", CborValue::Text(child_prompt)),
                     ("role", CborValue::Text(role)),
                 ];
@@ -2187,10 +2185,6 @@ fn agent_start_parameters() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "task_name": {
-                "type": "string",
-                "description": "Short user-visible label for the sub-task (a few words)."
-            },
             "prompt": {
                 "type": "string",
                 "description": "Initial prompt for the sub-agent."
@@ -2200,7 +2194,7 @@ fn agent_start_parameters() -> serde_json::Value {
                 "description": "Sub-agent role to use."
             }
         },
-        "required": ["task_name", "prompt", "role"],
+        "required": ["prompt", "role"],
         "additionalProperties": false
     })
 }

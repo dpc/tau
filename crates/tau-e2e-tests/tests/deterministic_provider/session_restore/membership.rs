@@ -320,7 +320,7 @@ fn assert_s3_live_roster(
             navigation_mode: AgentNavigationMode::ActiveAuto,
             role: "deterministic-worker",
             parent: Some(&identities.main),
-            display_name: Some("deterministic worker"),
+            display_name: None,
         },
     )?;
     assert_idle_live_roster_row(
@@ -363,7 +363,7 @@ fn assert_s3_history_roster(
             navigation_mode: AgentNavigationMode::ActiveAuto,
             role: "deterministic-worker",
             parent: Some(&identities.main),
-            display_name: Some("deterministic worker"),
+            display_name: None,
         },
     )?;
     let row = roster

@@ -4844,6 +4844,9 @@ fn switched_agent_shows_its_tool_usage() {
     assert!(vt.screen_contains(80, "read src/lib.rs"));
 }
 
+/// Ensures a watched agent's stats stay owned by its watcher even while that
+/// watcher is not the selected transcript, preventing a hidden-row redraw from
+/// leaking into another agent view.
 #[test]
 fn watched_agent_stats_route_to_hidden_watcher_owner() {
     let (_term, handle, vt) = setup(90, 24);
@@ -4895,7 +4898,7 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
 
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
-    assert!(vt.screen_contains(90, "running [engineer_1] @engineer_1"));
+    assert!(vt.screen_contains(90, "@engineer_1 unreported"));
     assert!(vt.screen_contains(90, "%1/2"));
 }
 
@@ -9285,6 +9288,8 @@ fn render_provider_compaction_item_when_response_finishes() {
     assert!(!vt.screen_contains(80, "compacted"));
 }
 
+/// Ensures watched rows replace the start-derived label with the watched
+/// agent's own work status while retaining display metadata and telemetry.
 #[test]
 fn watched_agent_stats_redraw_active_indicator() {
     let (_term, handle, vt) = setup(100, 24);
@@ -9294,6 +9299,10 @@ fn watched_agent_stats_redraw_active_indicator() {
         cli_test_theme(),
     );
 
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: SessionStartReason::New,
+    }));
     renderer.switch_agent("parent_1".to_owned());
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
@@ -9337,15 +9346,82 @@ fn watched_agent_stats_redraw_active_indicator() {
     }));
 
     assert!(
-        eventually_screen_contains(&vt, 100, "running [engineer_1] @engineer_1"),
+        eventually_screen_contains(&vt, 100, "@engineer_1 unreported"),
         "watched-agent stats should repaint without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
     assert!(
-        eventually_screen_contains(&vt, 100, "running [engineer_1] @engineer_1 %3/3"),
+        eventually_screen_contains(&vt, 100, "@engineer_1 unreported %3/3"),
         "watched-agent stats should repaint with tool-call-style counters without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+        parent_agent: Some(agent_id("parent_1")),
+        agent_id: agent_id("engineer_1"),
+        role: "engineer".to_owned(),
+        display_name: Some("worker display".to_owned()),
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    renderer.handle(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("status-engineer-1")
+                .expect("test identifier must satisfy its grammar"),
+            sender_id: agent_id("engineer_1"),
+            sender_session_id: None,
+            recipient_id: agent_id("parent_1"),
+            kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+                session_id: test_session_id("s1"),
+                subscription_id: "watch-engineer-1".to_owned(),
+                status_epoch: 1,
+                phase: tau_proto::AgentWorkStatusPhase::Working,
+                title: Some("investigate session".to_owned()),
+                initial: false,
+            }),
+            watch_long_wait: None,
+            message: String::new(),
+        },
+    ));
+    assert!(
+        eventually_screen_contains(
+            &vt,
+            100,
+            "@engineer_1 (worker display) working investigate session %3/3",
+        ),
+        "the watched row should use the agent's own status title and display name: {:?}",
+        vt.screen_text(100)
+    );
+    renderer.handle(&Event::SessionAgentUnloaded(
+        tau_proto::SessionAgentUnloaded {
+            session_id: test_session_id("s1"),
+            agent_id: agent_id("engineer_1"),
+        },
+    ));
+    assert!(renderer.watched_agent_work_status("engineer_1").is_none());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: test_session_id("s1"),
+            watcher_id: agent_id("parent_1"),
+            watched_agent_ids: vec![agent_id("engineer_1")],
+            changed_agent_id: Some(agent_id("engineer_1")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
+    ));
+    assert!(
+        eventually_screen_contains(&vt, 100, "@engineer_1 (worker display) unreported"),
+        "a reloaded same-id row must not retain its former self-reported title: {:?}",
+        vt.screen_text(100)
+    );
+    let reloaded_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.trim_start().starts_with("@engineer_1 (worker display)"))
+        .expect("reloaded watched row");
+    assert!(!reloaded_row.contains("investigate session"));
     assert!(
         !vt.screen_contains(100, "running tools"),
         "watched-agent block should keep compact tool-block layout, not prose: {:?}",
@@ -9399,11 +9475,11 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
     let screen = vt.screen_text(100);
     let first = screen
         .iter()
-        .position(|line| line.contains("running [engineer_a] @engineer_a"))
+        .position(|line| line.contains("@engineer_a unreported"))
         .expect("engineer_a running row");
     let second = screen
         .iter()
-        .position(|line| line.contains("running [engineer_b] @engineer_b"))
+        .position(|line| line.contains("@engineer_b unreported"))
         .expect("engineer_b running row");
     assert!(
         first < second,
@@ -9451,7 +9527,7 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
 
     renderer.handle(&prompt_started("worker"));
     sync(&handle);
-    assert!(vt.screen_contains(100, "watching [reviewer] @reviewer -> @worker"));
+    assert!(vt.screen_contains(100, "@reviewer unreported watching -> @worker"));
     assert!(
         !vt.screen_contains(100, "[worker] @worker"),
         "recursive descendants must not be flattened into manager rows"
@@ -9459,7 +9535,7 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
 
     renderer.handle(&prompt_started("reviewer"));
     sync(&handle);
-    assert!(vt.screen_contains(100, "running [reviewer] @reviewer"));
+    assert!(vt.screen_contains(100, "@reviewer unreported"));
     assert!(
         !vt.screen_contains(100, "@reviewer -> @worker"),
         "direct-running state must replace the transitive witness"
@@ -9524,7 +9600,7 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "running [engineer_1] @engineer_1 %13/13",
+        "@engineer_1 unreported %13/13",
     ));
 
     renderer.switch_agent("other_1".to_owned());
@@ -9546,12 +9622,12 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
     let watching_rows: Vec<_> = vt
         .screen_text(100)
         .into_iter()
-        .filter(|row| row.contains("running [engineer_1] @engineer_1"))
+        .filter(|row| row.contains("@engineer_1 unreported"))
         .map(|row| row.trim_end().to_owned())
         .collect();
     assert_eq!(
         watching_rows,
-        vec!["running [engineer_1] @engineer_1 %42/42"],
+        vec!["@engineer_1 unreported %42/42"],
         "watched-agent row should update in place after transcript restore: {:?}",
         vt.screen_text(100)
     );
@@ -9615,7 +9691,7 @@ fn watched_agent_response_finished_removes_active_indicator() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "running [engineer_1] @engineer_1 %15/15",
+        "@engineer_1 unreported %15/15",
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -9725,7 +9801,7 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
     }));
     sync(&handle);
     assert!(
-        vt.screen_contains(100, "running [engineer_1] @engineer_1"),
+        vt.screen_contains(100, "@engineer_1 unreported"),
         "the outer agent turn remains running while tools are pending"
     );
 
@@ -9749,7 +9825,7 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
     }));
     sync(&handle);
     assert!(
-        vt.screen_contains(100, "running [engineer_1] @engineer_1"),
+        vt.screen_contains(100, "@engineer_1 unreported"),
         "the provider's final model round is not the agent-turn boundary"
     );
 
@@ -9805,7 +9881,7 @@ fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "running [engineer_1] @engineer_1",
+        "@engineer_1 unreported",
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -9884,7 +9960,7 @@ fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "running [engineer_1] @engineer_1",
+        "@engineer_1 unreported",
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -11700,8 +11776,8 @@ fn info_chip_agent_classification_is_strict() {
     assert!(matches!(display.suffixes[1].status, ToolStatus::Info));
 }
 
-/// Every tool-line element must keep the requested ten-point priority bands,
-/// including documented best-guess bands for all pre-existing optional fields.
+/// Tool-line elements retain their documented truncation order, including the
+/// task-title band that yields after a display name and before telemetry.
 #[test]
 fn tool_line_priorities_cover_every_element() {
     let priorities = [
@@ -11713,6 +11789,7 @@ fn tool_line_priorities_cover_every_element() {
         (ToolLineElement::Mode, 50),
         (ToolLineElement::Range, 60),
         (ToolLineElement::Counter, 70),
+        (ToolLineElement::WorkTitle, 75),
         (ToolLineElement::Info, 80),
         (ToolLineElement::Duration, 90),
     ];
@@ -12163,10 +12240,8 @@ fn render_tool_use_state_token_progress_formats_context_like_status_bar() {
     );
 }
 
-/// Ensures the generic watched-agent indicator keeps the compact tool-block
-/// shape, distinguishes direct-running from transitive activity by wording
-/// under the shared watched-agent label style, keeps an explicit agent-id chip,
-/// and omits an in-progress ellipsis.
+/// Ensures watched-agent rows put stable identity first, then self-reported
+/// state and title, while preserving generic telemetry and truncation priority.
 #[test]
 fn watched_agent_display_uses_tool_block_styles_and_counters() {
     let theme = cli_test_theme();
@@ -12187,24 +12262,88 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         },
         estimated_api_cost: Default::default(),
     };
+    let status = tau_proto::AgentWatchWorkStatusNotification {
+        session_id: test_session_id("s1"),
+        subscription_id: "watch-1".to_owned(),
+        status_epoch: 1,
+        phase: tau_proto::AgentWorkStatusPhase::Working,
+        title: Some("review changes".to_owned()),
+        initial: false,
+    };
 
     let display = watched_agent_tool_display(
-        "review",
+        Some("review"),
         "engineer_1",
         Some(&stats),
         WatchedAgentActivity::Running,
+        Some(&status),
     );
-    assert_eq!(display.tool_name, "running");
-    assert_eq!(display.args, "[review]");
+    assert_eq!(display.tool_name, "@engineer_1");
+    assert_eq!(display.args, "");
+    let leading: Vec<&str> = display
+        .leading_segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect();
+    assert_eq!(leading, vec!["(review)", "working", "review changes"]);
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["@engineer_1", "%2/3", "#133.4k/200k"]);
+    assert_eq!(texts, vec!["%2/3", "#133.4k/200k"]);
 
     let block = render_tool_block(&theme, &display);
+    assert_eq!(
+        priority_header_text(&block, 100),
+        "@engineer_1 (review) working review changes %2/3 #133.4k/200k"
+    );
     let running = priority_header_cells(&block, 100)[0].clone();
     assert_eq!(
         running.style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME),
-        "direct activity keeps accessible wording without taking the tool-call color"
+        "stable agent identity keeps the watched-agent style"
+    );
+    let wide_cells = priority_header_cells(&block, 100);
+    let wide_text: String = wide_cells.iter().map(|cell| cell.ch).collect();
+    let display_name_start = wide_text.find("(review)").expect("display name span") + 1;
+    let phase_start = wide_text.find("working").expect("work phase span");
+    let title_start = wide_text
+        .rfind("review changes")
+        .expect("self-reported title span");
+    assert_eq!(
+        wide_cells[display_name_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_STATUS_INFO),
+        "persisted display names remain informational metadata"
+    );
+    assert_eq!(
+        wide_cells[phase_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROGRESS_INDICATOR),
+        "self-reported work phases retain the progress semantic style"
+    );
+    assert_eq!(
+        wide_cells[title_start].style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_STATUS_INFO),
+        "self-reported task titles remain informational metadata"
+    );
+    let without_display_name = priority_header_text(&block, 40);
+    assert!(!without_display_name.contains("(review)"));
+    assert!(
+        without_display_name.contains("working"),
+        "{without_display_name:?}"
+    );
+    assert!(
+        without_display_name.contains("re┄es"),
+        "{without_display_name:?}"
+    );
+    let without_task_title = priority_header_text(&block, 19);
+    assert!(
+        without_task_title.starts_with('@'),
+        "{without_task_title:?}"
+    );
+    assert!(
+        without_task_title.contains("working"),
+        "{without_task_title:?}"
+    );
+    assert!(
+        !without_task_title.contains("review"),
+        "{without_task_title:?}"
     );
 
     let percent_only_stats = tau_proto::AgentStatsUpdated {
@@ -12217,14 +12356,15 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         ..stats
     };
     let display = watched_agent_tool_display(
-        "review",
+        Some("review"),
         "engineer_1",
         Some(&percent_only_stats),
         WatchedAgentActivity::Watching { witness: "leaf" },
+        Some(&status),
     );
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(display.tool_name, "watching");
-    assert_eq!(texts, vec!["@engineer_1", "-> @leaf", "%2/3", "#67%"]);
+    assert_eq!(display.tool_name, "@engineer_1");
+    assert_eq!(texts, vec!["-> @leaf", "%2/3", "#67%"]);
     let block = render_tool_block(&theme, &display);
     let watching = priority_header_cells(&block, 100)[0].clone();
     assert_eq!(
@@ -12232,6 +12372,71 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME)
     );
     assert_eq!(watching.style.fg, Some(Color::DarkYellow));
+}
+
+/// Watch work status must remain session-scoped so old-session notifications
+/// cannot label a reused agent id after the UI changes sessions.
+#[test]
+fn watched_agent_work_status_rejects_old_sessions_and_clears_on_switch() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: SessionStartReason::New,
+    }));
+    let message = |session_id: &str, title: &str| {
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse(format!("status-{session_id}"))
+                .expect("test identifier must satisfy its grammar"),
+            sender_id: agent_id("worker"),
+            sender_session_id: None,
+            recipient_id: agent_id("manager"),
+            kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+                session_id: test_session_id(session_id),
+                subscription_id: "watch-worker".to_owned(),
+                status_epoch: 1,
+                phase: tau_proto::AgentWorkStatusPhase::Working,
+                title: Some(title.to_owned()),
+                initial: false,
+            }),
+            watch_long_wait: None,
+            message: String::new(),
+        })
+    };
+
+    renderer.handle(&message("old", "stale task"));
+    assert!(renderer.watched_agent_work_status("worker").is_none());
+    renderer.handle(&message("s1", "current task"));
+    assert_eq!(
+        renderer
+            .watched_agent_work_status("worker")
+            .and_then(|status| status.title.as_deref()),
+        Some("current task")
+    );
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: SessionStartReason::Resume,
+    }));
+    assert!(renderer.watched_agent_work_status("worker").is_none());
+    renderer.handle(&message("s1", "current task"));
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s2"),
+        reason: SessionStartReason::Resume,
+    }));
+    assert!(renderer.watched_agent_work_status("worker").is_none());
+    renderer.handle(&message("s2", "new-session task"));
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: test_session_id("s3"),
+        reason: SessionStartReason::New,
+    }));
+    assert!(renderer.watched_agent_work_status("worker").is_none());
 }
 
 #[test]

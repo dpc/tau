@@ -142,7 +142,7 @@ impl BuiltinState {
             }
             AGENT_START_TOOL_NAME => {
                 let parsed = parse_delegate_args(&call.arguments).ok()?;
-                let args = format!("[{}] +{}", parsed.task_name, parsed.role);
+                let args = format!("+{}", parsed.role);
                 (args, tau_proto::PROGRESS_INDICATOR_TEXT, None)
             }
             WAIT_TOOL_NAME => (
@@ -408,16 +408,13 @@ impl BuiltinTools {
             query_id
         };
         let prompt_stats = ToolUseStats::for_text(&parsed.prompt);
-        let task_name = parsed.task_name;
-        let start_request = StartAgentRequest {
-            parent_agent: None,
-            query_id: query_id.clone(),
-            instruction: delegate_instruction(&self_agent_id, &parsed.prompt),
-            role: Some(parsed.role),
-            input_stats: prompt_stats,
-            tool_call_id: Some(call_id.clone()),
-            task_name: Some(task_name.clone()),
-        };
+        let start_request = delegate_start_request(
+            query_id.clone(),
+            &self_agent_id,
+            call_id.clone(),
+            prompt_stats,
+            parsed,
+        );
         let agent_id = match host.enqueue_start_agent_request_without_draining(start_request) {
             Ok(agent_id) => agent_id,
             Err(message) => {
@@ -457,7 +454,6 @@ impl BuiltinTools {
             AgentStartSuccess {
                 self_agent_id: &self_agent_id,
                 agent_id: &agent_id,
-                task_name: &task_name,
                 prompt_stats,
             },
         );
@@ -755,7 +751,6 @@ impl AgentStartSuccessFinisher for InternalToolHost<'_> {
 struct AgentStartSuccess<'a> {
     self_agent_id: &'a str,
     agent_id: &'a str,
-    task_name: &'a str,
     prompt_stats: ToolUseStats,
 }
 
@@ -774,23 +769,18 @@ fn finish_agent_start_success(
         tool_type,
         delegate_result_value(success.self_agent_id, success.agent_id),
         Some(agent_start_success_display(
-            success.task_name,
             success.agent_id,
             success.prompt_stats,
         )),
     );
 }
 
-fn agent_start_success_display(
-    task_name: &str,
-    agent_id: &str,
-    prompt_stats: ToolUseStats,
-) -> ToolUseState {
+fn agent_start_success_display(agent_id: &str, prompt_stats: ToolUseStats) -> ToolUseState {
     ToolUseState {
         // Pending `agent_start` args may include `+role` while the model is
         // still choosing/starting work. The immediate success line instead
         // identifies the concrete spawned agent with the `@…` chip below.
-        args: format!("[{task_name}]"),
+        args: String::new(),
         stats: prompt_stats,
         info_chips: vec![format!("@{agent_id}")],
         status: ToolUseStatus::Success,
@@ -1859,7 +1849,6 @@ fn assistant_text_from_context_item(item: &ContextItem) -> Option<String> {
 
 #[derive(Debug)]
 struct DelegateArgs {
-    task_name: String,
     prompt: String,
     role: String,
 }
@@ -1869,7 +1858,6 @@ fn parse_delegate_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
         return Err("arguments must be an object".to_owned());
     };
     let mut prompt = None;
-    let mut task_name = None;
     let mut role = None;
     for (k, v) in entries {
         let CborValue::Text(name) = k else { continue };
@@ -1877,10 +1865,6 @@ fn parse_delegate_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
             "prompt" => match v {
                 CborValue::Text(text) => prompt = Some(text.clone()),
                 _ => return Err("`prompt` must be a string".to_owned()),
-            },
-            "task_name" => match v {
-                CborValue::Text(text) => task_name = Some(text.clone()),
-                _ => return Err("`task_name` must be a string".to_owned()),
             },
             "role" => match v {
                 CborValue::Text(text) => role = Some(text.clone()),
@@ -1893,19 +1877,11 @@ fn parse_delegate_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
     if prompt.trim().is_empty() {
         return Err("`prompt` must not be empty".to_owned());
     }
-    let task_name = task_name.ok_or_else(|| "missing string argument: task_name".to_owned())?;
-    if task_name.trim().is_empty() {
-        return Err("`task_name` must not be empty".to_owned());
-    }
     let role = role.ok_or_else(|| "missing string argument: role".to_owned())?;
     if role.trim().is_empty() {
         return Err("`role` must not be empty".to_owned());
     }
-    Ok(DelegateArgs {
-        task_name,
-        prompt,
-        role,
-    })
+    Ok(DelegateArgs { prompt, role })
 }
 
 fn delegate_instruction(self_agent_id: &str, prompt: &str) -> String {
@@ -1914,6 +1890,29 @@ fn delegate_instruction(self_agent_id: &str, prompt: &str) -> String {
         self_agent_id = self_agent_id,
         prompt = prompt,
     )
+}
+
+/// Builds the start request for the public `agent_start` tool.
+///
+/// `task_name` deliberately remains absent: the child owns its visible work
+/// title through `status`, while display names originate from their independent
+/// presentation metadata.
+fn delegate_start_request(
+    query_id: String,
+    self_agent_id: &str,
+    call_id: ToolCallId,
+    input_stats: ToolUseStats,
+    args: DelegateArgs,
+) -> StartAgentRequest {
+    StartAgentRequest {
+        parent_agent: None,
+        query_id,
+        instruction: delegate_instruction(self_agent_id, &args.prompt),
+        role: Some(args.role),
+        input_stats,
+        tool_call_id: Some(call_id),
+        task_name: None,
+    }
 }
 
 fn delegate_result_value(self_agent_id: &str, agent_id: &str) -> CborValue {
@@ -1968,7 +1967,7 @@ fn agent_start_tool_spec() -> ToolSpec {
         description: Some("Start a sub-agent".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(
-            serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short user-visible label for the sub-task (a few words)."},"prompt":{"type":"string","description":"Initial prompt for the sub-agent."},"role":{"type":"string","description":"Sub-agent role to use."}},"required":["task_name","prompt","role"],"additionalProperties":false}),
+            serde_json::json!({"type":"object","properties":{"prompt":{"type":"string","description":"Initial prompt for the sub-agent."},"role":{"type":"string","description":"Sub-agent role to use."}},"required":["prompt","role"],"additionalProperties":false}),
         ),
         format: None,
         tags: Vec::new(),

@@ -123,8 +123,10 @@ The CLI also owns presentation-only recursive watch activity. Its current
 implementation folds the harness-owned live watch DAG and watched-agent
 `TurnState` compatibility records, with active-prompt fallback until an edge
 receives its first such record, into direct `running` and transitive `watching`
-rows plus the session-wide side-agent count. It does not yet consume semantic
-`WorkStatus` snapshots. This projection must not create protocol facts,
+rows plus the session-wide side-agent count. It consumes current-session
+semantic `WorkStatus` snapshots only as a row's self-reported phase/title
+presentation metadata; `TurnState` remains the running-activity authority.
+This projection must not create protocol facts,
 model-visible notifications, navigation state, persistence, or routing behavior.
 Its authority and exact presentation are specified by
 [SPEC-tau-cli-agent-message-labels](SPEC-tau-cli-agent-message-labels.md).

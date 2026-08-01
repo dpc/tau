@@ -333,8 +333,10 @@ fn tool_background_result(call_id: &str) -> tau_proto::ToolBackgroundResult {
     }
 }
 
+/// The public agent-start schema must request only the prompt and explicit
+/// role, keeping display names independent of delegation.
 #[test]
-fn agent_start_spec_advertises_required_explicit_role() {
+fn agent_start_spec_advertises_prompt_and_required_explicit_role() {
     // Tau does not preserve compatibility for renamed tool call names yet.
     // Only the current public spelling should be advertised or handled.
     let tools = BuiltinTools::default();
@@ -353,7 +355,7 @@ fn agent_start_spec_advertises_required_explicit_role() {
     let parameters = spec.parameters.expect("agent_start parameters");
     assert_eq!(
         parameters["required"],
-        serde_json::json!(["task_name", "prompt", "role"])
+        serde_json::json!(["prompt", "role"])
     );
     assert_eq!(
         parameters["properties"]["prompt"]["description"],
@@ -370,16 +372,10 @@ fn agent_start_spec_advertises_required_explicit_role() {
 #[test]
 fn agent_start_runtime_requires_explicit_nonempty_role() {
     let arguments = |role: Option<&str>| {
-        let mut entries = vec![
-            (
-                CborValue::Text("task_name".to_owned()),
-                CborValue::Text("review".to_owned()),
-            ),
-            (
-                CborValue::Text("prompt".to_owned()),
-                CborValue::Text("Review this change".to_owned()),
-            ),
-        ];
+        let mut entries = vec![(
+            CborValue::Text("prompt".to_owned()),
+            CborValue::Text("Review this change".to_owned()),
+        )];
         if let Some(role) = role {
             entries.push((
                 CborValue::Text("role".to_owned()),
@@ -405,6 +401,27 @@ fn agent_start_runtime_requires_explicit_nonempty_role() {
             role
         );
     }
+}
+
+/// The public `agent_start` path must not turn its prompt or role into the
+/// child display name; only the child's own later `status` may set its task
+/// title.
+#[test]
+fn agent_start_request_omits_display_name_source() {
+    let request = delegate_start_request(
+        "delegate-0".to_owned(),
+        "engineer_parent",
+        ToolCallId::from("call-0"),
+        ToolUseStats::for_text("Review the change"),
+        DelegateArgs {
+            prompt: "Review the change".to_owned(),
+            role: "reviewer".to_owned(),
+        },
+    );
+
+    assert_eq!(request.task_name, None);
+    assert_eq!(request.role.as_deref(), Some("reviewer"));
+    assert_eq!(request.tool_call_id.as_deref(), Some("call-0"));
 }
 
 /// Model-visible built-in tool prose stays synchronized with the intentionally
@@ -1413,7 +1430,6 @@ fn agent_start_success_display_names_agent_and_uses_standard_status() {
     // answer, so its display descriptor must still give the user useful spawn
     // metadata in the normal tool-call block.
     let display = agent_start_success_display(
-        "review",
         "engineer_child",
         ToolUseStats {
             matches: None,
@@ -1422,7 +1438,7 @@ fn agent_start_success_display_names_agent_and_uses_standard_status() {
         },
     );
 
-    assert_eq!(display.args, "[review]");
+    assert_eq!(display.args, "");
     assert_eq!(display.stats.lines, Some(2));
     assert_eq!(display.stats.bytes, Some(12));
     assert_eq!(display.info_chips, vec!["@engineer_child"]);
@@ -1480,7 +1496,6 @@ fn finish_agent_start_success_passes_informative_display() {
         AgentStartSuccess {
             self_agent_id: "engineer_parent",
             agent_id: "engineer_child",
-            task_name: "review",
             prompt_stats: ToolUseStats {
                 matches: None,
                 lines: Some(2),
@@ -1503,7 +1518,7 @@ fn finish_agent_start_success_passes_informative_display() {
         cbor_map_text(&call.result, "sub_agent_id"),
         Some("engineer_child")
     );
-    assert_eq!(display.args, "[review]");
+    assert_eq!(display.args, "");
     assert_eq!(display.stats.lines, Some(2));
     assert_eq!(display.stats.bytes, Some(12));
     assert_eq!(display.info_chips, vec!["@engineer_child"]);

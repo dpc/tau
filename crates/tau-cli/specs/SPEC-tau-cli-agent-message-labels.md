@@ -76,13 +76,17 @@ Current CLI activity rows come from the latest watched-agent `TurnState` record
 cached on each directed watch edge. `Running` renders as active and `Idle` does
 not. Before an edge receives its first `TurnState`, active prompt tracking for
 the target is the edge-local compatibility/catch-up fallback. Structured
-`WorkStatus` reports supply transcript status updates but do not replace
-`TurnState` as activity-row authority.
+`WorkStatus` reports supply transcript status updates and current-session row
+presentation metadata, but do not replace `TurnState` as activity-row authority.
 
 The CLI derives recursive activity exactly over the current live watch DAG. A
-direct target whose edge reports Running renders as `running [name] @id`. An otherwise
-non-Running edge whose target watches an effective descendant renders as
-`watching [name] @id -> @witness`, where the witness is the nearest directly
+direct target whose edge reports Running renders as `@id (display name) phase
+title`, followed by existing tool/context telemetry. The stable id is primary;
+the display name is optional persisted UI metadata; phase/title are the watched
+agent's own structured `WorkStatus` report. Under width pressure the display
+name yields before the title, while identity and phase retain their existing
+higher priority. An otherwise non-Running edge whose target watches an effective
+descendant adds `watching -> @witness`, where the witness is the nearest directly
 running descendant and equal-depth candidates use stable agent-id order. Direct
 activity wins when both apply. Rows remain ordered by stable target id, and the
 selected agent gets one row per direct target; recursive descendants are not

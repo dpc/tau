@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Exact compact JSON size of the reviewed S5 scenario grammar.
-const SCENARIO_BYTES: usize = 1_061;
+const SCENARIO_BYTES: usize = 1_026;
 /// Existing bounded hold deadline used only to keep the provider prompt in
 /// flight until the synchronized process-group kill.
 const HOLD_TIMEOUT_MS: u64 = 10_000;
@@ -235,7 +235,6 @@ fn dispatch_uncertain_scenario() -> ScenarioV2 {
                         call_id: "s5-agent-start".into(),
                         prompt: WORKER_PROMPT.to_owned(),
                         role: "deterministic-worker".to_owned(),
-                        task_name: "deterministic worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
                         user_text: "start the held deterministic worker".to_owned(),

@@ -144,7 +144,6 @@ fn production_worker_scenario(name: &str, prefix: &str) -> ScenarioV2 {
                         call_id: format!("{prefix}-agent-start").into(),
                         prompt: WORKER_PROMPT.to_owned(),
                         role: "deterministic-worker".to_owned(),
-                        task_name: "deterministic worker".to_owned(),
                     },
                     ScenarioActionV2::AgentStartResult {
                         user_text: "start the deterministic worker".to_owned(),
@@ -289,7 +288,6 @@ fn cold_resume_recreates_explicit_worker_watch() -> Result<(), Box<dyn std::erro
                             call_id: "s2-agent-start".into(),
                             prompt: WORKER_PROMPT.to_owned(),
                             role: "deterministic-worker".to_owned(),
-                            task_name: "deterministic worker".to_owned(),
                         },
                         ScenarioActionV2::AgentStartResult {
                             user_text: "start the deterministic worker".to_owned(),
@@ -748,7 +746,7 @@ fn assert_boot_a_lifecycle(
         .ok_or("worker creation fact missing")?;
     if worker.parent_agent.as_ref() != Some(&identities.main)
         || worker.role != "deterministic-worker"
-        || worker.display_name.as_deref() != Some("deterministic worker")
+        || worker.display_name.is_some()
     {
         return Err(format!("worker immutable creation fact changed: {worker:?}").into());
     }
@@ -961,7 +959,7 @@ fn assert_replay_is_observational(
             &identities.worker,
             "deterministic-worker",
             Some(&identities.main),
-            Some("deterministic worker"),
+            None,
         ),
     ] {
         let exact = replayed_starts
@@ -1108,7 +1106,7 @@ fn assert_restored_roster(
             navigation_mode: AgentNavigationMode::ActiveAuto,
             role: "deterministic-worker",
             parent: Some(&identities.main),
-            display_name: Some("deterministic worker"),
+            display_name: None,
         },
     )
 }

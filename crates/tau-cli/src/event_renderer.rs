@@ -30,7 +30,7 @@ use crate::markdown_render::{
 use crate::renderer_handle::RendererHandle;
 use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
-    CompactionStatus, ToolCallDisplay, ToolStatus, ToolSuffixSegment, ToolSummaryDisplay,
+    CompactionStatus, ToolCallDisplay, ToolLineSegment, ToolStatus, ToolSummaryDisplay,
     agent_context_initialized_block, build_delegate_completion_display, build_tool_summary_display,
     diff_payload_counts, extension_status_block, format_token_count, pending_tool_call_display,
     render_action_output_block, render_compaction_block, render_diff_tool_block,
@@ -276,6 +276,8 @@ pub(crate) struct EventRenderer {
     /// activity across model rounds and intervening tool rounds.
     watched_agent_turn_states:
         HashMap<String, HashMap<String, tau_proto::AgentWatchTurnStateNotification>>,
+    /// Latest self-reported work status keyed by watched agent id.
+    watched_agent_work_statuses: HashMap<String, tau_proto::AgentWatchWorkStatusNotification>,
     /// In-flight `agent_prompt_id`s keyed by the agent currently producing a
     /// response.
     active_agent_prompts: HashMap<String, HashSet<String>>,
@@ -1403,15 +1405,16 @@ pub(crate) enum WatchedAgentActivity<'a> {
 /// Builds the generic tool-block-shaped display for a watched-agent indicator.
 ///
 /// This intentionally reuses [`tau_proto::ToolUseState`] counter formatting so
-/// rows keep the compact generic layout, an explicit `@agent_id` chip, and no
-/// in-progress status suffix. Both direct `running` and transitive `watching`
-/// labels use the historical `watching.name` style so watched-agent activity
-/// remains visually distinct from actual tool calls.
+/// rows keep the compact generic layout, stable `@agent_id` identity, and
+/// existing telemetry counters. The self-reported work state has result-status
+/// priority, while an optional display name and task title yield first under
+/// width pressure.
 pub(crate) fn watched_agent_tool_display(
-    label: &str,
+    display_name: Option<&str>,
     agent_id: &str,
     stats: Option<&tau_proto::AgentStatsUpdated>,
     activity: WatchedAgentActivity<'_>,
+    work_status: Option<&tau_proto::AgentWatchWorkStatusNotification>,
 ) -> ToolCallDisplay {
     use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStatus};
 
@@ -1447,30 +1450,48 @@ pub(crate) fn watched_agent_tool_display(
     }
 
     let display = ToolUseState {
-        args: format!("[{label}]"),
+        args: String::new(),
         progress_counters,
         status: ToolUseStatus::Success,
         status_text: String::new(),
         ..Default::default()
     };
-    let (name, witness) = match activity {
+    let (runtime_state, witness) = match activity {
         WatchedAgentActivity::Running => ("running", None),
         WatchedAgentActivity::Watching { witness } => ("watching", Some(witness)),
     };
-    let mut rendered = render_tool_use_state_without_status(name, &display);
+    let mut rendered = render_tool_use_state_without_status(&format!("@{agent_id}"), &display);
     rendered.tool_name_style = Some(tau_themes::names::WATCHING_NAME);
-    rendered.suffixes.insert(
-        0,
-        ToolSuffixSegment {
-            text: format!("@{agent_id}"),
-            status: ToolStatus::Agent,
+    if let Some(display_name) = display_name.map(str::trim).filter(|name| !name.is_empty()) {
+        rendered.leading_segments.push(ToolLineSegment {
+            text: format!("({})", tau_proto::visible_escape_metadata(display_name)),
+            status: ToolStatus::Info,
             no_leading_space: false,
-        },
-    );
+        });
+    }
+    rendered.leading_segments.push(ToolLineSegment {
+        text: watched_agent_work_status_phase(work_status),
+        status: ToolStatus::Progress,
+        no_leading_space: false,
+    });
+    if let Some(title) = work_status.and_then(|status| status.title.as_deref()) {
+        rendered.leading_segments.push(ToolLineSegment {
+            text: tau_proto::visible_escape_metadata(title),
+            status: ToolStatus::WorkTitle,
+            no_leading_space: false,
+        });
+    }
+    if runtime_state == "watching" {
+        rendered.leading_segments.push(ToolLineSegment {
+            text: runtime_state.to_owned(),
+            status: ToolStatus::Info,
+            no_leading_space: false,
+        });
+    }
     if let Some(witness) = witness {
         rendered.suffixes.insert(
-            1,
-            ToolSuffixSegment {
+            0,
+            ToolLineSegment {
                 text: format!("-> @{witness}"),
                 status: ToolStatus::Agent,
                 no_leading_space: false,
@@ -1478,6 +1499,20 @@ pub(crate) fn watched_agent_tool_display(
         );
     }
     rendered
+}
+
+/// Returns the stable UI spelling for one self-reported agent work phase.
+fn watched_agent_work_status_phase(
+    status: Option<&tau_proto::AgentWatchWorkStatusNotification>,
+) -> String {
+    match status.map(|status| status.phase) {
+        None | Some(tau_proto::AgentWorkStatusPhase::Unreported) => "unreported",
+        Some(tau_proto::AgentWorkStatusPhase::Working) => "working",
+        Some(tau_proto::AgentWorkStatusPhase::Done) => "done",
+        Some(tau_proto::AgentWorkStatusPhase::Blocked) => "blocked",
+        Some(tau_proto::AgentWorkStatusPhase::Unknown) => "unknown",
+    }
+    .to_owned()
 }
 
 impl EventRenderer {
@@ -1545,6 +1580,7 @@ impl EventRenderer {
             agent_estimated_api_costs: path_crate_estimated_cost::AgentCostProjection::default(),
             agent_models: HashMap::new(),
             watched_agent_turn_states: HashMap::new(),
+            watched_agent_work_statuses: HashMap::new(),
             active_agent_prompts: HashMap::new(),
             terminal_agent_prompts: HashSet::new(),
             finished_provider_prompts: HashSet::new(),
@@ -1675,6 +1711,15 @@ impl EventRenderer {
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<HashMap<String, String>>> {
         self.agent_display_names.clone()
+    }
+
+    /// Returns the current-session cached work status for one watched agent.
+    #[cfg(test)]
+    pub(crate) fn watched_agent_work_status(
+        &self,
+        agent_id: &str,
+    ) -> Option<&tau_proto::AgentWatchWorkStatusNotification> {
+        self.watched_agent_work_statuses.get(agent_id)
     }
 
     /// Returns the canonical cumulative per-agent costs shared with input
@@ -2116,6 +2161,26 @@ impl EventRenderer {
         }
     }
 
+    /// Records a current-session self-reported work-status snapshot for a
+    /// watched agent and redraws any visible row using that presentation
+    /// metadata.
+    fn handle_watched_agent_work_status(
+        &mut self,
+        message: &tau_proto::AgentMessageReceived,
+        status: &tau_proto::AgentWatchWorkStatusNotification,
+    ) {
+        if self
+            .current_session_id
+            .as_ref()
+            .is_none_or(|session_id| session_id != &status.session_id)
+        {
+            return;
+        }
+        self.watched_agent_work_statuses
+            .insert(message.sender_id.to_string(), status.clone());
+        self.refresh_watched_agent_blocks();
+    }
+
     fn mark_agent_prompt_active(&mut self, agent_id: &str, agent_prompt_id: &str) {
         if self.terminal_agent_prompts.contains(agent_prompt_id) {
             return;
@@ -2184,6 +2249,7 @@ impl EventRenderer {
         }
         self.watched_agent_turn_states
             .retain(|_, states| !states.is_empty());
+        self.watched_agent_work_statuses.remove(agent_id);
         self.render_model_status_if_present();
         self.refresh_watched_agent_blocks();
     }
@@ -2194,13 +2260,13 @@ impl EventRenderer {
         agent_id: &str,
         projection: &WatchActivityProjection,
     ) -> tau_cli_term::StyledBlock {
-        let label = self
+        let display_name = self
             .agent_display_names
             .lock()
             .ok()
-            .and_then(|names| names.get(agent_id).cloned())
-            .unwrap_or_else(|| agent_id.to_owned());
+            .and_then(|names| names.get(agent_id).cloned());
         let stats = self.agent_stats.get(agent_id);
+        let work_status = self.watched_agent_work_statuses.get(agent_id);
         let directly_running = projection.edge_is_directly_running(watcher_id, agent_id);
         let witness = (!directly_running)
             .then(|| projection.witness_for(agent_id, &self.watched_agents))
@@ -2214,7 +2280,13 @@ impl EventRenderer {
                     .expect("recursive activity has a directly running witness"),
             }
         };
-        let display = watched_agent_tool_display(&label, agent_id, stats, activity);
+        let display = watched_agent_tool_display(
+            display_name.as_deref(),
+            agent_id,
+            stats,
+            activity,
+            work_status,
+        );
         render_tool_block(&self.theme, &display)
     }
 
@@ -3117,6 +3189,7 @@ impl EventRenderer {
         self.agent_stats.clear();
         self.agent_estimated_api_costs.clear();
         self.watched_agent_turn_states.clear();
+        self.watched_agent_work_statuses.clear();
         self.active_agent_prompts.clear();
         self.terminal_agent_prompts.clear();
         self.clear_watched_agent_blocks();
@@ -4571,6 +4644,9 @@ impl EventRenderer {
                 if let Some(state) = &message.watch_turn_state {
                     self.handle_watched_agent_turn_state(message, state);
                 }
+                if let Some(status) = &message.watch_work_status {
+                    self.handle_watched_agent_work_status(message, status);
+                }
             }
             _ => {}
         }
@@ -5305,6 +5381,10 @@ impl EventRenderer {
     }
 
     fn handle_existing_session_started(&mut self, started: &tau_proto::SessionStarted) {
+        // Work status is runtime-only. A resume must wait for its fresh watch
+        // snapshots instead of carrying presentation metadata across a daemon
+        // generation, even when the session id is unchanged.
+        self.watched_agent_work_statuses.clear();
         if self.current_session_id.as_ref() != Some(&started.session_id) {
             self.agent_estimated_api_costs.clear();
             self.clear_agent_display_names();
@@ -6564,7 +6644,7 @@ impl EventRenderer {
 
     fn upsert_tool_duration_suffix_segment(
         display: &mut ToolCallDisplay,
-        mut suffix: crate::tool_render::ToolSuffixSegment,
+        mut suffix: crate::tool_render::ToolLineSegment,
     ) {
         use crate::tool_render::ToolStatus;
 
