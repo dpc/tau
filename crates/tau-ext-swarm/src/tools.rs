@@ -15,6 +15,9 @@ use tau_swarm_api::{
 
 use crate::runtime::SwarmRuntime;
 
+/// Logical tool group shared by Tau Swarm's model-visible tools.
+pub const TOOL_GROUP_NAME: &str = "swarm";
+
 /// One process-memory blocker record exposed by `blocker(action="list")`.
 #[derive(Clone)]
 pub(crate) struct BlockerRecord {
@@ -149,7 +152,14 @@ pub(crate) fn register(builder: &mut ExtensionBuilder<SwarmRuntime>) {
 fn declaration(tool: ToolSpec) -> tau_proto::ToolRegistrationDeclared {
     tau_proto::ToolRegistrationDeclared {
         tool,
-        tool_group: None,
+        tool_group: Some(swarm_tool_group()),
+        prompt_fragment: None,
+    }
+}
+
+fn swarm_tool_group() -> tau_proto::ToolGroup {
+    tau_proto::ToolGroup {
+        name: tau_proto::ToolGroupName::new(TOOL_GROUP_NAME),
         prompt_fragment: None,
     }
 }
@@ -163,7 +173,7 @@ fn common_spec(name: &str, description: &str, parameters: serde_json::Value) -> 
         parameters: Some(parameters),
         format: None,
         tags: Vec::new(),
-        enabled_by_default: true,
+        enabled_by_default: false,
         background_support: None,
         examples: Vec::new(),
     }

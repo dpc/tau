@@ -105,6 +105,9 @@
 #       prefix_agent_id: false
 #
 #   # Publish this Tau session to one identity-pinned Tau Swarm server.
+#   # Starting the extension does not expose its tools. Opt selected roles into
+#   # `enable_tool_groups: [swarm]` under `agents.role_groups` separately. With
+#   # `tool_prefix: work`, use the final group name `work_swarm` instead.
 #   std-swarm:
 #     enable: true
 #     require: false

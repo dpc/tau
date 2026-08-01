@@ -2059,6 +2059,37 @@ fn harness_settings_load_role_group_default_tool_overrides_without_relisting_rol
     }
 }
 
+/// Ensures roles can opt into a disabled extension tool group through either
+/// their group defaults or their own narrow role settings.
+#[test]
+fn harness_roles_can_opt_into_the_swarm_tool_group() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    swarm-team:
+      enable_tool_groups: [swarm]
+      roles:
+        group-member: {}
+    swarm-role:
+      roles:
+        role-member:
+          enable_tool_groups: [swarm]
+"#,
+    )
+    .expect("write config");
+
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load");
+    for role in ["group-member", "role-member"] {
+        assert_eq!(
+            settings.roles[role].enable_tool_groups,
+            vec![tau_proto::ToolGroupName::new("swarm")]
+        );
+    }
+}
+
 /// Ensures user config may define a new role group with its own roles.
 #[test]
 fn harness_settings_allow_new_role_group() {

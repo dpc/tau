@@ -168,6 +168,25 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
     }
 }
 
+fn register_swarm_tools(harness: &mut Harness, prefix: Option<&str>) {
+    let scoped_name =
+        |name: &str| prefix.map_or_else(|| name.to_owned(), |prefix| format!("{prefix}_{name}"));
+    let group = ToolGroup {
+        name: ToolGroupName::new(scoped_name("swarm")),
+        prompt_fragment: None,
+    };
+    for name in ["blocker", "swarm_update"] {
+        harness.registry.register_with_prompt_fragment(
+            &crate::test_connection_id("swarm"),
+            ToolRegistration {
+                tool: tagged_tool(&scoped_name(name), false, &[]),
+                tool_group: Some(group.clone()),
+                prompt_fragment: None,
+            },
+        );
+    }
+}
+
 /// Ensures a role cannot force-enable image-producing tools on a provider route
 /// that did not explicitly publish both image-input and image-tool-result
 /// support.
@@ -254,6 +273,76 @@ fn compaction_defaults_and_groups_are_independent() {
     let tools = effective_tool_names(&cross_only.harness);
     assert!(tools.contains(&"compact".to_owned()));
     assert!(tools.contains(&"agent_compact".to_owned()));
+}
+
+/// Ensures disabled-by-default Swarm tools stay absent unless a role enables
+/// their group or one exact tool, while preserving exact-tool opt-in
+/// precedence.
+#[test]
+fn swarm_tools_require_group_or_exact_role_opt_in() {
+    let mut default = policy_harness(&[], AgentRole::default());
+    register_swarm_tools(&mut default.harness, None);
+    let default_tools = default
+        .harness
+        .gather_effective_tool_specs_for_role_model(ROLE, default.harness.selected_model.as_ref());
+    assert!(!default_tools.iter().any(|tool| tool.name == "blocker"));
+    assert!(!default_tools.iter().any(|tool| tool.name == "swarm_update"));
+
+    let mut group_enabled = policy_harness(
+        &[],
+        AgentRole {
+            enable_tool_groups: vec![ToolGroupName::new("swarm")],
+            ..AgentRole::default()
+        },
+    );
+    register_swarm_tools(&mut group_enabled.harness, None);
+    let group_tools = group_enabled
+        .harness
+        .gather_effective_tool_specs_for_role_model(
+            ROLE,
+            group_enabled.harness.selected_model.as_ref(),
+        );
+    assert!(group_tools.iter().any(|tool| tool.name == "blocker"));
+    assert!(group_tools.iter().any(|tool| tool.name == "swarm_update"));
+
+    let mut exact_enabled = policy_harness(
+        &[],
+        AgentRole {
+            enable_tools: vec![ToolName::new("blocker")],
+            ..AgentRole::default()
+        },
+    );
+    register_swarm_tools(&mut exact_enabled.harness, None);
+    let exact_tools = exact_enabled
+        .harness
+        .gather_effective_tool_specs_for_role_model(
+            ROLE,
+            exact_enabled.harness.selected_model.as_ref(),
+        );
+    assert!(exact_tools.iter().any(|tool| tool.name == "blocker"));
+    assert!(!exact_tools.iter().any(|tool| tool.name == "swarm_update"));
+
+    let mut prefixed = policy_harness(
+        &[],
+        AgentRole {
+            enable_tool_groups: vec![ToolGroupName::new("work_swarm")],
+            ..AgentRole::default()
+        },
+    );
+    register_swarm_tools(&mut prefixed.harness, Some("work"));
+    let prefixed_tools = prefixed
+        .harness
+        .gather_effective_tool_specs_for_role_model(ROLE, prefixed.harness.selected_model.as_ref());
+    assert!(
+        prefixed_tools
+            .iter()
+            .any(|tool| tool.name == "work_blocker")
+    );
+    assert!(
+        prefixed_tools
+            .iter()
+            .any(|tool| tool.name == "work_swarm_update")
+    );
 }
 
 /// Exact tool and tag policy retains broad-to-specific precedence independently

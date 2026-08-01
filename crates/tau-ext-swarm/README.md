@@ -3,7 +3,21 @@
 `tau-ext-swarm` publishes one Tau session to one pinned Tau Swarm Iroh peer. It
 folds replay through `session.replay_complete` before publishing, routes remote
 prompts and blocker answers through Tau's canonical internal-prompt path, and
-exposes the agent-scoped `blocker` and `swarm_update` tools.
+registers the agent-scoped `blocker` and `swarm_update` tools. They are disabled
+by default even when the extension runs; opt selected roles into their shared
+`swarm` tool group:
+
+```yaml
+agents:
+  role_groups:
+    engineer:
+      enable_tool_groups: [swarm]
+```
+
+Use `enable_tools: [blocker]` or `enable_tools: [swarm_update]` to expose only
+one tool. These are unprefixed instance names. With `tool_prefix: work`, use
+the final names `work_swarm`, `work_blocker`, and `work_swarm_update` in role
+policy instead.
 
 ## Configuration
 

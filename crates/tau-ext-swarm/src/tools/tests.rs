@@ -11,6 +11,64 @@ use tokio::sync as path_tokio_sync;
 use super::*;
 use crate::application::SwarmApplication;
 
+/// Ensures connecting Tau Swarm does not expose its tools until a role opts
+/// into their shared group or exact names.
+#[test]
+fn swarm_tools_are_grouped_and_disabled_by_default() {
+    for (expected_name, tool) in [("blocker", blocker_spec()), ("swarm_update", update_spec())] {
+        assert_eq!(tool.name.as_str(), expected_name);
+        assert_eq!(
+            tool.model_visible_name
+                .as_ref()
+                .map(tau_proto::ToolName::as_str),
+            Some(expected_name)
+        );
+        assert!(!tool.enabled_by_default);
+        let declaration = declaration(tool);
+        assert_eq!(
+            declaration
+                .tool_group
+                .as_ref()
+                .map(|group| group.name.as_str()),
+            Some(TOOL_GROUP_NAME)
+        );
+    }
+}
+
+/// Ensures instance prefixes qualify the Swarm tool and group policy names
+/// emitted from the extension's actual declarations.
+#[test]
+fn swarm_tool_declarations_apply_instance_prefixes() {
+    let configure = tau_proto::Configure {
+        config: tau_proto::CborValue::Null,
+        instance_name: tau_proto::ExtensionName::parse("std-swarm").expect("instance name"),
+        tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
+        state_dir: None,
+        secrets: BTreeMap::new(),
+    };
+    let scope = tau_client::ToolNameScope::from_configure(&configure);
+    for (expected_tool, expected_group, declaration) in [
+        ("work_blocker", "work_swarm", declaration(blocker_spec())),
+        (
+            "work_swarm_update",
+            "work_swarm",
+            declaration(update_spec()),
+        ),
+    ] {
+        let declaration = scope
+            .scope_registration(declaration)
+            .expect("scope registration");
+        assert_eq!(declaration.tool.name.as_str(), expected_tool);
+        assert_eq!(
+            declaration
+                .tool_group
+                .as_ref()
+                .map(|group| group.name.as_str()),
+            Some(expected_group)
+        );
+    }
+}
+
 fn configured_runtime() -> SwarmRuntime {
     let peer_id = iroh::SecretKey::generate().public().to_string();
     let config: crate::config::ExtConfig = serde_json::from_value(serde_json::json!({
