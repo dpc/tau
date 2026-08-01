@@ -1,4 +1,5 @@
 use std::io::{BufReader, BufWriter};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -7,6 +8,39 @@ use tau_proto::{
     ClientKind, HarnessInputMessage, HarnessOutputMessage, Hello, PROTOCOL_VERSION,
     PeerInputReader, PeerOutputWriter, SessionId,
 };
+
+/// Builds an initial-UI harness command isolated from the test runner's
+/// configuration and launch environment.
+fn initial_ui_stdio_command(
+    tau_bin: &str,
+    temp: &tempfile::TempDir,
+    config_home: &Path,
+    state_home: &Path,
+    runtime_dir: &Path,
+) -> Command {
+    let home = temp.path().join("home");
+    let cache_home = temp.path().join("cache");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    std::fs::create_dir_all(&cache_home).expect("mkdir cache");
+
+    let mut command = Command::new(tau_bin);
+    command
+        .env_clear()
+        .arg("component")
+        .arg("harness")
+        .arg("--initial-ui-stdio")
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("XDG_STATE_HOME", state_home)
+        .env("XDG_CACHE_HOME", cache_home)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("LANG", "C.UTF-8")
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
 
 /// Ensures a real `tau component harness --initial-ui-stdio` child flushes a
 /// fatal startup disconnect all the way to child stdout before exiting. This
@@ -35,18 +69,10 @@ extensions:
     .expect("write harness config");
 
     let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
-    let mut child = Command::new(tau_bin)
-        .arg("component")
-        .arg("harness")
-        .arg("--initial-ui-stdio")
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("XDG_STATE_HOME", &state_home)
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn tau harness");
+    let mut child =
+        initial_ui_stdio_command(&tau_bin, &temp, &config_home, &state_home, &runtime_dir)
+            .spawn()
+            .expect("spawn tau harness");
     let _stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout");
     let (sender, receiver) = mpsc::channel();
@@ -103,20 +129,12 @@ fn resumed_harness_process_does_not_recreate_deleted_session() {
     std::fs::remove_dir_all(&session_dir).expect("delete selected session before startup lock");
 
     let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
-    let mut child = Command::new(tau_bin)
-        .arg("component")
-        .arg("harness")
-        .arg("--initial-ui-stdio")
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("XDG_STATE_HOME", &state_home)
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("TAU_SESSION_ID", "deleted-session")
-        .env("TAU_SESSION_STATUS", "resumed")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn resumed tau harness");
+    let mut child =
+        initial_ui_stdio_command(&tau_bin, &temp, &config_home, &state_home, &runtime_dir)
+            .env("TAU_SESSION_ID", "deleted-session")
+            .env("TAU_SESSION_STATUS", "resumed")
+            .spawn()
+            .expect("spawn resumed tau harness");
     let _stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout");
     let (sender, receiver) = mpsc::channel();
@@ -170,20 +188,12 @@ fn resumed_configured_harness_process_creates_relay_log() {
     .expect("write session metadata");
 
     let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
-    let mut child = Command::new(tau_bin)
-        .arg("component")
-        .arg("harness")
-        .arg("--initial-ui-stdio")
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("XDG_STATE_HOME", &state_home)
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("TAU_SESSION_ID", "resumed-session")
-        .env("TAU_SESSION_STATUS", "resumed")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn resumed tau harness");
+    let mut child =
+        initial_ui_stdio_command(&tau_bin, &temp, &config_home, &state_home, &runtime_dir)
+            .env("TAU_SESSION_ID", "resumed-session")
+            .env("TAU_SESSION_STATUS", "resumed")
+            .spawn()
+            .expect("spawn resumed tau harness");
     let harness_log = session_dir.join("logs/tau-harness.log");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline && !harness_log.exists() {
@@ -214,19 +224,11 @@ fn harness_process_rejects_attach_session_mismatch() {
     std::fs::create_dir_all(&runtime_dir).expect("mkdir runtime");
 
     let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
-    let mut child = Command::new(tau_bin)
-        .arg("component")
-        .arg("harness")
-        .arg("--initial-ui-stdio")
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("XDG_STATE_HOME", &state_home)
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("TAU_SESSION_ID", "actual-session")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn tau harness");
+    let mut child =
+        initial_ui_stdio_command(&tau_bin, &temp, &config_home, &state_home, &runtime_dir)
+            .env("TAU_SESSION_ID", "actual-session")
+            .spawn()
+            .expect("spawn tau harness");
     let mut writer = PeerOutputWriter::new(BufWriter::new(child.stdin.take().expect("stdin")));
     writer
         .write_message(&HarnessInputMessage::Hello(Hello {
