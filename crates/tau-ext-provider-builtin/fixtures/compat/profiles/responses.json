@@ -1,0 +1,11 @@
+{
+  "kind": "responses",
+  "base_url": "https://example.test/v1",
+  "api_key": "fixture-api-key",
+  "models": [
+    {
+      "id": "fixture-model",
+      "context_window": 128000
+    }
+  ]
+}

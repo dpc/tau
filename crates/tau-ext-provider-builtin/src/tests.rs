@@ -202,10 +202,15 @@ fn profile_storage_kinds_do_not_carry_openai_prefix() {
         OpenRouterProfile::default(),
     ))
     .expect("serialize openrouter profile");
+    let responses = serde_json::to_value(BuiltinProviderProfile::Responses(
+        ResponsesProvider::default(),
+    ))
+    .expect("serialize responses profile");
 
     assert_eq!(chatgpt["kind"], "chatgpt");
     assert_eq!(chat_completions["kind"], "chat_completions");
     assert_eq!(openrouter["kind"], "openrouter");
+    assert_eq!(responses["kind"], "responses");
 }
 
 /// ChatGPT's route compatibility flag is optional, omits its standard default,

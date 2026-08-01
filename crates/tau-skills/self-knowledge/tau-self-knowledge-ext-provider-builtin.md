@@ -48,8 +48,12 @@ Supported profile kinds:
 - `chatgpt` — ChatGPT/Codex OAuth credentials for the Responses backend.
 - `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, optional API key, model list, max output tokens, extra body, and compatibility options. `tau provider add` accepts `chat-completions` at the interactive provider-kind prompt.
 - `openrouter` — OpenRouter profile with API key and either explicit models or models fetched from OpenRouter.
+- `responses` — generic public Responses endpoint with base URL, optional API
+  key, and an explicit model list. `tau provider add` calls this selection
+  `responses API`; it calls the existing Chat Completions selection
+  `completions API`.
 
-The profile kinds route to two deliberately separate wire backends.
+The profile kinds route to three deliberately separate wire backends.
 `chat_completions` and `openrouter` use the OpenAI-compatible HTTP/SSE
 `/chat/completions` adapter, including Function tools and semantic transcript
 replay; this is the supported route for local servers such as llama.cpp.
@@ -57,6 +61,14 @@ replay; this is the supported route for local servers such as llama.cpp.
 inference is WebSocket-only with no HTTP/SSE fallback. HTTPS is retained only for
 OAuth, quota acquisition, and unary standalone compaction. It is not a public
 API-key OpenAI Responses provider.
+
+`responses` uses a generic API-key HTTP/SSE `POST /responses` adapter. It
+requires user-configured models and does not discover models or choose provider
+presets. Each turn sends the complete typed Responses transcript. It supports
+text and Function tools only, preserves Responses replay sidecars, and does not
+send `previous_response_id` or `store`; it does not expose hosted/custom tools,
+image/file inputs, or compaction. Existing `openrouter` profiles remain on
+Chat Completions.
 
 The extension has no ordinary `extensions.provider-builtin.config` schema for provider credentials; credentials belong in provider auth/profile storage, not harness config.
 ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.

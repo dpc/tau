@@ -14,6 +14,7 @@ mod oauth_refresh_rejection;
 mod prewarm;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
+mod responses;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
@@ -42,6 +43,12 @@ use oauth_refresh_rejection::{
 use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
 #[cfg(feature = "quota-test-support")]
 pub use quota_test_support::run_quota_recovery_fixture;
+use responses::{
+    PromptAttemptOutcome as ResponsesAttemptOutcome,
+    models_for_provider as responses_models_for_provider,
+    run_prompt_attempt as run_responses_prompt_attempt,
+};
+pub use responses::{ResponsesModel, ResponsesProvider};
 use serde::{Deserialize, Serialize};
 use tau_client::{
     ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder,
@@ -87,6 +94,8 @@ pub enum BuiltinProviderProfile {
     /// OpenRouter provider using a wrapped Chat Completions backend.
     #[serde(rename = "openrouter")]
     OpenRouter(OpenRouterProfile),
+    /// Generic public API-key HTTP/SSE Responses provider.
+    Responses(ResponsesProvider),
 }
 
 /// ChatGPT/Codex provider profile.
@@ -132,7 +141,8 @@ impl BuiltinProviderProfiles {
                     Some((provider.clone(), profile.responses_mode()))
                 }
                 BuiltinProviderProfile::ChatCompletions(_)
-                | BuiltinProviderProfile::OpenRouter(_) => None,
+                | BuiltinProviderProfile::OpenRouter(_)
+                | BuiltinProviderProfile::Responses(_) => None,
             })
             .collect()
     }
@@ -585,6 +595,11 @@ fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
             provider.base_url.hash(&mut hasher);
             provider.api_key.hash(&mut hasher);
         }
+        PromptBackend::PublicResponses { provider, .. } => {
+            "responses".hash(&mut hasher);
+            provider.base_url.hash(&mut hasher);
+            provider.api_key.hash(&mut hasher);
+        }
     }
     Some(hasher.finish())
 }
@@ -729,15 +744,43 @@ fn cmd_add(
         );
     }
     let kind: String = Input::new()
-        .with_prompt("Provider kind (chatgpt, chat-completions, or openrouter)")
+        .with_prompt("Provider kind (chatgpt, completions API, responses API, or openrouter)")
         .default("chatgpt".to_owned())
         .interact_text()?;
     match kind.trim() {
         "chatgpt" => cmd_add_chatgpt(network)?,
-        "chat-completions" => cmd_add_chat_completions()?,
+        "completions API" | "chat-completions" => cmd_add_chat_completions()?,
+        "responses API" | "responses" => cmd_add_responses()?,
         "openrouter" => cmd_add_openrouter(network)?,
         other => return Err(format!("unknown provider kind: {other}").into()),
     }
+    Ok(())
+}
+
+fn cmd_add_responses() -> Result<(), Box<dyn Error>> {
+    let name = prompt_provider_name("responses")?;
+    let base_url: String = Input::new()
+        .with_prompt("Base URL")
+        .default("https://api.openai.com/v1".to_owned())
+        .interact_text()?;
+    let api_key: String = Input::new()
+        .with_prompt("API key (empty for keyless/local providers)")
+        .allow_empty(true)
+        .interact_text()?;
+    let models_input: String = Input::new()
+        .with_prompt("Models (comma-separated)")
+        .interact_text()?;
+    let models = parse_responses_model_list(&models_input)?;
+    save_profile(
+        &name,
+        &BuiltinProviderProfile::Responses(ResponsesProvider {
+            base_url,
+            api_key,
+            models,
+            tags: Vec::new(),
+            max_output_tokens: 8192,
+        }),
+    )?;
     Ok(())
 }
 
@@ -887,6 +930,23 @@ fn cmd_list() -> Result<(), Box<dyn Error>> {
                     "{name}\topenrouter\thttps://openrouter.ai/api/v1\t{models}\t{auth_status}"
                 );
             }
+            BuiltinProviderProfile::Responses(provider) => {
+                let auth_status = if provider.api_key.trim().is_empty() {
+                    "no-api-key"
+                } else {
+                    "api-key"
+                };
+                let models = provider
+                    .models
+                    .iter()
+                    .map(|model| model.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "{name}\tresponses\t{}\t{models}\t{auth_status}",
+                    provider.base_url
+                );
+            }
         }
     }
     Ok(())
@@ -920,6 +980,31 @@ fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<d
             est_output_cost_1m_usd: None,
         });
     }
+    if models.is_empty() {
+        return Err("at least one model is required".into());
+    }
+    Ok(models)
+}
+
+fn parse_responses_model_list(input: &str) -> Result<Vec<ResponsesModel>, Box<dyn Error>> {
+    let models = input
+        .split(',')
+        .filter_map(|raw| {
+            let id = raw.trim();
+            (!id.is_empty()).then(|| {
+                ModelName::try_new(id.to_owned()).map(|id| ResponsesModel {
+                    id,
+                    display_name: None,
+                    context_window: 128_000,
+                    tags: Vec::new(),
+                    supports_parallel_tool_calls: true,
+                    est_uncached_input_cost_1m_usd: None,
+                    est_cached_input_cost_1m_usd: None,
+                    est_output_cost_1m_usd: None,
+                })
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if models.is_empty() {
         return Err("at least one model is required".into());
     }
@@ -3084,6 +3169,11 @@ enum PromptBackend {
         provider: ChatCompletionsProvider,
         model: ChatCompletionsModel,
     },
+    /// Generic public Responses API request using HTTP/SSE.
+    PublicResponses {
+        provider: ResponsesProvider,
+        model: ResponsesModel,
+    },
 }
 
 struct PromptExecution {
@@ -3904,6 +3994,18 @@ fn resolve_prompt_backend(
                 model: configured_model,
             })
         }
+        BuiltinProviderProfile::Responses(provider) => {
+            refresh_rejections.clear(&model.provider);
+            let configured_model = provider
+                .models
+                .iter()
+                .find(|configured| configured.id == model.model)?
+                .clone();
+            Some(PromptBackend::PublicResponses {
+                provider: provider.clone(),
+                model: configured_model,
+            })
+        }
     }
 }
 
@@ -3929,7 +4031,9 @@ fn resolve_responses_backend(
                 network,
             )
         }
-        BuiltinProviderProfile::ChatCompletions(_) | BuiltinProviderProfile::OpenRouter(_) => {
+        BuiltinProviderProfile::ChatCompletions(_)
+        | BuiltinProviderProfile::OpenRouter(_)
+        | BuiltinProviderProfile::Responses(_) => {
             refresh_rejections.clear(&model.provider);
             None
         }
@@ -4410,6 +4514,80 @@ where
                 }
                 ChatCompletionsAttemptOutcome::Canceled { progress } => {
                     if progress == tau_provider_chat_completions::SemanticProgress::Parsed {
+                        emit_chat_completions_partial_clear(
+                            agent_prompt_id,
+                            prompt,
+                            "request canceled; discarding partial provider output",
+                            writer,
+                        )?;
+                    }
+                    finish_canceled(agent_prompt_id, prompt, writer)?;
+                    Ok(None)
+                }
+            }
+        }
+        PromptBackend::PublicResponses { provider, model } => {
+            if TurnAbort::is_aborted(retry_ctx) {
+                finish_canceled(agent_prompt_id, prompt, writer)?;
+                return Ok(None);
+            }
+            match run_responses_prompt_attempt(
+                agent_prompt_id,
+                prompt,
+                provider,
+                model,
+                writer,
+                &mut || TurnAbort::is_aborted(retry_ctx),
+                context.runtime.network(),
+            ) {
+                ResponsesAttemptOutcome::Finished(finished) => {
+                    if TurnAbort::is_aborted(retry_ctx) {
+                        emit_chat_completions_partial_clear(
+                            agent_prompt_id,
+                            prompt,
+                            "request canceled; discarding tentative provider output",
+                            writer,
+                        )?;
+                        finish_canceled(agent_prompt_id, prompt, writer)?;
+                        return Ok(None);
+                    }
+                    writer.write_message(&HarnessInputMessage::emit_transient(
+                        Event::ProviderResponseFinishedReported(*finished),
+                    ))?;
+                    writer.flush()?;
+                    Ok(None)
+                }
+                ResponsesAttemptOutcome::Terminal { finished, progress } => {
+                    if progress.has_timed_semantic_output {
+                        emit_chat_completions_partial_clear(
+                            agent_prompt_id,
+                            prompt,
+                            "provider stream ended with an error; discarding partial output",
+                            writer,
+                        )?;
+                    }
+                    writer.write_message(&HarnessInputMessage::emit_transient(
+                        Event::ProviderResponseFinishedReported(*finished),
+                    ))?;
+                    writer.flush()?;
+                    Ok(None)
+                }
+                ResponsesAttemptOutcome::Retry { decision, progress } => {
+                    if progress.has_timed_semantic_output {
+                        emit_chat_completions_partial_clear(
+                            agent_prompt_id,
+                            prompt,
+                            "provider stream interrupted after partial output; preparing retry",
+                            writer,
+                        )?;
+                    }
+                    Ok(Some(PromptAttemptRetry {
+                        decision,
+                        live_detail: None,
+                    }))
+                }
+                ResponsesAttemptOutcome::Canceled { progress } => {
+                    if progress.has_timed_semantic_output {
                         emit_chat_completions_partial_clear(
                             agent_prompt_id,
                             prompt,
@@ -5158,6 +5336,9 @@ fn models_for_profiles(profiles: &BuiltinProviderProfiles) -> Vec<ProviderModelI
             BuiltinProviderProfile::OpenRouter(profile) => {
                 let provider = profile.to_chat_completions();
                 models.extend(chat_models_for_provider(provider_name, &provider));
+            }
+            BuiltinProviderProfile::Responses(provider) => {
+                models.extend(responses_models_for_provider(provider_name, provider));
             }
         }
     }

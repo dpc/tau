@@ -287,14 +287,15 @@ No separate enable flag is needed for registered profiles.
 
 ## Built-in first-party provider
 
-The built-in provider extension currently covers three profile kinds:
+The built-in provider extension currently covers four profile kinds:
 
 - `chatgpt` for the ChatGPT / Codex Responses backend
 - `chat_completions` for user-named OpenAI-compatible profiles with explicit
   model lists
 - `openrouter` for user-named profiles with explicit or fetched model lists
+- `responses` for user-named public Responses profiles with explicit model lists
 
-These are deliberately two backend contracts, not one generic OpenAI client.
+These are deliberately three backend contracts, not one generic OpenAI client.
 `tau-provider-chat-completions` implements the OpenAI-compatible
 `POST /chat/completions` HTTP/SSE surface used by local servers such as llama.cpp,
 remote compatible endpoints, and OpenRouter. It supports optional bearer auth,
@@ -303,6 +304,17 @@ reasoning/usage compatibility controls, and non-conflicting `extra_body` fields.
 The extension owns its serialized profiles, model publication, OpenRouter
 discovery, public stream sampling, retry scheduling, and provider events; the
 backend performs one finite typed attempt.
+
+`tau-provider-responses` implements `POST /responses` over API-key HTTP/SSE
+for the `responses` profile. `tau provider add` labels the existing generic
+Chat Completions choice `completions API` and this choice `responses API`.
+Responses profiles require a base URL and explicit models; Tau does not infer
+provider presets or discover models. Every turn sends the complete typed
+Responses transcript. It supports text and Function tools only and preserves
+assistant-message and Function-call replay sidecars. It deliberately omits
+`previous_response_id`, `store`, hosted/custom tools, image/file inputs, and
+public compaction. Existing `openrouter` profiles remain Chat Completions
+profiles.
 
 `tau-provider-codex` implements the private ChatGPT OAuth/Codex Responses
 contract. Ordinary inference is WebSocket-only: it has no HTTP/SSE selector or

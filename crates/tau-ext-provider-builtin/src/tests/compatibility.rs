@@ -39,6 +39,18 @@ fn old_profile_fixtures_round_trip_canonically() {
     }
 }
 
+/// The generic Responses profile must serialize its explicit API-key route
+/// without acquiring a vendor preset, discovery state, or chaining setting.
+#[test]
+fn responses_profile_round_trips_canonically() {
+    let profile = assert_canonical_profile_fixture("profiles/responses.json");
+    let BuiltinProviderProfile::Responses(provider) = profile else {
+        panic!("Responses fixture selected the wrong profile kind");
+    };
+    assert_eq!(provider.base_url, "https://example.test/v1");
+    assert_eq!(provider.models.len(), 1);
+}
+
 fn compatibility_profiles() -> BuiltinProviderProfiles {
     BuiltinProviderProfiles {
         providers: BTreeMap::from([
@@ -56,6 +68,33 @@ fn compatibility_profiles() -> BuiltinProviderProfiles {
             ),
         ]),
     }
+}
+
+/// The serialized public profile must resolve to the distinct generic
+/// HTTP/SSE backend rather than either Chat Completions or private Codex.
+#[test]
+fn responses_profile_routes_to_public_responses_backend() {
+    let mut profiles = compatibility_profiles();
+    profiles.providers.insert(
+        ProviderName::new("responses"),
+        load_profile_fixture("profiles/responses.json"),
+    );
+    let mut rejections = OAuthRefreshRejectionCache::default();
+    let model = ModelId::new(
+        ProviderName::new("responses"),
+        ModelName::new("fixture-model"),
+    );
+    let backend = resolve_prompt_backend(
+        &model,
+        &mut profiles,
+        &mut rejections,
+        &test_network_policy(),
+    );
+    let Some(PromptBackend::PublicResponses { provider, model }) = backend else {
+        panic!("Responses fixture must resolve to the public Responses backend");
+    };
+    assert_eq!(provider.base_url, "https://example.test/v1");
+    assert_eq!(model.id.as_str(), "fixture-model");
 }
 
 fn compatibility_route_snapshot(
@@ -96,6 +135,16 @@ fn compatibility_route_snapshot(
                 "max_output_tokens": provider.max_output_tokens,
                 "extra_body": provider.extra_body,
                 "compat": provider.compat,
+            },
+            "model": model,
+        }),
+        Some(PromptBackend::PublicResponses { provider, model }) => serde_json::json!({
+            "requested": requested,
+            "backend": "responses",
+            "provider": {
+                "base_url": provider.base_url,
+                "credential_present": !provider.api_key.trim().is_empty(),
+                "max_output_tokens": provider.max_output_tokens,
             },
             "model": model,
         }),

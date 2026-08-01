@@ -377,12 +377,15 @@ these layers; the deterministic fake provider does not cover upstream ChatGPT
 transport contracts.
 
 Provider-split acceptance is intentionally layered. Compatibility fixtures in
-`tau-ext-provider-builtin` freeze all three serialized profile kinds, durable old
+`tau-ext-provider-builtin` freeze existing serialized profile kinds plus the
+generic Responses profile, durable old
 session replay, model/routing publication, and successful event ordering. The
 Chat Completions crate owns HTTP/SSE request, cancellation, typed-error, Function
 tool, raw-argument, semantic-replay, and transport-byte tests; the extension owns
 OpenRouter discovery, capability/default/explicit-false publication, sampling,
-events, and scheduler integration. The Codex crate owns Standard/Lite goldens,
+events, and scheduler integration. The public Responses crate owns generic
+`/responses` HTTP/SSE parsing, no-`[DONE]` completion, typed full replay, and
+Function-call raw-argument preservation. The Codex crate owns Standard/Lite goldens,
 WS-only negotiation and no-fallback, typed finite outcomes, exact dispatch,
 cumulative bytes, one-budget semantic-safe recovery, strict prewarm
 prefix/fingerprint chaining, invalidation generations, compact cancellation, and

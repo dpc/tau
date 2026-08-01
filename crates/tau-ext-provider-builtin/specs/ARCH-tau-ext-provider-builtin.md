@@ -10,7 +10,9 @@ services, and reports provider execution through Tau protocol events.
 Tau state `auth.d/<namespace>.json` files define provider namespaces, and each
 profile's serialized kind selects its backend family. ChatGPT profiles use the
 model matrix and finite inference facade owned by `tau-provider-codex`; Chat
-Completions and OpenRouter profiles use the Chat Completions backend. The
+Completions and OpenRouter profiles use the Chat Completions backend. Generic
+public `responses` profiles use the separate API-key HTTP/SSE Responses backend
+and always fully replay their typed transcript. The
 extension owns mutable-profile resolution, model publication, event ordering,
 public response sampling, logical retries, cancellation, and supervised prewarm
 work. Backends return typed outcomes and never serialize harness frames.

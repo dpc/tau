@@ -156,7 +156,8 @@ and [external-message architecture](specs/ARCH-external-message-boundary.md).
 ## Providers and model controls
 
 The bundled provider extension supports ChatGPT/Codex accounts,
-OpenAI-compatible Chat Completions endpoints, and OpenRouter profiles. Provider
+OpenAI-compatible Chat Completions endpoints, generic public Responses
+endpoints, and OpenRouter profiles. Provider
 metadata drives model selection and filters supported reasoning effort, response
 verbosity, reasoning summaries, input modalities, and compaction. Provider- and
 role-specific behavior also includes service tiers and prompt caching.
@@ -167,10 +168,12 @@ model-aware values are filtered or clamped to the model's supported surface. The
 UI also surfaces per-turn statistics, cache information, retry state, and
 conservative quota-pacing status when the provider supplies enough data.
 
-The generic compatibility route is HTTP/SSE Chat Completions and is suitable for
+The `completions API` route is HTTP/SSE Chat Completions and is suitable for
 local servers such as llama.cpp as well as remote compatible services. The
-ChatGPT OAuth/Codex route is a separate private Responses backend whose inference
-is WebSocket-only; it never falls back to HTTP/SSE, though OAuth, quota, and
+`responses API` route is a separate generic public API-key HTTP/SSE backend
+with explicit models and stateless full-transcript replay. The ChatGPT
+OAuth/Codex route is a separate private Responses backend whose inference is
+WebSocket-only; it never falls back to HTTP/SSE, though OAuth, quota, and
 standalone compaction remain HTTPS operations. All of these routes share one
 startup-snapshotted proxy, `NO_PROXY`, platform-TLS, and optional additive-CA
 policy.

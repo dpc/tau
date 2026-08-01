@@ -5230,6 +5230,7 @@ dependencies = [
  "tau-provider",
  "tau-provider-chat-completions",
  "tau-provider-codex",
+ "tau-provider-responses",
  "tau-term-screen",
  "tempfile",
  "tokio",
@@ -5527,6 +5528,18 @@ dependencies = [
  "tungstenite",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "tau-provider-responses"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tau-proto",
+ "tau-provider",
+ "tokio",
 ]
 
 [[package]]
