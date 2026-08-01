@@ -39,9 +39,9 @@ metadata has folded without rewriting the immutable message event or its body.
 
 Ordinary directed communication, including watched responses, is labeled
 `Message`. In a selected-agent transcript the selected endpoint is implicit:
-received messages show only `□ Message from <sender>`, and sent messages show only
-`□ Message to <recipient>`. The no-selection overview shows both endpoints as
-`□ Message from <sender> to <recipient>`. Message bodies remain below these
+received messages show only `■ Message from <sender>`, and sent messages show only
+`■ Message to <recipient>`. The no-selection overview shows both endpoints as
+`■ Message from <sender> to <recipient>`. Message bodies remain below these
 headers. Watch-prompt projections keep their distinct lifecycle wording while
 using the same endpoint formatter. Canonical transport endpoints retain their
 explicit transport and session qualification.

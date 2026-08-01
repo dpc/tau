@@ -65,8 +65,8 @@ defaults. Completed agent responses use `◆`, while responses still streaming
 use `◇`.
 
 Fixed semantic transcript rows use category markers without rewriting their
-content: agent-to-agent and external messages use `□`, harness-authored
-structured status updates use `▤`, and harness or local UI notices use `■`.
+content: agent-to-agent and external messages use `■`, harness-authored
+structured status updates use `▤`, and harness or local UI notices use `□`.
 These markers apply equally when the renderer folds live delivery, restored
 history, or a retained hidden transcript.
 
@@ -77,7 +77,7 @@ retain their own semantic renderers and do not acquire these markers.
 
 When a submitted or steered prompt carries extension provenance, or
 harness-internal provenance without a front-exact queued user-prompt
-projection, it is a `□` message. A front-exact queued user prompt retains its
+projection, it is a `■` message. A front-exact queued user prompt retains its
 submitted-prompt marker when submission or steering promotes that exact queued
 projection, regardless of source; queue records have no provenance. The
 renderer does not consume a different front queued projection because a later

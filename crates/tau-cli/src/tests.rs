@@ -27,8 +27,8 @@ use super::chat::{
     redacted_command_echo_line, redacted_prompt_history_line, retarget_prompt_draft_snapshot,
     role_cycling_enabled, should_send_draft_snapshot,
 };
-use super::cli as path_super_cli;
 use super::event_renderer::{EventRenderer, WatchedAgentActivity, watched_agent_tool_display};
+use super::{cli as path_super_cli, transcript_markers};
 
 /// Dynamic action IDs use the bounded ASCII short-ID producer shape accepted by
 /// the protocol type.
@@ -2030,8 +2030,17 @@ fn extension_prompt_steered_uses_message_marker() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "□ extension-steered prompt"));
+    assert!(vt.screen_contains(100, "■ extension-steered prompt"));
     assert!(!vt.screen_contains(100, "⬤ extension-steered prompt"));
+}
+
+/// Semantic row markers keep messages and notices visually distinct while
+/// preserving the structured-status marker between them.
+#[test]
+fn semantic_row_markers_match_their_categories() {
+    assert_eq!(transcript_markers::MESSAGE, "■ ");
+    assert_eq!(transcript_markers::STATUS_UPDATE, "▤ ");
+    assert_eq!(transcript_markers::NOTICE, "□ ");
 }
 
 /// An unqueued harness-originated steered prompt is a message rather than an
@@ -2052,7 +2061,7 @@ fn unqueued_harness_prompt_steered_uses_message_marker() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "□ harness-steered message"));
+    assert!(vt.screen_contains(100, "■ harness-steered message"));
     assert!(!vt.screen_contains(100, "⬤ harness-steered message"));
 }
 
@@ -2118,7 +2127,7 @@ fn context_size_alert_prompt_submitted_renders_internal_history_marker() {
         relevant_lines,
         [
             "> before submitted alert",
-            "■ [tau-internal]: Use the `compact` tool after finishing your current task.",
+            "□ [tau-internal]: Use the `compact` tool after finishing your current task.",
             "> after submitted alert",
         ]
     );
@@ -2175,7 +2184,7 @@ fn context_size_alert_prompt_steered_renders_internal_history_marker() {
         relevant_lines,
         [
             "> before steered alert",
-            "■ [tau-internal]: compact after tools",
+            "□ [tau-internal]: compact after tools",
             "> after steered alert",
         ]
     );
@@ -2203,7 +2212,7 @@ fn compaction_lifecycle_notice_uses_info_style() {
             .iter()
             .map(|span| span.text.as_str())
             .collect::<String>(),
-        "■ Starting compaction request cr-35-0 for reviewer-sOqj (ct-35)"
+        "□ Starting compaction request cr-35-0 for reviewer-sOqj (ct-35)"
     );
 }
 
@@ -9067,7 +9076,7 @@ fn extension_steering_promotes_matching_queued_user_prompt() {
 
     assert!(!vt.screen_contains(80, "queued extension collision (queued)"));
     assert!(vt.screen_contains(80, "⬤ queued extension collision"));
-    assert!(!vt.screen_contains(80, "□ queued extension collision"));
+    assert!(!vt.screen_contains(80, "■ queued extension collision"));
     assert_eq!(
         vt.screen_text(80)
             .iter()
@@ -9113,7 +9122,7 @@ fn nonfront_queued_match_remains_a_message_without_consuming_the_front_prompt() 
 
         assert!(vt.screen_contains(80, "◯ first queued user prompt (queued)"));
         assert!(!vt.screen_contains(80, "⬤ first queued user prompt"));
-        assert!(vt.screen_contains(80, "□ second queued user prompt"));
+        assert!(vt.screen_contains(80, "■ second queued user prompt"));
         assert!(!vt.screen_contains(80, "⬤ second queued user prompt"));
     }
 }
@@ -9154,7 +9163,7 @@ fn submitted_nonhuman_prompt_promotes_matching_front_queue_before_start() {
         sync(&handle);
 
         assert!(vt.screen_contains(80, "⬤ accepted queued prompt"));
-        assert!(!vt.screen_contains(80, "□ accepted queued prompt"));
+        assert!(!vt.screen_contains(80, "■ accepted queued prompt"));
         assert!(!vt.screen_contains(80, "accepted queued prompt (queued)"));
         assert_eq!(
             vt.screen_text(80)
@@ -13218,7 +13227,7 @@ fn render_action_output_block_highlights_approval_ids_and_labels() {
     assert_eq!(row_id.style, id_style);
     assert_eq!(status_label.style, label_style);
     assert_eq!(account_label.style, label_style);
-    assert_eq!(spans[0].text, "■ ");
+    assert_eq!(spans[0].text, "□ ");
     assert_eq!(spans[0].style, marker_style);
 }
 
@@ -13234,7 +13243,7 @@ fn render_action_error_block_uses_action_error_styles() {
     let marker_style =
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER_SUBMITTED);
 
-    assert_eq!(spans[0].text, "■ ");
+    assert_eq!(spans[0].text, "□ ");
     assert_eq!(spans[0].style, marker_style);
     assert_eq!(spans[1].text, "7");
     assert_eq!(spans[1].style, id_style);

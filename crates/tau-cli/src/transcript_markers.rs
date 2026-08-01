@@ -6,10 +6,10 @@
 /// Marker for a semantic message: agent-to-agent or external communication,
 /// plus extension-originated and harness-originated prompts without a
 /// front-exact queued user projection.
-pub(crate) const MESSAGE: &str = "□ ";
+pub(crate) const MESSAGE: &str = "■ ";
 
 /// Marker for a harness-authored structured status update.
 pub(crate) const STATUS_UPDATE: &str = "▤ ";
 
 /// Marker for a harness or local UI notice.
-pub(crate) const NOTICE: &str = "■ ";
+pub(crate) const NOTICE: &str = "□ ";

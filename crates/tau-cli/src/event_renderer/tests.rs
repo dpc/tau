@@ -987,7 +987,7 @@ fn external_message_facts_use_the_message_marker() {
             &renderer
                 .submitted_message_fact_block("External `bridge-main` message:\nbody".to_owned())
         ),
-        "□ External `bridge-main` message:\nbody"
+        "■ External `bridge-main` message:\nbody"
     );
 }
 
