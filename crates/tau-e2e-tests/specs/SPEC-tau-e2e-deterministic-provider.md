@@ -304,7 +304,7 @@ bounded process-group/socket cleanup reject replay work, lane rebinding,
 cross-agent routing, and partial cleanup.
 The peer-navigation case requires the authenticated bare delivery to report one
 auto-started recipient, observes its complete stats snapshot as
-`active_auto/running`, and waits for the correlated hold-ready notice broadcast
+`active/running`, and waits for the correlated hold-ready notice broadcast
 later to render on the target PTY. It sends the real Ctrl-J binding exactly once while the
 correlated hold remains live. The selected prompt must name that recipient;
 exact cancellation then reaps the hold without a timeout. This covers

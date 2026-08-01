@@ -310,6 +310,9 @@ authenticates visible human `ui.prompt_submitted` intake and, after target/skill
 validation and durable `agent.user_interaction_recorded` append, applies an
 implicit absolute `active` write and enqueues fresh complete stats before queue
 or dispatch. The implicit write emits no explicit-navigation result.
+After durable creation and current-session membership setup, the internal
+authenticated bare peer-entrypoint auto-start path likewise writes `active` and
+publishes complete stats for only its newly created endpoint.
 
 Rejected, internal, extension-originated, stale, unloaded, unavailable, or
 terminating targets do not mutate navigation. Later queue dispatch, steering,

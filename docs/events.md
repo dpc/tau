@@ -920,3 +920,9 @@ requests do not write. Queue promotion, steering, and replay do not repeat the
 write. Same-daemon reconnect sees the current classification; cold restore
 recomputes defaults. UIs therefore update navigation only from complete stats,
 never optimistically from outgoing or replayed prompt events.
+
+An authenticated bare inter-session message that creates a peer-entrypoint
+recipient performs the same runtime-only `set_active` classification after
+durable creation and current-session membership setup, and broadcasts complete
+stats. This applies only to the newly created recipient; existing bare or exact
+recipients and other start paths retain their existing navigation behavior.

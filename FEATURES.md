@@ -103,6 +103,8 @@ navigation classification for each loaded agent while keeping their selected
 transcript, drafts, and presentation local. Explicit classifications survive UI
 reconnect while the agent remains loaded in the same daemon session. Successfully
 submitting a visible prompt to an existing target implicitly makes it `active`;
+an authenticated inter-session message that starts a bare peer-entrypoint
+recipient also makes only that new recipient `active`;
 selection alone does not. Unload, session switch, and daemon exit forget both
 explicit and implicit writes, and cold restore recomputes defaults.
 Running sessions also expose a bounded, pipe-friendly `tau agent list` roster.

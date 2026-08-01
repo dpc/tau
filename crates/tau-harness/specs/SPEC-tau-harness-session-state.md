@@ -256,6 +256,12 @@ The implicit value survives same-daemon disconnect/reconnect like an explicit
 override, but unload or session switch clears it and cold restore recomputes the
 ordinary/delegated default despite durable historical prompt facts.
 
+A newly created authenticated bare peer-entrypoint recipient similarly receives
+one harness-owned `active` write after durable creation and current-session
+membership setup. This narrow runtime-only exception does not apply to an
+existing bare recipient, an exact recipient, or another start path; it publishes
+the ordinary complete stats snapshot and cold restore recomputes the default.
+
 A completed durable parented start-agent worker is an ordinary loaded, idle,
 addressable conversation rather than work still owned by its transient request.
 Warm completion detaches both tool-backed starts and explicit-parent typed

@@ -80,7 +80,7 @@ rosters, replay metadata, exact fake-provider consumption, typed multi-agent
 store prefixes/suffixes, and bounded process/socket cleanup.
 An independent PTY case keeps a fresh target session agentless until one
 authenticated bare inter-session message auto-starts its first receiver. It
-requires the live `active_auto/running` snapshot and the correlated hold-ready
+requires the new recipient's live `active/running` snapshot and the correlated hold-ready
 notice rendered later by the target PTY, uses the ordinary Ctrl-J binding once
 to select the exact recipient, then explicitly cancels the provider hold.
 The separate headless `core_shell_resume` gate runs that universal binary as the

@@ -30573,8 +30573,9 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
 }
 
 /// Two real harness event loops complete callback correlation and delegated
-/// auto-start over separate Unix sockets, retain `active_auto/running`
-/// navigation state, and acknowledge only after the receive projection commits.
+/// auto-start over separate Unix sockets, promote the newly started endpoint
+/// to canonical `active` navigation, and acknowledge only after the receive
+/// projection commits.
 #[test]
 fn external_agent_message_two_harness_live_success_commits_before_ack() {
     let td = TempDir::new().expect("tempdir");
@@ -30587,6 +30588,18 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
             .expect("sender id"),
     );
     configure_inter_session_receivers(&mut target, &[("engineer", true)]);
+    let ui_frames =
+        connect_test_client(&mut target, "peer-auto-start-ui", tau_proto::ClientKind::Ui);
+    target
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("peer-auto-start-ui"),
+            Vec::new(),
+            vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STATS_UPDATED,
+            )],
+        )
+        .expect("subscribe UI to agent stats");
     let message_id: tau_proto::AgentMessageId =
         tau_proto::AgentMessageId::parse("two-harness-message")
             .expect("test identifier must satisfy its grammar");
@@ -30701,18 +30714,33 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
     assert_eq!(target.agents.len(), 1);
     assert_eq!(
         target.agent_navigation_modes.get(&recipient_id),
-        Some(&tau_proto::AgentNavigationMode::ActiveAuto)
+        Some(&tau_proto::AgentNavigationMode::Active)
     );
     let recipient_cid = target
         .agent_routes
         .get(recipient_id.as_str())
         .expect("auto-started recipient route");
+    let stats = target
+        .agent_stats_snapshot(recipient_cid)
+        .expect("auto-started recipient stats");
     assert_eq!(
-        target
-            .agent_stats_snapshot(recipient_cid)
-            .expect("auto-started recipient stats")
-            .runtime_state,
-        tau_proto::AgentRuntimeState::Running
+        stats.navigation_mode,
+        tau_proto::AgentNavigationMode::Active
+    );
+    assert_eq!(stats.runtime_state, tau_proto::AgentRuntimeState::Running);
+    assert!(
+        ui_frames
+            .lock()
+            .expect("UI frame mutex")
+            .iter()
+            .any(|frame| {
+                matches!(
+                    peel_inner_event(&frame.frame),
+                    Some(Event::AgentStatsUpdated(stats))
+                        if stats.agent_id == recipient_id
+                            && stats.navigation_mode == tau_proto::AgentNavigationMode::Active
+                )
+            })
     );
     assert_eq!(durable_agent_message_received_events(&target).len(), 1);
     accept_sender.join().expect("sender accept thread");

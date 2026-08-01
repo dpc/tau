@@ -18089,9 +18089,21 @@ impl Harness {
                 }),
             );
         }
-        // Emit the initial generic agent stats snapshot as soon as the side
-        // agent exists, before it spends tokens or starts nested tools.
-        self.emit_agent_stats_updated(&cid);
+        if peer_entrypoint_endpoint {
+            self.write_loaded_agent_navigation_mode(
+                &crate::parse_agent_id(&agent_id),
+                tau_proto::AgentNavigationMode::Active,
+            )
+            .map_err(|_| {
+                HarnessError::Participant(format!(
+                    "peer entrypoint agent `{agent_id}` lost its loaded navigation state"
+                ))
+            })?;
+        } else {
+            // Emit the initial generic agent stats snapshot as soon as the side
+            // agent exists, before it spends tokens or starts nested tools.
+            self.emit_agent_stats_updated(&cid);
+        }
 
         if publish_initial_instruction {
             // Publish the accepted instruction into the side agent transcript and

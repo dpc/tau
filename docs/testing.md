@@ -259,7 +259,7 @@ cleanup remain independent oracles.
 A third topology starts the universal PTY agentless and tool-free, then uses a
 private exact same-process sender callback to authorize one bare external
 message. That message auto-starts the first receiver. Typed socket stats prove
-`active_auto/running`; the correlated hold-ready notice is broadcast later, so
+`active/running`; the correlated hold-ready notice is broadcast later, so
 its target-PTY projection proves that UI consumed the update before one real
 Ctrl-J selects the exact recipient. The test then cancels and reaps its correlated
 provider hold. These are narrow terminal projection gates, not broad rendering

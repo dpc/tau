@@ -131,7 +131,7 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
     observer.cancel_prompt(&target_session, &prompt)?;
     wait_for_canceled_hold(&mut observer, &prompt, deadline)?;
     assert_hold_reaped(&fixture, &prompt)?;
-    wait_for_idle_auto(&mut observer, &agent_id, &prompt, deadline)?;
+    wait_for_idle_active(&mut observer, &agent_id, &prompt, deadline)?;
     assert_exact_canceled_hold_facts(&observer.events, &prompt)?;
 
     fixture.write_artifact(
@@ -147,19 +147,14 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// Waits for prompt creation, submission, active-auto/running stats, and the
+/// Waits for prompt creation, submission, active/running stats, and the
 /// later prompt-correlated hold-ready notice in that order.
 pub(super) fn wait_for_live_hold(
     observer: &mut SideObserver,
     agent_id: &AgentId,
     deadline: Instant,
 ) -> Result<AgentPromptCreated, Box<dyn std::error::Error>> {
-    wait_for_live_hold_with_navigation(
-        observer,
-        agent_id,
-        deadline,
-        AgentNavigationMode::ActiveAuto,
-    )
+    wait_for_live_hold_with_navigation(observer, agent_id, deadline, AgentNavigationMode::Active)
 }
 
 /// Waits for one correlated running provider hold while accepting the ordinary
@@ -374,8 +369,8 @@ pub(super) fn assert_exact_canceled_hold_facts(
     Ok(())
 }
 
-/// Waits for an idle active-auto snapshot ordered after prompt termination.
-pub(super) fn wait_for_idle_auto(
+/// Waits for an idle active snapshot ordered after prompt termination.
+pub(super) fn wait_for_idle_active(
     observer: &mut SideObserver,
     agent_id: &AgentId,
     prompt: &AgentPromptCreated,
@@ -386,7 +381,7 @@ pub(super) fn wait_for_idle_auto(
         agent_id,
         prompt,
         deadline,
-        AgentNavigationMode::ActiveAuto,
+        AgentNavigationMode::Active,
     )
 }
 

@@ -51,6 +51,11 @@ Auto-start uses ordinary role/model/required-skill/tool-policy construction and
 inherits no remote ancestry, watch, cwd, or transcript. The created live endpoint
 is immediately eligible, so concurrent sends coalesce; no second endpoint is
 created merely because the first is busy.
+After durable creation and current-session membership setup, only that newly
+created bare peer-entrypoint endpoint receives the daemon-lifetime `active`
+navigation classification and its complete `agent.stats_updated` projection.
+Existing bare recipients, exact recipients, and every non-peer start retain
+their existing navigation behavior. Cold restore recomputes the normal default.
 Peer-created lifecycle purpose is embedded as reserved, non-inheritable metadata
 in the immutable harness-owned `AgentStarted` creation fact. The ordinary ordered
 creation path commits it before the receive can succeed, and interception cannot

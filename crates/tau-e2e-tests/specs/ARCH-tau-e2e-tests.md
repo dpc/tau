@@ -152,7 +152,8 @@ or recovery claims.
 A third core-resume topology starts the exact universal Tau under a PTY with no
 agent and no tools. One private same-process sender record and callback socket
 authorize an exact bare external message, which auto-starts the first agent.
-Socket stats are authoritative for its `active_auto/running` state; the
+Socket stats are authoritative for the newly created recipient's `active/running`
+state; the
 correlated hold-ready notice is broadcast afterward, so its target-PTY
 projection proves that UI consumed the update before one real Ctrl-J selects
 the exact recipient. The provider hold is explicitly canceled and reaped after

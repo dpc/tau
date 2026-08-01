@@ -687,6 +687,14 @@ covers explicit navigation requests and the implicit `active` write after a
 visible human prompt is durably admitted for an existing target. Payload
 `originator`, submission provenance, durable prompt replay, and later queue/steer
 processing are not authentication and cannot independently cause the write.
+The authenticated cooperative bare peer-entrypoint auto-start has one
+harness-internal exception: after durable identity and current-session membership
+setup, the harness writes `active` only for its newly created recipient and
+publishes complete stats. The peer never chooses a mode, and exact/existing
+recipients and all other start paths cannot acquire this write. The runtime-only
+classification is forgotten on unload, session switch, or process exit; cold
+restore recomputes the extension-origin `active_auto` default. Receive-commit ACK
+authority remains independent of this UI-only state.
 Modes do not authorize loading, routing, prompt delivery, watches, execution, or
 model access and are intentionally not durable.
 

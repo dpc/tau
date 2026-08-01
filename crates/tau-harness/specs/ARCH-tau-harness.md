@@ -386,6 +386,10 @@ The event loop applies both authenticated explicit UI writes and the implicit
 target. The accepted-interaction append precedes the mode/stats publication,
 which precedes queue or dispatch. Complete harness stats are the only UI
 projection authority; CLIs and transcript replay must not infer a mode change.
+The authenticated bare peer-entrypoint auto-start path applies the same
+runtime-only mode/stat flow only to its newly created recipient after durable
+creation and current-session membership setup. Existing recipients and other
+start paths retain their ordinary navigation defaults.
 
 The wire contract is specified by
 [SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
