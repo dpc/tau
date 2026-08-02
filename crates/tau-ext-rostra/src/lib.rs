@@ -1,4 +1,4 @@
-//! Relay-only, read-only Rostra tools backed by an extension-owned database.
+//! Relay-only Rostra tools backed by an extension-owned database.
 //!
 //! `ARCH-tau-ext-rostra` records the persistent-state, synchronization, and
 //! hostile-content boundaries implemented here.
@@ -11,17 +11,18 @@ mod tools;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
-use std::future::Future;
 use std::io::{Read, Write};
 use std::str::FromStr as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rostra_client::{Client, Database, RostraId};
+use rostra_client::{Client, Database};
+use rostra_core::id::RostraIdSecretKey;
 use tau_client::{ClientError, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::ToolCancelled;
 use tokio::runtime::Builder as RuntimeBuilder;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, oneshot};
 use tokio::task::AbortHandle;
 
 /// Logging target used by this extension.
@@ -35,7 +36,13 @@ pub(crate) const MAX_EXCERPT_CHARS: usize = 240;
 /// Maximum UTF-8 bytes returned for detailed Djot source.
 pub(crate) const MAX_DJOT_BYTES: usize = 64 * 1024;
 
+#[cfg(not(test))]
 const TOOL_DEADLINE: Duration = Duration::from_secs(10);
+/// This gives the cancellation half of the protocol test scheduling margin
+/// while still exercising a retained publication without production's
+/// ten-second wait.
+#[cfg(test)]
+const TOOL_DEADLINE: Duration = Duration::from_secs(1);
 const MAX_CONCURRENT_TOOLS: usize = 8;
 
 /// Run the extension over stdio.
@@ -61,9 +68,11 @@ where
     let runtime = RuntimeBuilder::new_multi_thread().enable_all().build()?;
     let state = RostraState {
         client: None,
+        identity_secret: None,
         runtime: Some(runtime),
         running: Arc::new(Mutex::new(HashMap::new())),
         permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOLS)),
+        write_lock: Arc::new(AsyncMutex::new(())),
     };
     tau_client::TauExtensionRunner::new(RostraExtension)
         .run_detached_writer(reader, writer, state)?;
@@ -74,20 +83,24 @@ where
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExtConfig {
-    /// Public Rostra identity whose synchronized local view is exposed.
-    identity: String,
+    /// Name of the Tau-managed mnemonic secret for this identity.
+    identity_mnemonic_secret: String,
 }
 
 /// Runtime state owned by one extension process.
 struct RostraState {
     /// Full client; declared before the runtime so shutdown drops it first.
     client: Option<Arc<Client>>,
+    /// Signing key retained until the client and its active tasks are dropped.
+    identity_secret: Option<RostraIdSecretKey>,
     /// Executor that owns Rostra and bounded tool tasks.
     runtime: Option<tokio::runtime::Runtime>,
-    /// Abort handles for calls that can still produce a terminal result.
+    /// Abort handles for wrappers that can still produce a terminal result.
     running: Arc<Mutex<HashMap<tau_proto::ToolCallId, RunningCall>>>,
     /// Process-wide bound on concurrent tool work.
     permits: Arc<Semaphore>,
+    /// Serializes lazy activation and all authenticated publications.
+    write_lock: Arc<AsyncMutex<()>>,
 }
 
 impl Drop for RostraState {
@@ -126,6 +139,7 @@ impl TauExtension for RostraExtension {
                 |cx| configure(cx.state, cx.configure, cx.config),
                 |cx| {
                     cx.state.client = None;
+                    cx.state.identity_secret = None;
                     abort_all(&cx.state.running);
                 },
             )
@@ -137,6 +151,12 @@ impl TauExtension for RostraExtension {
             .tool(specs::list_spec(), handle_tool)
             .tool(specs::read_spec(), handle_tool)
             .tool(specs::profile_spec(), handle_tool)
+            .tool(specs::post_spec(), handle_tool)
+            .tool(specs::react_spec(), handle_tool)
+            .tool(specs::follow_spec(), handle_tool)
+            .tool(specs::unfollow_spec(), handle_tool)
+            .tool(specs::profile_update_spec(), handle_tool)
+            .tool(specs::vote_spec(), handle_tool)
             .ready_message("Rostra local synchronized view ready");
     }
 }
@@ -152,9 +172,24 @@ fn configure(
         ));
     }
     state.client = None;
+    state.identity_secret = None;
     abort_all(&state.running);
-    let identity = RostraId::from_str(&config.identity)
-        .map_err(|_| ClientError::handler("invalid_argument: `identity` is not a Rostra id"))?;
+    let mnemonic = configure
+        .secrets
+        .get(&config.identity_mnemonic_secret)
+        .map(tau_proto::SecretValue::expose_secret)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            ClientError::handler(
+                "invalid_argument: `identity_mnemonic_secret` does not name a supplied nonempty Tau secret",
+            )
+        })?;
+    let identity_secret = RostraIdSecretKey::from_str(mnemonic).map_err(|_| {
+        ClientError::handler(
+            "invalid_argument: `identity_mnemonic_secret` is not a valid Rostra mnemonic",
+        )
+    })?;
+    let identity = identity_secret.id();
     let state_dir = configure.state_dir.as_ref().ok_or_else(|| {
         ClientError::handler(
             "storage_failure: std-rostra requires persistent extension state; memory-only mode is unsupported",
@@ -185,8 +220,9 @@ fn configure(
             ClientError::handler(
                 "storage_failure: Rostra database open or client startup failed; check ownership, locking, corruption, and configured identity",
             )
-        })?;
+    })?;
     state.client = Some(client);
+    state.identity_secret = Some(identity_secret);
     Ok(())
 }
 
@@ -233,6 +269,8 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
         }
     };
     let running = Arc::clone(&cx.state.running);
+    let identity_secret = cx.state.identity_secret;
+    let write_lock = Arc::clone(&cx.state.write_lock);
     let call_id = invoke.call_id.clone();
     let (start_tx, start_rx) = oneshot::channel();
     let worker = cx
@@ -246,11 +284,28 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
             }
             let query_invoke = invoke.clone();
             let query_client = Arc::clone(&client);
-            let mut task = AbortOnDrop(cx_spawn(async move {
-                let _permit = permit;
-                tools::dispatch(&query_invoke, &query_client).await
-            }));
-            let event = match tokio::time::timeout(TOOL_DEADLINE, &mut task.0).await {
+            let publication_admitted = Arc::new(AtomicBool::new(false));
+            let task_publication_admitted = Arc::clone(&publication_admitted);
+            // Dropping a JoinHandle detaches the operation after publication
+            // admission. This deliberately precedes Rostra's actual redb call:
+            // its effect is unknown once downstream publication begins. Before
+            // admission, cancellation aborts this extension task; `unlock_active`
+            // can still have made its own lazy-activation side effect.
+            let mut task = AbortBeforePublicationAdmission {
+                task: tokio::spawn(async move {
+                    let _permit = permit;
+                    tools::dispatch(
+                        &query_invoke,
+                        &query_client,
+                        identity_secret,
+                        write_lock,
+                        task_publication_admitted,
+                    )
+                    .await
+                }),
+                publication_admitted: Arc::clone(&publication_admitted),
+            };
+            let event = match tokio::time::timeout(TOOL_DEADLINE, &mut task.task).await {
                 Ok(Ok(Ok(text))) => tools::tool_result(&invoke, text),
                 Ok(Ok(Err(error))) => tools::tool_error(&invoke, error),
                 Ok(Err(_)) => tools::tool_error(&invoke, tools::ToolFailure::internal()),
@@ -281,21 +336,20 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
     Ok(())
 }
 
-fn cx_spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    tokio::spawn(future)
+/// Cancels work before publication admission, but detaches work whose eventual
+/// local effect is unknown to the caller.
+struct AbortBeforePublicationAdmission<T> {
+    /// The tool task that owns the permit and, for writes, the serial lane.
+    task: tokio::task::JoinHandle<T>,
+    /// Set after activation and immediately before dispatching publication.
+    publication_admitted: Arc<AtomicBool>,
 }
 
-/// Aborts the async wrapper and suppresses late terminals; an upstream redb
-/// read may remain.
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
-
-impl<T> Drop for AbortOnDrop<T> {
+impl<T> Drop for AbortBeforePublicationAdmission<T> {
     fn drop(&mut self) {
-        self.0.abort();
+        if !self.publication_admitted.load(Ordering::Acquire) {
+            self.task.abort();
+        }
     }
 }
 

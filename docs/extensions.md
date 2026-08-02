@@ -2,33 +2,49 @@
 
 ## Rostra
 
-The bundled `std-rostra` instance is disabled by default. It runs one
-read-only full Rostra client with relay-only Iroh peer transport, Pkarr
-HTTPS/DNS discovery, and no direct peer-IP transport, and continuously synchronizes the
-configured public identity's local view while enabled:
+The bundled `std-rostra` instance is disabled by default. It runs one full
+Rostra client with relay-only Iroh peer transport, Pkarr HTTPS/DNS discovery,
+and no direct peer-IP transport. It derives its identity from a Tau-managed
+24-word mnemonic:
 
 ```yaml
 extensions:
   std-rostra:
     enable: true
     require: false
+    secrets:
+      rostra_identity_mnemonic: {}
     config:
-      identity: rs...
+      identity_mnemonic_secret: rostra_identity_mnemonic
 ```
 
-The extension exposes exactly `rostra_status`, `rostra_list_posts`,
-`rostra_read_post`, and `rostra_get_profile`. Timeline reads cover direct
-following, the locally known two-hop network, and one explicit author.
-They never perform on-demand synchronization, and empty or missing results mean
-only that data is absent from the synchronized local database.
+Set `TAU_SECRET_ROSTRA_IDENTITY_MNEMONIC` when starting Tau. The harness
+consumes it before it spawns extensions; the generic secret resolver otherwise
+uses `<tau-state>/secrets/rostra_identity_mnemonic.yaml`. The extension derives
+the public identity instead of accepting a duplicate ID. It remains read-only
+until the first signed call; activation can create a signed node announcement
+and begins best-effort background Pkarr/head publication.
+
+The read tools are `rostra_status`, `rostra_list_posts`, `rostra_read_post`,
+and `rostra_get_profile`. The signed tools are `rostra_post`, `rostra_react`,
+`rostra_follow`, `rostra_unfollow`, `rostra_update_profile`, and
+`rostra_vote`. A signed-tool result confirms only durable local storage;
+publication is asynchronous best effort. A timeout, cancellation, or crash can
+leave a possibly stored/published event, so retrying can create a duplicate.
+Timeline reads cover direct following, the locally known two-hop network, and
+one explicit author. They never perform on-demand synchronization, and empty
+or missing results mean only that data is absent from the synchronized local
+database.
 
 `std-rostra` stores graph state, projections, synchronization metadata, and its
 Iroh node secret in the stable per-instance `rostra.redb`. The store survives
 Tau sessions and is not part of session journals. The extension fails in
-memory-only mode. Changing identity for an existing state directory fails
-closed; use another extension instance or move the old directory. Tau never
-accepts a Rostra secret, creates an identity, writes to Rostra, enables direct-IP
-public mode, or turns synchronized posts into inbound messages.
+memory-only mode. Changing the derived identity for an existing state directory
+fails closed; use another extension instance or move the old directory. Tau
+never accepts a public Rostra ID alongside the mnemonic, creates an identity,
+enables direct-IP public mode, or turns synchronized posts into inbound
+messages. The mnemonic grants permanent signing authority to every role allowed
+the signed tools; Tau has no human per-call confirmation mechanism.
 
 
 ## Tau Swarm

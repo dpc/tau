@@ -1,17 +1,24 @@
-//! Async implementations of the four read-only tools.
+//! Async implementations of local read and authenticated-write tools.
 
 mod list;
 mod profile;
 mod read;
 mod status;
+pub(crate) mod write;
 
 use std::str::FromStr as _;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use rostra_client::{Client, RostraId};
+use rostra_core::id::RostraIdSecretKey;
 use tau_proto::{CborValue, Event, ToolError, ToolResult, ToolStarted};
 
 use crate::projection::sanitize_line;
-use crate::specs::{LIST_TOOL, PROFILE_TOOL, READ_TOOL, STATUS_TOOL};
+use crate::specs::{
+    FOLLOW_TOOL, LIST_TOOL, POST_TOOL, PROFILE_TOOL, PROFILE_UPDATE_TOOL, REACT_TOOL, READ_TOOL,
+    STATUS_TOOL, UNFOLLOW_TOOL, VOTE_TOOL,
+};
 
 /// Stable categorized tool failure.
 #[derive(Debug)]
@@ -28,6 +35,7 @@ pub(super) enum ToolFailureCategory {
     InvalidArgument,
     NotReady,
     NotFoundLocal,
+    StorageFailure,
     Timeout,
     InternalFailure,
 }
@@ -38,6 +46,7 @@ impl ToolFailureCategory {
             Self::InvalidArgument => "invalid_argument",
             Self::NotReady => "not_ready",
             Self::NotFoundLocal => "not_found_local",
+            Self::StorageFailure => "storage_failure",
             Self::Timeout => "timeout",
             Self::InternalFailure => "internal_failure",
         }
@@ -67,7 +76,7 @@ impl ToolFailure {
     pub(crate) fn timeout() -> Self {
         Self::new(
             ToolFailureCategory::Timeout,
-            "local Rostra query exceeded its deadline",
+            "local Rostra operation exceeded its deadline; a signed write may still have completed",
         )
     }
 
@@ -75,7 +84,7 @@ impl ToolFailure {
     pub(crate) fn capacity() -> Self {
         Self::new(
             ToolFailureCategory::Timeout,
-            "Rostra query capacity is occupied; retry later",
+            "Rostra operation capacity is occupied; retry later",
         )
     }
 
@@ -86,17 +95,35 @@ impl ToolFailure {
             "local Rostra query failed",
         )
     }
+
+    /// Report a failed local signed-event transaction.
+    pub(crate) fn storage() -> Self {
+        Self::new(
+            ToolFailureCategory::StorageFailure,
+            "local Rostra signed-event transaction failed",
+        )
+    }
 }
 
 type ToolTextResult = Result<String, ToolFailure>;
 
 /// Dispatch one validated invocation to its cohesive tool module.
-pub(crate) async fn dispatch(invoke: &ToolStarted, client: &Client) -> ToolTextResult {
+pub(crate) async fn dispatch(
+    invoke: &ToolStarted,
+    client: &Client,
+    identity_secret: Option<RostraIdSecretKey>,
+    write_lock: Arc<tokio::sync::Mutex<()>>,
+    publication_admitted: Arc<AtomicBool>,
+) -> ToolTextResult {
     match invoke.tool_name.as_str() {
         STATUS_TOOL => status::handle(invoke, client).await,
         LIST_TOOL => list::handle(invoke, client).await,
         READ_TOOL => read::handle(invoke, client).await,
         PROFILE_TOOL => profile::handle(invoke, client).await,
+        POST_TOOL | REACT_TOOL | FOLLOW_TOOL | UNFOLLOW_TOOL | PROFILE_UPDATE_TOOL | VOTE_TOOL => {
+            let secret = identity_secret.ok_or_else(ToolFailure::not_ready)?;
+            write::handle(invoke, client, secret, write_lock, publication_admitted).await
+        }
         _ => Err(ToolFailure::invalid("unknown Rostra tool")),
     }
 }

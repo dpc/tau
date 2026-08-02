@@ -3,12 +3,16 @@
 The disabled-by-default `std-rostra` extension is a trusted same-user
 executable, but every synchronized Rostra field is untrusted external content.
 Rostra signatures authenticate an author key, not instructions or Tau
-authority. The extension uses relay-only Iroh peer transport plus Pkarr
-HTTPS/DNS discovery without direct peer-IP transport, owns an exclusive
-owner-private per-instance redb containing public graph data and an Iroh node
-secret, and exposes only bounded pull tools. It has no signing key custody,
-writes, inbound messages, activation, direct-IP public mode, shared database,
-or memory-only fallback. See
+authority. It derives one identity from a declared Tau-managed mnemonic secret,
+keeps that signing authority in its trusted same-user process after lazy first
+write activation, and exposes bounded reads plus explicitly signed social
+writes. The extension uses relay-only Iroh peer transport plus Pkarr HTTPS/DNS
+discovery without direct peer-IP transport, owns an exclusive owner-private
+per-instance redb containing public graph data, signed local events, and an
+Iroh node secret. Signed effects are locally durable but remotely asynchronous;
+unknown timeout/cancellation outcomes can have taken effect. It has no inbound
+messages, identity creation, direct-IP public mode, shared database, or
+memory-only fallback. See
 [`ARCH-tau-ext-rostra`](crates/tau-ext-rostra/specs/ARCH-tau-ext-rostra.md).
 
 The optional `std-swarm` configured extension is a trusted same-user local

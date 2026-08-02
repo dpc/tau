@@ -28,7 +28,7 @@ pub(super) async fn handle(invoke: &ToolStarted, client: &Client) -> ToolTextRes
         }
     }
     bounded_output(format!(
-        "identity: {identity}\nmode: read-only\ntransport: relay-only Iroh peer transport; Pkarr HTTPS/DNS discovery; no direct peer-IP\ndatabase: open\nknown_direct_followees: {}\nknown_two_hop_identities: {}\nclient_state: started\nsynchronization_health: unknown",
+        "identity: {identity}\nmode: local synchronized view; signing activates lazily on the first signed tool call\ntransport: relay-only Iroh peer transport; Pkarr HTTPS/DNS discovery; no direct peer-IP\ndatabase: open\nknown_direct_followees: {}\nknown_two_hop_identities: {}\nclient_state: started\nsynchronization_health: unknown",
         direct_ids.len(),
         two_hop.len()
     ))
