@@ -362,7 +362,7 @@ fn write_proc_file(path: &CStr, content: &CStr, ignore_enoent: bool) -> std::io:
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn cvt(result: libc::c_int) -> std::io::Result<()> {
     if result == -1 {
         Err(path_std_io::Error::last_os_error())
