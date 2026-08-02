@@ -1350,6 +1350,81 @@ fn watch_work_status_renders_all_reportable_states() {
     }
 }
 
+/// Initial watch snapshots establish the status-row state without creating a
+/// pointless transcript notification, while a later explicit report remains
+/// visible to the watcher.
+#[test]
+fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.current_session_id =
+        Some(tau_proto::SessionId::parse("session-1").expect("valid session ID"));
+    renderer.current_agent_id = Some("manager".to_owned());
+    renderer.displayed_agent_id = Some("manager".to_owned());
+    let status_event = |message_id: &str, phase, title, initial| {
+        tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse(message_id).expect("valid message ID"),
+            sender_id: agent_id("worker"),
+            sender_session_id: None,
+            recipient_id: agent_id("manager"),
+            kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+                session_id: tau_proto::SessionId::parse("session-1").expect("valid session ID"),
+                subscription_id: "subscription-1".to_owned(),
+                status_epoch: 1,
+                phase,
+                title,
+                initial,
+            }),
+            watch_long_wait: None,
+            message: String::new(),
+        })
+    };
+
+    renderer.handle_socket_delivery(
+        &status_event(
+            "initial-status",
+            tau_proto::AgentWorkStatusPhase::Unreported,
+            None,
+            true,
+        ),
+        tau_proto::UnixMicros::new(1),
+        1,
+    );
+    assert_eq!(renderer.message_history.len(), 0);
+    assert_eq!(
+        renderer
+            .watched_agent_work_status("worker")
+            .expect("initial snapshot cached")
+            .phase,
+        tau_proto::AgentWorkStatusPhase::Unreported
+    );
+
+    renderer.handle_socket_delivery(
+        &status_event(
+            "working-status",
+            tau_proto::AgentWorkStatusPhase::Working,
+            Some("implementation".to_owned()),
+            false,
+        ),
+        tau_proto::UnixMicros::new(2),
+        2,
+    );
+    assert_eq!(renderer.message_history.len(), 1);
+    assert_eq!(
+        renderer
+            .watched_agent_work_status("worker")
+            .expect("explicit transition cached")
+            .phase,
+        tau_proto::AgentWorkStatusPhase::Working
+    );
+    assert_eq!(
+        block_text(&renderer.render_agent_message_block(&renderer.message_history[0].event)),
+        "▤ Status update from @worker: working (implementation)"
+    );
+}
+
 /// Provider-work retains its presentation body, while a long-wait record uses
 /// its typed threshold because production records have an empty body.
 #[test]

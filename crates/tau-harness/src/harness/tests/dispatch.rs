@@ -28304,6 +28304,23 @@ fn working_final_gate_commits_bounded_candidates_and_accepts_unknown() {
         agent.work_status.phase(),
         tau_proto::AgentWorkStatusPhase::Unknown
     );
+    assert_eq!(
+        session_agent_message_received_events(&h)
+            .into_iter()
+            .filter(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchWorkStatus
+                    && message.sender_id == agent_id
+                    && message.recipient_id == watcher_id
+                    && message.watch_work_status.as_ref().is_some_and(|status| {
+                        !status.initial
+                            && status.phase == tau_proto::AgentWorkStatusPhase::Unknown
+                            && status.title.as_deref() == Some("finish gate")
+                    })
+            })
+            .count(),
+        1,
+        "the exhausted Working-final guard reports its actionable fallback"
+    );
     assert_eq!(agent.turn_generation, outer_generation);
     assert!(matches!(agent.turn_state, AgentTurnState::Idle));
     assert_eq!(

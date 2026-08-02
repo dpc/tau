@@ -5047,6 +5047,17 @@ impl EventRenderer {
         ) {
             return false;
         }
+        if matches!(
+            event,
+            Event::AgentMessageReceived(message)
+                if message.watch_work_status.as_ref().is_some_and(|status| status.initial)
+        ) {
+            // `learn_agent_metadata` already folded this initial snapshot into
+            // the watched-agent row. It establishes current state rather than
+            // reporting an actionable transition, so it must not create a
+            // transcript notification.
+            return true;
+        }
         let block = self.render_agent_message_block(event);
         let block_id = self.handle.print_output("agent-message", block);
         self.message_history.push(MessageBlockEntry {
