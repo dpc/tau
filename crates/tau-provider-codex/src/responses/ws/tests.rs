@@ -1,6 +1,6 @@
 use std::{collections as path_std_collections, net as path_std_net};
 
-use rustls::pki_types as path_rustls_pki_types;
+use rustls::{crypto as path_rustls_crypto, pki_types as path_rustls_pki_types};
 use tungstenite::http as path_tungstenite_http;
 
 use crate::attempt_failure as path_crate_attempt_failure;
@@ -454,15 +454,19 @@ fn secure_websocket_proxy_connects_before_target_tls_and_upgrade() {
         .expect("leaf params")
         .signed_by(&leaf_key, &ca, &ca_key)
         .expect("leaf certificate");
-    let tls = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![leaf.der().clone()],
-            path_rustls_pki_types::PrivateKeyDer::Pkcs8(
-                path_rustls_pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
-            ),
-        )
-        .expect("target TLS");
+    let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        path_rustls_crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("target TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![leaf.der().clone()],
+        path_rustls_pki_types::PrivateKeyDer::Pkcs8(
+            path_rustls_pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+        ),
+    )
+    .expect("target TLS");
     let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
     let address = listener.local_addr().expect("proxy address");
     let (capture_tx, capture_rx) = std_mpsc::channel();

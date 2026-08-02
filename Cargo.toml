@@ -14,6 +14,7 @@ members = [
   "crates/tau-ext-pim",
   "crates/tau-ext-provider-builtin",
   "crates/tau-ext-rhai",
+  "crates/tau-ext-rostra",
   "crates/tau-ext-shell",
   "crates/tau-ext-slack",
   "crates/tau-ext-std-notifications",
@@ -65,6 +66,9 @@ unwrap_used = "deny"
 [workspace.dependencies]
 httpdate = "1.0.3"
 proptest = "1.7"
+rostra-client = "0.1.0"
+rostra-client-db = "=0.1.0"
+rostra-core = "=0.1.0"
 # Internal crates
 tau-actions = { path = "crates/tau-actions" }
 tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel" }
@@ -78,6 +82,7 @@ tau-core = { path = "crates/tau-core" }
 tau-ext-pim = { path = "crates/tau-ext-pim" }
 tau-ext-provider-builtin = { path = "crates/tau-ext-provider-builtin" }
 tau-ext-rhai = { path = "crates/tau-ext-rhai" }
+tau-ext-rostra = { path = "crates/tau-ext-rostra" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
 tau-ext-slack = { path = "crates/tau-ext-slack" }
 tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }

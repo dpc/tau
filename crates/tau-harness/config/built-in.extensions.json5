@@ -32,6 +32,13 @@
         config: {},
     },
     {
+        name: "std-rostra",
+        suffix: ["component", "ext-rostra"],
+        role: "tool",
+        enable: false,
+        config: {},
+    },
+    {
         name: "std-notifications",
         suffix: ["component", "ext-std-notifications"],
         role: "tool",

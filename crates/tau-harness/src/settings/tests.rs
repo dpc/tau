@@ -62,6 +62,13 @@ fn builtins() -> Vec<BuiltinExtension> {
             serde_json::json!({ "agent_start": [], "agent_end": [], "agent_idle": [], "agent_idle_all": [] }),
         ),
         builtin(
+            "std-rostra",
+            "ext-rostra",
+            "tool",
+            false,
+            serde_json::json!({}),
+        ),
+        builtin(
             "std-websearch",
             "ext-websearch",
             "tool",

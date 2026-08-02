@@ -118,6 +118,7 @@ impl GateFixture {
             "core-shell",
             "test-dummy",
             "std-rhai",
+            "std-rostra",
             "std-notifications",
             "std-slack",
             "std-telegram",

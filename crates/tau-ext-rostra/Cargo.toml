@@ -1,0 +1,30 @@
+[package]
+name = "tau-ext-rostra"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+rostra-client.workspace = true
+rostra-client-db.workspace = true
+rostra-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tau-client.workspace = true
+tau-proto.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

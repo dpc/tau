@@ -1,5 +1,8 @@
 //! Generated certificate authority for scripted TLS layers.
 
+use std::sync::Arc;
+
+use rustls::crypto::ring;
 use rustls::pki_types as path_rustls_pki_types;
 
 /// Generated test-only certificate authority for scripted TLS layers.
@@ -33,7 +36,9 @@ impl TestCa {
             .expect("test leaf params")
             .signed_by(&leaf_key, &self.certificate, &self.key)
             .expect("test leaf certificate");
-        rustls::ServerConfig::builder()
+        rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("test TLS versions")
             .with_no_client_auth()
             .with_single_cert(
                 vec![leaf.der().clone()],

@@ -1,5 +1,36 @@
 # Configuring extensions
 
+## Rostra
+
+The bundled `std-rostra` instance is disabled by default. It runs one
+read-only full Rostra client with relay-only Iroh peer transport, Pkarr
+HTTPS/DNS discovery, and no direct peer-IP transport, and continuously synchronizes the
+configured public identity's local view while enabled:
+
+```yaml
+extensions:
+  std-rostra:
+    enable: true
+    require: false
+    config:
+      identity: rs...
+```
+
+The extension exposes exactly `rostra_status`, `rostra_list_posts`,
+`rostra_read_post`, and `rostra_get_profile`. Timeline reads cover direct
+following, the locally known two-hop network, and one explicit author.
+They never perform on-demand synchronization, and empty or missing results mean
+only that data is absent from the synchronized local database.
+
+`std-rostra` stores graph state, projections, synchronization metadata, and its
+Iroh node secret in the stable per-instance `rostra.redb`. The store survives
+Tau sessions and is not part of session journals. The extension fails in
+memory-only mode. Changing identity for an existing state directory fails
+closed; use another extension instance or move the old directory. Tau never
+accepts a Rostra secret, creates an identity, writes to Rostra, enables direct-IP
+public mode, or turns synchronized posts into inbound messages.
+
+
 ## Tau Swarm
 
 The bundled `std-swarm` instance is disabled by default and optional

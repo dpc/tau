@@ -412,15 +412,19 @@ fn custom_ca_is_additive_for_https_target() {
         .expect("leaf params")
         .signed_by(&leaf_key, &ca, &ca_key)
         .expect("leaf certificate");
-    let server = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![leaf.der().clone()],
-            path_rustls_pki_types::PrivateKeyDer::Pkcs8(
-                path_rustls_pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
-            ),
-        )
-        .expect("server TLS");
+    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
+        path_rustls_crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("server TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![leaf.der().clone()],
+        path_rustls_pki_types::PrivateKeyDer::Pkcs8(
+            path_rustls_pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+        ),
+    )
+    .expect("server TLS");
     let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("TLS listener");
     let address = listener.local_addr().expect("TLS address");
     let server = std::thread::spawn(move || {
@@ -616,15 +620,19 @@ fn https_proxy_uses_custom_ca_and_absolute_form() {
         .expect("leaf params")
         .signed_by(&leaf_key, &ca, &ca_key)
         .expect("leaf certificate");
-    let server = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![leaf.der().clone()],
-            path_rustls_pki_types::PrivateKeyDer::Pkcs8(
-                path_rustls_pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
-            ),
-        )
-        .expect("proxy TLS");
+    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
+        path_rustls_crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("proxy TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![leaf.der().clone()],
+        path_rustls_pki_types::PrivateKeyDer::Pkcs8(
+            path_rustls_pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+        ),
+    )
+    .expect("proxy TLS");
     let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
     let address = listener.local_addr().expect("proxy address");
     let proxy = std::thread::spawn(move || {
