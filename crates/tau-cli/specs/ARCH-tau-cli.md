@@ -56,6 +56,13 @@ too narrow for both show no ambiguous header rather than hiding whether a call
 succeeded or failed. Expanded payload and diff bodies remain ordinary detail
 rows below the one-row header and hide with an essential header that cannot
 fit, while compact and summary modes keep their existing visibility semantics.
+The bundled Swarm `blocker` tool is the narrow exception to otherwise generic
+tool-header projection: its structured start argument contributes only the
+validated `add`, `cancel`, or `list` action label. The CLI retains that safe
+label through progress, terminal, replay, and cold-attach reconstruction, while
+never projecting the blocker's title, description, answer, reason, or other
+payload fields, including in full tool-display mode. An absent or malformed
+action fails closed to the identity, lifecycle status, and duration only.
 
 Prompt completion may read the local filesystem and query `git` for tracked and
 unignored files. These operations should stay bounded and best-effort: failures

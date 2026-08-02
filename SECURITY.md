@@ -43,6 +43,12 @@ minimum/maximum boundaries, tiny widths, owned-body suppression, and resize
 restoration whenever terminal layout or tool presentation changes. See
 [`ARCH-tau-term-screen`](crates/tau-term-screen/specs/ARCH-tau-term-screen.md)
 and [`ARCH-tau-cli`](crates/tau-cli/specs/ARCH-tau-cli.md).
+The built-in Swarm `blocker` tool has a narrower presentation boundary: the
+CLI permits only its finite `add`, `cancel`, or `list` action discriminant from
+the start arguments, and strips all other start, progress, and terminal display
+fields in compact and full modes. Missing, malformed, or unknown actions fail
+closed. Re-check valid and invalid actions across live, progress, result, error,
+cancellation, replay, and cold attachment whenever blocker presentation changes.
 
 Interactive frontend progress diagnostics contain only process-local delivery
 ids, typed event names, agent routing ids, selected/hidden classification,

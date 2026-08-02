@@ -51,9 +51,89 @@ pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
 const UI_IO_HIGH_BYTES_PER_SEC: u64 = 100 * 1024;
 
 const AGENT_START_TOOL_NAME: &str = "agent_start";
+const BLOCKER_TOOL_NAME: &str = "blocker";
 const TIMER_WAKEUP_CTX_PREFIX: &str = "timer:";
 static LAST_HANDLER_STALL_WARNING: std::sync::OnceLock<Mutex<Option<Instant>>> =
     path_std_sync::OnceLock::new();
+
+/// One safe, finite action accepted by the bundled Swarm blocker tool.
+#[derive(Clone, Copy)]
+enum BlockerAction {
+    Add,
+    Cancel,
+    List,
+}
+
+impl BlockerAction {
+    /// Returns the stable compact label for this action.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Cancel => "cancel",
+            Self::List => "list",
+        }
+    }
+}
+
+/// Extracts the sole safe compact descriptor from a built-in blocker
+/// invocation.
+///
+/// Blocker payloads carry titles, descriptions, answers, and cancellation
+/// reasons. The action discriminant alone distinguishes the operation without
+/// displaying any of that payload.
+fn blocker_action_descriptor(started: &tau_proto::ToolStarted) -> Option<BlockerAction> {
+    if started.tool_name.as_str() != BLOCKER_TOOL_NAME {
+        return None;
+    }
+    let CborValue::Map(entries) = &started.arguments else {
+        return None;
+    };
+    let mut action = None;
+    for (key, value) in entries {
+        if !matches!(key, CborValue::Text(key) if key == "action") {
+            continue;
+        }
+        let CborValue::Text(value) = value else {
+            return None;
+        };
+        if action.is_some() {
+            return None;
+        }
+        action = match value.as_str() {
+            "add" => Some(BlockerAction::Add),
+            "cancel" => Some(BlockerAction::Cancel),
+            "list" => Some(BlockerAction::List),
+            _ => return None,
+        };
+    }
+    action
+}
+
+/// Projects a blocker display through the action-only presentation boundary.
+fn sanitize_blocker_display(
+    display: &mut ToolCallDisplay,
+    is_blocker: bool,
+    action: Option<BlockerAction>,
+) {
+    if !is_blocker {
+        return;
+    }
+    display.mode.clear();
+    display.args = action.map_or_else(String::new, |action| action.as_str().to_owned());
+    display.range = None;
+    display.suffixes.retain(|suffix| {
+        matches!(
+            suffix.status,
+            ToolStatus::Success
+                | ToolStatus::Warning
+                | ToolStatus::Error
+                | ToolStatus::Pending
+                | ToolStatus::Progress
+                | ToolStatus::Time
+        )
+    });
+    display.payload = None;
+}
 
 fn admit_handler_stall_warning(now: Instant) -> bool {
     let mut last = LAST_HANDLER_STALL_WARNING
@@ -1125,6 +1205,12 @@ struct ToolCallState {
     /// Latest live display for the block, used when `:set show-tools`
     /// flips while the call is still running.
     live_display: Option<ToolCallDisplay>,
+    /// Safe action descriptor extracted from a `blocker` start. Terminal
+    /// reports do not repeat invocation arguments, so this survives until the
+    /// final display replaces the live row.
+    blocker_action: Option<BlockerAction>,
+    /// Whether this call uses the built-in blocker action-only projection.
+    is_blocker: bool,
     /// Monotonic start time for live duration updates.
     started_at: Option<Instant>,
     /// Harness log timestamp for final duration chips.
@@ -6505,7 +6591,10 @@ impl EventRenderer {
         {
             return;
         }
+        let is_blocker = started.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let blocker_action = blocker_action_descriptor(started);
         let mut display = pending_tool_call_display(started.tool_name.as_str());
+        sanitize_blocker_display(&mut display, is_blocker, blocker_action);
         Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO);
         let live_block = self.render_tool_history_block(&display);
         let live_id = self.handle.new_block(
@@ -6525,9 +6614,13 @@ impl EventRenderer {
             ToolCallState {
                 history_block_id: Some(history_id),
                 is_main_delegate: started.tool_name.as_str() == AGENT_START_TOOL_NAME,
+                blocker_action,
+                is_blocker,
                 ..ToolCallState::default()
             }
         });
+        state.blocker_action = blocker_action;
+        state.is_blocker = is_blocker;
         state.block_id = Some(live_id);
         state.live_display = Some(display);
         state.started_at = Some(Instant::now());
@@ -6602,7 +6695,12 @@ impl EventRenderer {
             if let Some(state) = self.tool_calls.get_mut(progress.call_id.as_str())
                 && let Some(block_id) = state.block_id
             {
-                let mut display = render_tool_use_state(&progress.tool_name, progress_display);
+                let mut display = if state.is_blocker {
+                    pending_tool_call_display(&progress.tool_name)
+                } else {
+                    render_tool_use_state(&progress.tool_name, progress_display)
+                };
+                sanitize_blocker_display(&mut display, state.is_blocker, state.blocker_action);
                 if Self::use_static_live_duration(freeze_multiline_payloads, &display) {
                     Self::upsert_static_tool_duration_suffix(&mut display);
                 } else if let Some(duration) = Self::live_tool_duration(state) {
@@ -6832,14 +6930,25 @@ impl EventRenderer {
         else {
             return;
         };
-        let mut display = Self::tool_result_display(result);
+        let is_blocker = prior.is_blocker || result.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let mut display = if is_blocker {
+            render_tool_use_state(
+                &result.tool_name,
+                &synthesize_fallback_display(&result.tool_name, None),
+            )
+        } else {
+            Self::tool_result_display(result)
+        };
+        sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
-        let diff = Self::tool_result_diff(result);
+        let diff = (!is_blocker)
+            .then(|| Self::tool_result_diff(result))
+            .flatten();
         self.record_tool_summary_result(
             prior.summary_block_id,
-            result.display.as_ref(),
+            (!is_blocker).then_some(result.display.as_ref()).flatten(),
             diff.as_ref(),
             false,
         );
@@ -6877,14 +6986,25 @@ impl EventRenderer {
         else {
             return;
         };
-        let mut display = Self::tool_result_display(&result);
+        let is_blocker = prior.is_blocker || result.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let mut display = if is_blocker {
+            render_tool_use_state(
+                &result.tool_name,
+                &synthesize_fallback_display(&result.tool_name, None),
+            )
+        } else {
+            Self::tool_result_display(&result)
+        };
+        sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
-        let diff = Self::tool_result_diff(&result);
+        let diff = (!is_blocker)
+            .then(|| Self::tool_result_diff(&result))
+            .flatten();
         self.record_tool_summary_result(
             prior.summary_block_id,
-            result.display.as_ref(),
+            (!is_blocker).then_some(result.display.as_ref()).flatten(),
             diff.as_ref(),
             false,
         );
@@ -6956,11 +7076,25 @@ impl EventRenderer {
         else {
             return;
         };
-        let mut display = Self::tool_error_display(error);
+        let is_blocker = prior.is_blocker || error.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let mut display = if is_blocker {
+            render_tool_use_state(
+                &error.tool_name,
+                &synthesize_fallback_display(&error.tool_name, Some("failed")),
+            )
+        } else {
+            Self::tool_error_display(error)
+        };
+        sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
-        self.record_tool_summary_result(prior.summary_block_id, error.display.as_ref(), None, true);
+        self.record_tool_summary_result(
+            prior.summary_block_id,
+            (!is_blocker).then_some(error.display.as_ref()).flatten(),
+            None,
+            true,
+        );
         self.record_plain_finished_tool_block(prior.history_block_id, display, "tool-error");
         self.render_model_status_after_tool_completion(known_main_tool);
     }
@@ -6984,11 +7118,25 @@ impl EventRenderer {
         else {
             return;
         };
-        let mut display = Self::tool_error_display(&error);
+        let is_blocker = prior.is_blocker || error.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        let mut display = if is_blocker {
+            render_tool_use_state(
+                &error.tool_name,
+                &synthesize_fallback_display(&error.tool_name, Some("failed")),
+            )
+        } else {
+            Self::tool_error_display(&error)
+        };
+        sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
-        self.record_tool_summary_result(prior.summary_block_id, error.display.as_ref(), None, true);
+        self.record_tool_summary_result(
+            prior.summary_block_id,
+            (!is_blocker).then_some(error.display.as_ref()).flatten(),
+            None,
+            true,
+        );
         self.record_plain_finished_tool_block(prior.history_block_id, display, "tool-error");
         self.render_model_status_after_tool_completion(known_main_tool);
     }
@@ -7028,6 +7176,8 @@ impl EventRenderer {
             &cancelled.tool_name,
             &synthesize_fallback_display(&cancelled.tool_name, Some("cancelled")),
         );
+        let is_blocker = prior.is_blocker || cancelled.tool_name.as_str() == BLOCKER_TOOL_NAME;
+        sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
