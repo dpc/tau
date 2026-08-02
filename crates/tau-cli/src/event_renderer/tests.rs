@@ -1330,15 +1330,17 @@ fn agent_activity_tracks_side_conversation_prompts() {
     assert!(!activity.is_in_progress());
 }
 
+/// Role completion labels retain model controls but omit tool policy fragments,
+/// which add noise without changing the candidate or its role configuration.
 #[test]
-fn role_details_abbreviate_description() {
+fn role_completion_labels_omit_tool_policy() {
     let details = RoleCompletionDetails::from_description(
         "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, tools=read_only, enable-tools=web_search",
     );
 
     assert_eq!(
-        details.short_description(),
-        "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off tools=read_only et=web_search"
+        details.completion_description(false),
+        "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off"
     );
 }
 
@@ -1356,11 +1358,13 @@ fn role_details_append_configured_role_description() {
     });
 
     assert_eq!(
-        details.short_description(),
+        details.completion_description(false),
         "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off — Investigate deeply, no rush = thorough"
     );
 }
 
+/// Structured role metadata remains authoritative for the non-tool fields
+/// displayed beside each `:role` completion candidate.
 #[test]
 fn role_details_prefer_structured_fields_over_description_text() {
     let details = RoleCompletionDetails::from_role_info(&tau_proto::HarnessRoleInfo {
@@ -1384,8 +1388,8 @@ fn role_details_prefer_structured_fields_over_description_text() {
     });
 
     assert_eq!(
-        details.short_description(),
-        "provider/model e=high v=low ts=concise st=fast tools=read etg=pim dtg=shell et=web_search dt=shell"
+        details.completion_description(false),
+        "provider/model e=high v=low ts=concise st=fast"
     );
 }
 
@@ -1398,7 +1402,7 @@ fn role_details_structured_role_without_model_renders_as_no_model() {
         details: Some(tau_proto::HarnessRoleDetails::default()),
     });
 
-    assert_eq!(details.short_description(), "no model");
+    assert_eq!(details.completion_description(false), "no model");
     assert_eq!(details.current_description("effort"), "unset");
     assert_eq!(details.current_description("model"), "unset");
 }

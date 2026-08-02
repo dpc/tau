@@ -288,8 +288,10 @@ unavailable, including when role or model policy removes the tool.
 Use `:role <role>`.
 
 `:role` completion lists roles. Each completion description shows the currently
-resolved model and role settings, and appends the configured role `description`
-when present. `:new <role>` also completes roles; it clears the current agent
+resolved model and non-tool role settings, and appends the configured role
+`description` when present. It omits tool-policy fragments; complete tool
+settings remain visible and editable through `:role <role> <setting>`
+completion. `:new <role>` also completes roles; it clears the current agent
 selection and makes the next prompt create a new agent with that role. Later
 no-agent role selections such as `:role <role>` or role cycling supersede the
 role named in `:new <role>`.

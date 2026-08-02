@@ -842,7 +842,7 @@ impl RoleCompletionDetails {
         details
     }
 
-    fn short_description(&self) -> String {
+    fn completion_description(&self, include_tool_details: bool) -> String {
         let mut parts = Vec::new();
         if let Some(model) = self.model.as_deref() {
             parts.push(model.to_owned());
@@ -859,20 +859,22 @@ impl RoleCompletionDetails {
         if let Some(service_tier) = self.service_tier.as_deref() {
             parts.push(format!("st={service_tier}"));
         }
-        if let Some(tools) = self.tools.as_deref() {
-            parts.push(format!("tools={tools}"));
-        }
-        if let Some(enable_tool_groups) = self.enable_tool_groups.as_deref() {
-            parts.push(format!("etg={enable_tool_groups}"));
-        }
-        if let Some(disable_tool_groups) = self.disable_tool_groups.as_deref() {
-            parts.push(format!("dtg={disable_tool_groups}"));
-        }
-        if let Some(enable_tools) = self.enable_tools.as_deref() {
-            parts.push(format!("et={enable_tools}"));
-        }
-        if let Some(disable_tools) = self.disable_tools.as_deref() {
-            parts.push(format!("dt={disable_tools}"));
+        if include_tool_details {
+            if let Some(tools) = self.tools.as_deref() {
+                parts.push(format!("tools={tools}"));
+            }
+            if let Some(enable_tool_groups) = self.enable_tool_groups.as_deref() {
+                parts.push(format!("etg={enable_tool_groups}"));
+            }
+            if let Some(disable_tool_groups) = self.disable_tool_groups.as_deref() {
+                parts.push(format!("dtg={disable_tool_groups}"));
+            }
+            if let Some(enable_tools) = self.enable_tools.as_deref() {
+                parts.push(format!("et={enable_tools}"));
+            }
+            if let Some(disable_tools) = self.disable_tools.as_deref() {
+                parts.push(format!("dt={disable_tools}"));
+            }
         }
         let mut summary = if parts.is_empty() {
             "no model".to_owned()
@@ -7656,7 +7658,7 @@ impl EventRenderer {
             .iter()
             .map(|r| (r.name.clone(), RoleCompletionDetails::from_role_info(r)))
             .collect();
-        let role_items = Self::role_completion_items(roles, &role_defaults);
+        let role_items = Self::role_completion_items(roles, &role_defaults, false);
         if let Ok(mut available) = self.roles_available.lock() {
             *available = roles.roles.iter().map(|r| r.name.clone()).collect();
         }
@@ -7673,7 +7675,7 @@ impl EventRenderer {
             .collect();
         self.completion_data
             .set_arg_completions(tau_cli_term::CommandName::new(":prompt"), prompt_items);
-        let new_agent_role_items = role_items
+        let new_agent_role_items = Self::role_completion_items(roles, &role_defaults, true)
             .iter()
             .map(|(item, _)| item.clone())
             .collect::<Vec<_>>();
@@ -7692,6 +7694,7 @@ impl EventRenderer {
     fn role_completion_items(
         roles: &tau_proto::HarnessRolesAvailable,
         role_defaults: &HashMap<String, RoleCompletionDetails>,
+        include_tool_details: bool,
     ) -> Vec<(tau_cli_term::CompletionItem, RoleCompletionDetails)> {
         roles
             .roles
@@ -7699,7 +7702,10 @@ impl EventRenderer {
             .filter_map(|role| {
                 let details = role_defaults.get(&role.name)?.clone();
                 Some((
-                    tau_cli_term::CompletionItem::new(&role.name, details.short_description()),
+                    tau_cli_term::CompletionItem::new(
+                        &role.name,
+                        details.completion_description(include_tool_details),
+                    ),
                     details,
                 ))
             })

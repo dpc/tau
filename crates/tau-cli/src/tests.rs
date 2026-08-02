@@ -8614,6 +8614,103 @@ fn new_command_completes_available_roles() {
     assert_eq!(candidates[0].replacement, ":new reviewer");
 }
 
+/// Role candidates hide every tool-policy fragment in their display
+/// description, while their matching, insertion text, and subsequent
+/// tool-setting completions remain available for inspecting and editing the
+/// configured policy.
+#[test]
+fn role_completion_labels_hide_tool_policy_without_hiding_tool_settings() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let completion_data = tau_cli_term::CompletionData::new();
+    let mut renderer = EventRenderer::new(handle, completion_data.clone(), cli_test_theme());
+    renderer.handle(&Event::HarnessRolesAvailable(HarnessRolesAvailable {
+        roles: vec![HarnessRoleInfo {
+            name: "engineer".to_owned(),
+            description: "unused structured details".to_owned(),
+            role_description: Some("production implementation".to_owned()),
+            details: Some(tau_proto::HarnessRoleDetails {
+                model: Some("provider/model".into()),
+                params: tau_proto::ModelParams {
+                    effort: Effort::High,
+                    verbosity: Verbosity::Low,
+                    thinking_summary: ThinkingSummary::Concise,
+                    service_tier: Some(ServiceTier::Fast),
+                },
+                tools: Some(vec![tau_proto::ToolName::new("read")]),
+                enable_tool_groups: vec![tau_proto::ToolGroupName::new("pim")],
+                disable_tool_groups: vec![tau_proto::ToolGroupName::new("shell")],
+                enable_tools: vec![tau_proto::ToolName::new("web_search")],
+                disable_tools: vec![tau_proto::ToolName::new("shell")],
+            }),
+        }],
+        groups: Vec::new(),
+        custom_prompts: Vec::new(),
+    }));
+
+    let role_candidates = tau_cli_term::completion::build_candidates(
+        &[tau_cli_term::CommandCompletion::new(
+            ":role",
+            "configure role",
+        )],
+        &completion_data,
+        ":role eng",
+        ":role eng".len(),
+    );
+    assert_eq!(role_candidates.len(), 1);
+    assert_eq!(role_candidates[0].label, "engineer");
+    assert_eq!(
+        role_candidates[0].description,
+        "provider/model e=high v=low ts=concise st=fast — production implementation"
+    );
+    assert_eq!(role_candidates[0].replacement, ":role engineer");
+
+    let new_role_candidates = tau_cli_term::completion::build_candidates(
+        &[tau_cli_term::CommandCompletion::new(":new", "new agent")],
+        &completion_data,
+        ":new eng",
+        ":new eng".len(),
+    );
+    assert_eq!(new_role_candidates.len(), 1);
+    assert_eq!(
+        new_role_candidates[0].description,
+        "provider/model e=high v=low ts=concise st=fast tools=read etg=pim dtg=shell et=web_search dt=shell — production implementation"
+    );
+
+    let tool_setting_candidates = tau_cli_term::completion::build_candidates(
+        &[tau_cli_term::CommandCompletion::new(
+            ":role",
+            "configure role",
+        )],
+        &completion_data,
+        ":role engineer ",
+        ":role engineer ".len(),
+    );
+    let labels_and_descriptions = tool_setting_candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.label.as_str(),
+                "tools"
+                    | "enable-tool-groups"
+                    | "disable-tool-groups"
+                    | "enable-tools"
+                    | "disable-tools"
+            )
+        })
+        .map(|candidate| (candidate.label.as_str(), candidate.description.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels_and_descriptions,
+        vec![
+            ("tools", "read"),
+            ("enable-tool-groups", "pim"),
+            ("disable-tool-groups", "shell"),
+            ("enable-tools", "web_search"),
+            ("disable-tools", "shell"),
+        ]
+    );
+}
+
 #[test]
 fn role_state_overrides_are_compared_to_role_baseline() {
     let (_term, handle, vt) = setup(80, 24);
