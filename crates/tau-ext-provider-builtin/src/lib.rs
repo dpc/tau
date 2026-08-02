@@ -49,7 +49,7 @@ use responses::{
     models_for_provider as responses_models_for_provider,
     run_prompt_attempt as run_responses_prompt_attempt,
 };
-pub use responses::{ResponsesModel, ResponsesProvider};
+pub use responses::{ResponsesEfforts, ResponsesModel, ResponsesProvider};
 use serde::{Deserialize, Serialize};
 use tau_client::{
     ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder,
@@ -996,6 +996,7 @@ fn parse_responses_model_list(input: &str) -> Result<Vec<ResponsesModel>, Box<dy
             (!id.is_empty()).then(|| {
                 ModelName::try_new(id.to_owned()).map(|id| ResponsesModel {
                     id,
+                    efforts: None,
                     display_name: None,
                     context_window: 128_000,
                     tags: Vec::new(),

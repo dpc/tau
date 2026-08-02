@@ -13,19 +13,20 @@ fn profile_round_trips_explicit_models() {
     let encoded = serde_json::to_value(&profile).expect("serialize profile");
     assert_eq!(encoded["base_url"], "https://example.test/v1");
     assert_eq!(encoded["models"][0]["id"], "example-model");
+    assert!(encoded["models"][0].get("efforts").is_none());
     assert!(encoded.get("protocol_preset").is_none());
 }
 
-/// The public profile must publish only its explicitly configured model with
-/// the Function/text metadata surface; reasoning remains response content, not
-/// a configurable reasoning-control capability.
+/// An omitted model effort override must retain the complete canonical public
+/// Responses capability set, so existing profiles gain the documented default.
 #[test]
-fn profile_publishes_explicit_responses_model() {
+fn profile_publishes_default_responses_efforts() {
     let provider = ResponsesProvider {
         base_url: "https://example.test/v1".to_owned(),
         api_key: String::new(),
         models: vec![ResponsesModel {
             id: tau_proto::ModelName::new("example-model"),
+            efforts: None,
             display_name: None,
             context_window: 42,
             tags: Vec::new(),
@@ -44,7 +45,98 @@ fn profile_publishes_explicit_responses_model() {
         models[0].supported_tool_types,
         vec![tau_proto::ToolType::Function]
     );
+    assert_eq!(models[0].efforts, tau_proto::Effort::ALL.to_vec());
     assert!(!models[0].supports_compaction);
+}
+
+/// The shared canonical list must retain the documented UI order so default
+/// public Responses capabilities and harness effort cycling cannot drift.
+#[test]
+fn canonical_responses_efforts_match_ui_order() {
+    assert_eq!(
+        tau_proto::Effort::ALL,
+        [
+            tau_proto::Effort::Off,
+            tau_proto::Effort::Minimal,
+            tau_proto::Effort::Low,
+            tau_proto::Effort::Medium,
+            tau_proto::Effort::High,
+            tau_proto::Effort::XHigh,
+            tau_proto::Effort::Max,
+        ]
+    );
+}
+
+/// Non-empty effort overrides are sets, so profile loading must canonicalize
+/// their publication order instead of changing UI cycling based on input order.
+#[test]
+fn profile_canonicalizes_responses_effort_override() {
+    let provider: ResponsesProvider = serde_json::from_value(serde_json::json!({
+        "models": [{
+            "id": "example-model",
+            "efforts": ["max", "low", "off", "xhigh"]
+        }]
+    }))
+    .expect("profile");
+
+    assert_eq!(
+        models_for_provider(&tau_proto::ProviderName::new("responses"), &provider)[0].efforts,
+        vec![
+            tau_proto::Effort::Off,
+            tau_proto::Effort::Low,
+            tau_proto::Effort::XHigh,
+            tau_proto::Effort::Max,
+        ]
+    );
+    assert_eq!(
+        provider.models[0]
+            .efforts
+            .as_ref()
+            .expect("configured effort override")
+            .as_slice(),
+        &[
+            tau_proto::Effort::Off,
+            tau_proto::Effort::Low,
+            tau_proto::Effort::XHigh,
+            tau_proto::Effort::Max,
+        ]
+    );
+}
+
+/// Duplicate configured effort names must fail profile loading rather than
+/// quietly creating an ambiguous capability override.
+#[test]
+fn profile_rejects_duplicate_responses_efforts() {
+    let error = serde_json::from_value::<ResponsesProvider>(serde_json::json!({
+        "models": [{"id": "example-model", "efforts": ["low", "low"]}]
+    }))
+    .expect_err("duplicate efforts must fail");
+
+    assert!(error.to_string().contains("must not contain duplicates"));
+}
+
+/// Direct Rust construction must retain the same duplicate rejection as
+/// serialized profiles, so callers cannot publish an ambiguous effort set.
+#[test]
+fn responses_efforts_reject_duplicates() {
+    assert!(
+        ResponsesEfforts::try_from(vec![tau_proto::Effort::Low, tau_proto::Effort::Low]).is_err()
+    );
+}
+
+/// An explicit empty effort override must publish no reasoning-effort
+/// capability, which lets the harness clamp requests to its off value.
+#[test]
+fn profile_empty_responses_effort_override_disables_capability() {
+    let provider: ResponsesProvider = serde_json::from_value(serde_json::json!({
+        "models": [{"id": "example-model", "efforts": []}]
+    }))
+    .expect("profile");
+
+    assert_eq!(
+        models_for_provider(&tau_proto::ProviderName::new("responses"), &provider)[0].efforts,
+        Vec::new()
+    );
 }
 
 /// Public Responses plain reasoning progress must use the established full

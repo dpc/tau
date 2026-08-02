@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
 use tau_proto::{
-    ContentPart, ContextItem, ContextRole, MessageItem, ModelName, ProviderStopReason,
+    ContentPart, ContextItem, ContextRole, Effort, MessageItem, ModelName, ProviderStopReason,
     ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope,
     ToolCallItem, ToolChoice, ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
 };
@@ -1159,6 +1159,8 @@ struct RequestBody {
     input: Vec<ResponsesInputItem>,
     /// Public Responses attempts always request SSE output.
     stream: bool,
+    /// Harness-selected reasoning effort lowered to the public Responses shape.
+    reasoning: Reasoning,
     /// Optional provider instructions.
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
@@ -1171,6 +1173,13 @@ struct RequestBody {
     /// Optional closed tool selection.
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+}
+
+/// Public Responses reasoning options for one request.
+#[derive(Serialize)]
+struct Reasoning {
+    /// Upstream spelling for the harness-effective reasoning effort.
+    effort: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1209,12 +1218,27 @@ fn build_request(
         model: model.id.as_str().to_owned(),
         input,
         stream: true,
+        reasoning: Reasoning {
+            effort: effort_wire(prompt.model_params.effort),
+        },
         instructions: (!prompt.system_prompt.trim().is_empty())
             .then(|| prompt.system_prompt.clone()),
         max_output_tokens: (config.max_output_tokens != 0).then_some(config.max_output_tokens),
         tools,
         tool_choice,
     })
+}
+
+fn effort_wire(effort: Effort) -> &'static str {
+    match effort {
+        Effort::Off => "none",
+        Effort::Minimal => "minimal",
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
+        Effort::XHigh => "xhigh",
+        Effort::Max => "max",
+    }
 }
 
 fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {

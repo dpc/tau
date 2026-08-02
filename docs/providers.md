@@ -349,6 +349,27 @@ replay sidecars. It deliberately omits `previous_response_id`, `store`,
 hosted/custom tools, image/file inputs, and public compaction. Existing
 `openrouter` profiles remain Chat Completions profiles.
 
+Each `responses.models[]` entry may set `efforts` to describe the exact
+reasoning-effort levels its upstream model accepts:
+
+```json
+{
+  "id": "quirky-model",
+  "efforts": ["off", "low", "medium", "high"]
+}
+```
+
+Omitting `efforts` publishes the full canonical set
+`[off, minimal, low, medium, high, xhigh, max]`, including for existing
+profiles. An explicit `efforts: []` publishes no reasoning-effort capability.
+Non-empty overrides are sets: Tau rejects duplicates and publishes the selected
+levels in that canonical order, regardless of their order in JSON or YAML.
+The harness clamps each request to the published set; the public Responses
+backend always sends the resulting `reasoning: { effort: ... }`, spelling Tau's
+`off` as API `none`. `tau provider add` intentionally omits this field, so new
+profiles receive the full default; edit the profile only when a model needs an
+override.
+
 `tau-provider-codex` implements the private ChatGPT OAuth/Codex Responses
 contract. Ordinary inference is WebSocket-only: it has no HTTP/SSE selector or
 fallback. HTTPS remains in that backend for OAuth, `/wham/usage`, and unary

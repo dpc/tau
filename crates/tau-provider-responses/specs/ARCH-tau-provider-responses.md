@@ -14,3 +14,8 @@ also preserves Responses assistant and function-call replay sidecars and never
 sends `previous_response_id` or provider-side compaction controls. The
 extension owns profile storage, model publication, retry scheduling,
 cancellation policy, and protocol-event sampling.
+
+Every request also lowers the harness-selected effective reasoning effort as
+`reasoning.effort`. The public API spells Tau's `off` as `none`; the remaining
+canonical levels (`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`) pass
+through directly.

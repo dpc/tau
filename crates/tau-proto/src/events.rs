@@ -518,6 +518,17 @@ pub enum Effort {
 impl Effort {
     const LEVEL_COUNT: usize = 7;
 
+    /// Every effort level in stable UI cycling order.
+    pub const ALL: [Self; Self::LEVEL_COUNT] = [
+        Self::Off,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
     /// Cycles to the next level (wraps `Max → Off`).
     #[must_use]
     pub const fn next(self) -> Self {

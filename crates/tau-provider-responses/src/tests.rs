@@ -584,6 +584,7 @@ fn http_sse_attempt_posts_responses_and_completes() {
         assert!(head.starts_with("POST /responses HTTP/1.1"));
         let request: serde_json::Value = serde_json::from_slice(&body).expect("request JSON");
         assert_eq!(request["stream"], true);
+        assert_eq!(request["reasoning"]["effort"], "none");
         assert!(request.get("previous_response_id").is_none());
         assert!(request.get("store").is_none());
         assert_eq!(
@@ -625,6 +626,32 @@ fn http_sse_attempt_posts_responses_and_completes() {
         panic!("Responses SSE attempt must complete");
     };
     assert_eq!(success.provider_response_id.as_deref(), Some("resp_1"));
+}
+
+/// Public Responses requests must always transmit the harness-effective effort:
+/// `off` uses the API's explicit `none` spelling and `max` remains selectable.
+#[test]
+fn request_lowers_off_and_max_reasoning_efforts() {
+    let config = AttemptConfig {
+        base_url: "https://example.test/v1".to_owned(),
+        api_key: String::new(),
+        max_output_tokens: 0,
+    };
+    let model = AttemptModel {
+        id: ModelName::new("test-model"),
+    };
+
+    for (effort, expected) in [
+        (tau_proto::Effort::Off, "none"),
+        (tau_proto::Effort::Max, "max"),
+    ] {
+        let mut prompt = minimal_prompt();
+        prompt.model_params.effort = effort;
+        let request = build_request(&prompt, &config, &model).expect("request");
+        let request = serde_json::to_value(request).expect("serialize request");
+
+        assert_eq!(request["reasoning"]["effort"], expected);
+    }
 }
 
 fn read_http_request(socket: &mut TcpStream) -> (String, Vec<u8>) {

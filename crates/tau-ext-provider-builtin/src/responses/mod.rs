@@ -4,8 +4,9 @@ mod sampling;
 #[cfg(test)]
 mod tests;
 
-use serde::{Deserialize, Serialize};
-use tau_proto::{ModelName, ProviderModelInfo, ProviderName};
+use serde::de::Error as SerdeError;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use tau_proto::{Effort, ModelName, ProviderModelInfo, ProviderName};
 
 use self::sampling::ResponsesResponseSampler;
 
@@ -39,6 +40,10 @@ pub struct ResponsesProvider {
 pub struct ResponsesModel {
     /// Upstream model identifier.
     pub id: ModelName,
+    /// Optional supported reasoning-effort set. Omission uses every canonical
+    /// effort, while an empty list disables reasoning-effort selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efforts: Option<ResponsesEfforts>,
     /// Optional user-facing label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -60,6 +65,70 @@ pub struct ResponsesModel {
     /// Estimated USD price per million output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_output_cost_1m_usd: Option<tau_proto::EstimatedUsdPerMillion>,
+}
+
+/// A validated canonical set of public Responses reasoning-effort levels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResponsesEfforts {
+    /// Unique configured levels in canonical UI cycling order.
+    levels: Vec<Effort>,
+}
+
+impl ResponsesEfforts {
+    /// Returns the validated levels in canonical UI cycling order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Effort] {
+        &self.levels
+    }
+}
+
+impl Serialize for ResponsesEfforts {
+    /// Serializes validated effort levels as the profile's direct array value.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.levels.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ResponsesEfforts {
+    /// Deserializes and validates the profile's direct effort array value.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(Vec::deserialize(deserializer)?).map_err(SerdeError::custom)
+    }
+}
+
+impl TryFrom<Vec<Effort>> for ResponsesEfforts {
+    type Error = &'static str;
+
+    /// Validates unique configured levels and stores them in canonical order.
+    fn try_from(configured: Vec<Effort>) -> Result<Self, Self::Error> {
+        if configured
+            .iter()
+            .enumerate()
+            .any(|(index, effort)| configured[..index].contains(effort))
+        {
+            return Err("Responses model efforts must not contain duplicates");
+        }
+
+        Ok(Self {
+            levels: Effort::ALL
+                .into_iter()
+                .filter(|effort| configured.contains(effort))
+                .collect(),
+        })
+    }
+}
+
+fn model_efforts(model: &ResponsesModel) -> Vec<Effort> {
+    model.efforts.as_ref().map_or_else(
+        || Effort::ALL.to_vec(),
+        |efforts| efforts.as_slice().to_vec(),
+    )
 }
 
 fn default_context_window() -> u64 {
@@ -107,7 +176,7 @@ pub fn models_for_provider(
                 supports_parallel_tool_calls: model.supports_parallel_tool_calls,
                 default_affinity: 0,
                 context_window: model.context_window,
-                efforts: vec![tau_proto::Effort::Off],
+                efforts: model_efforts(model),
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,

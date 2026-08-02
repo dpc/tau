@@ -1073,6 +1073,16 @@ fn chat_completions_add_defaults_to_legacy_max_tokens() {
     assert!(compat.prompt_cache_key);
 }
 
+/// The Responses setup wizard must omit effort overrides so its generated
+/// profiles use the complete public Responses default capability set.
+#[test]
+fn responses_add_omits_effort_override() {
+    let models = parse_responses_model_list("gpt-5.4, gpt-5.4-mini").expect("model list");
+
+    assert_eq!(models.len(), 2);
+    assert!(models.iter().all(|model| model.efforts.is_none()));
+}
+
 /// Persistent provider profiles reject unknown fields instead of hiding schema
 /// mistakes.
 #[test]

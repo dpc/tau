@@ -73,6 +73,14 @@ is rejected. The backend preserves Responses replay sidecars and does not send
 image/file inputs, or compaction. Existing `openrouter` profiles remain on Chat
 Completions.
 
+Each `responses.models[]` entry can set `efforts` to an exact set of supported
+reasoning levels. Omission uses `[off, minimal, low, medium, high, xhigh, max]`;
+an explicit empty list disables the control. Non-empty overrides reject
+duplicates and publish in that canonical order. `tau provider add` omits the
+field, so generated profiles receive the full set. Each request explicitly
+sends the harness-effective level as `reasoning.effort`, mapping Tau `off` to
+API `none`.
+
 The extension has no ordinary `extensions.provider-builtin.config` schema for provider credentials; credentials belong in provider auth/profile storage, not harness config.
 ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.
 
