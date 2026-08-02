@@ -10,9 +10,11 @@ writes. The extension uses relay-only Iroh peer transport plus Pkarr HTTPS/DNS
 discovery without direct peer-IP transport, owns an exclusive owner-private
 per-instance redb containing public graph data, signed local events, and an
 Iroh node secret. Signed effects are locally durable but remotely asynchronous;
-unknown timeout/cancellation outcomes can have taken effect. It has no inbound
-messages, identity creation, direct-IP public mode, shared database, or
-memory-only fallback. See
+unknown timeout/cancellation outcomes can have taken effect. Its only inbound
+model-visible path is the separately opted-in, bounded following-notification
+report: it projects hostile Rostra content into an extension-owned checkpointed
+batch and has no arbitrary inbound message or reply route. It has no identity
+creation, direct-IP public mode, shared database, or memory-only fallback. See
 [`ARCH-tau-ext-rostra`](crates/tau-ext-rostra/specs/ARCH-tau-ext-rostra.md).
 
 The optional `std-swarm` configured extension is a trusted same-user local

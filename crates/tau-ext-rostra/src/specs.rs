@@ -22,6 +22,8 @@ pub(crate) const UNFOLLOW_TOOL: &str = "rostra_unfollow";
 pub(crate) const PROFILE_UPDATE_TOOL: &str = "rostra_update_profile";
 /// Authenticated social-vote tool's exact public name.
 pub(crate) const VOTE_TOOL: &str = "rostra_vote";
+/// Agent-scoped following-notification preference tool's exact public name.
+pub(crate) const NOTIFICATIONS_TOOL: &str = "rostra_notifications";
 
 /// Declare the local-view status tool.
 pub(crate) fn status_spec() -> ToolSpec {
@@ -74,6 +76,20 @@ pub(crate) fn profile_spec() -> ToolSpec {
             "type":"object",
             "properties":{"identity":{"type":"string"}},
             "required":["identity"],
+            "additionalProperties":false
+        }),
+    )
+}
+
+/// Declare the explicit per-agent following-notification preference tool.
+pub(crate) fn notifications_spec() -> ToolSpec {
+    spec(
+        NOTIFICATIONS_TOOL,
+        "Enable or disable this agent's bounded Rostra following-notification reports. Enabling establishes a receipt baseline and never signs or changes Rostra state.",
+        serde_json::json!({
+            "type":"object",
+            "properties":{"enabled":{"type":"boolean"}},
+            "required":["enabled"],
             "additionalProperties":false
         }),
     )

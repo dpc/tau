@@ -40,11 +40,23 @@ database.
 Iroh node secret in the stable per-instance `rostra.redb`. The store survives
 Tau sessions and is not part of session journals. The extension fails in
 memory-only mode. Changing the derived identity for an existing state directory
-fails closed; use another extension instance or move the old directory. Tau
+fails closed; use another extension instance or move the old directory with a
+new instance name so publisher-scoped notification IDs cannot repeat. Tau
 never accepts a public Rostra ID alongside the mnemonic, creates an identity,
-enables direct-IP public mode, or turns synchronized posts into inbound
-messages. The mnemonic grants permanent signing authority to every role allowed
+enables direct-IP public mode, or turns synchronized posts into arbitrary
+inbound messages. The mnemonic grants permanent signing authority to every role allowed
 the signed tools; Tau has no human per-call confirmation mechanism.
+
+`rostra_notifications` is agent-scoped and accepts only `{"enabled": boolean}`.
+It starts at the materialization-feed tip, selects matching direct-followee
+posts only, and uses the bounded durable materialization feed after lossy
+broadcast hints. It suppresses self posts and historical syncs using the
+database initialization and current follow-epoch timestamps. It becomes
+eligible after 30 seconds of quiet or five minutes of batch age, then limits
+each agent's canonical Rostra reports and normal wakes to one every five
+minutes. That does not rate-limit model runs; normal busy-agent batching can
+coalesce or delay them. Reports preview at most 32 posts and 48 KiB, summarize
+excess, and leave excess in the Rostra pull-queryable local view.
 
 
 ## Tau Swarm

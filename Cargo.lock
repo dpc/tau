@@ -483,7 +483,7 @@ version = "3.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "519bd3116aeeb42d5372c29d982d16d0170d3d4a5ed85fc7dd91642ffff3c67c"
 dependencies = [
- "darling 0.23.0",
+ "darling",
  "ident_case",
  "prettyplease",
  "proc-macro2",
@@ -1103,18 +1103,8 @@ version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee"
 dependencies = [
- "darling_core 0.20.11",
- "darling_macro 0.20.11",
-]
-
-[[package]]
-name = "darling"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25ae13da2f202d56bd7f91c25fba009e7717a1e4a1cc98a76d844b65ae912e9d"
-dependencies = [
- "darling_core 0.23.0",
- "darling_macro 0.23.0",
+ "darling_core",
+ "darling_macro",
 ]
 
 [[package]]
@@ -1132,36 +1122,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "darling_core"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9865a50f7c335f53564bb694ef660825eb8610e0a53d3e11bf1b0d3df31e03b0"
-dependencies = [
- "ident_case",
- "proc-macro2",
- "quote",
- "strsim",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "darling_macro"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
 dependencies = [
- "darling_core 0.20.11",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "darling_macro"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac3984ec7bd6cfa798e62b4a642426a5be0e68f9401cfc2a01e3fa9ea2fcdb8d"
-dependencies = [
- "darling_core 0.23.0",
+ "darling_core",
  "quote",
  "syn 2.0.117",
 ]
@@ -1227,7 +1193,7 @@ version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8"
 dependencies = [
- "darling 0.20.11",
+ "darling",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -1323,7 +1289,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1481,7 +1447,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3393,7 +3359,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4226,7 +4192,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4525,7 +4491,7 @@ dependencies = [
  "quinn",
  "rustls",
  "rustls-pki-types",
- "rustls-platform-verifier 0.7.0",
+ "rustls-platform-verifier 0.6.2",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4592,8 +4558,7 @@ dependencies = [
 [[package]]
 name = "rostra-client"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eabe5131f8bab2dc87e29da5c69a34d1eef7e4103908598b7383cdbca0647781"
+source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
 dependencies = [
  "anyhow",
  "backon",
@@ -4632,8 +4597,7 @@ dependencies = [
 [[package]]
 name = "rostra-client-db"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e2da84f2258ed5f3845f0a402716e4d7026ccb896365d28f62a187db42af07c"
+source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
 dependencies = [
  "anyhow",
  "backon",
@@ -4669,8 +4633,7 @@ dependencies = [
 [[package]]
 name = "rostra-core"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "634dcef4a1cd2805a5ed1aca0b2efe981f849c14360ddd3299c76fff6eecde83"
+source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
 dependencies = [
  "bech32",
  "bincode",
@@ -4696,8 +4659,7 @@ dependencies = [
 [[package]]
 name = "rostra-djot"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f9c71dfb7ac2a53b2f4f34c3e3ab6446c6270dc68cd1333e11f3e205aacd86c"
+source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
 dependencies = [
  "async-trait",
  "jotup",
@@ -4707,8 +4669,7 @@ dependencies = [
 [[package]]
 name = "rostra-p2p"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f3d60a6c2a876703f65f6fe003c12901e5707f479f5480f7b2f4b540f7fc81a"
+source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
 dependencies = [
  "anyhow",
  "bao-tree",
@@ -4730,8 +4691,7 @@ dependencies = [
 [[package]]
 name = "rostra-p2p-api"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4426d84d53f7b1fb2088d20513436cde4308500b6267f4d7a0e37c72aa29cc3d"
+source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
 dependencies = [
  "anyhow",
  "futures",
@@ -4745,8 +4705,7 @@ dependencies = [
 [[package]]
 name = "rostra-util"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77e4040da9464dd92c2a7b42b14714b5c473872f7fa8ae878073dc67644c7283"
+source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
 dependencies = [
  "snafu",
 ]
@@ -4754,8 +4713,7 @@ dependencies = [
 [[package]]
 name = "rostra-util-dedup-chan"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7199a0aeb703cfe90cf85e9a98c3dec43c165fb4e5751de1b2012063f8987d43"
+source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
 dependencies = [
  "snafu",
  "tokio",
@@ -4764,8 +4722,7 @@ dependencies = [
 [[package]]
 name = "rostra-util-error"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "302a67458334774b1ef0013c1383a24611cde91352cc73ce2d9a7cc3003c82bd"
+source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
 dependencies = [
  "snafu",
 ]
@@ -4773,8 +4730,7 @@ dependencies = [
 [[package]]
 name = "rostra-util-fmt"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17777d44ae2fd92ed8c5a1f7d326c69c55dc72228396a98b13d5477aee3a5dbc"
+source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
 
 [[package]]
 name = "rrule"
@@ -4827,7 +4783,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4906,7 +4862,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4927,7 +4883,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5086,7 +5042,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5946,6 +5902,7 @@ name = "tau-ext-rostra"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "ciborium",
  "rostra-client",
  "rostra-client-db",
  "rostra-core",
@@ -6398,7 +6355,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7227,7 +7184,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -17,6 +17,7 @@ use tau_proto::{
     Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
     ToolCancelRequest,
 };
+use tokio::sync::Notify;
 
 use super::*;
 use crate::cursor::{Position, Timeline};
@@ -184,6 +185,9 @@ fn mnemonic_configuration_derives_read_only_identity() {
         running: Arc::new(Mutex::new(HashMap::new())),
         permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOLS)),
         write_lock: Arc::new(AsyncMutex::new(())),
+        notifications: Arc::new(Mutex::new(notification_state::State::default())),
+        notifications_wake: Arc::new(Notify::new()),
+        notifications_task: None,
     };
     let mnemonic_secret = "rostra_identity_mnemonic";
     let configure_event = tau_proto::Configure {

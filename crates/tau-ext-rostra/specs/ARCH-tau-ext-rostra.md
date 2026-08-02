@@ -43,7 +43,9 @@ secret, and locally committed signed events. It survives Tau sessions outside
 Tau journals. Missing stable state fails startup rather than selecting
 Rostra's non-synchronizing memory client. A database bound to another derived
 identity fails closed. Operators must choose a distinct instance or move the
-old state. This exception for large, independently replicated,
+old state. Moving or resetting notification state requires a new extension
+instance name: retained message IDs are scoped by that publisher name, while
+the report-attempt counter is identity-bound. This exception for large, independently replicated,
 subscriber-unsafe, history-independent state follows
 [GATE-event-log-first-extension-state](../../../specs/GATE-event-log-first-extension-state.md).
 The authenticated interface and persistence semantics were explicitly approved
@@ -71,9 +73,11 @@ timelines. Every read describes only the configured identity's synchronized
 local view; empty and `not_found_local` results never claim global absence.
 Pages default to 20 and never exceed 50 records. List excerpts stop near 240
 Unicode scalar values, and detailed Djot stops at 64 KiB. Versioned bounded
-cursors bind continuation to its timeline and author filter. Exact
-`rostra-client-db = 0.1.0` and `rostra-core = 0.1.0` dependencies expose
-cursor, selector, event, and key types; all client construction, networking,
+cursors bind continuation to its timeline and author filter. Tau pins
+`rostra-client`, `rostra-client-db`, and `rostra-core` to upstream Rostra revision
+`045345bd5001776eb338ea2c1f55dd60637db4cd`, whose materialization feed API and
+upstream database migration are separately approved external prerequisites. Tau
+adds no Rostra table, schema, or migration; all client construction, networking,
 and storage access still go through `rostra-client`.
 
 The protocol reader only validates and schedules work. Reads run independently
@@ -116,6 +120,55 @@ policy is the only current authorization boundary: supplying the mnemonic
 delegates signing authority to every role allowed these tool names. Tau has no
 genuine human per-call confirmation primitive, so a model-supplied confirmation
 field would not add authority protection. Operators must limit these tools to
-trusted roles. Synchronization updates only the extension database and never
-turns remote posts into inbound messages, notifications, activation, or
-background model work.
+trusted roles.
+
+`rostra_notifications` is a separately scoped, per-agent opt-in tool with the
+strict argument shape `{"enabled": boolean}`. Its extension-owned crash-durable
+`<state_dir>/rostra-notifications-v1.cbor` state file contains the configured
+Rostra identity, first-enable materialization tip, committed cursor, queued age,
+last canonical report time, and the identity-wide `next_report_attempt: u64`
+counter. The counter remains when registrations are disabled so publisher-scoped
+report IDs never repeat across re-enable or restart; unused sequence holes are
+harmless. Startup accepts only its exact schema and configured-identity match;
+corrupt or mismatched state fails closed. Canonical `message.delivered` echoes
+advance the file checkpoint; policy-file updates never activate the model.
+[`SPEC-external-message-reports-and-facts`](../../../specs/SPEC-external-message-reports-and-facts.md)
+governs that canonical delivery boundary. The file deliberately does not use
+the generic metadata facts governed by
+[`SPEC-agent-metadata-requests-and-canonical-facts`](../../../specs/SPEC-agent-metadata-requests-and-canonical-facts.md).
+An agent unload disables live delivery without deleting its durable preference.
+The extension serializes each policy/checkpoint mutation under one notification
+mutex. It writes a same-directory mode-0600 temporary file, syncs it, atomically
+renames it, and syncs the mode-0700 parent directory before installing the
+candidate in memory. A pre-rename policy mutation retains the previous memory
+and disk state and returns failure. Bounded backoff applies only to worker source
+and report-enqueue operations; it never retries a live canonical-checkpoint
+write. A directory-sync failure after rename keeps memory aligned with the new
+visible file, returns failure, and poisons later notification mutations rather
+than rolling memory back behind disk. Restart recovery reads the visible
+checkpoint when one exists.
+
+The worker subscribes before reconciling, but treats Rostra's lossy broadcast
+only as a wake hint. It reads Rostra's bounded durable materialization feed,
+takes a fresh direct-followee/persona-selector/follow-epoch snapshot before
+each page, excludes self posts and historical syncs,
+and produces separate serial batches for each loaded, opted-in agent. The
+first enable baseline is the current materialization tip, so existing posts do not
+notify. Replay never checkpoints notification state or emits a report. The
+`agent.replay_complete` boundary opens reconciliation. A crash clears transient
+pending/in-flight state, rescans from the committed durable cursor, and can
+duplicate a report without skipping its range. Configured interceptors must not
+drop `std-rostra` notification reports: a dropped live report remains in-flight
+until restart because this integration adds no live echo retry.
+
+Trailing idle debounce is 30 seconds and maximum batch age is five minutes.
+After the first report, a hard five-minute per-agent interval limits canonical
+Rostra reports and the payload-free external-message wakes they cause. This
+does not promise a five-minute interval between model runs: normal harness
+busy-agent batching remains authoritative and may coalesce or delay work.
+Count and size limits never bypass those timing limits. A report has at most
+32 post previews and 48 KiB of projected text, carries at most 16 KiB of
+extension metadata, uses the durable `rostra-batch-v1:<attempt>` message ID,
+summarizes omitted posts, and advances the acknowledged materialization range.
+Omitted posts remain in the existing Rostra pull-queryable local view rather
+than creating an activation backlog.

@@ -53,7 +53,25 @@ cliff. Database open and migration can consume temporary disk. Back up
 restore the backup, and run the previous version to roll back. Locked, corrupt,
 or identity-mismatched stores fail closed.
 
+`rostra_notifications` never treats a Rostra author as a Tau sender. An
+agent must explicitly enable its own preference. The worker selects only
+direct-followee posts matching their persona selector, excludes self posts and
+historical syncs, and projects every selected field as bounded hostile external
+content. It uses the bounded durable materialization feed to recover from lossy
+broadcasts. A batch becomes eligible no sooner than 30 seconds after quiet and
+at five minutes after it starts; canonical delivery can be delayed by normal
+harness processing. It emits no more often than every five minutes per agent.
+The latter bounds
+canonical reports and Rostra-caused wakes, not model execution: normal harness
+busy batching can coalesce or delay work. A report previews at most 32 posts
+within 48 KiB and summarizes excess; all excess remains pull-queryable.
+The identity-bound policy/checkpoint file uses a mode-0600 temporary file,
+file sync, atomic rename, and parent-directory sync. If that final directory
+sync fails after rename, the extension installs the visible candidate in memory,
+returns failure, and poisons later notification mutations. It never silently
+claims success or rolls memory behind the renamed file.
+
 The interface has no identity creation/import/export, direct-IP mode, arbitrary
 on-demand synchronization, attachments or avatars, news/shoutbox, raw event
-construction, notifications, followee listing, inbound messages, or activation
-from remote content.
+construction, followee listing, arbitrary inbound messages, or activation
+directly from remote content.

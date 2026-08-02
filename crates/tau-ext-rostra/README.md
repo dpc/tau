@@ -39,13 +39,28 @@ persistent Iroh node secret; the extension never writes the mnemonic into this
 database. The generic Tau secret resolver can instead store a supplied
 file-backed secret as described above. Memory-only mode fails startup. Changing
 the derived identity for existing state fails closed; use another extension
-instance or move the old directory.
+instance or move the old directory with a new instance name so publisher-scoped
+notification IDs cannot repeat.
 
 Posts use bounded Djot and optional persona tags. Replies use `reply_to`;
 reactions are single-emoji upstream social-post replies. Profile updates are
 text-only and votes are `up`, `down`, or `clear`. Attachments, avatars, news,
-shoutbox, raw event signing, identity creation, on-demand synchronization,
-notifications, and inbound messages remain unsupported.
+shoutbox, raw event signing, identity creation, on-demand synchronization, and
+arbitrary inbound messages remain unsupported.
+
+`rostra_notifications` is an agent-scoped preference with exactly
+`{"enabled": true|false}`. Enabling records the current local social-post
+materialization tip, so it never announces older feed rows. It reports only
+direct followees whose persona selector matches, and excludes self-authored
+posts. Rostra's lossy post broadcast is only a wake hint; the extension
+reconciles the bounded durable materialization feed. A report becomes eligible
+no sooner than 30 seconds after the last eligible row and at five minutes after
+the first; canonical delivery can be delayed by normal harness processing. It
+never emits more than once per agent every five minutes. That rate limit applies to Rostra
+reports and their normal harness wakes, not model runs: the harness may batch,
+coalesce, or delay work for a busy agent. Each report previews at most 32 posts
+and 48 KiB, summarizes omitted posts, and leaves every post queryable through
+the existing pull tools.
 
 See [`ARCH-tau-ext-rostra`](specs/ARCH-tau-ext-rostra.md) and
 [`SECURITY.md`](SECURITY.md) for the complete contract and trust boundary.
