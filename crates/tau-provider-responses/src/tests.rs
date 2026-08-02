@@ -266,20 +266,23 @@ fn proxy_407_is_typed_as_auth_retry() {
     assert_eq!(decision.class, tau_provider::retry_policy::RetryClass::Auth);
 }
 
-/// Error bodies must stop at the documented 64 KiB cap before diagnostics or
-/// retry classification can retain an arbitrarily large provider response.
+/// Error bodies must stop at the documented 64 KiB decoded cap before
+/// diagnostics or retry classification can retain an arbitrarily large
+/// compressed provider response.
 #[test]
-fn error_body_read_is_capped() {
+fn compressed_error_body_read_is_capped_after_decoding() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind error server");
     let address = listener.local_addr().expect("error server address");
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().expect("accept error request");
         let mut request = [0_u8; 1024];
         let _ = socket.read(&mut request).expect("read error request");
-        let body = vec![b'x'; MAX_HTTP_ERROR_BODY_BYTES as usize + 1];
+        let decoded = vec![b'x'; MAX_HTTP_ERROR_BODY_BYTES as usize + 1];
+        let body = zstd::stream::encode_all(decoded.as_slice(), 1).expect("encode error body");
+        assert!(body.len() < MAX_HTTP_ERROR_BODY_BYTES as usize);
         write!(
             socket,
-            "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            "HTTP/1.1 400 Bad Request\r\ncontent-encoding: zstd\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
             body.len()
         )
         .expect("write error headers");
@@ -305,6 +308,47 @@ fn error_body_read_is_capped() {
     });
     server.join().expect("join error server");
     assert_eq!(body.len(), MAX_HTTP_ERROR_BODY_BYTES as usize);
+}
+
+/// A compressed SSE line must be rejected by the existing decoded line bound,
+/// and transport statistics must retain their decoded-chunk accounting.
+#[test]
+fn compressed_sse_line_uses_decoded_limits_and_statistics() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE server");
+    let address = listener.local_addr().expect("SSE server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept SSE request");
+        let _ = read_http_request(&mut socket);
+        let decoded = vec![b'x'; MAX_SSE_LINE_BYTES + 1];
+        let body = zstd::stream::encode_all(decoded.as_slice(), 1).expect("encode SSE body");
+        assert!(body.len() < MAX_SSE_LINE_BYTES);
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-encoding: zstd\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("write response headers");
+        socket.write_all(&body).expect("write compressed SSE body");
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    server.join().expect("join SSE server");
+    let AttemptOutcome::Retryable { progress, .. } = outcome else {
+        panic!("oversized decoded SSE line must fail retryably");
+    };
+    assert!(MAX_SSE_LINE_BYTES < progress.response_bytes_received as usize);
 }
 
 fn minimal_prompt() -> tau_proto::AgentPromptCreated {

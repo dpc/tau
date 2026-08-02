@@ -21,3 +21,6 @@ serde_json.workspace = true
 tau-proto.workspace = true
 tau-provider.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+zstd.workspace = true

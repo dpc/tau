@@ -25,7 +25,10 @@ The policy constructs explicit async reqwest clients with redirect and
 environment discovery disabled. HTTP/WS targets select the HTTP proxy class;
 HTTPS/WSS targets select the HTTPS class; both fall back to ALL_PROXY. A selected
 proxy is the only route. TLS always uses the platform verifier plus strictly
-parsed additive roots.
+parsed additive roots. HTTP routes negotiate and decode gzip and zstd responses;
+their existing body limits and transport-byte accounting apply to the decoded
+payload. WebSocket upgrade requests carry the same HTTP content-coding
+advertisement, but WebSocket frames do not use HTTP response decoding.
 
 Transport failures expose only closed route, phase, and category facts. Provider
 backends retain ownership of HTTP/provider status classification and product

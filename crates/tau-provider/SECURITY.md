@@ -46,6 +46,12 @@ HTTP/WS proxy routes are not confidential from the selected proxy. SOCKS,
 PAC/WPAD, OS GUI discovery, integrated proxy authentication, and redirects are
 unsupported.
 
+HTTP routes negotiate and decode gzip and zstd response bodies. Existing
+response and SSE-line bounds apply after decoding; there is no separate encoded
+body bound or encoded-byte statistic. WebSocket upgrades advertise the same
+HTTP response codings, but the policy neither requests WebSocket extensions nor
+decodes WebSocket frames.
+
 `NO_PROXY` matching is syntactic and never resolves DNS: exact IP addresses and
 CIDR networks match address literals, while host entries match DNS label
 boundaries with an optional exact port. This avoids resolver-dependent bypasses,

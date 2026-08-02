@@ -234,7 +234,10 @@ impl OutboundNetworkPolicy {
     ///
     /// The client disables reqwest's environment discovery and redirects. A
     /// selected proxy is the client's only route; failures never construct or
-    /// retry a direct client.
+    /// retry a direct client. HTTP responses negotiate and decode gzip and
+    /// zstd; callers observe decoded response chunks. An explicit caller
+    /// `Accept-Encoding` header remains authoritative and suppresses the
+    /// automatic advertisement.
     ///
     /// # Errors
     ///

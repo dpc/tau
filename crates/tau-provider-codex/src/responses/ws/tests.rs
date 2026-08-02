@@ -231,8 +231,9 @@ fn test_responses_config() -> ResponsesConfig {
     }
 }
 
-/// Ensures plain WebSocket traffic uses an HTTP proxy's required absolute-form
-/// upgrade without resolving or dialing the target directly.
+/// Ensures plain WebSocket traffic uses an HTTP proxy's absolute-form upgrade,
+/// carries the shared HTTP response-coding policy, and offers no WebSocket
+/// extension while avoiding a direct target connection.
 #[test]
 fn websocket_upgrade_uses_selected_http_proxy_absolute_form() {
     use std::io::Write;
@@ -287,6 +288,19 @@ fn websocket_upgrade_uses_selected_http_proxy_absolute_form() {
             "GET http://unresolvable.invalid/backend-api/codex/responses HTTP/1.1\r\n"
         ),
         "request was {request:?}",
+    );
+    assert!(
+        request
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("accept-encoding: zstd,gzip")),
+        "upgrade must carry the shared HTTP response-coding policy: {request:?}"
+    );
+    assert!(
+        !request.lines().any(|line| {
+            line.split_once(':')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-extensions"))
+        }),
+        "HTTP response decoding must not offer WebSocket PMCE: {request:?}"
     );
     proxy.join().expect("proxy thread");
 }

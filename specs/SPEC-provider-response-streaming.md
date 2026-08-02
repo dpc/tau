@@ -14,10 +14,13 @@ field. The first non-empty progress sample may be emitted promptly. Later nonter
 output, status, and stats updates are sampled at most once per second per prompt, with
 one immediate terminal flush permitted before closure.
 
-Providers accumulate arbitrary upstream chunks, transport bytes, visible text,
-compaction status, and non-visible semantic output independently of that public
-cadence. The rate-limited emitter, not the parser's chunk cadence, decides when
-to publish an update.
+Providers accumulate arbitrary upstream chunks, backend response bytes, visible
+text, compaction status, and non-visible semantic output independently of that
+public cadence. For content-coded HTTP responses, the shared network policy
+exposes decoded chunks, so existing body bounds and HTTP response-byte
+accounting apply to decoded payload bytes. Tau does not measure or publish the
+encoded-body byte count. The rate-limited emitter, not the parser's chunk
+cadence, decides when to publish an update.
 
 `provider.response_finished.output_items` is the complete durable replacement and replay source. Consumers clear transient state when an attempt restarts or repetition is rejected, and replace rather than append that state when the terminal response arrives. A valid update observed after late subscription may create an ellipsis-prefixed transient block for an otherwise unknown live prompt. Stale, already-finished, or invalid prompt updates do not create transcript state.
 
@@ -41,8 +44,10 @@ value without changing cadence. Absence means unsupported or not observed.
 Neither the harness nor durable finished output, journals, replay, snapshots, or
 final turn stats derive or retain it.
 
-Stats count backend response bytes received at the provider transport before
-semantic parsing. They exclude prompts, tool execution output and results, UI
+Stats preserve each backend's response-byte accounting before semantic parsing.
+HTTP backends count decoded response chunks exposed by the shared network
+policy; non-HTTP backends retain their existing accounting. Stats exclude
+prompts, encoded-body byte counts, tool execution output and results, UI
 rendering text, and Tau UI/harness protocol bytes, and are never folded into
 transcripts. The harness validates prompt ownership and cancellation before
 deriving public routing identity and broadcasting the samples unchanged.

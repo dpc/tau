@@ -21,6 +21,104 @@ fn policy(entries: &[(&str, &str)]) -> OutboundNetworkPolicy {
     )
 }
 
+/// Ensures every policy-built client negotiates only the approved response
+/// codings and exposes gzip and zstd bodies as decoded chunks.
+#[test]
+fn clients_negotiate_and_decode_only_gzip_and_zstd() {
+    use std::io::Write;
+
+    const PAYLOAD: &[u8] = b"decoded provider payload";
+    const GZIP_PAYLOAD: &[u8] = &[
+        31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 75, 73, 77, 206, 79, 73, 77, 81, 40, 40, 202, 47, 203,
+        76, 73, 45, 82, 40, 72, 172, 204, 201, 79, 76, 1, 0, 169, 212, 200, 7, 24, 0, 0, 0,
+    ];
+
+    for (coding, encoded) in [
+        ("gzip", GZIP_PAYLOAD.to_vec()),
+        (
+            "zstd",
+            zstd::stream::encode_all(PAYLOAD, 1).expect("encode zstd fixture"),
+        ),
+    ] {
+        let server = ScriptedTcpServer::spawn(move |mut stream| {
+            let request = read_http_head(&mut stream);
+            let accept_encoding = request
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("accept-encoding")
+                            .then(|| value.trim())
+                    })
+                })
+                .expect("automatic Accept-Encoding");
+            assert_eq!(accept_encoding, "zstd,gzip");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Encoding: {coding}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                encoded.len()
+            )
+            .expect("write response head");
+            stream.write_all(&encoded).expect("write encoded response");
+        });
+        let url = format!("http://{}/response", server.address());
+        let runtime = path_tokio_runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let body = runtime.block_on(async {
+            policy(&[])
+                .client_for(&url)
+                .expect("client")
+                .get(&url)
+                .send()
+                .await
+                .expect("response")
+                .bytes()
+                .await
+                .expect("decoded body")
+        });
+        assert_eq!(body.as_ref(), PAYLOAD);
+        server.finish();
+    }
+}
+
+/// Ensures an explicit caller content-coding preference remains authoritative
+/// instead of being replaced by the client's automatic gzip/zstd advertisement.
+#[test]
+fn client_preserves_explicit_accept_encoding() {
+    use std::io::Write;
+
+    let server = ScriptedTcpServer::spawn(move |mut stream| {
+        let request = read_http_head(&mut stream);
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("accept-encoding: identity")),
+            "request was {request:?}"
+        );
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .expect("write response");
+    });
+    let url = format!("http://{}/response", server.address());
+    let runtime = path_tokio_runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let response = runtime
+        .block_on(
+            policy(&[])
+                .client_for(&url)
+                .expect("client")
+                .get(&url)
+                .header("accept-encoding", "identity")
+                .send(),
+        )
+        .expect("response");
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    server.finish();
+}
+
 /// Ensures scheme-specific proxy selection and ALL_PROXY fallback are stable.
 #[test]
 fn route_selection_is_scheme_specific() {
