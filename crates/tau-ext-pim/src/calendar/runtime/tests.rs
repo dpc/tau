@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use time::format_description as path_time_format_description;
 
 use super::*;
@@ -1294,7 +1296,7 @@ fn google_event_etag_cache_is_cleared_by_missing_provider_etag() {
 
 #[test]
 fn title_filter_matches_visible_event_summaries() {
-    let events = vec![
+    let events = [
         BackendEvent::Google(GoogleEvent {
             id: "evt1".to_owned(),
             etag: None,
@@ -1341,10 +1343,459 @@ fn title_filter_matches_visible_event_summaries() {
         },
     };
 
-    let filtered = filtered_events(&policy, &events, Some("tau"));
+    let filtered = events
+        .iter()
+        .filter(|event| event_is_visible(&policy, event, Some("tau"), EventVisibility::Active))
+        .collect::<Vec<_>>();
 
     assert_eq!(filtered.len(), 1);
     assert_eq!(event_id(filtered[0]), "evt1");
+}
+
+/// Ordinary searches must defensively hide cancelled provider rows, whereas a
+/// deliberate discovery search may retain them for cancellation investigation.
+#[test]
+fn search_visibility_filters_cancelled_rows_case_insensitively() {
+    let events = [
+        test_google_event("active", Some("confirmed"), None, None),
+        test_google_event("cancelled", Some("cAnCeLlEd"), None, None),
+    ];
+    let policy = test_policy();
+
+    let active = events
+        .iter()
+        .filter(|event| event_is_visible(&policy, event, None, EventVisibility::Active))
+        .collect::<Vec<_>>();
+    let discovery = events
+        .iter()
+        .filter(|event| event_is_visible(&policy, event, None, EventVisibility::ActiveAndCancelled))
+        .collect::<Vec<_>>();
+
+    assert_eq!(active.len(), 1);
+    assert_eq!(event_id(active[0]), "active");
+    assert_eq!(discovery.len(), 2);
+}
+
+/// Free/busy must leave only active, blocking entries so stale cancellations,
+/// transparent holds, and declined invitations cannot consume availability.
+#[test]
+fn free_busy_excludes_cancelled_transparent_and_self_declined_events() {
+    let events = [
+        test_google_event("busy", Some("confirmed"), None, None),
+        test_google_event("cancelled", Some("cancelled"), None, None),
+        test_google_event("transparent", Some("confirmed"), Some("transparent"), None),
+        test_google_event("declined", Some("confirmed"), None, Some("declined")),
+        test_google_event("tentative", Some("tentative"), None, Some("tentative")),
+    ];
+    let policy = test_policy();
+    let busy = events
+        .iter()
+        .filter(|event| event_is_visible(&policy, event, None, EventVisibility::Active))
+        .filter(|event| event_blocks_time(event))
+        .map(event_id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(busy, vec!["busy", "tentative"]);
+}
+
+/// Title filtering must consume later provider pages until it fills the
+/// semantic page and return the cursor after every consumed provider row.
+#[test]
+fn title_filter_fills_page_across_provider_pages() {
+    let policy = test_policy();
+    let mut pages = VecDeque::from([
+        (
+            2,
+            None,
+            test_backend_page(
+                vec![
+                    test_google_event("other", None, None, None),
+                    test_google_event("planning-one", None, None, None),
+                ],
+                Some("google:p1"),
+            ),
+        ),
+        (
+            1,
+            Some("google:p1"),
+            test_backend_page(
+                vec![test_google_event("planning-two", None, None, None)],
+                Some("google:p2"),
+            ),
+        ),
+    ]);
+
+    let page = collect_semantic_page(
+        2,
+        None,
+        SEMANTIC_PAGE_BUDGET,
+        |limit, cursor| {
+            let (expected_limit, expected_cursor, page) =
+                pages.pop_front().expect("scripted provider page");
+            assert_eq!(limit, expected_limit);
+            assert_eq!(cursor, expected_cursor);
+            Ok(page)
+        },
+        |event| event_is_visible(&policy, event, Some("planning"), EventVisibility::Active),
+    )
+    .expect("semantic page");
+
+    assert_eq!(
+        page.events.iter().map(event_id).collect::<Vec<_>>(),
+        vec!["planning-one", "planning-two"]
+    );
+    assert_eq!(page.next_cursor.as_deref(), Some("google:p2"));
+    assert!(pages.is_empty());
+}
+
+/// A transparent event must not produce an empty free/busy page when a
+/// blocking event exists on the provider's next page.
+#[test]
+fn free_busy_fills_page_after_transparent_provider_row() {
+    let page = collect_blocking_page(
+        test_google_event("transparent", None, Some("transparent"), None),
+        test_google_event("busy", None, None, None),
+    );
+
+    assert_eq!(
+        page.events.iter().map(event_id).collect::<Vec<_>>(),
+        vec!["busy"]
+    );
+    assert_eq!(page.next_cursor.as_deref(), Some("google:p2"));
+}
+
+/// A self-declined event must not produce an empty free/busy page when a
+/// blocking event exists on the provider's next page.
+#[test]
+fn free_busy_fills_page_after_self_declined_provider_row() {
+    let page = collect_blocking_page(
+        test_google_event("declined", None, None, Some("declined")),
+        test_google_event("busy", None, None, None),
+    );
+
+    assert_eq!(
+        page.events.iter().map(event_id).collect::<Vec<_>>(),
+        vec!["busy"]
+    );
+    assert_eq!(page.next_cursor.as_deref(), Some("google:p2"));
+}
+
+/// Advancing empty provider pages must stop at the request budget instead of
+/// issuing an unbounded sequence of provider calls.
+#[test]
+fn semantic_page_rejects_advancing_empty_pages_after_budget() {
+    let mut request = 0;
+    let error = semantic_page_error(collect_semantic_page(
+        1,
+        None,
+        SemanticPageBudget {
+            max_provider_requests: 2,
+            max_provider_rows: 10,
+        },
+        |_limit, _cursor| {
+            request += 1;
+            Ok(test_backend_page(
+                Vec::new(),
+                Some(&format!("google:p{request}")),
+            ))
+        },
+        |_| true,
+    ));
+
+    assert_eq!(request, 2);
+    assert!(error.contains("provider page budget"), "{error}");
+}
+
+/// Provider rows rejected by semantic filters must still count toward the row
+/// budget so dense irrelevant results cannot bypass the scan bound.
+#[test]
+fn semantic_page_rejects_provider_row_budget_exhaustion() {
+    let error = semantic_page_error(collect_semantic_page(
+        2,
+        None,
+        SemanticPageBudget {
+            max_provider_requests: 2,
+            max_provider_rows: 1,
+        },
+        |_limit, _cursor| {
+            Ok(test_backend_page(
+                vec![
+                    test_google_event("filtered-one", None, None, None),
+                    test_google_event("filtered-two", None, None, None),
+                ],
+                Some("google:next"),
+            ))
+        },
+        |_| false,
+    ));
+
+    assert!(error.contains("provider row budget"), "{error}");
+}
+
+/// A provider cursor cycle must fail as soon as any prior token repeats, not
+/// only when a token repeats on adjacent pages.
+#[test]
+fn semantic_page_rejects_two_token_cursor_cycle() {
+    let cursors = ["google:a", "google:b", "google:a"];
+    let mut request = 0;
+    let error = semantic_page_error(collect_semantic_page(
+        1,
+        None,
+        SEMANTIC_PAGE_BUDGET,
+        |_limit, _cursor| {
+            let next = cursors[request];
+            request += 1;
+            Ok(test_backend_page(Vec::new(), Some(next)))
+        },
+        |_| true,
+    ));
+
+    assert_eq!(request, 3);
+    assert!(error.contains("repeated pagination cursor"), "{error}");
+}
+
+/// Cursor-only continuation must retain the normalized query and reject a
+/// second query field, preventing models from changing visibility mid-stream.
+#[test]
+fn cursor_round_trips_query_and_rejects_mixed_arguments() {
+    let account = ValidatedAccount {
+        id: "feed".to_owned(),
+        enable: true,
+        display_name: None,
+        backend: None,
+        default_calendar: Some("main".to_owned()),
+        allowed_calendars: vec!["main".to_owned()],
+        timezone: Some("UTC".to_owned()),
+    };
+    let calendar = flatten_calendar_id(&account.id, "main");
+    let cursor = CalendarCursor::encode_next(
+        Some("ics:20".to_owned()),
+        &CalendarCursorQuery::search(
+            &calendar,
+            "2026-06-02T00:00:00Z",
+            "2026-06-03T00:00:00Z",
+            20,
+            Some("planning"),
+            true,
+        )
+        .expect("valid search cursor query"),
+    )
+    .expect("cursor serializes")
+    .expect("next cursor");
+    let args = CalendarRangeArgs {
+        cursor: Some(cursor.clone()),
+        ..Default::default()
+    };
+    let continuation = calendar_continuation(&args, CalendarCursorSelector::Search)
+        .expect("cursor parses")
+        .expect("continuation");
+    let reconstructed = continuation.continuation_args();
+    assert_eq!(reconstructed.calendar.as_deref(), Some("feed/main"));
+    assert_eq!(reconstructed.start.as_deref(), Some("2026-06-02T00:00:00Z"));
+    assert_eq!(reconstructed.end.as_deref(), Some("2026-06-03T00:00:00Z"));
+    assert_eq!(reconstructed.limit, Some(20));
+    assert_eq!(reconstructed.cursor.as_deref(), Some("ics:20"));
+    assert_eq!(reconstructed.title.as_deref(), Some("planning"));
+    assert_eq!(reconstructed.include_cancelled, Some(true));
+    let wrong_command = calendar_continuation(
+        &CalendarRangeArgs {
+            cursor: Some(cursor),
+            ..Default::default()
+        },
+        CalendarCursorSelector::FreeBusy,
+    )
+    .expect_err("search cursor cannot continue free/busy");
+    assert!(wrong_command.contains("different calendar query"));
+
+    let free_busy_cursor = CalendarCursor::encode_next(
+        Some("ics:20".to_owned()),
+        &CalendarCursorQuery::free_busy(
+            &calendar,
+            "2026-06-02T00:00:00Z",
+            "2026-06-03T00:00:00Z",
+            20,
+        )
+        .expect("valid free/busy cursor query"),
+    )
+    .expect("free/busy cursor serializes")
+    .expect("free/busy next cursor");
+    let free_busy = calendar_continuation(
+        &CalendarRangeArgs {
+            cursor: Some(free_busy_cursor),
+            ..Default::default()
+        },
+        CalendarCursorSelector::FreeBusy,
+    )
+    .expect("free/busy cursor parses")
+    .expect("free/busy continuation");
+    let free_busy_args = free_busy.continuation_args();
+    assert_eq!(free_busy_args.calendar.as_deref(), Some("feed/main"));
+    assert_eq!(
+        free_busy_args.start.as_deref(),
+        Some("2026-06-02T00:00:00Z")
+    );
+    assert_eq!(free_busy_args.end.as_deref(), Some("2026-06-03T00:00:00Z"));
+    assert_eq!(free_busy_args.limit, Some(20));
+    assert_eq!(free_busy_args.cursor.as_deref(), Some("ics:20"));
+    assert_eq!(free_busy_args.title, None);
+    assert_eq!(free_busy_args.include_cancelled, None);
+
+    let mixed = CalendarRangeArgs {
+        cursor: args.cursor,
+        limit: Some(100),
+        ..Default::default()
+    };
+    let error = calendar_continuation(&mixed, CalendarCursorSelector::Search)
+        .expect_err("mixed cursor rejected");
+    assert!(error.contains("retry with cursor only"));
+}
+
+/// Calendar command arguments must be named maps; serde's positional struct
+/// representation is not part of the model-visible API.
+#[test]
+fn range_args_reject_positional_arrays() {
+    let invocation = ToolInvocation {
+        command: CalendarCommand::ListEvents,
+        args: Some(CborValue::Array(vec![CborValue::Text(
+            "feed/main".to_owned(),
+        )])),
+    };
+
+    let error =
+        parse_invocation_args::<CalendarRangeArgs>(&invocation).expect_err("array is rejected");
+    assert!(error.contains("expected a map of named fields"), "{error}");
+
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let output = dispatch_test(
+        &test_engine(temp.path()),
+        CborValue::Array(vec![CborValue::Text("list_events".to_owned())]),
+    );
+    assert_eq!(cbor_bool_field(&output, "ok"), Some(false));
+    assert_eq!(
+        cbor_nested_text_field(&output, "error", "message"),
+        Some("invalid calendar tool arguments: expected a map of named fields")
+    );
+}
+
+/// A mistyped cancellation-discovery flag must return the contract's short,
+/// actionable Boolean repair message.
+#[test]
+fn range_args_use_exact_include_cancelled_type_repair() {
+    let invocation = ToolInvocation {
+        command: CalendarCommand::ListEvents,
+        args: Some(cbor_map(vec![(
+            "include_cancelled",
+            CborValue::Text("yes".to_owned()),
+        )])),
+    };
+
+    let error = match parse_invocation_args::<CalendarRangeArgs>(&invocation) {
+        Ok(_) => panic!("non-Boolean flag was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error, "include_cancelled must be true or false");
+}
+
+/// Runtime normalization must match the advertised 20-row default and reject
+/// requests above the explicit 100-row maximum.
+#[test]
+fn range_limit_defaults_to_twenty_and_rejects_above_one_hundred() {
+    assert_eq!(normalized_limit(None).expect("default limit"), 20);
+    assert_eq!(normalized_limit(Some(100)).expect("maximum limit"), 100);
+    assert_eq!(
+        normalized_limit(Some(101)),
+        Err("limit must be at most 100".to_owned())
+    );
+}
+
+/// Build a compact Google event for pure calendar visibility regressions.
+fn test_google_event(
+    id: &str,
+    status: Option<&str>,
+    transparency: Option<&str>,
+    self_response_status: Option<&str>,
+) -> BackendEvent {
+    BackendEvent::Google(GoogleEvent {
+        id: id.to_owned(),
+        etag: None,
+        i_cal_uid: None,
+        summary: id.to_owned(),
+        description: None,
+        location: None,
+        start: "2026-06-02T09:00:00Z".to_owned(),
+        end: "2026-06-02T10:00:00Z".to_owned(),
+        status: status.map(str::to_owned),
+        visibility: None,
+        transparency: transparency.map(str::to_owned),
+        organizer: None,
+        attendees: Vec::new(),
+        self_response_status: self_response_status.map(str::to_owned),
+        recurring: false,
+    })
+}
+
+/// Extract a semantic-page error without requiring successful pages to
+/// implement debug formatting.
+fn semantic_page_error(result: Result<BackendEventPage, String>) -> String {
+    match result {
+        Ok(_) => panic!("semantic page unexpectedly succeeded"),
+        Err(error) => error,
+    }
+}
+
+/// Build one scripted provider page for semantic pagination tests.
+fn test_backend_page(events: Vec<BackendEvent>, next_cursor: Option<&str>) -> BackendEventPage {
+    let scanned_events = events.len();
+    BackendEventPage {
+        events,
+        next_cursor: next_cursor.map(str::to_owned),
+        truncated: next_cursor.is_some(),
+        scanned_events,
+    }
+}
+
+/// Exercise free/busy filtering across two deterministic provider pages.
+fn collect_blocking_page(filtered: BackendEvent, busy: BackendEvent) -> BackendEventPage {
+    let policy = test_policy();
+    let mut pages = VecDeque::from([
+        (None, test_backend_page(vec![filtered], Some("google:p1"))),
+        (
+            Some("google:p1"),
+            test_backend_page(vec![busy], Some("google:p2")),
+        ),
+    ]);
+    let page = collect_semantic_page(
+        1,
+        None,
+        SEMANTIC_PAGE_BUDGET,
+        |limit, cursor| {
+            assert_eq!(limit, 1);
+            let (expected_cursor, page) = pages.pop_front().expect("scripted provider page");
+            assert_eq!(cursor, expected_cursor);
+            Ok(page)
+        },
+        |event| {
+            event_is_visible(&policy, event, None, EventVisibility::Active)
+                && event_blocks_time(event)
+        },
+    )
+    .expect("semantic free/busy page");
+    assert!(pages.is_empty());
+    page
+}
+
+/// Return the ordinary permissive read policy used by visibility tests.
+fn test_policy() -> ValidatedPolicy {
+    ValidatedPolicy {
+        read: ValidatedReadPolicy {
+            private_events: PrivateEventsPolicy::BusyOnly,
+            descriptions: DescriptionPolicy::Always,
+        },
+        write: ValidatedWritePolicy {
+            require_approval: true,
+            max_attendees: 50,
+        },
+    }
 }
 
 #[test]

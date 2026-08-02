@@ -87,6 +87,18 @@ pub struct GoogleEventPage {
     pub next_cursor: Option<String>,
 }
 
+/// Parameters for one Google event-list page.
+pub(crate) struct GoogleEventListQuery<'a> {
+    /// Inclusive/exclusive time range to request.
+    pub range: TimeRange,
+    /// Maximum provider rows to request.
+    pub limit: usize,
+    /// Backend continuation token from a prior page.
+    pub cursor: Option<&'a str>,
+    /// Whether to request Google deleted-event records.
+    pub include_cancelled: bool,
+}
+
 /// Event fields used by Google create/update requests.
 #[derive(Default)]
 pub struct GoogleEventWrite<'a> {
@@ -201,52 +213,32 @@ impl GoogleBackend {
                 account,
                 stored_refresh_token,
                 calendar_id,
-                range,
-                limit,
-                None,
+                GoogleEventListQuery {
+                    range,
+                    limit,
+                    cursor: None,
+                    include_cancelled: false,
+                },
             )?
             .events)
     }
 
     /// List one cursor page of Google events in a calendar.
-    pub fn list_events_page(
+    pub(crate) fn list_events_page(
         &self,
         account: &ValidatedAccount,
         stored_refresh_token: Option<&str>,
         calendar_id: &str,
-        range: TimeRange,
-        limit: usize,
-        cursor: Option<&str>,
+        query: GoogleEventListQuery<'_>,
     ) -> Result<GoogleEventPage, String> {
         ensure_google_calendar_allowed(account, calendar_id)?;
-        let page_token = parse_google_cursor(cursor)?;
         let token = self.access_token(account, stored_refresh_token)?;
         let api_base = api_base(account)?;
-        let mut query = form_urlencoded::Serializer::new(String::new());
-        query.append_pair("singleEvents", "true");
-        query.append_pair("orderBy", "startTime");
-        query.append_pair("maxResults", &limit.to_string());
-        if let Some(page_token) = page_token {
-            query.append_pair("pageToken", page_token);
-        }
-        if let Some(min) = range.min {
-            query.append_pair(
-                "timeMin",
-                &min.format(&Rfc3339)
-                    .map_err(|error| format!("formatting start failed: {error}"))?,
-            );
-        }
-        if let Some(max) = range.max {
-            query.append_pair(
-                "timeMax",
-                &max.format(&Rfc3339)
-                    .map_err(|error| format!("formatting end failed: {error}"))?,
-            );
-        }
+        let query = event_list_query(&query)?;
         let url = format!(
             "{api_base}/calendars/{}/events?{}",
             encode_path_segment(calendar_id),
-            query.finish()
+            query
         );
         let json = self.get_json(&url, &token)?;
         let next_cursor = google_next_cursor(&json)?;
@@ -471,6 +463,41 @@ impl GoogleBackend {
         serde_json::from_str(&text)
             .map_err(|error| format!("Google Calendar API response was not JSON: {error}"))
     }
+}
+
+/// Build the Google event-list query with explicit cancellation visibility.
+fn event_list_query(event_query: &GoogleEventListQuery<'_>) -> Result<String, String> {
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query.append_pair("singleEvents", "true");
+    query.append_pair("orderBy", "startTime");
+    query.append_pair("maxResults", &event_query.limit.to_string());
+    query.append_pair(
+        "showDeleted",
+        if event_query.include_cancelled {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    let page_token = parse_google_cursor(event_query.cursor)?;
+    if let Some(page_token) = page_token {
+        query.append_pair("pageToken", page_token);
+    }
+    if let Some(min) = event_query.range.min {
+        query.append_pair(
+            "timeMin",
+            &min.format(&Rfc3339)
+                .map_err(|error| format!("formatting start failed: {error}"))?,
+        );
+    }
+    if let Some(max) = event_query.range.max {
+        query.append_pair(
+            "timeMax",
+            &max.format(&Rfc3339)
+                .map_err(|error| format!("formatting end failed: {error}"))?,
+        );
+    }
+    Ok(query.finish())
 }
 
 fn google_oauth_config(account: &ValidatedAccount) -> Result<GoogleOauthSecretConfig<'_>, String> {

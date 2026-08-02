@@ -21,3 +21,12 @@ Manual live Gmail or Calendar tests remain outside all automation and use
 throwaway accounts.
 Never commit credentials, refresh/access tokens, device codes, PKCE verifiers,
 pasted redirects, or private URLs.
+
+Calendar query lifecycle tests follow
+[`SPEC-calendar-query-lifecycle`](specs/SPEC-calendar-query-lifecycle.md) across
+the distributed boundary: provider tests cover exact Google query serialization
+and ICS visibility before feed-page slicing; runtime tests cover defensive
+lifecycle and blocking filters, semantic page filling, provider budgets, and
+cursor reconstruction; tool tests cover schemas; model-visible output tests
+cover headers and row shape. Keep these layers deterministic and use loopback
+feeds or scripted provider pages rather than live accounts.

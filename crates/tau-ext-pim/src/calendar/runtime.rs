@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
@@ -15,7 +15,8 @@ use super::config::{
     CalendarExtensionConfig, DescriptionPolicy, PrivateEventsPolicy, ValidatedAccount,
     ValidatedBackendConfig, ValidatedConfig, ValidatedPolicy,
 };
-use super::google::{GoogleBackend, GoogleEvent, GoogleEventWrite};
+use super::cursor::{CalendarCursor, CalendarCursorQuery, CalendarCursorSelector};
+use super::google::{GoogleBackend, GoogleEvent, GoogleEventListQuery, GoogleEventWrite};
 use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange, normalize_feed_url};
 use super::state::{CalendarChangeApproval, CalendarLogEntry, GooglePendingAuth, StateStore};
 use super::tool::{
@@ -28,8 +29,12 @@ const LIST_CALENDARS_FORMAT: &str = "calendar_id flags display_name";
 const LIST_EVENTS_FORMAT: &str = "event_id start end flags status summary...";
 const FREE_BUSY_FORMAT: &str = "event_id start end flags";
 const EVENT_DETAIL_FORMAT: &str = "key value...";
-const DEFAULT_EVENT_LIMIT: u32 = 50;
+const DEFAULT_EVENT_LIMIT: u32 = 20;
 const MAX_EVENT_LIMIT: u32 = 100;
+const SEMANTIC_PAGE_BUDGET: SemanticPageBudget = SemanticPageBudget {
+    max_provider_requests: 100,
+    max_provider_rows: 10_000,
+};
 const DEFAULT_READ_LOOKBACK_DAYS: u8 = 2;
 const DEFAULT_READ_WINDOW_DAYS: i64 = 7;
 const CALENDAR_LOG_DEFAULT_LIMIT: usize = 20;
@@ -350,10 +355,49 @@ enum BackendEvent {
     Google(GoogleEvent),
 }
 
+/// One provider or provider-neutral page of calendar rows.
 struct BackendEventPage {
+    /// Rows consumed or retained for this page.
     events: Vec<BackendEvent>,
+    /// Provider continuation after every consumed row, when more rows remain.
     next_cursor: Option<String>,
+    /// Whether `next_cursor` identifies additional provider rows.
     truncated: bool,
+    /// Number of provider rows consumed while building this page.
+    scanned_events: usize,
+}
+
+/// Resource limits for filling one provider-neutral semantic page.
+#[derive(Clone, Copy)]
+struct SemanticPageBudget {
+    /// Maximum sequential provider page requests.
+    max_provider_requests: usize,
+    /// Maximum provider rows consumed across all requests.
+    max_provider_rows: usize,
+}
+
+/// Visibility requested for a provider range read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EventVisibility {
+    /// Return only events that are not cancelled.
+    Active,
+    /// Return active events and cancellation records that the provider exposes.
+    ActiveAndCancelled,
+}
+
+impl EventVisibility {
+    /// Return whether the provider should request cancellation records.
+    fn includes_cancelled(self) -> bool {
+        self == Self::ActiveAndCancelled
+    }
+
+    /// Return the model-visible visibility label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::ActiveAndCancelled => "active_and_cancelled",
+        }
+    }
 }
 
 enum CalendarMutationResult {
@@ -449,6 +493,20 @@ where
             &empty_args
         }
     };
+    if !matches!(args, CborValue::Map(_)) {
+        return Err(format!(
+            "invalid {} args: expected a map of named fields",
+            command_name(invocation.command)
+        ));
+    }
+    if let CborValue::Map(fields) = args
+        && fields.iter().any(|(key, value)| {
+            matches!(key, CborValue::Text(key) if key == "include_cancelled")
+                && !matches!(value, CborValue::Bool(_))
+        })
+    {
+        return Err("include_cancelled must be true or false".to_owned());
+    }
     args.deserialized()
         .map_err(|error| calendar_arg_parse_error(command_name(invocation.command), &error))
 }
@@ -478,6 +536,13 @@ impl CalendarMutationResult {
 
 impl Engine {
     fn dispatch(&self, arguments: &CborValue, agent_id: &AgentId) -> CborValue {
+        if !matches!(arguments, CborValue::Map(_)) {
+            return error_envelope(
+                None,
+                "invalid_input",
+                "invalid calendar tool arguments: expected a map of named fields",
+            );
+        }
         let invocation: ToolInvocation = match arguments.deserialized() {
             Ok(invocation) => invocation,
             Err(error) => {
@@ -874,6 +939,14 @@ impl Engine {
         args: &CalendarRangeArgs,
         agent_id: &AgentId,
     ) -> Result<CborValue, String> {
+        let continuation = calendar_continuation(args, CalendarCursorSelector::Search)?;
+        let continuation_args;
+        let args = if let Some(cursor) = continuation.as_ref() {
+            continuation_args = cursor.continuation_args();
+            &continuation_args
+        } else {
+            args
+        };
         let limit = normalized_limit(args.limit)?;
         let title_filter = optional_trimmed_line(args.title.as_deref(), "title")?;
         let (account, calendar) = self.resolve_calendar_arg(args.calendar.as_deref())?;
@@ -882,10 +955,36 @@ impl Engine {
         let output_timezone = timezone_for_read("event output", account.timezone.as_deref())?;
         let range_start = format_optional_read_bound(range.min, "start")?;
         let range_end = format_optional_read_bound(range.max, "end")?;
-        let page =
-            self.events_for_account(account, calendar, range, limit, args.cursor.as_deref())?;
-        let scanned_events = page.events.len();
-        let events = filtered_events(&self.config.policy, &page.events, title_filter.as_deref());
+        let visibility = if args.include_cancelled.unwrap_or(false) {
+            EventVisibility::ActiveAndCancelled
+        } else {
+            EventVisibility::Active
+        };
+        let page = collect_semantic_page(
+            limit,
+            args.cursor.as_deref(),
+            SEMANTIC_PAGE_BUDGET,
+            |provider_limit, provider_cursor| {
+                self.events_for_account(
+                    account,
+                    calendar,
+                    range,
+                    provider_limit,
+                    provider_cursor,
+                    visibility,
+                )
+            },
+            |event| {
+                event_is_visible(
+                    &self.config.policy,
+                    event,
+                    title_filter.as_deref(),
+                    visibility,
+                )
+            },
+        )?;
+        let scanned_events = page.scanned_events;
+        let events = page.events.iter().collect::<Vec<_>>();
         let returned_events = events.len();
         self.remember_visible_events(agent_id, account, calendar, &events);
         let mut rows = Vec::new();
@@ -897,6 +996,20 @@ impl Engine {
                 event,
             ));
         }
+        let flattened_calendar = flatten_calendar_id(&account.id, calendar);
+        let cursor_query = CalendarCursorQuery::search(
+            &flattened_calendar,
+            range_start
+                .as_deref()
+                .expect("calendar range always has a start"),
+            range_end
+                .as_deref()
+                .expect("calendar range always has an end"),
+            limit,
+            title_filter.as_deref(),
+            visibility.includes_cancelled(),
+        )?;
+        let next_cursor = CalendarCursor::encode_next(page.next_cursor, &cursor_query)?;
         let data = cbor_map(vec![
             (
                 "calendar",
@@ -908,6 +1021,7 @@ impl Engine {
             ("format", CborValue::Text(LIST_EVENTS_FORMAT.to_owned())),
             ("start", optional_text(range_start.clone())),
             ("end", optional_text(range_end.clone())),
+            ("visibility", CborValue::Text(visibility.label().to_owned())),
             ("events", line_array(rows.clone())),
             ("title_filter", optional_text(title_filter.clone())),
             (
@@ -923,7 +1037,7 @@ impl Engine {
                     CborValue::Integer(scanned_events.into())
                 },
             ),
-            ("next_cursor", optional_text(page.next_cursor.clone())),
+            ("next_cursor", optional_text(next_cursor.clone())),
             ("truncated", CborValue::Bool(page.truncated)),
         ]);
         Ok(ok_line_envelope(
@@ -940,21 +1054,13 @@ impl Engine {
                 ("format", CborValue::Text(LIST_EVENTS_FORMAT.to_owned())),
                 ("start", optional_text(range_start)),
                 ("end", optional_text(range_end)),
-                ("title_filter", optional_text(title_filter)),
+                ("visibility", CborValue::Text(visibility.label().to_owned())),
+                ("title_filter", optional_text(title_filter.clone())),
                 (
                     "returned_events",
                     CborValue::Integer(returned_events.into()),
                 ),
-                ("scanned_events", CborValue::Integer(scanned_events.into())),
-                (
-                    "total_events",
-                    if page.truncated {
-                        CborValue::Null
-                    } else {
-                        CborValue::Integer(scanned_events.into())
-                    },
-                ),
-                ("next_cursor", optional_text(page.next_cursor)),
+                ("next_cursor", optional_text(next_cursor)),
                 ("truncated", CborValue::Bool(page.truncated)),
             ],
             data,
@@ -1022,10 +1128,24 @@ impl Engine {
     }
 
     fn free_busy(&self, args: &CalendarRangeArgs, agent_id: &AgentId) -> Result<CborValue, String> {
+        let continuation = calendar_continuation(args, CalendarCursorSelector::FreeBusy)?;
+        let continuation_args;
+        let args = if let Some(cursor) = continuation.as_ref() {
+            continuation_args = cursor.continuation_args();
+            &continuation_args
+        } else {
+            args
+        };
         let limit = normalized_limit(args.limit)?;
         if args.title.is_some() {
             return Err(
                 "calendar_free_busy does not accept `title`; use calendar_search for title filtering".to_owned(),
+            );
+        }
+        if args.include_cancelled.is_some() {
+            return Err(
+                "calendar_free_busy does not accept `include_cancelled`; busy time always excludes cancelled events"
+                    .to_owned(),
             );
         }
         let (account, calendar) = self.resolve_calendar_arg(args.calendar.as_deref())?;
@@ -1034,9 +1154,26 @@ impl Engine {
         let output_timezone = timezone_for_read("event output", account.timezone.as_deref())?;
         let range_start = format_optional_read_bound(range.min, "start")?;
         let range_end = format_optional_read_bound(range.max, "end")?;
-        let page =
-            self.events_for_account(account, calendar, range, limit, args.cursor.as_deref())?;
-        let events = filtered_events(&self.config.policy, &page.events, None);
+        let page = collect_semantic_page(
+            limit,
+            args.cursor.as_deref(),
+            SEMANTIC_PAGE_BUDGET,
+            |provider_limit, provider_cursor| {
+                self.events_for_account(
+                    account,
+                    calendar,
+                    range,
+                    provider_limit,
+                    provider_cursor,
+                    EventVisibility::Active,
+                )
+            },
+            |event| {
+                event_is_visible(&self.config.policy, event, None, EventVisibility::Active)
+                    && event_blocks_time(event)
+            },
+        )?;
+        let events = page.events.iter().collect::<Vec<_>>();
         self.remember_visible_events(agent_id, account, calendar, &events);
         let mut rows = Vec::new();
         for event in events {
@@ -1047,6 +1184,18 @@ impl Engine {
                 event,
             ));
         }
+        let flattened_calendar = flatten_calendar_id(&account.id, calendar);
+        let cursor_query = CalendarCursorQuery::free_busy(
+            &flattened_calendar,
+            range_start
+                .as_deref()
+                .expect("calendar range always has a start"),
+            range_end
+                .as_deref()
+                .expect("calendar range always has an end"),
+            limit,
+        )?;
+        let next_cursor = CalendarCursor::encode_next(page.next_cursor, &cursor_query)?;
         let data = cbor_map(vec![
             (
                 "calendar",
@@ -1059,7 +1208,7 @@ impl Engine {
             ("start", optional_text(range_start.clone())),
             ("end", optional_text(range_end.clone())),
             ("busy", line_array(rows.clone())),
-            ("next_cursor", optional_text(page.next_cursor.clone())),
+            ("next_cursor", optional_text(next_cursor.clone())),
             ("truncated", CborValue::Bool(page.truncated)),
         ]);
         Ok(ok_line_envelope(
@@ -1076,7 +1225,7 @@ impl Engine {
                 ("format", CborValue::Text(FREE_BUSY_FORMAT.to_owned())),
                 ("start", optional_text(range_start)),
                 ("end", optional_text(range_end)),
-                ("next_cursor", optional_text(page.next_cursor)),
+                ("next_cursor", optional_text(next_cursor)),
                 ("truncated", CborValue::Bool(page.truncated)),
             ],
             data,
@@ -1433,16 +1582,24 @@ impl Engine {
         range: TimeRange,
         limit: usize,
         cursor: Option<&str>,
+        visibility: EventVisibility,
     ) -> Result<BackendEventPage, String> {
         match &account.backend {
             Some(ValidatedBackendConfig::IcsFeed { .. }) => {
-                let page = self
-                    .ics_feed
-                    .list_events_page(account, calendar, range, limit, cursor)?;
+                let page = self.ics_feed.list_events_page(
+                    account,
+                    calendar,
+                    range,
+                    limit,
+                    cursor,
+                    visibility.includes_cancelled(),
+                )?;
+                let scanned_events = page.events.len();
                 Ok(BackendEventPage {
                     events: page.events.into_iter().map(BackendEvent::Ics).collect(),
                     next_cursor: page.next_cursor,
                     truncated: page.truncated,
+                    scanned_events,
                 })
             }
             Some(ValidatedBackendConfig::Google { .. }) => {
@@ -1451,15 +1608,20 @@ impl Engine {
                     account,
                     stored_refresh_token.as_deref(),
                     calendar,
-                    range,
-                    limit,
-                    cursor,
+                    GoogleEventListQuery {
+                        range,
+                        limit,
+                        cursor,
+                        include_cancelled: visibility.includes_cancelled(),
+                    },
                 )?;
                 let truncated = page.next_cursor.is_some();
+                let scanned_events = page.events.len();
                 Ok(BackendEventPage {
                     events: page.events.into_iter().map(BackendEvent::Google).collect(),
                     next_cursor: page.next_cursor,
                     truncated,
+                    scanned_events,
                 })
             }
             Some(ValidatedBackendConfig::Caldav { .. }) | None => Err(format!(
@@ -1841,12 +2003,19 @@ fn normalized_limit(limit: Option<u32>) -> Result<usize, String> {
     if limit == 0 {
         return Err("limit must be a positive integer".to_owned());
     }
-    let capped = if MAX_EVENT_LIMIT < limit {
-        MAX_EVENT_LIMIT
-    } else {
-        limit
-    };
-    Ok(capped as usize)
+    if MAX_EVENT_LIMIT < limit {
+        return Err(format!("limit must be at most {MAX_EVENT_LIMIT}"));
+    }
+    Ok(limit as usize)
+}
+
+/// Decode a cursor-only continuation or return no continuation for a first
+/// page.
+fn calendar_continuation(
+    args: &CalendarRangeArgs,
+    selector: CalendarCursorSelector,
+) -> Result<Option<CalendarCursor>, String> {
+    CalendarCursor::from_args(args, selector, MAX_EVENT_LIMIT)
 }
 
 fn required_arg<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, String> {
@@ -2406,23 +2575,77 @@ fn format_event_detail(
     lines
 }
 
-fn filtered_events<'a>(
+fn event_is_visible(
     policy: &ValidatedPolicy,
-    events: &'a [BackendEvent],
+    event: &BackendEvent,
     title_filter: Option<&str>,
-) -> Vec<&'a BackendEvent> {
-    let Some(title_filter) = title_filter else {
-        return events.iter().collect();
-    };
-    let title_filter = title_filter.to_lowercase();
-    events
-        .iter()
-        .filter(|event| {
+    visibility: EventVisibility,
+) -> bool {
+    (visibility.includes_cancelled() || !event_is_cancelled(event))
+        && title_filter.is_none_or(|title_filter| {
             event_summary_for_policy(policy, event)
                 .to_lowercase()
-                .contains(&title_filter)
+                .contains(&title_filter.to_lowercase())
         })
-        .collect()
+}
+
+/// Collect visible rows without allowing provider-page boundaries to shorten a
+/// semantic page.
+fn collect_semantic_page(
+    limit: usize,
+    initial_cursor: Option<&str>,
+    budget: SemanticPageBudget,
+    mut fetch: impl FnMut(usize, Option<&str>) -> Result<BackendEventPage, String>,
+    is_visible: impl Fn(&BackendEvent) -> bool,
+) -> Result<BackendEventPage, String> {
+    let mut events = Vec::with_capacity(limit);
+    let mut cursor = initial_cursor.map(str::to_owned);
+    let mut seen_cursors = BTreeSet::new();
+    seen_cursors.extend(cursor.iter().cloned());
+    let mut scanned_events = 0;
+    let mut provider_requests = 0;
+    loop {
+        if budget.max_provider_requests <= provider_requests {
+            return Err(
+                "calendar query exceeded the provider page budget while filling filtered results"
+                    .to_owned(),
+            );
+        }
+        provider_requests += 1;
+        let remaining = limit - events.len();
+        let page = fetch(remaining, cursor.as_deref())?;
+        if remaining < page.events.len() {
+            return Err("calendar provider returned more rows than requested".to_owned());
+        }
+        scanned_events += page.scanned_events;
+        if budget.max_provider_rows < scanned_events {
+            return Err(
+                "calendar query exceeded the provider row budget while filling filtered results"
+                    .to_owned(),
+            );
+        }
+        events.extend(page.events.into_iter().filter(&is_visible));
+        let Some(next_cursor) = page.next_cursor else {
+            return Ok(BackendEventPage {
+                events,
+                next_cursor: None,
+                truncated: false,
+                scanned_events,
+            });
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err("calendar provider returned a repeated pagination cursor".to_owned());
+        }
+        cursor = Some(next_cursor);
+        if events.len() == limit {
+            return Ok(BackendEventPage {
+                events,
+                next_cursor: cursor,
+                truncated: true,
+                scanned_events,
+            });
+        }
+    }
 }
 
 fn event_id(event: &BackendEvent) -> &str {
@@ -2521,6 +2744,22 @@ fn event_status(event: &BackendEvent) -> Option<&str> {
     match event {
         BackendEvent::Ics(event) => event.status.as_deref(),
         BackendEvent::Google(event) => event.status.as_deref(),
+    }
+}
+
+/// Return whether an event has a provider cancellation lifecycle status.
+fn event_is_cancelled(event: &BackendEvent) -> bool {
+    event_status(event).is_some_and(|status| status.eq_ignore_ascii_case("cancelled"))
+}
+
+/// Return whether an active event occupies the user's time.
+fn event_blocks_time(event: &BackendEvent) -> bool {
+    match event {
+        BackendEvent::Ics(_) => true,
+        BackendEvent::Google(event) => {
+            event.transparency.as_deref() != Some("transparent")
+                && event.self_response_status.as_deref() != Some("declined")
+        }
     }
 }
 
@@ -2842,7 +3081,11 @@ fn ok_line_envelope(
         ("command", CborValue::Text(command.to_owned())),
         ("status", CborValue::Text(status.to_owned())),
     ];
-    entries.extend(headers);
+    entries.extend(
+        headers
+            .into_iter()
+            .filter(|(_, value)| !matches!(value, CborValue::Null)),
+    );
     entries.push(("data", data));
     entries.push(("output", CborValue::Text(line_rows_output(rows))));
     cbor_map(entries)

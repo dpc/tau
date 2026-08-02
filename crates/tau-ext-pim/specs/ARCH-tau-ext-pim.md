@@ -138,6 +138,8 @@ source:
 
 Calendar ids exposed to models are opaque. Provider-specific identifiers,
 approval state, and cached metadata stay behind the calendar runtime boundary. Writes keep provider concurrency tokens such as ETags internal and require approval by default. ICS feed URLs are private bearer-like URLs; non-loopback plaintext HTTP requires explicit configuration.
+The distributed calendar-query lifecycle contract is specified by
+[SPEC-calendar-query-lifecycle](SPEC-calendar-query-lifecycle.md).
 
 ## Security and output policy
 

@@ -28,8 +28,9 @@ Email:
 Calendar:
 
 - list calendars as opaque ids
-- list bounded event rows and free/busy rows with cursor pagination
-- read one event by id
+- list active event rows and active blocking free/busy rows with cursor pagination
+- deliberately include cancellation records in `calendar_search` with `include_cancelled: true`
+- read one event by id, including a targeted cancelled event when available
 - read-only ICS feed accounts for standard `.ics` calendars, including timezone-aware event times and bounded recurrence expansion
 - Google Calendar native API reads and user-approved writes: create, update, delete, and RSVP
 - Google OAuth device authorization via `:calendar auth google start <account>` and `:calendar auth google finish <account>`
@@ -113,7 +114,7 @@ Recommended defaults:
 - `calendar.policy.write.require_approval: true`
 - keep `calendar.accounts[*].calendars.allow` narrow
 
-PIM list-style tool results should follow Tau's standard header-then-payload shape: headers such as `format: ...` first, one empty line, then plain unindented rows. The `format` header describes the space-separated payload columns, and each item row starts with the main item id. Empty lists use a single `(no matches found)` payload line. Email folder ids and calendar ids are opaque ids returned by list tools; pass those opaque ids back exactly as returned by `email_list_folders` or `calendar_list_calendars`, without decoding or rewriting them. Email list rows still name the first column `uid`; pass that value as `email_id` to message-targeting tools such as `email_read`. Implicit/default values such as selected folder/calendar or defaulted calendar range bounds are response headers instead of repeated in every row. `calendar_search` and `calendar_free_busy` are bounded reads; if `start` is omitted they default to midnight 2 days before the current date, and if `end` is omitted it defaults to 7 days after `start`. Range read results include effective `start`/`end` headers; reuse those while paginating.
+PIM list-style tool results should follow Tau's standard header-then-payload shape: headers such as `format: ...` first, one empty line, then plain unindented rows. The `format` header describes the space-separated payload columns, and each item row starts with the main item id. Empty lists use a single `(no matches found)` payload line. Email folder ids and calendar ids are opaque ids returned by list tools; pass those opaque ids back exactly as returned by `email_list_folders` or `calendar_list_calendars`, without decoding or rewriting them. Email list rows still name the first column `uid`; pass that value as `email_id` to message-targeting tools such as `email_read`. Implicit/default values such as selected folder/calendar or defaulted calendar range bounds are response headers instead of repeated in every row. `calendar_search` returns active events by default; set `include_cancelled: true` only to investigate cancellations. Google cancellation tombstones without complete range bounds are omitted because they cannot be placed in a bounded result. `calendar_free_busy` excludes cancelled, transparent, and self-declined events. Both reads default to 20 rows and reject limits above 100. If either returns `next_cursor`, invoke that tool with `{{ "cursor": "..." }}` only: the opaque cursor retains the original normalized query. `calendar_get` remains a targeted inspection path and can return a cancelled event when its provider exposes it. `calendar_search` and `calendar_free_busy` are bounded reads; if `start` is omitted they default to midnight 2 days before the current date, and if `end` is omitted it defaults to 7 days after `start`. Provider page, row, or cursor-cycle safety failures return visible errors instead of successful short pages.
 
 ICS feed accounts should use `https://` or `webcal://` URLs, especially for private feed tokens. Non-loopback `http://` ICS feed URLs are rejected unless the account backend sets `allow_plain_http: true`; loopback HTTP remains available for local tests.
 

@@ -1,5 +1,52 @@
 use super::*;
 
+/// Google list reads must explicitly choose deleted-event visibility instead of
+/// inheriting a provider default that could change or be bypassed by test data.
+#[test]
+fn event_list_query_explicitly_selects_deleted_visibility() {
+    let active = event_list_query(&GoogleEventListQuery {
+        range: TimeRange::default(),
+        limit: 20,
+        cursor: None,
+        include_cancelled: false,
+    })
+    .expect("active query");
+    let discovery = event_list_query(&GoogleEventListQuery {
+        range: TimeRange::default(),
+        limit: 20,
+        cursor: None,
+        include_cancelled: true,
+    })
+    .expect("discovery query");
+
+    let active_pairs = form_urlencoded::parse(active.as_bytes()).collect::<Vec<_>>();
+    let discovery_pairs = form_urlencoded::parse(discovery.as_bytes()).collect::<Vec<_>>();
+    assert_eq!(
+        active_pairs
+            .iter()
+            .filter(|(key, _)| key == "showDeleted")
+            .count(),
+        1
+    );
+    assert!(
+        active_pairs
+            .iter()
+            .any(|(key, value)| key == "showDeleted" && value == "false")
+    );
+    assert_eq!(
+        discovery_pairs
+            .iter()
+            .filter(|(key, _)| key == "showDeleted")
+            .count(),
+        1
+    );
+    assert!(
+        discovery_pairs
+            .iter()
+            .any(|(key, value)| key == "showDeleted" && value == "true")
+    );
+}
+
 #[test]
 fn parses_calendar_list_items() {
     let json = serde_json::json!({

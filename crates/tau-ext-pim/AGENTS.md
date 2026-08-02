@@ -1,6 +1,9 @@
-Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
-
 # tau-ext-pim
+
+Read [`SECURITY.md`](SECURITY.md) before changing or reviewing provider reads,
+pagination, parsing, or other externally sourced PIM data.
+
+Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
 
 Read the applicable trust-boundary records under `specs/` before changing or reviewing PIM runtime behavior,
 credential handling, persistent state, OAuth/provider integrations,

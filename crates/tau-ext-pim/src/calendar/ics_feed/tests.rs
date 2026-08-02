@@ -5,7 +5,72 @@ use std::thread;
 use super::*;
 use crate::calendar::config::{
     CalendarAccountConfig, CalendarBackendConfig, CalendarExtensionConfig, CalendarSelectionConfig,
+    ValidatedConfig,
 };
+
+/// A normal ICS range page must remove every cancellation representation before
+/// it is sorted or sliced, while cancellation discovery retains complete rows.
+#[test]
+fn range_visibility_filters_standalone_and_master_cancellations_before_paging() {
+    let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:active\nSUMMARY:Active\nDTSTART:20260602T090000Z\nDTEND:20260602T100000Z\nEND:VEVENT\nBEGIN:VEVENT\nUID:standalone\nSUMMARY:Standalone cancellation\nSTATUS:cAnCeLlEd\nDTSTART:20260602T100000Z\nDTEND:20260602T110000Z\nEND:VEVENT\nBEGIN:VEVENT\nUID:master\nSUMMARY:Cancelled series\nSTATUS:CANCELLED\nDTSTART:20260602T110000Z\nDTEND:20260602T120000Z\nRRULE:FREQ=DAILY;COUNT=1\nEND:VEVENT\nEND:VCALENDAR\n";
+    let range = TimeRange {
+        min: Some(OffsetDateTime::parse("2026-06-02T00:00:00Z", &Rfc3339).expect("start")),
+        max: Some(OffsetDateTime::parse("2026-06-03T00:00:00Z", &Rfc3339).expect("end")),
+    };
+    let mut events = parse_ics_events_in_range(ics, Tz::UTC, range).expect("ICS parses");
+
+    filter_ics_event_visibility(&mut events, false);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, "active");
+
+    let mut discovery = parse_ics_events_in_range(ics, Tz::UTC, range).expect("ICS parses");
+    filter_ics_event_visibility(&mut discovery, true);
+    assert_eq!(discovery.len(), 3);
+}
+
+/// The backend must filter cancellations before slicing an active page, while
+/// the discovery mode must retain the same cancellation as its first row.
+#[test]
+fn backend_applies_cancellation_visibility_before_page_slicing() {
+    const ICS: &str = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:cancelled\nSUMMARY:Cancelled\nSTATUS:CANCELLED\nDTSTART:20260602T090000Z\nDTEND:20260602T100000Z\nEND:VEVENT\nBEGIN:VEVENT\nUID:active\nSUMMARY:Active\nDTSTART:20260602T100000Z\nDTEND:20260602T110000Z\nEND:VEVENT\nEND:VCALENDAR\n";
+    let range = TimeRange {
+        min: Some(OffsetDateTime::parse("2026-06-02T00:00:00Z", &Rfc3339).expect("start")),
+        max: Some(OffsetDateTime::parse("2026-06-03T00:00:00Z", &Rfc3339).expect("end")),
+    };
+
+    let (active_url, active_handle) = serve_ics_once(ICS);
+    let active_config = validated_feed_config(active_url);
+    let backend = IcsFeedBackend::new(BTreeMap::new());
+    let active = backend
+        .list_events_page(
+            active_config.accounts.get("feed").expect("account"),
+            "main",
+            range,
+            1,
+            None,
+            false,
+        )
+        .expect("active page");
+    active_handle.join().expect("active server exits");
+    assert_eq!(active.events[0].id, "active");
+    assert!(!active.truncated);
+
+    let (discovery_url, discovery_handle) = serve_ics_once(ICS);
+    let discovery_config = validated_feed_config(discovery_url);
+    let discovery = backend
+        .list_events_page(
+            discovery_config.accounts.get("feed").expect("account"),
+            "main",
+            range,
+            1,
+            None,
+            true,
+        )
+        .expect("discovery page");
+    discovery_handle.join().expect("discovery server exits");
+    assert_eq!(discovery.events[0].id, "cancelled");
+    assert_eq!(discovery.next_cursor.as_deref(), Some("ics:1"));
+}
 
 #[test]
 fn parser_unfolds_and_extracts_basic_events() {
@@ -179,13 +244,15 @@ fn dense_recurrence_inside_requested_range_is_visible_error() {
     assert!(!err.contains("secondly"));
 }
 
+/// An orphan cancellation still has to reach the shared visibility filter so
+/// discovery can retain it and the normal path can suppress it consistently.
 #[test]
-fn cancelled_orphan_override_is_not_emitted() {
+fn cancelled_orphan_override_reaches_visibility_filter() {
     let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:cancelled\nSUMMARY:Cancelled\nSTATUS:CANCELLED\nRECURRENCE-ID:20260602T120000Z\nDTSTART:20260602T120000Z\nDTEND:20260602T130000Z\nEND:VEVENT\nEND:VCALENDAR\n";
     let start = OffsetDateTime::parse("2026-06-02T00:00:00Z", &Rfc3339).expect("time");
     let end = OffsetDateTime::parse("2026-06-03T00:00:00Z", &Rfc3339).expect("time");
 
-    let events = parse_ics_events_in_range(
+    let mut events = parse_ics_events_in_range(
         ics,
         Tz::UTC,
         TimeRange {
@@ -195,7 +262,29 @@ fn cancelled_orphan_override_is_not_emitted() {
     )
     .expect("ics parses");
 
+    assert_eq!(events.len(), 1);
+    filter_ics_event_visibility(&mut events, false);
     assert!(events.is_empty());
+}
+
+/// A cancelled override attached to a recurring master must replace its
+/// occurrence, remain discoverable, and disappear from an active-only page.
+#[test]
+fn cancelled_attached_override_is_discoverable_after_expansion() {
+    let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:series\nSUMMARY:Series\nDTSTART:20260601T120000Z\nDTEND:20260601T130000Z\nRRULE:FREQ=DAILY;COUNT=3\nEND:VEVENT\nBEGIN:VEVENT\nUID:series\nSUMMARY:Cancelled occurrence\nSTATUS:CANCELLED\nRECURRENCE-ID:20260602T120000Z\nDTSTART:20260602T120000Z\nDTEND:20260602T130000Z\nEND:VEVENT\nEND:VCALENDAR\n";
+    let range = TimeRange {
+        min: Some(OffsetDateTime::parse("2026-06-02T00:00:00Z", &Rfc3339).expect("start")),
+        max: Some(OffsetDateTime::parse("2026-06-03T00:00:00Z", &Rfc3339).expect("end")),
+    };
+    let mut discovery = parse_ics_events_in_range(ics, Tz::UTC, range).expect("ICS parses");
+
+    assert_eq!(discovery.len(), 1);
+    assert_eq!(discovery[0].status.as_deref(), Some("CANCELLED"));
+    let mut active = discovery.clone();
+    filter_ics_event_visibility(&mut active, false);
+    assert!(active.is_empty());
+    filter_ics_event_visibility(&mut discovery, true);
+    assert_eq!(discovery.len(), 1);
 }
 
 #[test]
@@ -381,6 +470,7 @@ fn backend_lists_ics_events_with_cursor_pages() {
             },
             1,
             None,
+            false,
         )
         .expect("events page");
     handle.join().expect("server exits");
@@ -431,6 +521,54 @@ fn read_event_prefers_static_id_before_recurring_suffix_parse() {
     handle.join().expect("server exits");
 
     assert_eq!(event.summary, "Static with hash");
+}
+
+/// Targeted reads must retain a complete cancelled event even though ordinary
+/// range pages suppress it.
+#[test]
+fn read_event_returns_complete_cancelled_entry() {
+    const ICS: &str = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:cancelled\nSUMMARY:Cancelled meeting\nSTATUS:CANCELLED\nDTSTART:20260602T120000Z\nDTEND:20260602T130000Z\nEND:VEVENT\nEND:VCALENDAR\n";
+    let (url, handle) = serve_ics_once(ICS);
+    let config = validated_feed_config(url);
+    let backend = IcsFeedBackend::new(BTreeMap::new());
+
+    let event = backend
+        .read_event(
+            config.accounts.get("feed").expect("account"),
+            "main",
+            "cancelled",
+        )
+        .expect("cancelled event remains targetable");
+    handle.join().expect("server exits");
+
+    assert_eq!(event.status.as_deref(), Some("CANCELLED"));
+    assert_eq!(event.start, "2026-06-02T12:00:00Z");
+    assert_eq!(event.end, "2026-06-02T13:00:00Z");
+}
+
+/// Build one validated loopback-feed configuration for backend tests.
+fn validated_feed_config(url: String) -> ValidatedConfig {
+    CalendarExtensionConfig {
+        enable: true,
+        accounts: vec![CalendarAccountConfig {
+            id: "feed".to_owned(),
+            enable: true,
+            backend: Some(CalendarBackendConfig::IcsFeed {
+                url_secret: None,
+                url: Some(url),
+                allow_plain_http: false,
+            }),
+            calendars: CalendarSelectionConfig {
+                default: Some("main".to_owned()),
+                allow: vec!["main".to_owned()],
+            },
+            timezone: Some("UTC".to_owned()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .validate()
+    .expect("valid feed config")
 }
 
 fn serve_ics_once(body: &'static str) -> (String, thread::JoinHandle<()>) {

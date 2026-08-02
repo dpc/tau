@@ -312,17 +312,17 @@ Email is exposed as split model-visible tools:
 Calendar is exposed as split model-visible tools:
 
 - `calendar_list_calendars` — returns visible calendars as opaque ids for other calendar tools.
-- `calendar_search` — lists bounded event metadata for one calendar id.
-- `calendar_get` — reads one event by `event_id`; Google ETags are cached internally for safe writes.
-- `calendar_free_busy` — returns busy blocks without descriptions.
+- `calendar_search` — lists bounded active event metadata for one calendar id. Set `include_cancelled: true` only when deliberately investigating cancellations.
+- `calendar_get` — reads one event by `event_id`, including a targeted cancelled event when the provider can read it; Google ETags are cached internally for safe writes.
+- `calendar_free_busy` — returns active busy blocks without descriptions; cancelled, transparent, and self-declined events do not occupy time.
 - `calendar_create` — queues or applies a Google event create request.
 - `calendar_update` — queues or applies a Google event patch; requires `event_id` and at least one changed field.
 - `calendar_delete` — queues or applies a Google event delete; requires `event_id`.
 - `calendar_respond` — queues or applies an RSVP response; requires `event_id` and `response`.
 
-Calendar list-style results render as headers, one blank line, then plain unindented rows. Headers include `format`; `calendar_search` and `calendar_free_busy` also include `next_cursor` and `truncated`, so pass the cursor with the same calendar/range arguments to continue. If a list has no rows, the payload is `(no matches found)`.
+Calendar list-style results render as headers, one blank line, then plain unindented rows. Headers include `format`; `calendar_search` reports `visibility: active` by default, or `active_and_cancelled` after deliberate cancellation discovery. Both range tools default to 20 rows and allow at most 100. Their opaque `next_cursor` binds the selected calendar, normalized range, filtering, visibility, and limit; continue with `{ "cursor": "..." }` only. If a list has no rows, the payload is `(no matches found)`.
 
-Calendar writes target Google accounts only. The default write policy queues `:calendar change` approvals; ICS feed accounts remain read-only. `calendar_search` accepts an optional `title` substring filter. `start` and `end` accept RFC3339 date-times with offsets, local `YYYY-MM-DDTHH:MM:SS` date-times interpreted in the configured or system timezone, natural expressions like `today`, `tomorrow`, or `next week`, and `YYYY-MM-DD` all-day dates.
+Calendar writes target Google accounts only. The default write policy queues `:calendar change` approvals; ICS feed accounts remain read-only. `calendar_search` accepts an optional `title` substring filter and `include_cancelled` boolean, which defaults to `false`. Google cancellation tombstones without complete range bounds are omitted because they cannot be placed in a bounded result. `start` and `end` accept RFC3339 date-times with offsets, local `YYYY-MM-DDTHH:MM:SS` date-times interpreted in the configured or system timezone, natural expressions like `today`, `tomorrow`, or `next week`, and `YYYY-MM-DD` all-day dates.
 
 ## User approval actions
 

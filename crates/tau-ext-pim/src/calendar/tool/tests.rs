@@ -79,6 +79,33 @@ fn calendar_schema_hides_timezone_and_has_command_conditionals() {
     assert!(update_schema.pointer("/anyOf").is_none());
 }
 
+/// The model-visible schema must advertise the runtime's conservative 20-row
+/// default and expose cancellation discovery only on calendar_search.
+#[test]
+fn search_schema_declares_active_default_and_limit() {
+    let schemas = calendar_tool_specs();
+    let search = schemas
+        .iter()
+        .find(|spec| spec.name.as_str() == "calendar_search")
+        .and_then(|spec| spec.parameters.as_ref())
+        .expect("search schema");
+    let free_busy = schemas
+        .iter()
+        .find(|spec| spec.name.as_str() == "calendar_free_busy")
+        .and_then(|spec| spec.parameters.as_ref())
+        .expect("free busy schema");
+
+    assert_eq!(
+        search.pointer("/properties/limit/default"),
+        Some(&serde_json::json!(20))
+    );
+    assert_eq!(
+        search.pointer("/properties/include_cancelled/default"),
+        Some(&serde_json::json!(false))
+    );
+    assert!(free_busy.pointer("/properties/include_cancelled").is_none());
+}
+
 #[test]
 fn calendar_tool_examples_validate_and_legacy_examples_parse() {
     // Examples are provider-owned repair hints. Validate them against the

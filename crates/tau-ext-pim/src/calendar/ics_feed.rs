@@ -143,7 +143,7 @@ impl IcsFeedBackend {
         limit: usize,
     ) -> Result<Vec<IcsEvent>, String> {
         Ok(self
-            .list_events_page(account, calendar, range, limit, None)?
+            .list_events_page(account, calendar, range, limit, None, false)?
             .events)
     }
 
@@ -155,6 +155,7 @@ impl IcsFeedBackend {
         range: TimeRange,
         limit: usize,
         cursor: Option<&str>,
+        include_cancelled: bool,
     ) -> Result<IcsEventPage, String> {
         ensure_calendar_allowed(account, calendar)?;
         let offset = parse_ics_cursor(cursor)?;
@@ -162,6 +163,7 @@ impl IcsFeedBackend {
         let timezone = ics_default_timezone(account)?;
         let mut events = parse_ics_events_in_range(&text, timezone, range)?;
         events.retain(|event| event_overlaps(event, range));
+        filter_ics_event_visibility(&mut events, include_cancelled);
         events.sort_by_key(event_sort_key);
         let truncated = offset.saturating_add(limit) < events.len();
         let next_cursor = if truncated {
@@ -529,7 +531,6 @@ fn expand_calendar_events_in_range(
         for (recurrence_id, override_seed) in override_group {
             if emitted_override_ids
                 .contains(&override_event_key(&override_seed.uid, *recurrence_id))
-                || is_cancelled(override_seed.component)
             {
                 continue;
             }
@@ -697,9 +698,6 @@ fn expand_master_in_range(
         }
         if let Some(override_seed) = overrides.and_then(|overrides| overrides.get(&timestamp)) {
             emitted_override_ids.insert(override_event_key(&override_seed.uid, timestamp));
-            if is_cancelled(override_seed.component) {
-                continue;
-            }
             push_seed_occurrence_if_overlaps(
                 override_seed,
                 override_seed.start,
@@ -787,9 +785,16 @@ fn format_range_event_time(
     }
 }
 
-fn is_cancelled(component: &ICalendarComponent) -> bool {
-    first_property_text(component, &ICalendarProperty::Status)
-        .is_some_and(|status| status.eq_ignore_ascii_case("CANCELLED"))
+/// Remove cancellation records before sorting and slicing an ICS range page.
+fn filter_ics_event_visibility(events: &mut Vec<IcsEvent>, include_cancelled: bool) {
+    if !include_cancelled {
+        events.retain(|event| {
+            !event
+                .status
+                .as_deref()
+                .is_some_and(|status| status.eq_ignore_ascii_case("cancelled"))
+        });
+    }
 }
 
 fn override_event_key(uid: &str, recurrence_id: i64) -> String {
