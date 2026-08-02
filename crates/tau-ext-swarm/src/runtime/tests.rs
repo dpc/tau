@@ -75,7 +75,7 @@ fn gates_publication_on_agent_replay_and_clears_invalid_projection() {
     let mut state = SwarmRuntime::new();
     state.config = Some(resolved_config());
     let agent = tau_swarm_api::AgentId::new("agent");
-    let mut draft = AgentDraft::new(&agent);
+    let mut draft = AgentDraft::new();
     draft.loaded = true;
     state.agents.insert(agent.clone(), draft);
     state.publish_agent(&agent).expect("pre-boundary fold");
@@ -193,7 +193,7 @@ fn session_switch_clears_incarnation_state_before_replay() {
     state.session_id = Some("old".parse().expect("session ID"));
     state.replay_complete = true;
     let agent = tau_swarm_api::AgentId::new("agent");
-    let mut draft = AgentDraft::new(&agent);
+    let mut draft = AgentDraft::new();
     draft.loaded = true;
     draft.replay_valid = true;
     state.agents.insert(agent, draft);
@@ -627,8 +627,9 @@ async fn iroh_connector_rejects_peer_mismatch_before_network() {
 }
 
 /// The real Tau runner and published Swarm 0.2 server compose Configure,
-/// replay folding, worker startup, snapshot publication, remote prompt routing,
-/// transient internal submission, canonical loopback, and accepted RPC result.
+/// display-name replay and live replacement, worker startup, snapshot
+/// publication, remote prompt routing, transient internal submission, canonical
+/// loopback, and accepted RPC result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runner_and_published_server_complete_remote_prompt_vertical() {
     let server_endpoint = Endpoint::builder(presets::Minimal)
@@ -699,6 +700,8 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
     }
     let session_id: tau_proto::SessionId = "session".parse().expect("session ID");
     let agent_id = tau_proto::AgentId::parse("agent").expect("agent ID");
+    let named_agent_id = tau_proto::AgentId::parse("named").expect("agent ID");
+    let initial_agent_id = tau_proto::AgentId::parse("initial").expect("agent ID");
     for message in [
         HarnessOutputMessage::deliver(Event::SessionStarted(tau_proto::SessionStarted {
             session_id: session_id.clone(),
@@ -714,8 +717,81 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
                 ephemeral: false,
             }),
         ),
+        HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(2),
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: agent_id.clone(),
+                creator: None,
+                parent_agent: None,
+                role: "default".into(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        ),
+        HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(3),
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: session_id.clone(),
+                agent_id: named_agent_id.clone(),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("named-init")
+                    .expect("valid initialization id"),
+                ephemeral: false,
+            }),
+        ),
+        HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(4),
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: named_agent_id.clone(),
+                creator: None,
+                parent_agent: None,
+                role: "default".into(),
+                display_name: Some("Initial".into()),
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        ),
+        HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(5),
+            Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
+                agent_id: named_agent_id.clone(),
+                display_name: "Restored".into(),
+            }),
+        ),
+        HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(6),
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: session_id.clone(),
+                agent_id: initial_agent_id.clone(),
+                agent_initialization_id: tau_proto::AgentInitializationId::parse("initial-init")
+                    .expect("valid initialization id"),
+                ephemeral: false,
+            }),
+        ),
+        HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(7),
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: initial_agent_id.clone(),
+                creator: None,
+                parent_agent: None,
+                role: "default".into(),
+                display_name: Some("Initial".into()),
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        ),
         HarnessOutputMessage::deliver(Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
             agent_id: agent_id.clone(),
+            session_id: Some(session_id.clone()),
+            error: None,
+        })),
+        HarnessOutputMessage::deliver(Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
+            agent_id: named_agent_id,
+            session_id: Some(session_id.clone()),
+            error: None,
+        })),
+        HarnessOutputMessage::deliver(Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
+            agent_id: initial_agent_id,
             session_id: Some(session_id.clone()),
             error: None,
         })),
@@ -737,13 +813,47 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
                 && view.connection == tau_swarm_core::ConnectionState::Synchronized
                 && view
                     .agents
-                    .contains_key(&tau_swarm_api::AgentId::new("agent"))
+                    .get(&tau_swarm_api::AgentId::new("agent"))
+                    .is_some_and(|agent| agent.name.is_empty())
+                && view
+                    .agents
+                    .get(&tau_swarm_api::AgentId::new("named"))
+                    .is_some_and(|agent| agent.name == "Restored")
+                && view
+                    .agents
+                    .get(&tau_swarm_api::AgentId::new("initial"))
+                    .is_some_and(|agent| agent.name == "Initial")
         }) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
     .expect("runner-published snapshot");
+
+    for expected_name in ["Operator", "Commander"] {
+        writer
+            .write_message(&HarnessOutputMessage::deliver(Event::AgentDisplayNameSet(
+                tau_proto::AgentDisplayNameSet {
+                    agent_id: agent_id.clone(),
+                    display_name: expected_name.into(),
+                },
+            )))
+            .expect("live display-name fact");
+        writer.flush().expect("display-name flush");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !server.view().snapshot().sessions.iter().any(|view| {
+                view.identity == swarm_session
+                    && view
+                        .agents
+                        .get(&tau_swarm_api::AgentId::new("agent"))
+                        .is_some_and(|agent| agent.name == expected_name)
+            }) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("live display-name publication");
+    }
 
     let commands = server.commands();
     let dispatch_session = swarm_session.clone();

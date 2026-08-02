@@ -33,8 +33,8 @@ pub const LOG_TARGET: &str = "std-swarm";
 /// Replay/live accumulator for one Tau agent load epoch.
 #[derive(Clone)]
 struct AgentDraft {
-    /// Latest display name, defaulting to the Tau agent ID.
-    name: String,
+    /// Latest explicit Tau display name, if one has been recorded.
+    name: Option<String>,
     /// Latest canonical semantic work status.
     work_status: AgentWorkStatus,
     /// Latest independent running/waiting state.
@@ -50,9 +50,9 @@ struct AgentDraft {
 }
 
 impl AgentDraft {
-    fn new(id: &AgentId) -> Self {
+    fn new() -> Self {
         Self {
-            name: id.as_str().to_owned(),
+            name: None,
             work_status: AgentWorkStatus::Unreported,
             activity: AgentActivity::Waiting,
             navigation_mode: AgentNavigationMode::Active,
@@ -65,7 +65,7 @@ impl AgentDraft {
     fn publication(&self, id: AgentId) -> Agent {
         Agent {
             id,
-            name: self.name.clone(),
+            name: self.name.clone().unwrap_or_default(),
             work_status: self.work_status.clone(),
             activity: self.activity,
             navigation_mode: self.navigation_mode,
@@ -600,7 +600,7 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
             state
                 .agents
                 .entry(id.clone())
-                .or_insert_with(|| AgentDraft::new(&id))
+                .or_insert_with(AgentDraft::new)
                 .loaded = true;
             // Publication waits for this load epoch's replay validity boundary.
         }
@@ -622,9 +622,9 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
             let draft = state
                 .agents
                 .entry(id.clone())
-                .or_insert_with(|| AgentDraft::new(&id));
+                .or_insert_with(AgentDraft::new);
             if let Some(name) = &event.display_name {
-                draft.name.clone_from(name);
+                draft.name = Some(name.clone());
             }
             state.publish_agent(&id)?;
         }
@@ -639,7 +639,7 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
             state
                 .agents
                 .entry(id.clone())
-                .or_insert_with(|| AgentDraft::new(&id))
+                .or_insert_with(AgentDraft::new)
                 .replay_valid = true;
             state.publish_agent(&id)?;
         }
@@ -657,9 +657,9 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
             state
                 .agents
                 .entry(id.clone())
-                .or_insert_with(|| AgentDraft::new(&id))
+                .or_insert_with(AgentDraft::new)
                 .name
-                .clone_from(&event.display_name);
+                .replace(event.display_name.clone());
             state.publish_agent(&id)?;
         }
         Event::AgentStatsUpdated(event) if state.session_id.as_ref() == Some(&event.session_id) => {
@@ -667,7 +667,7 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
             let draft = state
                 .agents
                 .entry(id.clone())
-                .or_insert_with(|| AgentDraft::new(&id));
+                .or_insert_with(AgentDraft::new);
             draft.work_status =
                 swarm_work_status(&event.work_status).map_err(ClientError::handler)?;
             draft.activity = match event.runtime_state {
@@ -688,7 +688,7 @@ fn fold_event(state: &mut SwarmRuntime, event: &Event) -> Result<(), ClientError
             state
                 .agents
                 .entry(id.clone())
-                .or_insert_with(|| AgentDraft::new(&id))
+                .or_insert_with(AgentDraft::new)
                 .watches = event
                 .watched_agent_ids
                 .iter()

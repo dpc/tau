@@ -6,10 +6,15 @@ owns one coherent bounded current-session view, `SwarmApplication` implements
 the published Tau Swarm client contract, and an owned worker runs the pinned
 Iroh client without blocking Tau's protocol reader.
 
-The extension waits for `session.replay_complete` before publishing. A session
-switch cancels and joins the previous worker and clears session-local blocker
-history, updates, and acknowledgements while retaining the process-incarnation
-command table. Ordinary Iroh
+The extension waits for `session.replay_complete` before publishing. An agent
+whose Tau display name is absent retains that absence while replay and live
+events are folded. At the unchanged Tau Swarm v4 publication boundary, the
+extension encodes that absence as an empty `name` string; a later explicit Tau
+display-name fact replaces it with the nonempty name.
+
+A session switch cancels and joins the previous worker and clears session-local
+blocker history, updates, and acknowledgements while retaining the
+process-incarnation command table. Ordinary Iroh
 reconnects retain that process-memory state and restart publication from a
 coherent snapshot when retained changes no longer cover the reader revision.
 `SwarmRuntime` generates one collision-resistant application-incarnation ID at
