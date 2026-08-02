@@ -35,6 +35,7 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
+        nixpkgsPkgs = nixpkgs.legacyPackages.${system};
         # TODO: get rid of custom stuff
         # pkgs = nixpkgs.legacyPackages.${system};
         pkgs = import nixpkgs {
@@ -117,11 +118,17 @@
           if (self ? rev) && (builtins.stringLength self.rev == 40) then
             self.rev
           else if (self ? dirtyRev) && (builtins.stringLength self.dirtyRev == 46) then
-            "${builtins.substring 0 16 self.dirtyRev}00000000${builtins.substring 24 16 self.dirtyRev}"
+            builtins.substring 0 40 self.dirtyRev
           else if (self ? dirtyRev) && (builtins.stringLength self.dirtyRev == 40) then
             self.dirtyRev
           else
             tauBuildRevisionPlaceholder;
+        tauBuildDirty = self ? dirtyRev;
+        tauBuildRevisionDisplay =
+          if tauBuildRevision == tauBuildRevisionPlaceholder then
+            "unknown"
+          else
+            "${builtins.substring 0 7 tauBuildRevision}${pkgs.lib.optionalString tauBuildDirty "-modified"}";
         tauBuildDate =
           if self ? lastModifiedDate then
             "${builtins.substring 0 4 self.lastModifiedDate}-${builtins.substring 4 2 self.lastModifiedDate}-${
@@ -129,6 +136,17 @@
             } ${builtins.substring 8 2 self.lastModifiedDate}:${builtins.substring 10 2 self.lastModifiedDate}"
           else
             tauBuildDatePlaceholder;
+
+        tauPackage = nixpkgsPkgs.callPackage ./nix/pkgs/tau.nix {
+          buildRevision = tauBuildRevision;
+          buildDate = tauBuildDate;
+          buildDirty = tauBuildDirty;
+        };
+        tauDirtyPackage = nixpkgsPkgs.callPackage ./nix/pkgs/tau.nix {
+          buildRevision = "0123456789abcdef0123456789abcdef01234567";
+          buildDate = "1970-01-01 00:00";
+          buildDirty = true;
+        };
 
         replaceTauBuildInfo =
           package:
@@ -480,8 +498,8 @@
       in
       {
         packages = {
-          default = multiBuild.tau;
-          tau = multiBuild.tau;
+          default = tauPackage;
+          tau = tauPackage;
           site = site;
           "cargo-crap" = cargoCrap;
         }
@@ -502,6 +520,20 @@
             crapAbsolute
             crap
             ;
+        };
+
+        checks = {
+          tau-version = tauPackage.passthru.tests.version;
+          tau-provenance = pkgs.runCommand "tau-package-provenance" { nativeBuildInputs = [ tauPackage ]; } ''
+            tau --version | grep -qF '(${tauBuildRevisionDisplay},'
+            touch "$out"
+          '';
+          tau-dirty-provenance =
+            pkgs.runCommand "tau-package-dirty-provenance" { nativeBuildInputs = [ tauDirtyPackage ]; }
+              ''
+                tau --version | grep -qF 'tau 0.1.0 (0123456-modified, 1970-01-01 00:00)'
+                touch "$out"
+              '';
         };
 
         legacyPackages = multiBuild;

@@ -16,6 +16,8 @@
 //! `.rodata`/data as one contiguous, unmerged blob.
 
 mod built_info;
+#[cfg(test)]
+mod tests;
 
 /// Magic prefix used to detect an unpatched binary (i.e. plain
 /// `cargo build` outside of the Nix packaging path).
@@ -31,6 +33,16 @@ const PLACEHOLDER_TAG: &[u8] = b"__TAU_BUILD";
 )]
 #[cfg_attr(not(target_vendor = "apple"), unsafe(link_section = ".tau_build_info"))]
 static GIT_REVISION: [u8; 40] = *b"__TAU_BUILD_GIT_REVISION_PLACEHOLDER____";
+
+/// 17-byte slot indicating whether the packaged source was dirty.
+#[used]
+#[allow(unsafe_code)]
+#[cfg_attr(
+    target_vendor = "apple",
+    unsafe(link_section = "__DATA,.tau_build_info")
+)]
+#[cfg_attr(not(target_vendor = "apple"), unsafe(link_section = ".tau_build_info"))]
+static BUILD_STATE: [u8; 17] = *b"__TAU_BUILD_DIRTY";
 
 /// 16-byte slot for the build date, formatted `YYYY-MM-DD HH:MM`.
 /// Patched in place by the Nix build's `bbe` post-processing.
@@ -67,10 +79,19 @@ pub fn build_revision() -> String {
             _ => "unknown".to_owned(),
         };
     }
-    let short = bytes.get(..7).unwrap_or(&bytes);
-    std::str::from_utf8(short)
-        .map(str::to_owned)
-        .unwrap_or_else(|_| "unknown".to_owned())
+    format_patched_revision(&bytes, &read_static(&BUILD_STATE))
+}
+
+fn format_patched_revision(revision: &[u8; 40], state: &[u8; 17]) -> String {
+    let short = revision.get(..7).unwrap_or(revision);
+    let Ok(short) = std::str::from_utf8(short) else {
+        return "unknown".to_owned();
+    };
+    if state.starts_with(b"modified") {
+        format!("{short}-modified")
+    } else {
+        short.to_owned()
+    }
 }
 
 /// `YYYY-MM-DD HH:MM` of the build, with the Nix-packaging patch
