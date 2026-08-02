@@ -64,9 +64,10 @@ prompt use `◯`; configured submitted and prompt symbols replace those respecti
 defaults. Completed agent responses use `◆`, while responses still streaming
 use `◇`.
 
-The default dark theme renders submitted user prompt text in ANSI bright white.
-Custom themes retain control of the `user.prompt` style, including any explicit
-foreground override.
+The default dark theme's named `white` foreground renders submitted user prompt
+text with ANSI palette index 15 (bright white), not ordinary-white index 7 or
+bold promotion. Custom themes retain control of the `user.prompt` style,
+including any explicit foreground override.
 
 Fixed semantic transcript rows use category markers without rewriting their
 content: agent-to-agent and external messages use `■`, harness-authored

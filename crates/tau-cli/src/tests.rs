@@ -1410,7 +1410,12 @@ fn sync(handle: &TermHandle) {
     handle.redraw_sync();
 }
 
-fn assert_rendered_bright_white(vt: &VtWriter, width: u16, text: &str) {
+fn assert_rendered_ansi_foreground(
+    vt: &VtWriter,
+    width: u16,
+    text: &str,
+    index: u8,
+) -> vt100::Color {
     let rows = vt.screen_text(width);
     let (row, column) = rows
         .iter()
@@ -1421,9 +1426,21 @@ fn assert_rendered_bright_white(vt: &VtWriter, width: u16, text: &str) {
     let expected = if std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
         vt100::Color::Default
     } else {
-        vt100::Color::Idx(15)
+        vt100::Color::Idx(index)
     };
     assert_eq!(foreground, expected, "submitted prompt {text:?}");
+    foreground
+}
+
+fn assert_rendered_bright_white(vt: &VtWriter, width: u16, text: &str) {
+    let foreground = assert_rendered_ansi_foreground(vt, width, text, 15);
+    if foreground == vt100::Color::Idx(15) {
+        assert_ne!(
+            foreground,
+            vt100::Color::Idx(7),
+            "submitted prompt {text:?} must not use ordinary white"
+        );
+    }
 }
 
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> Event {
@@ -2005,16 +2022,10 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
     assert!(vt.screen_contains(80, "hello"));
 }
 
-/// Ensures every submitted-user-prompt projection renders ANSI bright white in
-/// the default theme while custom `user.prompt` themes keep their own style.
-#[test]
-fn submitted_prompt_projections_render_default_bright_white() {
+fn render_submitted_prompt_projections(theme: tau_themes::Theme) -> VtWriter {
     let (_term, handle, vt) = setup(100, 24);
-    let mut renderer = EventRenderer::new(
-        handle.clone(),
-        tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
-    );
+    let mut renderer =
+        EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new(), theme);
     let ui_prompt = |text: &str| {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
@@ -2059,6 +2070,15 @@ fn submitted_prompt_projections_render_default_bright_white() {
     renderer.switch_agent("main".to_owned());
     sync(&handle);
 
+    vt
+}
+
+/// Ensures every submitted-user-prompt projection renders ANSI bright white in
+/// the default theme rather than ordinary-white index 7.
+#[test]
+fn submitted_prompt_projections_render_default_bright_white() {
+    let vt = render_submitted_prompt_projections(tau_themes::Theme::builtin());
+
     for text in [
         "immediate submitted prompt",
         "promoted queued prompt",
@@ -2066,6 +2086,24 @@ fn submitted_prompt_projections_render_default_bright_white() {
         "replayed submitted prompt",
     ] {
         assert_rendered_bright_white(&vt, 100, text);
+    }
+}
+
+/// Ensures each submitted-prompt projection preserves an explicit custom
+/// `user.prompt` foreground instead of restoring the default bright white.
+#[test]
+fn custom_submitted_prompt_foreground_overrides_default_bright_white() {
+    let theme = tau_themes::Theme::parse(r#"{ styles: { "user.prompt": { fg: "grey" } } }"#)
+        .expect("custom prompt theme parses");
+    let vt = render_submitted_prompt_projections(theme);
+
+    for text in [
+        "immediate submitted prompt",
+        "promoted queued prompt",
+        "steered submitted prompt",
+        "replayed submitted prompt",
+    ] {
+        assert_rendered_ansi_foreground(&vt, 100, text, 7);
     }
 }
 

@@ -78,3 +78,6 @@ pub fn convert_color(c: tau_themes::Color) -> Color {
         TC::Rgb { r, g, b } => Color::Rgb { r, g, b },
     }
 }
+
+#[cfg(test)]
+mod tests;
