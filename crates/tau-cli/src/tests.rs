@@ -13,10 +13,11 @@ use tau_proto::{
     AgentPromptQueued, AgentPromptSteered, AgentPromptSubmitted, AgentPromptTerminated,
     AgentPromptTerminationReason, AgentStandaloneCompactionStarted, CborValue, ContentPart,
     ContextItem, ContextRole, Effort, Event, ExtensionReady, HarnessContextUsageChanged,
-    HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable, MessageItem, OpaqueProviderItem,
-    ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, ServiceTier,
-    SessionStartReason, SessionStarted, ThinkingSummary, ToolBackgroundResult, ToolCallItem,
-    ToolCancelled, ToolError, ToolResult, UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
+    HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable, HarnessSessionDir, MessageItem,
+    OpaqueProviderItem, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
+    ServiceTier, SessionDirStatus, SessionStartReason, SessionStarted, ThinkingSummary,
+    ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted,
+    UiRoleUpdateAction, Verbosity,
 };
 
 use super::agent_navigation::AgentNavigationState;
@@ -1794,6 +1795,48 @@ fn initial_session_started_omits_session_status_and_role_placeholder() {
 
     assert!(!vt.screen_contains(80, "&tau-agent-test"));
     assert!(!vt.screen_contains(80, "no role selected"));
+}
+
+/// Ensures the resolved profile name follows the session-directory status while
+/// absent selection does not add a synthetic startup line.
+#[test]
+fn session_directory_status_reports_only_named_startup_profiles() {
+    let session_dir = HarnessSessionDir {
+        session_id: test_session_id("tau-agent-test"),
+        path: "/tmp/tau-agent-test".into(),
+        status: SessionDirStatus::New,
+    };
+
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.set_startup_profile(Some("someprofile".to_owned()));
+    renderer.handle(&Event::HarnessSessionDir(session_dir.clone()));
+    sync(&handle);
+    let named_lines = visible_lines(&vt, 100);
+    let session_line = named_lines
+        .iter()
+        .position(|line| line.contains("▤ session dir:"))
+        .expect("session directory status");
+    assert_eq!(
+        named_lines
+            .get(session_line + 1)
+            .map(|line| line.trim_end()),
+        Some("▤ config profile: someprofile")
+    );
+
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::HarnessSessionDir(session_dir));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "config profile:"));
 }
 
 /// A theme refresh between an optimistic session switch and its authoritative

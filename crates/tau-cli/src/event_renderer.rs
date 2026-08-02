@@ -32,12 +32,13 @@ use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolLineSegment, ToolStatus, ToolSummaryDisplay,
     agent_context_initialized_block, build_delegate_completion_display, build_tool_summary_display,
-    diff_payload_counts, extension_status_block, format_token_count, pending_tool_call_display,
-    render_action_output_block, render_compaction_block, render_diff_tool_block,
-    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_use_state, render_tool_use_state_without_status, render_turn_stats_block,
-    session_status_block, streaming_block, streaming_block_with_indicator_suffix,
-    synthesize_fallback_display, tool_duration_suffix, ui_dir_block,
+    config_profile_block, diff_payload_counts, extension_status_block, format_token_count,
+    pending_tool_call_display, render_action_output_block, render_compaction_block,
+    render_diff_tool_block, render_harness_notice, render_multi_diff_tool_block,
+    render_shell_block, render_tool_block, render_tool_use_state,
+    render_tool_use_state_without_status, render_turn_stats_block, session_status_block,
+    streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
+    tool_duration_suffix, ui_dir_block,
 };
 use crate::watch_activity::WatchActivityProjection;
 use crate::{
@@ -354,6 +355,8 @@ pub(crate) struct EventRenderer {
     model_status_block: Option<tau_cli_term::BlockId>,
     /// Current session id used to scope events and detect session transitions.
     current_session_id: Option<tau_proto::SessionId>,
+    /// Named profile resolved before this UI started its daemon.
+    startup_profile: Option<String>,
     /// Filesystem context used to rebuild the right prompt after session
     /// events.
     right_prompt_paths: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
@@ -1600,6 +1603,7 @@ impl EventRenderer {
             ready_extensions: HashSet::new(),
             model_status_block: None,
             current_session_id: None,
+            startup_profile: None,
             right_prompt_paths: None,
             diff_blocks: Vec::new(),
             diffs_expanded: state.show_diff,
@@ -1692,6 +1696,11 @@ impl EventRenderer {
         session_id: Arc<Mutex<tau_proto::SessionId>>,
     ) {
         self.draft_retargeter = Some(DraftRetargeter { handle, session_id });
+    }
+
+    /// Sets the named profile resolved for the daemon this UI starts.
+    pub(crate) fn set_startup_profile(&mut self, profile: Option<String>) {
+        self.startup_profile = profile;
     }
 
     /// Configures the filesystem context rendered beside the current session.
@@ -7597,6 +7606,10 @@ impl EventRenderer {
                 session_dir.status.as_str(),
             ),
         );
+        if let Some(profile) = self.startup_profile.as_deref() {
+            self.handle
+                .print_output("config-profile", config_profile_block(&self.theme, profile));
+        }
     }
 
     fn handle_harness_role_events(&mut self, event: &Event) -> bool {

@@ -835,6 +835,13 @@ pub(crate) fn run_chat(
 ) -> Result<(), CliError> {
     use tau_cli_term::{CommandCompletion, HighTerm};
 
+    let startup_profile = if attach {
+        None
+    } else {
+        cli_overrides
+            .profile
+            .map(|profile| profile.as_str().to_owned())
+    };
     let state_dir = tau_session_inspect::default_state_dir();
     let ui_logging = if ephemeral {
         ui_logging::init_ephemeral()
@@ -1178,6 +1185,7 @@ pub(crate) fn run_chat(
         settings.prompt_symbol.clone(),
         settings.submitted_prompt_symbol,
     );
+    renderer.set_startup_profile(startup_profile);
     renderer.set_osc8_links(settings.osc8_links);
     renderer.set_draft_retargeter(draft_handle.clone(), active_session_state.clone());
     renderer.set_right_prompt_paths(cwd.clone(), home_dir.clone());

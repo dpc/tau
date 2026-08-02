@@ -1517,6 +1517,24 @@ pub(crate) fn ui_dir_block(theme: &tau_themes::Theme, path: &Path) -> tau_cli_te
     system_path_block(theme, "ui dir: ", path, "/")
 }
 
+/// Renders the named configuration profile selected for this UI's daemon.
+pub(crate) fn config_profile_block(
+    theme: &tau_themes::Theme,
+    profile: &str,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::themed_block;
+    use tau_themes::names;
+
+    themed_block(
+        theme,
+        names::SYSTEM_INFO,
+        format!(
+            "{}config profile: {profile}",
+            crate::transcript_markers::STATUS_UPDATE
+        ),
+    )
+}
+
 pub(crate) fn session_status_block(
     theme: &tau_themes::Theme,
     path: &Path,
