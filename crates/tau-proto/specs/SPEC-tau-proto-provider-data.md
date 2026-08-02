@@ -74,6 +74,12 @@ prefer this sidecar so key order and numeric spelling remain stable for upstream
 cache identity, and fall back to serializing `value` only for older records or
 items that were not captured from provider JSON.
 
+The public Responses backend represents validated plain `reasoning_text` output
+as both `ReasoningTextKind::Full` display content and an opaque `Reasoning` item.
+The display item follows the existing thinking-visibility policy and is not
+replayed; the opaque item is the durable replay authority. Encrypted,
+summary-only, malformed, and mixed reasoning items do not enter the transcript.
+
 ## Responses assistant message dual representation
 
 `MessageItem.role`, `MessageItem.content`, and `MessageItem.phase` are Tau's

@@ -340,11 +340,14 @@ for the `responses` profile. `tau provider add` labels the existing generic
 Chat Completions choice `completions API` and this choice `responses API`.
 Responses profiles require a base URL and explicit models; Tau does not infer
 provider presets or discover models. Every turn sends the complete typed
-Responses transcript. It supports text and Function tools only and preserves
-assistant-message and Function-call replay sidecars. It deliberately omits
-`previous_response_id`, `store`, hosted/custom tools, image/file inputs, and
-public compaction. Existing `openrouter` profiles remain Chat Completions
-profiles.
+Responses transcript. It supports assistant text, plain `reasoning_text`
+reasoning, and Function tools. Plain reasoning uses the existing
+`show-thinking` UI behavior and is retained for full-transcript replay.
+Encrypted, summary-only, malformed, and mixed reasoning remains unsupported.
+The backend preserves assistant-message, reasoning-item, and Function-call
+replay sidecars. It deliberately omits `previous_response_id`, `store`,
+hosted/custom tools, image/file inputs, and public compaction. Existing
+`openrouter` profiles remain Chat Completions profiles.
 
 `tau-provider-codex` implements the private ChatGPT OAuth/Codex Responses
 contract. Ordinary inference is WebSocket-only: it has no HTTP/SSE selector or

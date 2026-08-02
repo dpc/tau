@@ -65,10 +65,13 @@ API-key OpenAI Responses provider.
 `responses` uses a generic API-key HTTP/SSE `POST /responses` adapter. It
 requires user-configured models and does not discover models or choose provider
 presets. Each turn sends the complete typed Responses transcript. It supports
-text and Function tools only, preserves Responses replay sidecars, and does not
-send `previous_response_id` or `store`; it does not expose hosted/custom tools,
-image/file inputs, or compaction. Existing `openrouter` profiles remain on
-Chat Completions.
+assistant text, plain `reasoning_text` reasoning, and Function tools. Plain
+reasoning follows the existing `show-thinking` UI behavior and is retained for
+full-transcript replay; encrypted, summary-only, malformed, and mixed reasoning
+is rejected. The backend preserves Responses replay sidecars and does not send
+`previous_response_id` or `store`; it does not expose hosted/custom tools,
+image/file inputs, or compaction. Existing `openrouter` profiles remain on Chat
+Completions.
 
 The extension has no ordinary `extensions.provider-builtin.config` schema for provider credentials; credentials belong in provider auth/profile storage, not harness config.
 ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.

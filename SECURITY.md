@@ -24,6 +24,9 @@ OpenAI-compatible Chat Completions uses HTTP/SSE, private ChatGPT/Codex inferenc
 is WebSocket-only, and all built-in provider egress shares the immutable policy
 documented in
 [`tau-provider/SECURITY.md`](crates/tau-provider/SECURITY.md).
+The generic public Responses parser's validated reasoning, sensitive replay
+sidecar, and configured-endpoint boundary are documented in
+[`tau-provider-responses/SECURITY.md`](crates/tau-provider-responses/SECURITY.md).
 
 ## Terminal presentation boundary
 

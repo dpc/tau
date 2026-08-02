@@ -9,24 +9,526 @@ use tokio::runtime as path_tokio_runtime;
 
 use super::*;
 
+/// DeepSeek-style reasoning must stream as full thinking immediately, then
+/// become a paired display item and durable opaque replay item at completion
+/// without displacing the ordinary assistant response.
+#[test]
+fn plain_reasoning_streams_displays_and_materializes_for_replay() {
+    let mut state = State::default();
+    state.apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","status":"in_progress","summary":[],"content":[]}}"#,
+    )
+    .expect("reasoning added");
+    state.apply_event(r#"{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"think "}"#,
+    )
+    .expect("reasoning delta");
+
+    let progress = state.progress();
+    assert!(progress.has_timed_semantic_output);
+    assert!(matches!(
+        progress.output_items.as_slice(),
+        [AttemptOutputItem {
+            output_index: 0,
+            item: ContextItem::ReasoningText(ReasoningTextItem {
+                kind: ReasoningTextKind::Full,
+                text,
+            }),
+        }] if text == "think "
+    ));
+
+    state.apply_event(r#"{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":1,"delta":"carefully"}"#,
+    )
+    .expect("second reasoning delta");
+    state.apply_event(r#"{"type":"response.reasoning_text.done","item_id":"rs_1","output_index":0,"content_index":0,"text":"think "}"#,
+    )
+    .expect("first reasoning text done");
+    state.apply_event(r#"{"type":"response.reasoning_text.done","item_id":"rs_1","output_index":0,"content_index":1,"text":"carefully"}"#,
+    )
+    .expect("second reasoning text done");
+    state.apply_event(r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"think "},{"type":"reasoning_text","text":"carefully"}],"provider_number":1.2300,"provider_future":true}}"#,
+    )
+    .expect("reasoning item done");
+    state.apply_event(r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"message","role":"assistant","content":[]}}"#,
+    )
+    .expect("message added");
+    state
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":1,"delta":"answer"}"#)
+        .expect("message delta");
+    state.apply_event(r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}"#,
+    )
+    .expect("message done");
+
+    let output = state.output_items();
+    assert_eq!(output.len(), 3);
+    assert!(matches!(
+        &output[0],
+        ContextItem::ReasoningText(ReasoningTextItem {
+            kind: ReasoningTextKind::Full,
+            text,
+        }) if text == "think carefully"
+    ));
+    let ContextItem::Reasoning(reasoning) = &output[1] else {
+        panic!("durable reasoning item");
+    };
+    assert_eq!(
+        reasoning.raw_json.as_deref(),
+        Some(
+            r#"{"type":"reasoning","id":"rs_1","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"think "},{"type":"reasoning_text","text":"carefully"}],"provider_number":1.2300,"provider_future":true}"#
+        )
+    );
+    let raw_reasoning: serde_json::Value = serde_json::from_str(
+        reasoning
+            .raw_json
+            .as_deref()
+            .expect("reasoning replay sidecar"),
+    )
+    .expect("reasoning replay JSON");
+    assert_eq!(
+        raw_reasoning,
+        serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "status": "completed",
+            "summary": [],
+            "content": [
+                {"type": "reasoning_text", "text": "think "},
+                {"type": "reasoning_text", "text": "carefully"},
+            ],
+            "provider_number": 1.23,
+            "provider_future": true,
+        })
+    );
+    assert!(matches!(
+        &output[2],
+        ContextItem::Message(message)
+            if message.content == vec![ContentPart::Text {
+                text: "answer".to_owned(),
+            }]
+    ));
+}
+
+/// A terminal response output array is authoritative when a provider omits
+/// incremental item events, including for plain reasoning followed by text.
+#[test]
+fn terminal_output_fallback_materializes_plain_reasoning_and_text() {
+    let mut state = State::default();
+    state.apply_event(r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"reasoning","id":"rs_1","summary":[],"content":[{"type":"reasoning_text","text":"fallback thought"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback answer"}]}]}}"#,
+    )
+    .expect("terminal output");
+
+    assert!(state.terminal);
+    assert!(!state.has_incomplete_reasoning());
+    let output = state.output_items();
+    assert_eq!(output.len(), 3);
+    assert!(matches!(
+        &output[0],
+        ContextItem::ReasoningText(reasoning)
+            if reasoning.kind == ReasoningTextKind::Full
+                && reasoning.text == "fallback thought"
+    ));
+    assert!(matches!(&output[1], ContextItem::Reasoning(_)));
+    assert!(matches!(
+        &output[2],
+        ContextItem::Message(message)
+            if message.content == vec![ContentPart::Text {
+                text: "fallback answer".to_owned(),
+            }]
+    ));
+}
+
+/// Full-transcript lowering must skip the display-only companion and prefer
+/// the durable reasoning item's Responses replay sidecar.
+#[test]
+fn plain_reasoning_replay_prefers_sidecar_and_skips_display_item() {
+    let display = ContextItem::ReasoningText(ReasoningTextItem {
+        kind: ReasoningTextKind::Full,
+        text: "display text".to_owned(),
+    });
+    assert!(lower_item(&display).expect("display lowering").is_none());
+
+    let replay = ContextItem::Reasoning(tau_proto::OpaqueProviderItem {
+        value: tau_proto::json_to_cbor(&serde_json::json!({
+            "type": "reasoning",
+            "content": [{"type": "reasoning_text", "text": "stale"}],
+        })),
+        raw_json: Some(
+            r#"{"type":"reasoning","id":"rs_raw","summary":[],"content":[{"type":"reasoning_text","text":"replay me"}],"provider_number":1.2300,"provider_future":17}"#
+                .to_owned(),
+        ),
+    });
+    let lowered = lower_item(&replay)
+        .expect("reasoning lowering")
+        .expect("reasoning input");
+    let replay_body = serde_json::to_string(&lowered).expect("serialize replay authority");
+    assert!(
+        replay_body.contains(r#""provider_number":1.2300"#),
+        "raw replay must preserve numeric spelling: {replay_body}"
+    );
+    let lowered = serde_json::to_value(lowered).expect("serialize reasoning input");
+    assert_eq!(lowered["id"], "rs_raw");
+    assert_eq!(lowered["content"][0]["text"], "replay me");
+    assert_eq!(lowered["provider_future"], 17);
+}
+
+/// Public Responses must keep rejecting every reasoning shape outside plain
+/// `reasoning_text`, as well as unsupported output item families.
+#[test]
+fn malformed_or_unsupported_reasoning_output_is_rejected() {
+    let unsupported = [
+        r#"{"type":"reasoning","summary":[]}"#,
+        r#"{"type":"reasoning","summary":[],"content":[]}"#,
+        r#"{"type":"reasoning","summary":[],"content":"thought"}"#,
+        r#"{"type":"reasoning","summary":[],"content":[{"type":"summary_text","text":"summary"}]}"#,
+        r#"{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":1}]}"#,
+        r#"{"type":"reasoning","summary":[],"encrypted_content":"SEALED","content":[{"type":"reasoning_text","text":"thought"}]}"#,
+        r#"{"type":"reasoning","summary":[{"type":"summary_text","text":"summary"}],"content":[{"type":"reasoning_text","text":"thought"}]}"#,
+        r#"{"type":"custom_tool_call","call_id":"call_1","name":"shell","input":"pwd"}"#,
+        r#"{"type":"web_search_call","id":"search_1"}"#,
+        r#"{"type":"future_output","value":"unknown"}"#,
+    ];
+
+    for item in unsupported {
+        let mut state = State::default();
+        let event =
+            format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{item}}}"#);
+        assert!(
+            matches!(state.apply_event(&event), Err(Error::UnsupportedOutput)),
+            "unexpectedly accepted {item}"
+        );
+    }
+}
+
+/// Reasoning deltas require an added plain-reasoning slot, and a stream cannot
+/// terminalize while that slot lacks a validated completed item.
+#[test]
+fn incomplete_or_unscoped_reasoning_stream_is_rejected() {
+    let mut state = State::default();
+    assert!(matches!(
+        state.apply_event(r#"{"type":"response.reasoning_text.delta","item_id":"rs_orphan","output_index":0,"content_index":0,"delta":"orphan"}"#,
+        ),
+        Err(Error::UnsupportedOutput)
+    ));
+
+    let mut state = State::default();
+    state.apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","summary":[],"content":[]}}"#,
+    )
+    .expect("reasoning added");
+    state.apply_event(r#"{"type":"response.reasoning_text.delta","item_id":"rs_unfinished","output_index":0,"content_index":0,"delta":"unfinished"}"#,
+    )
+    .expect("reasoning delta");
+    assert!(state.has_incomplete_reasoning());
+    assert!(state.output_items().is_empty());
+}
+
+/// The finite attempt must reject a stream that displays reasoning but reaches
+/// its sentinel without a validated durable reasoning item.
+#[test]
+fn incomplete_reasoning_attempt_rejects_terminal_sentinel() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE server");
+    let address = listener.local_addr().expect("SSE server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept request");
+        let _ = read_http_request(&mut socket);
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"summary\":[],\"content\":[]}}\n\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_unfinished\",\"output_index\":0,\"content_index\":0,\"delta\":\"unfinished\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write response");
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    server.join().expect("join SSE server");
+    let AttemptOutcome::Terminal(failure) = outcome else {
+        panic!("incomplete reasoning must be terminal");
+    };
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+    assert!(failure.progress.has_timed_semantic_output);
+}
+
+/// Reasoning event indices are required exact `u32` values so malformed
+/// provider events cannot alias an existing output slot.
+#[test]
+fn malformed_reasoning_output_indices_are_rejected() {
+    for output_index in ["", r#""0""#, "4294967296"] {
+        let mut state = State::default();
+        let member = if output_index.is_empty() {
+            String::new()
+        } else {
+            format!(r#","output_index":{output_index}"#)
+        };
+        let event = format!(
+            r#"{{"type":"response.output_item.added"{member},"item":{{"type":"reasoning","summary":[],"content":[]}}}}"#
+        );
+        assert!(
+            matches!(state.apply_event(&event), Err(Error::UnsupportedOutput)),
+            "unexpectedly accepted output_index {output_index}"
+        );
+    }
+}
+
+/// Once a reasoning slot streams display text, only one matching reasoning
+/// completion may create its durable authority.
+#[test]
+fn reasoning_completion_rejects_cross_type_and_repeated_transitions() {
+    for done_item in [
+        r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}"#,
+        r#"{"type":"function_call","call_id":"call_1","name":"run","arguments":"{}"}"#,
+    ] {
+        let mut state = reasoning_delta_state();
+        let event = format!(
+            r#"{{"type":"response.output_item.done","output_index":0,"item":{done_item}}}"#
+        );
+        assert!(matches!(
+            state.apply_event(&event),
+            Err(Error::UnsupportedOutput)
+        ));
+    }
+
+    let mut state = reasoning_delta_state();
+    let done = r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_test","summary":[],"content":[{"type":"reasoning_text","text":"thought"}]}}"#;
+    state.apply_event(done).expect("first reasoning completion");
+    assert!(matches!(
+        state.apply_event(done),
+        Err(Error::UnsupportedOutput)
+    ));
+
+    for event in [
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}"#,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}"#,
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"run","arguments":"{}"}}"#,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"run","arguments":"{}"}}"#,
+        r#"{"type":"response.output_text.delta","output_index":0,"delta":"answer"}"#,
+    ] {
+        let mut state = completed_reasoning_state();
+        assert!(
+            matches!(state.apply_event(event), Err(Error::UnsupportedOutput)),
+            "completed reasoning accepted conflicting event {event}"
+        );
+    }
+
+    let mut pending = reasoning_delta_state();
+    assert!(matches!(
+        pending.apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","summary":[],"content":[]}}"#,
+        ),
+        Err(Error::UnsupportedOutput)
+    ));
+}
+
+/// Every streaming representation of one reasoning slot must agree on its
+/// provider identity and accumulated full text.
+#[test]
+fn reasoning_stream_rejects_identity_or_text_contradictions() {
+    for event in [
+        r#"{"type":"response.reasoning_text.delta","output_index":0,"content_index":0,"delta":"missing id"}"#,
+        r#"{"type":"response.reasoning_text.delta","item_id":"rs_test","output_index":0,"delta":"missing content index"}"#,
+    ] {
+        let mut state = reasoning_delta_state();
+        let before = state.items[0].reasoning_parts.clone();
+        assert!(matches!(
+            state.apply_event(event),
+            Err(Error::UnsupportedOutput)
+        ));
+        assert_eq!(state.items[0].reasoning_parts, before);
+    }
+
+    let mut done_mismatch = reasoning_delta_state();
+    assert!(matches!(
+        done_mismatch.apply_event(r#"{"type":"response.reasoning_text.done","item_id":"rs_test","output_index":0,"content_index":0,"text":"different"}"#,
+        ),
+        Err(Error::UnsupportedOutput)
+    ));
+
+    let mut item_text_mismatch = reasoning_delta_state();
+    assert!(matches!(
+        item_text_mismatch.apply_event(r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_test","summary":[],"content":[{"type":"reasoning_text","text":"different"}]}}"#,
+        ),
+        Err(Error::UnsupportedOutput)
+    ));
+
+    let mut id_mismatch = State::default();
+    id_mismatch.apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_added","summary":[],"content":[]}}"#,
+    )
+    .expect("reasoning added");
+    assert!(matches!(
+        id_mismatch.apply_event(r#"{"type":"response.reasoning_text.delta","item_id":"rs_other","output_index":0,"content_index":0,"delta":"foreign"}"#,
+        ),
+        Err(Error::UnsupportedOutput)
+    ));
+    assert!(id_mismatch.items[0].reasoning_parts.is_empty());
+    assert_eq!(
+        id_mismatch.items[0].reasoning_item_id,
+        Some(ReasoningItemId("rs_added".to_owned()))
+    );
+    assert!(matches!(
+        id_mismatch.apply_event(r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_done","summary":[],"content":[{"type":"reasoning_text","text":"thought"}]}}"#,
+        ),
+        Err(Error::UnsupportedOutput)
+    ));
+}
+
+/// Reasoning parts may advance only in append-only content-index order, and a
+/// terminalized part rejects every later delta or duplicate done event.
+#[test]
+fn reasoning_parts_enforce_append_only_streaming_and_single_completion() {
+    let mut state = State::default();
+    state
+        .apply_event(
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_parts","summary":[],"content":[]}}"#,
+        )
+        .expect("reasoning added");
+    for event in [
+        r#"{"type":"response.reasoning_text.delta","item_id":"rs_parts","output_index":0,"content_index":0,"delta":"a"}"#,
+        r#"{"type":"response.reasoning_text.delta","item_id":"rs_parts","output_index":0,"content_index":1,"delta":"b"}"#,
+    ] {
+        state.apply_event(event).expect("ordered reasoning delta");
+    }
+    let before = state.progress();
+    assert!(matches!(
+        &before.output_items[0].item,
+        ContextItem::ReasoningText(item) if item.text == "ab"
+    ));
+    assert!(matches!(
+        state.apply_event(
+            r#"{"type":"response.reasoning_text.delta","item_id":"rs_parts","output_index":0,"content_index":0,"delta":"c"}"#,
+        ),
+        Err(Error::UnsupportedOutput)
+    ));
+    assert!(matches!(
+        &state.progress().output_items[0].item,
+        ContextItem::ReasoningText(item) if item.text == "ab"
+    ));
+
+    let mut state = reasoning_delta_state();
+    let done = r#"{"type":"response.reasoning_text.done","item_id":"rs_test","output_index":0,"content_index":0,"text":"thought"}"#;
+    state.apply_event(done).expect("reasoning part done");
+    assert!(matches!(
+        state.apply_event(done),
+        Err(Error::UnsupportedOutput)
+    ));
+    assert!(matches!(
+        state.apply_event(
+            r#"{"type":"response.reasoning_text.delta","item_id":"rs_test","output_index":0,"content_index":0,"delta":"again"}"#,
+        ),
+        Err(Error::UnsupportedOutput)
+    ));
+}
+
+/// A terminal output array is authoritative, but it may not contradict
+/// streamed reasoning by silently dropping or changing its durable item.
+#[test]
+fn terminal_output_rejects_streamed_reasoning_disagreement() {
+    for mut state in [reasoning_delta_state(), completed_reasoning_state()] {
+        assert!(matches!(
+            state.apply_event(r#"{"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}}"#,
+            ),
+            Err(Error::UnsupportedOutput)
+        ));
+    }
+
+    for reasoning in [
+        r#"{"type":"reasoning","id":"different","summary":[],"content":[{"type":"reasoning_text","text":"thought"}]}"#,
+        r#"{"type":"reasoning","id":"rs_test","summary":[],"content":[{"type":"reasoning_text","text":"different"}]}"#,
+        r#"{"type":"reasoning","id":"rs_test","summary":[],"content":[{"type":"reasoning_text","text":"thought"}],"provider_future":true}"#,
+    ] {
+        let mut state = completed_reasoning_state();
+        let event =
+            format!(r#"{{"type":"response.completed","response":{{"output":[{reasoning}]}}}}"#);
+        assert!(
+            matches!(state.apply_event(&event), Err(Error::UnsupportedOutput)),
+            "terminal reasoning replaced authority with {reasoning}"
+        );
+        assert!(!state.terminal);
+        assert!(state.response_id.is_none());
+        assert!(matches!(
+            state.output_items().as_slice(),
+            [ContextItem::ReasoningText(_), ContextItem::Reasoning(_)]
+        ));
+    }
+}
+
+/// Replay validation must reject malformed raw sidecars and malformed legacy
+/// CBOR fallbacks instead of forwarding arbitrary opaque provider items.
+#[test]
+fn invalid_reasoning_replay_authorities_are_rejected() {
+    let invalid = [
+        tau_proto::OpaqueProviderItem {
+            value: tau_proto::CborValue::Null,
+            raw_json: Some("{".to_owned()),
+        },
+        tau_proto::OpaqueProviderItem {
+            value: tau_proto::CborValue::Null,
+            raw_json: Some(
+                r#"{"type":"reasoning","encrypted_content":"SEALED","content":[{"type":"reasoning_text","text":"thought"}]}"#
+                    .to_owned(),
+            ),
+        },
+        tau_proto::OpaqueProviderItem {
+            value: tau_proto::json_to_cbor(&serde_json::json!({
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "summary"}],
+            })),
+            raw_json: None,
+        },
+    ];
+    for item in invalid {
+        assert!(matches!(
+            lower_item(&ContextItem::Reasoning(item)),
+            Err(Error::UnsupportedOutput)
+        ));
+    }
+}
+
+fn reasoning_delta_state() -> State {
+    let mut state = State::default();
+    state.apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_test","summary":[],"content":[]}}"#,
+    )
+    .expect("reasoning added");
+    state.apply_event(r#"{"type":"response.reasoning_text.delta","item_id":"rs_test","output_index":0,"content_index":0,"delta":"thought"}"#,
+    )
+    .expect("reasoning delta");
+    state
+}
+
+fn completed_reasoning_state() -> State {
+    let mut state = reasoning_delta_state();
+    state.apply_event(r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_test","summary":[],"content":[{"type":"reasoning_text","text":"thought"}]}}"#,
+    )
+    .expect("reasoning completed");
+    state
+}
+
 /// Function-call streaming must preserve the exact argument JSON for the next
 /// stateless full-transcript replay rather than reserializing it.
 #[test]
 fn function_call_arguments_keep_raw_spelling() {
     let mut state = State::default();
-    apply_event(
-        &mut state,
-        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","status":"in_progress","call_id":"call_1","name":"run","arguments":""}}"#,
+    state.apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","status":"in_progress","call_id":"call_1","name":"run","arguments":""}}"#,
     )
     .expect("function call item");
-    apply_event(
-        &mut state,
-        r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{ \"path\""}"#,
+    state.apply_event(r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{ \"path\""}"#,
     )
     .expect("argument delta");
-    apply_event(
-        &mut state,
-        r#"{"type":"response.function_call_arguments.done","output_index":0,"arguments":"{ \"path\" : \"/tmp\" }"}"#,
+    state.apply_event(r#"{"type":"response.function_call_arguments.done","output_index":0,"arguments":"{ \"path\" : \"/tmp\" }"}"#,
     )
     .expect("argument completion");
     let ContextItem::ToolCall(call) = &state.items[0].item else {
@@ -43,30 +545,31 @@ fn function_call_arguments_keep_raw_spelling() {
 #[test]
 fn completion_event_ends_stream_without_done_sentinel() {
     let mut state = State::default();
-    apply_event(
-        &mut state,
-        r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}"#,
+    state.apply_event(r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}"#,
     )
     .expect("completion event");
     assert!(state.terminal);
     assert_eq!(state.response_id.as_deref(), Some("resp_1"));
 }
 
-/// The text-and-Function public contract must reject image-bearing assistant
-/// items at parse time, before a forbidden raw sidecar can reach replay.
+/// The text-only assistant contract must reject image- and file-bearing items
+/// at parse time, before a forbidden raw sidecar can reach replay.
 #[test]
-fn image_assistant_item_is_rejected_at_parse_time() {
-    let mut state = State::default();
-    let error = apply_event(
-        &mut state,
-        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_image","image_url":"https://example.test/image"}]}}"#,
-    )
-    .expect_err("image content must not enter the transcript");
-    assert!(matches!(error, Error::UnsupportedOutput));
-    assert!(matches!(
-        state.items.first().map(|slot| &slot.item),
-        Some(ContextItem::UnknownProviderItem(item)) if item.raw_json.is_none()
-    ));
+fn image_or_file_assistant_item_is_rejected_at_parse_time() {
+    for part in [
+        r#"{"type":"output_image","image_url":"https://example.test/image"}"#,
+        r#"{"type":"output_file","file_id":"file_1"}"#,
+    ] {
+        let mut state = State::default();
+        let event = format!(
+            r#"{{"type":"response.output_item.done","output_index":0,"item":{{"type":"message","role":"assistant","content":[{part}]}}}}"#
+        );
+        let error = state
+            .apply_event(&event)
+            .expect_err("non-text content must be rejected");
+        assert!(matches!(error, Error::UnsupportedOutput));
+        assert!(state.items.is_empty());
+    }
 }
 
 /// A public Responses attempt must post to `/responses`, parse semantic SSE

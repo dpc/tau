@@ -17,7 +17,8 @@ fn profile_round_trips_explicit_models() {
 }
 
 /// The public profile must publish only its explicitly configured model with
-/// the Function/text-only metadata surface.
+/// the Function/text metadata surface; reasoning remains response content, not
+/// a configurable reasoning-control capability.
 #[test]
 fn profile_publishes_explicit_responses_model() {
     let provider = ResponsesProvider {
@@ -44,4 +45,54 @@ fn profile_publishes_explicit_responses_model() {
         vec![tau_proto::ToolType::Function]
     );
     assert!(!models[0].supports_compaction);
+}
+
+/// Public Responses plain reasoning progress must use the established full
+/// reasoning delta so the existing `show-thinking` policy controls visibility.
+#[test]
+fn plain_reasoning_progress_emits_append_only_full_thinking() {
+    let mut sampler = sampling::ResponsesResponseSampler::new();
+    sampler.latest_items = vec![tau_provider_responses::AttemptOutputItem {
+        output_index: 2,
+        item: tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Full,
+            text: "think".to_owned(),
+        }),
+    }];
+    assert_eq!(
+        sampler.deltas(),
+        vec![tau_proto::ProviderResponseTextDelta::ReasoningText {
+            output_index: 2,
+            kind: tau_proto::ReasoningTextKind::Full,
+            text: "think".to_owned(),
+        }]
+    );
+
+    sampler.latest_items = vec![tau_provider_responses::AttemptOutputItem {
+        output_index: 2,
+        item: tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Full,
+            text: "think again".to_owned(),
+        }),
+    }];
+    assert_eq!(
+        sampler.deltas(),
+        vec![tau_proto::ProviderResponseTextDelta::ReasoningText {
+            output_index: 2,
+            kind: tau_proto::ReasoningTextKind::Full,
+            text: " again".to_owned(),
+        }]
+    );
+
+    sampler.latest_items = vec![tau_provider_responses::AttemptOutputItem {
+        output_index: 2,
+        item: tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Full,
+            text: "think revised".to_owned(),
+        }),
+    }];
+    assert!(
+        sampler.deltas().is_empty(),
+        "sampler must never publish a non-append replacement if an upstream parser regresses"
+    );
 }
