@@ -3,9 +3,10 @@
 ## Record justification
 
 Foreground terminal authority spans configured-report admission, interception,
-agent-journal persistence, wait and loop accounting, tool scheduling, lifecycle
-synthesis, renderer projection, and provider-context replay, so no single local
-artifact can own the complete durable-before-runtime contract.
+agent-journal persistence, runtime-only canonical publication, wait and loop
+accounting, tool scheduling, lifecycle synthesis, renderer projection, and
+provider-context replay, so no single local artifact can own the complete
+canonical-before-projection-and-settlement contract.
 
 ## Scope
 
@@ -18,9 +19,11 @@ unconfigured, and stale configured generations have no report authority. No
 peer may author canonical `tool.result`, `tool.result_display`, `tool.error`, `tool.cancelled`,
 `provider.tool_result`, `provider.tool_error`, or background completion facts.
 
-This specification covers terminal result, error, and cancellation reports
-only. Tool request routing, progress, registration lifecycle, actions, and
-shell command completion remain separate protocol families.
+This specification covers terminal result, error, and cancellation reports,
+plus the canonical projection and settlement boundary for harness-synthesized
+and internal foreground errors without a transcript owner. Tool request
+routing, progress, registration lifecycle, actions, and shell command
+completion remain separate protocol families.
 
 ## Downstream validation
 
@@ -54,6 +57,15 @@ foreground error likewise commits protected harness-sourced
 `provider.tool_error` before deriving `tool.error`. A valid foreground
 cancellation publishes protected harness-sourced `tool.cancelled`, which is its
 own durable completion authority.
+
+The same provider-first boundary applies when a foreground error has no open
+transcript owner, including loaded-agent-correlated internal calls and truly
+uncorrelated peer calls. The canonical `provider.tool_error` crosses ordinary
+runtime publication and protected interception before `tool.error` is derived.
+It does not acquire a semantic-journal owner or durability. Correlated
+wait/failure-loop state, tool accounting, caller cleanup, disconnect batches,
+and lifecycle teardown settle only after that canonical runtime commit; each
+terminal settles once even if the canonical or derived event was parked.
 
 Canonical terminal facts are immutable and must-pass through interception.
 Interceptors may observe them but cannot rewrite or drop them. The harness
@@ -96,6 +108,8 @@ history. `tool.result`, `tool.result_display`, and `tool.error` remain transient
 facts; only the display projection is owned by UI consumers. The protected
 `provider.tool_result` / `provider.tool_error` counterparts
 retain the durable agent-transcript and replay contract. Canonical
+provider terminals without an open transcript owner remain runtime-only and
+gain no replay contract. Canonical
 `tool.cancelled` and background completion facts retain their existing terminal
 semantic persistence. UI replay derives the same result-display DTOs from those
 full canonical facts without exposing raw successful output. No report has

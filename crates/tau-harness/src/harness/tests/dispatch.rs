@@ -4044,6 +4044,17 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
     )
     .expect("start side agent");
     let side_cid = ext_query_cid(&h, "q-invalid-tool").expect("side conversation");
+    let _interceptor = connect_test_tool(&mut h, "side-invalid-terminal-interceptor");
+    h.handle_extension_event(
+        "side-invalid-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_TOOL_ERROR,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register side terminal interceptor");
     let first_prompt_id = h
         .agents
         .get(&side_cid)
@@ -4071,6 +4082,25 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
     h.handle_provider_response_finished(response)
         .expect("reject invalid side-agent tool call");
 
+    assert!(h.pending_intercept.is_some());
+    let parked_call_id = h
+        .tool_agents
+        .iter()
+        .find_map(|(call_id, owner)| (owner == &side_cid).then(|| call_id.clone()))
+        .expect("normalized side call remains live");
+    let parked_side_agent = h.agents.get(&side_cid).expect("side agent remains parked");
+    assert_eq!(parked_side_agent.tools_in_flight, 1);
+    assert!(parked_side_agent.in_flight_prompt.is_none());
+    assert!(!h.completed_tool_calls.contains(&parked_call_id));
+
+    h.handle_extension_event(
+        "side-invalid-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit side canonical error");
+
     let side_agent = h.agents.get(&side_cid).expect("side agent remains loaded");
     let continuation = side_agent
         .in_flight_prompt
@@ -4081,6 +4111,19 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
         side_agent.turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
+    assert_eq!(side_agent.tools_in_flight, 0);
+    assert!(h.completed_tool_calls.contains(&parked_call_id));
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Event::ProviderToolError(error) | Event::ToolError(error)
+                    if error.call_id == parked_call_id
+            ))
+            .count(),
+        2
+    );
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::SessionAgentUnloaded(unloaded)
@@ -26204,6 +26247,17 @@ fn wait_resolves_on_synthetic_tool_error() {
     };
     h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
         .expect("start wait");
+    let _interceptor = connect_test_tool(&mut h, "wait-error-interceptor");
+    h.handle_extension_event(
+        "wait-error-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_TOOL_ERROR,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register canonical error interceptor");
 
     let missing_message = unavailable_tool_error_message(&ToolName::new("missing"));
     h.publish_terminal_tool_error(
@@ -26220,6 +26274,32 @@ fn wait_resolves_on_synthetic_tool_error() {
             display: None,
         },
     );
+
+    assert!(h.pending_intercept.is_some());
+    assert!(h.tool_agents.contains_key("target-call"));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolError(error) if error.call_id.as_str() == "wait-call"
+    )));
+
+    h.handle_extension_event(
+        "wait-error-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit canonical synthetic error");
+    assert!(
+        h.pending_intercept.is_some(),
+        "the wait helper's own canonical error remains parked"
+    );
+    h.handle_extension_event(
+        "wait-error-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit canonical wait-helper error");
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,

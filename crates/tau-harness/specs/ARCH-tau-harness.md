@@ -142,6 +142,10 @@ processing and publishing protected harness-sourced terminal or provider facts.
 Successful provider and background facts then produce distinct payload-free UI
 display events in both live and replay paths; see
 [SPEC-terminal-tool-reports-and-canonical-outcomes](../../../specs/SPEC-terminal-tool-reports-and-canonical-outcomes.md).
+Ownerless and harness-internal foreground errors use the same provider-first
+post-commit reaction without acquiring journal ownership: their runtime
+`provider.tool_error` commit precedes `tool.error`, wait/loop settlement,
+accounting, and teardown cleanup.
 Configured Tool/Core shell providers likewise submit
 `shell.command_progress_reported` and `shell.command_finished_reported` through
 generic publication. The post-commit consumer revalidates the captured

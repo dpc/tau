@@ -36,7 +36,7 @@ use crate::error::HarnessError;
 use crate::event::{ExternalMessageToolCompletedCommand, HarnessCommand, HarnessEvent};
 use crate::harness::{
     AgentMessageRecipientStatus, AgentToolCall, BackgroundCompletionPromptMode, Harness,
-    PendingExternalAgentMessageAuth, TerminalSettlement,
+    PendingExternalAgentMessageAuth,
 };
 
 /// Maximum overdue long-wait occurrences published in one scheduler cycle.
@@ -2402,7 +2402,7 @@ impl Harness {
             originator: tau_proto::PromptOriginator::User,
         };
         let transcript_owner = self.harness_owned_terminal_transcript_owner(cid, &call_id);
-        let _settlement = self.publish_terminal_tool_result(transcript_owner, None, result);
+        self.publish_terminal_tool_result(transcript_owner, None, result);
     }
 
     pub(crate) fn finish_harness_owned_tool_with_error(
@@ -2441,9 +2441,6 @@ impl Harness {
         };
         let transcript_owner = self.harness_owned_terminal_transcript_owner(cid, &call_id);
         self.publish_terminal_tool_error(transcript_owner, None, error);
-        if transcript_owner.is_none() {
-            self.finish_harness_owned_tool_tracking(&call_id);
-        }
     }
 
     pub(crate) fn finish_prebuilt_internal_tool_result(&mut self, result: ToolResult) {
@@ -2478,7 +2475,7 @@ impl Harness {
         } else {
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);
-            let _settlement = self.publish_terminal_tool_result(transcript_owner, None, result);
+            self.publish_terminal_tool_result(transcript_owner, None, result);
         }
     }
 
@@ -2516,9 +2513,6 @@ impl Harness {
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&owner_cid, &call_id);
             self.publish_terminal_tool_error(transcript_owner, None, error);
-            if transcript_owner.is_none() {
-                self.finish_harness_owned_tool_tracking(&call_id);
-            }
         }
     }
 
@@ -2541,7 +2535,6 @@ impl Harness {
             };
             let transcript_owner =
                 self.harness_owned_terminal_transcript_owner(&cid, &wait_call_id);
-            let ownerless = transcript_owner.is_none();
             let cause = match &reply.kind {
                 WaitReplyKind::Result { .. } => tau_proto::ToolTerminalCause::Completed,
                 WaitReplyKind::Error { .. } => tau_proto::ToolTerminalCause::ToolError,
@@ -2554,7 +2547,7 @@ impl Harness {
                 self.pending_wait_settlements
                     .insert(wait_call_id.clone(), settlement);
             }
-            let settlement = match reply.kind {
+            match reply.kind {
                 WaitReplyKind::Result { result, display } => self.publish_terminal_tool_result(
                     transcript_owner,
                     None,
@@ -2586,9 +2579,6 @@ impl Harness {
                         originator: tau_proto::PromptOriginator::User,
                     },
                 ),
-            };
-            if ownerless && matches!(settlement, TerminalSettlement::Caller) {
-                self.finish_harness_owned_tool_tracking(&wait_call_id);
             }
         }
     }

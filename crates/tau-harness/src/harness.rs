@@ -2094,15 +2094,6 @@ impl Borrow<tau_proto::ShellCommandId> for UiShellRouteId {
     }
 }
 
-/// Component responsible for settling runtime state after terminal publication.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TerminalSettlement {
-    /// The canonical terminal fact's post-commit reaction settles the call.
-    PostCommit,
-    /// The publication caller settles the call after transient projections.
-    Caller,
-}
-
 /// Central harness event loop and runtime state.
 ///
 /// Owns the event bus, live connections, durable stores, and provider/tool
@@ -2206,6 +2197,9 @@ pub struct Harness {
     /// Wait settlements held until their canonical wait terminal commits.
     pending_wait_settlements:
         HashMap<ToolCallId, path_crate_harness::subagents_tool::PendingWaitSettlement>,
+    /// Calls whose canonical terminal clears runtime state without advancing
+    /// the owning tool turn.
+    post_commit_runtime_only_tool_terminals: HashSet<ToolCallId>,
     /// Background completion prompt policy retained until its canonical
     /// terminal commits.
     pending_background_completion_modes: HashMap<ToolCallId, BackgroundCompletionPromptMode>,
@@ -3175,6 +3169,7 @@ impl Harness {
             pending_declaration_observations: HashMap::new(),
             pending_terminal_observations: HashMap::new(),
             pending_wait_settlements: HashMap::new(),
+            post_commit_runtime_only_tool_terminals: HashSet::new(),
             pending_background_completion_modes: HashMap::new(),
             pending_cancellation_observations: HashMap::new(),
             peer_tool_requests: HashSet::new(),
@@ -4917,13 +4912,13 @@ impl Harness {
         })
     }
 
-    /// Publish one terminal result and identify its runtime settlement owner.
+    /// Publish one terminal result for post-commit runtime settlement.
     fn publish_terminal_tool_result(
         &mut self,
         cid: Option<&AgentId>,
         source: Option<&tau_proto::ConnectionId>,
         result: ToolResult,
-    ) -> TerminalSettlement {
+    ) {
         if result.kind == ToolResultKind::Final
             && let Some(cid) = cid
             && self.tool_terminal_has_open_durable_owner(cid, &result.call_id)
@@ -4937,7 +4932,6 @@ impl Harness {
         match cid {
             Some(cid) if self.tool_terminal_has_open_durable_owner(cid, &result.call_id) => {
                 self.publish_for_agent_from(cid, source, Event::ProviderToolResult(result));
-                TerminalSettlement::PostCommit
             }
             Some(cid) => {
                 self.tool_agents
@@ -4951,7 +4945,6 @@ impl Harness {
                     false,
                     None,
                 );
-                TerminalSettlement::PostCommit
             }
             None => {
                 let source = self.resolved_publish_source(source);
@@ -4962,18 +4955,17 @@ impl Harness {
                     false,
                     None,
                 );
-                TerminalSettlement::PostCommit
             }
         }
     }
 
-    /// Publish one terminal error and identify its runtime settlement owner.
+    /// Publish one terminal error for post-commit runtime settlement.
     fn publish_terminal_tool_error(
         &mut self,
         cid: Option<&AgentId>,
         source: Option<&tau_proto::ConnectionId>,
         error: ToolError,
-    ) -> TerminalSettlement {
+    ) {
         self.publish_terminal_tool_error_with_cause(
             cid,
             source,
@@ -4989,7 +4981,7 @@ impl Harness {
         source: Option<&tau_proto::ConnectionId>,
         error: ToolError,
         cause: tau_proto::ToolTerminalCause,
-    ) -> TerminalSettlement {
+    ) {
         if let Some(cid) = cid
             && self.tool_terminal_has_open_durable_owner(cid, &error.call_id)
         {
@@ -4998,20 +4990,29 @@ impl Harness {
         match cid {
             Some(cid) if self.tool_terminal_has_open_durable_owner(cid, &error.call_id) => {
                 self.publish_for_agent_from(cid, source, Event::ProviderToolError(error));
-                TerminalSettlement::PostCommit
             }
             Some(cid) => {
-                self.publish_event(source, Event::ToolError(error.clone()));
-                self.publish_event(source, Event::ProviderToolError(error.clone()));
-                self.record_tool_failure_loop_signature(cid, &error);
-                self.record_wait_tool_error(error, None);
-                TerminalSettlement::Caller
+                self.tool_agents
+                    .entry(error.call_id.clone())
+                    .or_insert_with(|| cid.clone());
+                let source = self.resolved_publish_source(source);
+                self.enqueue_publish(
+                    source.as_ref(),
+                    Event::ProviderToolError(error),
+                    false,
+                    false,
+                    None,
+                );
             }
             None => {
-                self.publish_event(source, Event::ToolError(error.clone()));
-                self.publish_event(source, Event::ProviderToolError(error.clone()));
-                self.record_wait_tool_error(error, None);
-                TerminalSettlement::Caller
+                let source = self.resolved_publish_source(source);
+                self.enqueue_publish(
+                    source.as_ref(),
+                    Event::ProviderToolError(error),
+                    false,
+                    false,
+                    None,
+                );
             }
         }
     }
@@ -6937,6 +6938,21 @@ impl Harness {
             Event::ToolBackgroundError(error) => &error.call_id,
             _ => return,
         };
+        let runtime_only_cid = self.take_post_commit_runtime_only_tool_cid(call_id);
+        if let Event::ProviderToolError(error) = event {
+            let projection_cid = runtime_only_cid.clone().or_else(|| {
+                self.tool_agents
+                    .get(call_id)
+                    .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                    .cloned()
+            });
+            match projection_cid.as_ref() {
+                Some(cid) => {
+                    self.publish_for_agent_from(cid, source, Event::ToolError(error.clone()));
+                }
+                None => self.publish_event(source, Event::ToolError(error.clone())),
+            }
+        }
         if let Event::ProviderToolResult(result) = event {
             let projection_cid = self
                 .tool_agents
@@ -6967,26 +6983,55 @@ impl Harness {
             _ => {}
         }
         let Some(append_outcome) = append_outcome else {
-            if let Event::ProviderToolResult(result) = event {
-                self.record_wait_tool_result(result.clone(), None);
-                if let Some(cid) = self
-                    .tool_agents
+            let disconnect_batch_pending = self.disconnect_terminal_batch_pending.contains(call_id);
+            let runtime_cid = runtime_only_cid.clone().or_else(|| {
+                self.tool_agents
                     .get(call_id)
                     .or_else(|| self.peer_internal_tool_agents.get(call_id))
                     .cloned()
-                {
-                    self.reset_loop_guard_for_progress(&cid);
+            });
+            match event {
+                Event::ProviderToolResult(result) => {
+                    self.record_wait_tool_result(result.clone(), None);
+                    if let Some(cid) = self
+                        .tool_agents
+                        .get(call_id)
+                        .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                        .cloned()
+                    {
+                        self.reset_loop_guard_for_progress(&cid);
+                    }
+                    self.finish_non_durable_tool_tracking_after_terminal(call_id);
                 }
-                self.finish_harness_owned_tool_tracking(call_id);
+                Event::ProviderToolError(error) => {
+                    if let Some(cid) = runtime_only_cid.clone().or_else(|| {
+                        self.tool_agents
+                            .get(call_id)
+                            .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                            .cloned()
+                    }) {
+                        self.record_tool_failure_loop_signature(&cid, error);
+                    }
+                    self.record_wait_tool_error(error.clone(), None);
+                    if runtime_only_cid.is_none() {
+                        if disconnect_batch_pending {
+                            self.finish_non_durable_disconnect_tool_tracking(call_id);
+                        } else {
+                            self.finish_non_durable_tool_tracking_after_terminal(call_id);
+                        }
+                    }
+                }
+                _ => {}
             }
+            self.release_disconnect_terminal_batch_after_commit(call_id, runtime_cid);
             return;
         };
-        let Some(cid) = self
-            .tool_agents
-            .get(call_id)
-            .or_else(|| self.peer_internal_tool_agents.get(call_id))
-            .cloned()
-        else {
+        let Some(cid) = runtime_only_cid.clone().or_else(|| {
+            self.tool_agents
+                .get(call_id)
+                .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                .cloned()
+        }) else {
             return;
         };
         if let Event::ToolBackgroundResult(result) = event {
@@ -7034,7 +7079,6 @@ impl Harness {
                 self.record_wait_tool_result(result.clone(), Some(append_outcome.observation_id));
             }
             Event::ProviderToolError(error) => {
-                self.publish_for_agent_from(&cid, source, Event::ToolError(error.clone()));
                 self.record_tool_failure_loop_signature(&cid, error);
                 self.record_wait_tool_error(error.clone(), Some(append_outcome.observation_id));
             }
@@ -7047,20 +7091,14 @@ impl Harness {
             _ => unreachable!("terminal variants handled above"),
         }
 
-        if self.disconnect_terminal_batch_pending.remove(call_id) {
+        if runtime_only_cid.is_some() {
+            return;
+        }
+
+        if self.disconnect_terminal_batch_pending.contains(call_id) {
             self.finish_tool_call_runtime_state(call_id.as_str());
             self.clear_tool_call_tracking(call_id.as_str());
-            self.disconnect_terminal_batch_completed
-                .push((call_id.clone(), cid));
-            if self.disconnect_terminal_batch_pending.is_empty() {
-                let completed = std::mem::take(&mut self.disconnect_terminal_batch_completed);
-                self.drain_pending_tool_invocations_or_report();
-                for (completed_call_id, completed_cid) in completed {
-                    self.maybe_complete_agent_turn_for(&completed_cid, completed_call_id.as_str());
-                }
-                self.drain_publish_idle_dispatches();
-                self.try_advance_queue();
-            }
+            self.release_disconnect_terminal_batch_after_commit(call_id, Some(cid));
             return;
         }
 
@@ -7089,6 +7127,73 @@ impl Harness {
                 self.on_tool_call_complete(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
             }
+        }
+    }
+
+    /// Release scheduler advancement after one disconnect-synthesized canonical
+    /// foreground terminal commits.
+    fn release_disconnect_terminal_batch_after_commit(
+        &mut self,
+        call_id: &ToolCallId,
+        cid: Option<AgentId>,
+    ) {
+        if !self.disconnect_terminal_batch_pending.remove(call_id) {
+            return;
+        }
+        if let Some(cid) = cid {
+            self.disconnect_terminal_batch_completed
+                .push((call_id.clone(), cid));
+        }
+        if !self.disconnect_terminal_batch_pending.is_empty() {
+            return;
+        }
+        let completed = std::mem::take(&mut self.disconnect_terminal_batch_completed);
+        self.drain_pending_tool_invocations_or_report();
+        for (completed_call_id, completed_cid) in completed {
+            self.maybe_complete_agent_turn_for(&completed_cid, completed_call_id.as_str());
+        }
+        self.drain_publish_idle_dispatches();
+        self.try_advance_queue();
+    }
+
+    /// Clear one non-durable disconnect terminal without draining scheduler
+    /// work before the complete disconnect batch commits.
+    fn finish_non_durable_disconnect_tool_tracking(&mut self, call_id: &ToolCallId) {
+        if let Some(cid) = self.peer_internal_tool_agents.get(call_id).cloned() {
+            self.tool_turn.mark_complete(call_id);
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent.tools_in_flight = agent.tools_in_flight.saturating_sub(1);
+            }
+            self.emit_agent_stats_updated(&cid);
+        } else {
+            self.finish_tool_call_runtime_state(call_id.as_str());
+        }
+        self.clear_tool_call_tracking(call_id.as_str());
+    }
+
+    /// Settle and retain attribution for a runtime-only terminal mode before
+    /// deriving its transient projection from the committed canonical event.
+    fn take_post_commit_runtime_only_tool_cid(&mut self, call_id: &ToolCallId) -> Option<AgentId> {
+        if !self.post_commit_runtime_only_tool_terminals.remove(call_id) {
+            return None;
+        }
+        let cid = self
+            .tool_agents
+            .get(call_id)
+            .or_else(|| self.peer_internal_tool_agents.get(call_id))
+            .cloned()?;
+        self.finish_tool_call_runtime_state(call_id.as_str());
+        self.clear_tool_call_tracking(call_id.as_str());
+        Some(cid)
+    }
+
+    /// Settle one non-journal terminal after its canonical event commits.
+    fn finish_non_durable_tool_tracking_after_terminal(&mut self, call_id: &ToolCallId) {
+        if self.post_commit_runtime_only_tool_terminals.remove(call_id) {
+            self.finish_tool_call_runtime_state(call_id.as_str());
+            self.clear_tool_call_tracking(call_id.as_str());
+        } else {
+            self.finish_harness_owned_tool_tracking(call_id);
         }
     }
 
@@ -8127,13 +8232,16 @@ impl Harness {
             }
             return Ok(None);
         }
-        if let Event::ProviderToolResult(result) = event
-            && !persist
+        if let Some(call_id) = match event {
+            Event::ProviderToolResult(result) => Some(&result.call_id),
+            Event::ProviderToolError(error) => Some(&error.call_id),
+            _ => None,
+        } && !persist
             && self
                 .tool_agents
-                .get(&result.call_id)
-                .or_else(|| self.peer_internal_tool_agents.get(&result.call_id))
-                .is_none_or(|cid| !self.tool_terminal_has_open_durable_owner(cid, &result.call_id))
+                .get(call_id)
+                .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                .is_none_or(|cid| !self.tool_terminal_has_open_durable_owner(cid, call_id))
         {
             // Harness-owned wait and peer completions can have a live agent route
             // without a declared transcript call. They still publish the
@@ -13363,7 +13471,6 @@ impl Harness {
         tool_name: ToolName,
         message: String,
     ) {
-        let call_id = request.call_id.to_string();
         let owning_cid = self.tool_agents.get(&request.call_id).cloned();
         let rejected = ToolRejected {
             call_id: request.call_id.clone(),
@@ -13398,9 +13505,6 @@ impl Harness {
             Some(crate::harness::harness_connection_id()),
             error,
         );
-        if owning_cid.is_none() {
-            self.clear_tool_call_tracking(&call_id);
-        }
     }
 
     fn handle_extension_tool_terminal_event(
@@ -13459,7 +13563,6 @@ impl Harness {
         if self.tool_turn.is_backgrounded(&result.call_id) {
             self.handle_background_tool_result(crate::harness::harness_connection_id(), result);
         } else if let Some(cid) = self.tool_agents.get(&result.call_id).cloned() {
-            let call_id = result.call_id.clone();
             let mut allows_provider_image = false;
             if let Some(tool) = self.pending_tools.get(&result.call_id) {
                 result.tool_name = tool.name.clone();
@@ -13502,7 +13605,7 @@ impl Harness {
                     %error,
                     "rejecting tool result before dedup and generic publication"
                 );
-                let settlement = self.publish_terminal_tool_error(
+                self.publish_terminal_tool_error(
                     Some(&cid),
                     Some(crate::harness::harness_connection_id()),
                     ToolError {
@@ -13519,10 +13622,6 @@ impl Harness {
                         originator: result.originator,
                     },
                 );
-                if matches!(settlement, TerminalSettlement::Caller) {
-                    self.on_tool_call_complete(call_id.as_str());
-                    self.clear_tool_call_tracking(call_id.as_str());
-                }
                 return;
             }
             // Collapse byte-identical large results into a pointer back to the
@@ -13534,7 +13633,7 @@ impl Harness {
             // (during its teardown) leaves `tree.head` on the *parent* branch —
             // folding the result there misplaces it and produces orphan ToolUse
             // blocks when the parent conv is later re-prompted.
-            let _settlement = self.publish_terminal_tool_result(
+            self.publish_terminal_tool_result(
                 Some(&cid),
                 Some(crate::harness::harness_connection_id()),
                 result,
@@ -13545,7 +13644,6 @@ impl Harness {
             result.tool_name = tool.name;
             result.tool_type = tool.tool_type;
             if !result.provider_content.is_empty() {
-                let call_id = result.call_id.clone();
                 self.publish_terminal_tool_error(
                     None,
                     Some(crate::harness::harness_connection_id()),
@@ -13559,7 +13657,6 @@ impl Harness {
                         originator: result.originator,
                     },
                 );
-                self.clear_tool_call_tracking(call_id.as_str());
             } else {
                 self.publish_terminal_tool_result(
                     None,
@@ -13586,25 +13683,19 @@ impl Harness {
         if self.tool_turn.is_backgrounded(&error.call_id) {
             self.handle_background_tool_error(Some(crate::harness::harness_connection_id()), error);
         } else if let Some(cid) = self.tool_agents.get(&error.call_id).cloned() {
-            let call_id = error.call_id.clone();
             if let Some(tool) = self.pending_tools.get(&error.call_id) {
                 error.tool_name = tool.name.clone();
                 error.tool_type = tool.tool_type;
             }
             self.dedup_tool_error(&cid, &mut error);
-            let settlement = self.publish_terminal_tool_error(
+            self.publish_terminal_tool_error(
                 Some(&cid),
                 Some(crate::harness::harness_connection_id()),
                 error,
             );
-            if matches!(settlement, TerminalSettlement::Caller) {
-                self.on_tool_call_complete(call_id.as_str());
-                self.clear_tool_call_tracking(call_id.as_str());
-            }
         } else if self.peer_tool_requests.contains(&error.call_id)
             && let Some(tool) = self.pending_tools.get(&error.call_id).cloned()
         {
-            let call_id = error.call_id.to_string();
             error.tool_name = tool.name;
             error.tool_type = tool.tool_type;
             self.publish_terminal_tool_error(
@@ -13612,7 +13703,6 @@ impl Harness {
                 Some(crate::harness::harness_connection_id()),
                 error,
             );
-            self.clear_tool_call_tracking(&call_id);
         } else {
             self.emit_info(&format!(
                 "discarding duplicate tool error for call_id={}",
@@ -16431,11 +16521,6 @@ impl Harness {
         let foreground_batch = failed_call_ids
             .iter()
             .filter(|call_id| !self.tool_turn.is_backgrounded(call_id))
-            .filter(|call_id| {
-                self.tool_agents
-                    .get(*call_id)
-                    .is_some_and(|cid| self.tool_terminal_has_open_durable_owner(cid, call_id))
-            })
             .cloned()
             .collect::<Vec<_>>();
         self.disconnect_terminal_batch_pending
@@ -16472,8 +16557,6 @@ impl Harness {
                         Some(crate::harness::harness_connection_id()),
                         error,
                     );
-                    self.tool_turn.mark_complete(&call_id);
-                    self.clear_tool_call_tracking(call_id.as_str());
                 }
                 continue;
             }
@@ -16489,17 +16572,12 @@ impl Harness {
             // have been terminalized.
             let owner = self.tool_agents.get(call_id.as_str()).cloned();
             if let Some(cid) = owner.as_ref() {
-                let settlement = self.publish_terminal_tool_error_with_cause(
+                self.publish_terminal_tool_error_with_cause(
                     Some(cid),
                     Some(crate::harness::harness_connection_id()),
                     error,
                     tau_proto::ToolTerminalCause::ProviderDisconnected,
                 );
-                if matches!(settlement, TerminalSettlement::Caller) {
-                    self.disconnect_terminal_batch_pending.remove(&call_id);
-                    self.on_tool_call_complete_inner(call_id.as_str(), false);
-                    self.clear_tool_call_tracking(call_id.as_str());
-                }
             } else {
                 // No conversation attribution — fall back to the
                 // unsnapped publish so the error still reaches the
@@ -16509,8 +16587,6 @@ impl Harness {
                     Some(crate::harness::harness_connection_id()),
                     error,
                 );
-                self.tool_turn.mark_complete(&call_id);
-                self.clear_tool_call_tracking(call_id.as_str());
             }
         }
 
@@ -16886,6 +16962,7 @@ impl Harness {
         self.pending_tool_providers.remove(call_id);
         self.pending_terminal_observations.remove(call_id);
         self.pending_wait_settlements.remove(call_id);
+        self.post_commit_runtime_only_tool_terminals.remove(call_id);
         self.pending_background_completion_modes.remove(call_id);
         self.pending_cancellation_observations.remove(call_id);
         if let Some(prompt_id) = self.prompt_tool_call_prompts.remove(call_id)
@@ -20308,6 +20385,7 @@ impl Harness {
         self.pending_declaration_observations.clear();
         self.pending_terminal_observations.clear();
         self.pending_wait_settlements.clear();
+        self.post_commit_runtime_only_tool_terminals.clear();
         self.pending_cancellation_observations.clear();
         self.peer_tool_requests.clear();
         self.peer_internal_tool_agents.clear();
@@ -26456,12 +26534,14 @@ impl Harness {
                 .get(cid)
                 .and_then(|conv| conv.in_flight_prompt.as_ref())
                 .is_some_and(|prompt_id| Some(prompt_id) != completed_prompt_id);
+        let replacement_tool_terminal_in_flight =
+            keep_parented_conversation && self.tool_agents.values().any(|owner| owner == cid);
         // Release before removing or detaching the side agent so
         // queued descendants can still resolve their parent agent
         // while starting. Active descendants keep their own copied state. Result
         // delivery can synchronously dispatch a replacement prompt, so do not
         // overwrite that prompt's running state while detaching the old request.
-        if !replacement_prompt_in_flight {
+        if !replacement_prompt_in_flight && !replacement_tool_terminal_in_flight {
             self.set_agent_turn_state(cid, AgentTurnState::Idle);
         }
         self.release_start_agent_request(cid);
@@ -27721,7 +27801,11 @@ impl Harness {
         let call_id: ToolCallId = call.id.clone();
         self.tool_agents.insert(call_id.clone(), cid.clone());
         self.bump_tools_started_for(cid);
-        let settlement = self.publish_terminal_tool_error(
+        if !complete_turn && !self.tool_terminal_has_open_durable_owner(cid, &call_id) {
+            self.post_commit_runtime_only_tool_terminals
+                .insert(call_id.clone());
+        }
+        self.publish_terminal_tool_error(
             Some(cid),
             source,
             ToolError {
@@ -27735,14 +27819,6 @@ impl Harness {
                 display: None,
             },
         );
-        if matches!(settlement, TerminalSettlement::Caller) {
-            if complete_turn {
-                self.on_tool_call_complete(call_id.as_str());
-            } else {
-                self.finish_tool_call_runtime_state(call_id.as_str());
-            }
-            self.clear_tool_call_tracking(call_id.as_str());
-        }
     }
 
     fn tool_owner_agent_id(&self, cid: &AgentId) -> AgentId {
@@ -27990,7 +28066,7 @@ impl Harness {
                 originator: owner_originator.clone(),
             };
             self.publish_for_agent_from(cid, source, Event::ToolRequest(request));
-            let settlement = self.publish_terminal_tool_error(
+            self.publish_terminal_tool_error(
                 Some(cid),
                 source,
                 ToolError {
@@ -28004,10 +28080,6 @@ impl Harness {
                     display: None,
                 },
             );
-            if matches!(settlement, TerminalSettlement::Caller) {
-                self.on_tool_call_complete(call_id.as_str());
-                self.clear_tool_call_tracking(call_id.as_str());
-            }
             return Ok(());
         };
         let internal_tool_name = tool_spec.name.clone();
@@ -28138,11 +28210,7 @@ impl Harness {
 
                     display: None,
                 };
-                let settlement = self.publish_terminal_tool_error(Some(cid), source, error);
-                if matches!(settlement, TerminalSettlement::Caller) {
-                    self.on_tool_call_complete(call_id.as_str());
-                    self.clear_tool_call_tracking(call_id.as_str());
-                }
+                self.publish_terminal_tool_error(Some(cid), source, error);
             }
             Err(error) => return Err(HarnessError::ToolRoute(error)),
         }

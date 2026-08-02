@@ -31,21 +31,22 @@ conversation and has no extension terminal owner. That correlation is
 runtime-only and distinct from transcript tool-call ownership. It participates
 in pending accounting, wait projection, ephemeral classification, and agent
 unload cleanup. Result/error completion publishes ownerless, non-transcript
-terminal facts, decrements runtime accounting, clears live correlation, and
-retains the completed-call tombstone. Unavailable routing publishes
-harness-sourced `tool.rejected`. For an ownerless, non-transcript call it then
-publishes protected `tool.error` and `provider.tool_error` in that order and
-closes the pending call while retaining its completed-call tombstone.
+canonical provider facts before deriving transient runtime projections, then
+decrements runtime accounting, clears live correlation, and retains the
+completed-call tombstone. Unavailable routing publishes harness-sourced
+`tool.rejected`. For an ownerless, non-transcript call it then publishes
+protected `provider.tool_error`, derives `tool.error` after the canonical
+runtime commit, and closes the pending call exactly once while retaining its
+completed-call tombstone.
 `tool.started` preserves the
 committed request's agent id, arguments, tool identity, and originator;
 request-time rejection preserves its tool identity and originator. Later
 terminal reports retain their routed producer metadata.
 
 Ownerless, non-transcript calls have no durable provider-terminal journal
-authority and remain outside
-[SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md).
-For journal-backed request rejection, the durable provider terminal instead
-commits before renderer projection or pending-call cleanup, as specified by
+authority. Their provider-first runtime commit and post-commit settlement, and
+the durable provider-first boundary for journal-backed request rejection, are
+specified by
 [SPEC-terminal-tool-reports-and-canonical-outcomes](SPEC-terminal-tool-reports-and-canonical-outcomes.md).
 
 Generic intake preserves `Emit.persist`. A request with `persist=false` is live-only.

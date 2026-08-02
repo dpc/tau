@@ -1,5 +1,4 @@
 use super::*;
-use crate::harness::TerminalSettlement;
 use crate::harness::tests::dispatch::{final_tool_result, setup_routed_test_tool_call, tool_error};
 use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
@@ -219,6 +218,77 @@ fn parked_ownerless_result_settles_once_after_canonical_commit() {
     );
 }
 
+/// An agent-correlated, non-transcript internal error retains wait/accounting
+/// ownership until its canonical provider error commits, then settles once.
+#[test]
+fn parked_ownerless_error_settles_once_after_canonical_commit() {
+    let (_tmp, mut harness) = setup_routed_test_tool_call("seed-error-owner", "owned_tool");
+    let cid = harness
+        .tool_agents
+        .remove("seed-error-owner")
+        .expect("seed owner");
+    let call_id = ToolCallId::from("parked-ownerless-error");
+    harness
+        .peer_internal_tool_agents
+        .insert(call_id.clone(), cid.clone());
+    harness.agents.get_mut(&cid).expect("agent").tools_in_flight = 1;
+    intercept_terminal_names(
+        &mut harness,
+        vec![
+            tau_proto::EventName::PROVIDER_TOOL_ERROR,
+            tau_proto::EventName::TOOL_ERROR,
+        ],
+    );
+
+    harness.finish_prebuilt_internal_tool_error(tool_error(
+        call_id.as_str(),
+        "skill",
+        "original failure",
+    ));
+    assert!(harness.pending_intercept.is_some());
+    assert_eq!(harness.peer_internal_tool_agents.get(&call_id), Some(&cid));
+    assert_eq!(harness.agents[&cid].tools_in_flight, 1);
+    assert!(committed_terminal_events(&harness, call_id.as_str()).is_empty());
+
+    reply(
+        &mut harness,
+        InterceptAction::Pass(Some(Box::new(Event::ProviderToolError(tool_error(
+            call_id.as_str(),
+            "forged",
+            "forged canonical replacement",
+        ))))),
+    );
+
+    assert!(harness.pending_intercept.is_some());
+    assert!(!harness.peer_internal_tool_agents.contains_key(&call_id));
+    assert_eq!(harness.agents[&cid].tools_in_flight, 0);
+    reply(
+        &mut harness,
+        InterceptAction::Pass(Some(Box::new(Event::ToolError(tool_error(
+            call_id.as_str(),
+            "forged",
+            "forged projection replacement",
+        ))))),
+    );
+
+    assert!(matches!(
+        committed_terminal_events(&harness, call_id.as_str()).as_slice(),
+        [
+            (_, Event::ProviderToolError(provider)),
+            (_, Event::ToolError(error)),
+        ] if provider.message == "original failure"
+            && error == provider
+    ));
+    assert_eq!(
+        harness
+            .completed_tool_calls
+            .iter()
+            .filter(|completed| *completed == &call_id)
+            .count(),
+        1
+    );
+}
+
 /// A truly uncorrelated peer request remains live while its canonical result is
 /// parked, then clears only after commit.
 #[test]
@@ -257,6 +327,148 @@ fn parked_uncorrelated_peer_result_clears_tracking_after_commit() {
         committed_terminal_events(&harness, call_id.as_str()).as_slice(),
         [(_, Event::ProviderToolResult(_)), (_, Event::ToolResult(_)),]
     ));
+}
+
+/// A truly uncorrelated peer error keeps request metadata live while its
+/// canonical provider error is parked and clears it only after commit.
+#[test]
+fn parked_uncorrelated_peer_error_clears_tracking_after_commit() {
+    let (_tmp, mut harness) = setup_routed_test_tool_call("seed-peer-error", "owned_tool");
+    let call_id = ToolCallId::from("parked-peer-error");
+    harness.peer_tool_requests.insert(call_id.clone());
+    harness.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("peer_tool"),
+            internal_name: ToolName::new("peer_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            allows_provider_image: false,
+        },
+    );
+    intercept_terminal_names(
+        &mut harness,
+        vec![tau_proto::EventName::PROVIDER_TOOL_ERROR],
+    );
+
+    harness.handle_extension_tool_error(
+        crate::harness::harness_connection_id(),
+        tool_error(call_id.as_str(), "peer_tool", "peer failure"),
+    );
+    assert!(harness.pending_intercept.is_some());
+    assert!(harness.peer_tool_requests.contains(&call_id));
+    assert!(harness.pending_tools.contains_key(&call_id));
+    assert!(committed_terminal_events(&harness, call_id.as_str()).is_empty());
+
+    reply(&mut harness, InterceptAction::Pass(None));
+
+    assert!(!harness.peer_tool_requests.contains(&call_id));
+    assert!(!harness.pending_tools.contains_key(&call_id));
+    assert!(matches!(
+        committed_terminal_events(&harness, call_id.as_str()).as_slice(),
+        [
+            (_, Event::ProviderToolError(provider)),
+            (_, Event::ToolError(error)),
+        ] if provider.message == "peer failure"
+            && error == provider
+    ));
+}
+
+/// Disconnect teardown keeps every ownerless peer call and queued dispatch
+/// parked until the complete canonical provider-error batch commits.
+#[test]
+fn parked_ownerless_disconnect_error_defers_teardown_until_canonical_commit() {
+    let (_tmp, mut harness) = setup_routed_test_tool_call("seed-disconnect", "owned_tool");
+    let cid = harness.tool_agents["seed-disconnect"].clone();
+    harness.clear_tool_call_tracking("seed-disconnect");
+    harness.tool_turn.push(
+        cid,
+        AgentToolCall {
+            call_ref: None,
+            id: "queued-after-ownerless-disconnect".into(),
+            name: ToolName::new("owned_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        },
+        tau_proto::BackgroundSupport::Never,
+    );
+    let call_ids = [
+        ToolCallId::from("ownerless-disconnect-a"),
+        ToolCallId::from("ownerless-disconnect-b"),
+    ];
+    for call_id in &call_ids {
+        harness.peer_tool_requests.insert(call_id.clone());
+        harness.pending_tools.insert(
+            call_id.clone(),
+            PendingTool {
+                name: ToolName::new("peer_tool"),
+                internal_name: ToolName::new("peer_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                allows_provider_image: false,
+            },
+        );
+        harness
+            .pending_tool_providers
+            .insert(call_id.clone(), crate::test_connection_id("conn-owner"));
+    }
+    intercept_terminal_names(
+        &mut harness,
+        vec![tau_proto::EventName::PROVIDER_TOOL_ERROR],
+    );
+
+    harness.handle_disconnect(&crate::test_connection_id("conn-owner"));
+
+    assert!(harness.pending_intercept.is_some());
+    for call_id in &call_ids {
+        assert!(harness.peer_tool_requests.contains(call_id));
+        assert!(harness.pending_tools.contains_key(call_id));
+        assert!(harness.disconnect_terminal_batch_pending.contains(call_id));
+        assert!(committed_terminal_events(&harness, call_id.as_str()).is_empty());
+    }
+    assert_eq!(
+        harness.tool_turn.pending_len(),
+        1,
+        "scheduler advancement remains blocked before canonical commit"
+    );
+
+    reply(&mut harness, InterceptAction::Pass(None));
+
+    assert!(!harness.peer_tool_requests.contains(&call_ids[0]));
+    assert!(harness.peer_tool_requests.contains(&call_ids[1]));
+    assert!(
+        !harness
+            .disconnect_terminal_batch_pending
+            .contains(&call_ids[0])
+    );
+    assert!(
+        harness
+            .disconnect_terminal_batch_pending
+            .contains(&call_ids[1])
+    );
+    assert_eq!(
+        harness.tool_turn.pending_len(),
+        1,
+        "the first commit cannot advance past the remaining canonical terminal"
+    );
+
+    reply(&mut harness, InterceptAction::Pass(None));
+
+    for call_id in &call_ids {
+        assert!(!harness.peer_tool_requests.contains(call_id));
+        assert!(!harness.pending_tools.contains_key(call_id));
+        assert!(!harness.disconnect_terminal_batch_pending.contains(call_id));
+        assert!(matches!(
+            committed_terminal_events(&harness, call_id.as_str()).as_slice(),
+            [
+                (_, Event::ProviderToolError(provider)),
+                (_, Event::ToolError(error)),
+            ] if provider == error
+        ));
+    }
+    assert_eq!(
+        harness.tool_turn.pending_len(),
+        0,
+        "scheduler advancement resumes after the final canonical commit"
+    );
 }
 
 /// A provider-terminal append error rejects that attempt without faulting the
@@ -392,13 +604,10 @@ fn direct_append_fault_discards_deferred_terminal() {
     harness.emit_info("park nonsemantic publication");
     assert!(harness.pending_intercept.is_some());
 
-    assert_eq!(
-        harness.publish_terminal_tool_result(
-            Some(&cid),
-            None,
-            final_tool_result("deferred-fault", "owned_tool", "deferred"),
-        ),
-        TerminalSettlement::PostCommit
+    harness.publish_terminal_tool_result(
+        Some(&cid),
+        None,
+        final_tool_result("deferred-fault", "owned_tool", "deferred"),
     );
     assert_eq!(harness.deferred_publishes.len(), 1);
 

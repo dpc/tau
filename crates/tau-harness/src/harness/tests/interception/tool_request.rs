@@ -400,8 +400,8 @@ fn empty_call_id_replacement_falls_back_to_original_request() {
 }
 
 /// Unavailable routing must preserve extension-originated metadata, publish the
-/// rejection before both protected terminal projections, and retain a
-/// tombstone.
+/// rejection before the canonical provider terminal and derived projection, and
+/// retain a tombstone.
 #[test]
 fn unavailable_request_closes_with_ordered_harness_outcomes() {
     let tmp = TempDir::new().expect("tempdir");
@@ -433,8 +433,8 @@ fn unavailable_request_closes_with_ordered_harness_outcomes() {
         [
             (Some(request_source), Event::ToolRequest(_)),
             (Some(rejected_source), Event::ToolRejected(rejected)),
-            (Some(error_source), Event::ToolError(error)),
             (Some(provider_error_source), Event::ProviderToolError(provider_error)),
+            (Some(error_source), Event::ToolError(error)),
         ] if request_source == "requester"
             && rejected_source == HARNESS_CONNECTION_ID
             && error_source == HARNESS_CONNECTION_ID
@@ -463,8 +463,8 @@ fn unavailable_request_closes_with_ordered_harness_outcomes() {
         [
             "tool.request",
             "tool.rejected",
-            "tool.error",
-            "provider.tool_error"
+            "provider.tool_error",
+            "tool.error"
         ]
     );
 }
