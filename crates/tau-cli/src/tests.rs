@@ -2089,6 +2089,22 @@ fn submitted_prompt_projections_render_default_bright_white() {
     }
 }
 
+/// Ensures the active `tau-dpc` theme renders every submitted-prompt
+/// projection bright white rather than inheriting the terminal-default color.
+#[test]
+fn submitted_prompt_projections_render_dpc_bright_white() {
+    let vt = render_submitted_prompt_projections(tau_themes::Theme::builtin_dpc());
+
+    for text in [
+        "immediate submitted prompt",
+        "promoted queued prompt",
+        "steered submitted prompt",
+        "replayed submitted prompt",
+    ] {
+        assert_rendered_bright_white(&vt, 100, text);
+    }
+}
+
 /// Ensures each submitted-prompt projection preserves an explicit custom
 /// `user.prompt` foreground instead of restoring the default bright white.
 #[test]

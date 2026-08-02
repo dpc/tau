@@ -299,13 +299,16 @@ fn builtin_default_theme_styles_stay_palette_safe() {
     }
 }
 
-/// Ensures the personalized `tau-dpc` built-in theme parses without
-/// snapshotting any visual choices, so future theme tuning does not churn test
-/// expectations.
+/// Ensures the personalized `tau-dpc` theme explicitly renders submitted user
+/// prompts bright white instead of inheriting the terminal-default foreground.
 #[test]
-fn builtin_dpc_theme_parses() {
+fn builtin_dpc_theme_resolves_submitted_user_prompts_as_bright_white() {
     let theme = Theme::builtin_dpc();
-    let _ = theme.resolve_style(&StyleName::new("user.prompt"));
+    let prompt = theme.resolve_style(&StyleName::new("user.prompt"));
+
+    assert!(prompt.bold);
+    assert_eq!(prompt.fg, Some(Color::White));
+    assert!(prompt.bg.is_none());
 }
 
 /// Ensures user-authored theme typos are rejected instead of being silently

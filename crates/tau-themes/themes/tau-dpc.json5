@@ -6,7 +6,7 @@
   description: "dpc's personal theme/design to work with. Generated from rad:z66La5YXmV5jbW77ByXvoeTs1c5n.",
   styles: {
     // -- User input --
-    "user.prompt":          { bold: true },
+    "user.prompt":          { fg: "white", bold: true },
     "user.prompt.queued":   { fg: "dark_grey" },
 
     // -- Agent responses --
