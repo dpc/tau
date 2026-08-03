@@ -564,8 +564,18 @@ impl ColdAttachStager {
         }
     }
 
-    /// Stops reconstruction and drains the retained baseline before buffered
+    /// Stops reconstruction after deriving an owner-aware baseline for buffered
     /// live frames and an optional overflowing delivery.
+    ///
+    /// The first pass walks buffered frames in order and determines whether a
+    /// held replay start needs materializing: it survives a buffered terminal
+    /// only when an earlier buffered progress frame needs that start as its
+    /// renderer owner. It ignores starts and progress after a terminal. The
+    /// second pass emits starts and progress only with an active owner,
+    /// preserves the first terminal even without one, and suppresses every
+    /// later lifecycle frame. This preserves a valid progress/terminal
+    /// transition without creating an ownerless progress block after replay
+    /// failure, ownership rejection, or a late report.
     fn finish_tool_reconstruction(
         &mut self,
         overflow: Option<RendererDelivery>,
@@ -584,52 +594,91 @@ impl ColdAttachStager {
         if discard_baseline {
             self.tool_reconciliation = ToolReconciliation::FailedClosed;
         }
+        let mut buffered_live_starts = HashSet::new();
+        let mut buffered_terminals = HashSet::new();
+        let mut progress_before_terminal = HashSet::new();
+        let mut first_pass_settled_calls = HashSet::new();
         for buffered in state.buffered_live.iter().chain(overflow.iter()) {
-            if let Some(call_id) = tool_terminal_id(&buffered.event) {
-                state.pending_starts.remove(call_id);
-            } else if let Event::ToolStarted(started) = &buffered.event {
-                state.pending_starts.remove(&started.call_id);
+            match tool_lifecycle_frame(&buffered.event) {
+                Some(ToolLifecycleFrame::Started(call_id))
+                    if !first_pass_settled_calls.contains(call_id) =>
+                {
+                    buffered_live_starts.insert(call_id.clone());
+                }
+                Some(ToolLifecycleFrame::Progress(call_id))
+                    if !first_pass_settled_calls.contains(call_id) =>
+                {
+                    progress_before_terminal.insert(call_id.clone());
+                }
+                Some(ToolLifecycleFrame::Terminal(call_id)) => {
+                    first_pass_settled_calls.insert(call_id.clone());
+                    buffered_terminals.insert(call_id.clone());
+                }
+                _ => {}
             }
         }
         let mut ready = self.finish();
-        let mut starts = if discard_baseline {
-            Vec::new()
-        } else {
-            state.pending_starts.drain().collect::<Vec<_>>()
-        };
-        starts.sort_by_key(|(_, delivery)| delivery.delivery_id);
-        ready.extend(starts.into_iter().filter_map(|(call_id, mut delivery)| {
-            let Event::ToolStarted(started) = &delivery.event else {
-                return None;
-            };
-            let transcript_owned = state
-                .transcript_tool_owners
-                .get(&call_id)
-                .map(|entry| &entry.value);
-            let loaded_session = state
-                .loaded_agents
-                .get(&started.agent_id)
-                .map(|entry| &entry.value);
-            let current_session_id = state.current_session_id.as_ref().map(|entry| &entry.value);
-            let authorized = transcript_owned == Some(&started.agent_id)
-                && matches!(
-                    (loaded_session, current_session_id),
-                    (Some(loaded), Some(current)) if loaded == current
-                );
-            if authorized {
-                delivery.presentation = RendererPresentation::ReconstructedToolStart {
-                    owner: started.agent_id.clone(),
+        let mut starts = state
+            .pending_starts
+            .drain()
+            .filter(|(call_id, _)| {
+                !discard_baseline
+                    && !buffered_live_starts.contains(call_id)
+                    && (!buffered_terminals.contains(call_id)
+                        || progress_before_terminal.contains(call_id))
+            })
+            .filter_map(|(call_id, mut delivery)| {
+                let Event::ToolStarted(started) = &delivery.event else {
+                    return None;
                 };
-                Some(delivery)
-            } else {
-                None
-            }
+                let transcript_owned = state
+                    .transcript_tool_owners
+                    .get(&call_id)
+                    .map(|entry| &entry.value);
+                let loaded_session = state
+                    .loaded_agents
+                    .get(&started.agent_id)
+                    .map(|entry| &entry.value);
+                let current_session_id =
+                    state.current_session_id.as_ref().map(|entry| &entry.value);
+                let authorized = transcript_owned == Some(&started.agent_id)
+                    && matches!(
+                        (loaded_session, current_session_id),
+                        (Some(loaded), Some(current)) if loaded == current
+                    );
+                if authorized {
+                    delivery.presentation = RendererPresentation::ReconstructedToolStart {
+                        owner: started.agent_id.clone(),
+                    };
+                    Some((call_id, delivery))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        starts.sort_by_key(|(_, delivery)| delivery.delivery_id);
+        let mut active_tool_calls = starts
+            .iter()
+            .map(|(call_id, _)| call_id.clone())
+            .collect::<HashSet<_>>();
+        let mut settled_tool_calls = HashSet::new();
+        ready.extend(starts.into_iter().map(|(_, delivery)| delivery));
+        ready.extend(state.buffered_live.drain(..).filter(|delivery| {
+            preserve_buffered_tool_lifecycle(
+                &delivery.event,
+                &mut active_tool_calls,
+                &mut settled_tool_calls,
+            )
         }));
-        ready.append(&mut state.buffered_live);
         ready.extend(overflow.into_iter().filter(|delivery| {
-            !discard_baseline
+            (!discard_baseline
                 || !delivery.replay
-                || !matches!(delivery.event, Event::ToolStarted(_))
+                || !matches!(delivery.event, Event::ToolStarted(_)))
+                && preserve_buffered_tool_lifecycle(
+                    &delivery.event,
+                    &mut active_tool_calls,
+                    &mut settled_tool_calls,
+                )
         }));
         ready
     }
@@ -735,6 +784,56 @@ fn tool_terminal_id(event: &Event) -> Option<&tau_proto::ToolCallId> {
         Event::ToolBackgroundResultDisplay(event) => Some(&event.call_id),
         Event::ToolBackgroundError(event) => Some(&event.call_id),
         _ => None,
+    }
+}
+
+/// One buffered event that needs an active tool presentation owner.
+enum ToolLifecycleFrame<'a> {
+    /// A tool lifecycle begins with this id.
+    Started(&'a tau_proto::ToolCallId),
+    /// A tool lifecycle has an in-flight update for this id.
+    Progress(&'a tau_proto::ToolCallId),
+    /// A tool lifecycle is terminal for this id.
+    Terminal(&'a tau_proto::ToolCallId),
+}
+
+/// Classifies buffered frames whose projection depends on a live tool owner.
+fn tool_lifecycle_frame(event: &Event) -> Option<ToolLifecycleFrame<'_>> {
+    match event {
+        Event::ToolStarted(event) => Some(ToolLifecycleFrame::Started(&event.call_id)),
+        Event::ToolProgress(event) => Some(ToolLifecycleFrame::Progress(&event.call_id)),
+        event => tool_terminal_id(event).map(ToolLifecycleFrame::Terminal),
+    }
+}
+
+/// Retains starts and progress only with a materialized owner, preserves the
+/// first terminal as the visible call outcome, and suppresses later lifecycle
+/// frames so progress cannot become an orphan row.
+fn preserve_buffered_tool_lifecycle(
+    event: &Event,
+    active_tool_calls: &mut HashSet<tau_proto::ToolCallId>,
+    settled_tool_calls: &mut HashSet<tau_proto::ToolCallId>,
+) -> bool {
+    match tool_lifecycle_frame(event) {
+        Some(ToolLifecycleFrame::Started(call_id)) => {
+            if settled_tool_calls.contains(call_id) {
+                false
+            } else {
+                active_tool_calls.insert(call_id.clone());
+                true
+            }
+        }
+        Some(ToolLifecycleFrame::Progress(call_id)) => {
+            active_tool_calls.contains(call_id) && !settled_tool_calls.contains(call_id)
+        }
+        Some(ToolLifecycleFrame::Terminal(call_id)) => {
+            if !settled_tool_calls.insert(call_id.clone()) {
+                return false;
+            }
+            active_tool_calls.remove(call_id);
+            true
+        }
+        None => true,
     }
 }
 

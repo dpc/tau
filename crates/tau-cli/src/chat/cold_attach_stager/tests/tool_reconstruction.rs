@@ -137,10 +137,12 @@ fn active_silent_tool_reconstructs_once() {
     ));
 }
 
-/// A real terminal racing replay wins over the historical start, and buffered
-/// live frames retain their wire order after the folded baseline.
+/// A live progress update followed by a terminal while attach replay is pending
+/// must materialize the replayed start before both live frames. Otherwise the
+/// renderer treats progress as ownerless and leaves its multiline block visible
+/// after the terminal has completed the call.
 #[test]
-fn live_terminal_during_attach_prevents_stale_pending_row() {
+fn live_progress_then_terminal_during_attach_preserves_tool_lifecycle() {
     let mut stager = ColdAttachStager::staging();
     assert_eq!(stager.admit(replay(session_started(), 1, 0)).len(), 1);
     assert_eq!(stager.admit(replay(agent_loaded(), 1, 1)).len(), 1);
@@ -157,14 +159,55 @@ fn live_terminal_during_attach_prevents_stale_pending_row() {
     );
     assert!(stager.admit(live(tool_progress("racing"), 4)).is_empty());
     assert!(stager.admit(live(tool_error("racing"), 5)).is_empty());
+    assert!(stager.admit(live(tool_started("racing"), 6)).is_empty());
 
-    let ready = stager.admit(live(replay_complete(), 6));
+    let ready = stager.admit(live(replay_complete(), 7));
 
     assert!(matches!(
         ready.as_slice(),
-        [progress, terminal, boundary]
-            if progress.delivery_id == 4
+        [start, progress, terminal, boundary]
+            if matches!(&start.event, Event::ToolStarted(started)
+                if started.call_id.as_str() == "racing")
+                && matches!(
+                    &start.presentation,
+                    RendererPresentation::ReconstructedToolStart { owner }
+                        if owner.as_str() == "agent-1"
+                )
+                && progress.delivery_id == 4
                 && terminal.delivery_id == 5
+                && matches!(boundary.event, Event::SessionReplayComplete(_))
+    ));
+}
+
+/// Late progress and duplicate start reports after their terminal have no
+/// active presentation owner, so attachment must discard them instead of
+/// printing an unremovable progress block or recreating a settled tool row.
+#[test]
+fn live_lifecycle_after_terminal_during_attach_is_discarded() {
+    let mut stager = ColdAttachStager::staging();
+    assert_eq!(stager.admit(replay(session_started(), 1, 0)).len(), 1);
+    assert_eq!(stager.admit(replay(agent_loaded(), 1, 1)).len(), 1);
+    assert_eq!(
+        stager
+            .admit(replay(tool_call_response("settled"), 1, 2))
+            .len(),
+        1
+    );
+    assert!(
+        stager
+            .admit(replay(tool_started("settled"), 1, 3))
+            .is_empty()
+    );
+    assert!(stager.admit(live(tool_error("settled"), 4)).is_empty());
+    assert!(stager.admit(live(tool_progress("settled"), 5)).is_empty());
+    assert!(stager.admit(live(tool_started("settled"), 6)).is_empty());
+
+    let ready = stager.admit(live(replay_complete(), 7));
+
+    assert!(matches!(
+        ready.as_slice(),
+        [terminal, boundary]
+            if terminal.delivery_id == 4
                 && matches!(boundary.event, Event::SessionReplayComplete(_))
     ));
 }
@@ -386,9 +429,10 @@ fn replay_boundary_excludes_owned_start_without_session_or_membership() {
         if matches!(boundary.event, Event::SessionReplayComplete(_))));
 }
 
-/// Transcript ownership by another agent cannot authorize the loaded starter.
+/// Transcript ownership by another agent cannot authorize the loaded starter;
+/// its buffered progress must remain hidden while the terminal still projects.
 #[test]
-fn replay_boundary_excludes_start_owned_by_another_agent() {
+fn replay_boundary_excludes_unowned_start_and_buffered_progress() {
     let mut stager = ColdAttachStager::staging();
     assert_eq!(stager.admit(replay(session_started(), 1, 1)).len(), 1);
     assert_eq!(stager.admit(replay(agent_loaded(), 1, 2)).len(), 1);
@@ -407,15 +451,20 @@ fn replay_boundary_excludes_start_owned_by_another_agent() {
             .admit(replay(tool_started("orphan"), 1, 4))
             .is_empty()
     );
+    assert!(stager.admit(live(tool_progress("orphan"), 5)).is_empty());
+    assert!(stager.admit(live(tool_error("orphan"), 6)).is_empty());
 
-    let ready = stager.admit(live(replay_complete(), 5));
-    assert!(matches!(ready.as_slice(), [boundary]
-        if matches!(boundary.event, Event::SessionReplayComplete(_))));
+    let ready = stager.admit(live(replay_complete(), 7));
+    assert!(matches!(ready.as_slice(), [terminal, boundary]
+        if terminal.delivery_id == 6
+            && matches!(boundary.event, Event::SessionReplayComplete(_))));
 }
 
-/// A failed replay boundary never publishes a pending baseline.
+/// A failed replay boundary must discard buffered progress whose replay start
+/// no longer has an authorized presentation owner while retaining the terminal
+/// fact.
 #[test]
-fn replay_error_discards_reconstructed_pending_start() {
+fn replay_error_discards_reconstructed_start_and_buffered_progress() {
     let mut stager = ColdAttachStager::staging();
     assert_eq!(stager.admit(replay(session_started(), 1, 1)).len(), 1);
     assert_eq!(stager.admit(replay(agent_loaded(), 1, 2)).len(), 1);
@@ -430,15 +479,18 @@ fn replay_error_discards_reconstructed_pending_start() {
             .admit(replay(tool_started("active"), 1, 4))
             .is_empty()
     );
+    assert!(stager.admit(live(tool_progress("active"), 5)).is_empty());
+    assert!(stager.admit(live(tool_error("active"), 6)).is_empty());
     let mut boundary = replay_complete();
     let Event::SessionReplayComplete(complete) = &mut boundary else {
         unreachable!("replay_complete helper returns boundary");
     };
     complete.error = Some("fixture replay failed".to_owned());
 
-    let ready = stager.admit(live(boundary, 5));
-    assert!(matches!(ready.as_slice(), [boundary]
-        if matches!(boundary.event, Event::SessionReplayComplete(_))));
+    let ready = stager.admit(live(boundary, 7));
+    assert!(matches!(ready.as_slice(), [terminal, boundary]
+        if terminal.delivery_id == 6
+            && matches!(boundary.event, Event::SessionReplayComplete(_))));
 }
 
 /// A provider error is the durable failed-call terminal and must close and
@@ -640,6 +692,91 @@ fn tool_reconstruction_item_overflow_preserves_baseline_live_order() {
             .iter()
             .all(|delivery| matches!(delivery.event, Event::ToolProgress(_)))
     );
+}
+
+/// A late start that overflows after an already-buffered terminal must not
+/// suppress the replay start needed by earlier progress or resurrect the call.
+#[test]
+fn item_overflow_discards_start_after_buffered_terminal() {
+    let mut stager = ColdAttachStager::staging();
+    assert_eq!(stager.admit(replay(session_started(), 1, 1)).len(), 1);
+    assert_eq!(stager.admit(replay(agent_loaded(), 1, 2)).len(), 1);
+    assert_eq!(
+        stager
+            .admit(replay(tool_call_response("active"), 1, 3))
+            .len(),
+        1
+    );
+    assert!(
+        stager
+            .admit(replay(tool_started("active"), 1, 4))
+            .is_empty()
+    );
+    let buffered_capacity = RENDERER_QUEUE_MAX_ITEMS - stager.retained_usage().items;
+    for offset in 0..buffered_capacity.saturating_sub(1) {
+        assert!(
+            stager
+                .admit(live(tool_progress("active"), 5 + offset as u64))
+                .is_empty()
+        );
+    }
+    let terminal_id = 5 + buffered_capacity.saturating_sub(1) as u64;
+    assert!(
+        stager
+            .admit(live(tool_error("active"), terminal_id))
+            .is_empty()
+    );
+
+    let ready = stager.admit(live(tool_started("active"), terminal_id + 1));
+
+    assert_eq!(ready.len(), buffered_capacity + 1);
+    assert!(matches!(
+        ready.first().map(|delivery| &delivery.event),
+        Some(Event::ToolStarted(_))
+    ));
+    assert!(matches!(
+        ready.last().map(|delivery| &delivery.event),
+        Some(Event::ToolError(_))
+    ));
+    assert!(
+        ready[1..ready.len().saturating_sub(1)]
+            .iter()
+            .all(|delivery| matches!(delivery.event, Event::ToolProgress(_)))
+    );
+}
+
+/// Duplicate live terminals must project only the first visible outcome after
+/// the reconstructed start and progress have completed the tool lifecycle.
+#[test]
+fn duplicate_terminal_during_attach_is_discarded() {
+    let mut stager = ColdAttachStager::staging();
+    assert_eq!(stager.admit(replay(session_started(), 1, 1)).len(), 1);
+    assert_eq!(stager.admit(replay(agent_loaded(), 1, 2)).len(), 1);
+    assert_eq!(
+        stager
+            .admit(replay(tool_call_response("active"), 1, 3))
+            .len(),
+        1
+    );
+    assert!(
+        stager
+            .admit(replay(tool_started("active"), 1, 4))
+            .is_empty()
+    );
+    assert!(stager.admit(live(tool_progress("active"), 5)).is_empty());
+    assert!(stager.admit(live(tool_error("active"), 6)).is_empty());
+    assert!(stager.admit(live(tool_error("active"), 7)).is_empty());
+
+    let ready = stager.admit(live(replay_complete(), 8));
+
+    assert!(matches!(
+        ready.as_slice(),
+        [start, progress, terminal, boundary]
+            if matches!(start.event, Event::ToolStarted(_))
+                && progress.delivery_id == 5
+                && terminal.delivery_id == 6
+                && matches!(boundary.event, Event::SessionReplayComplete(_))
+    ));
 }
 
 /// Historical overflow suppresses every replayed start until the boundary

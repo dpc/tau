@@ -170,8 +170,12 @@ pending tool starts, buffered live tool frames, and session/membership/ownership
 indexes. Replayed provider-declared
 tool calls authorize only matching durable starts owned by agents currently
 loaded in this session; canonical terminals close those starts, including
-provider-projected errors. The UI publishes the remaining baseline at
-`session.replay_complete`, then buffered live frames, and disables the fold
+provider-projected errors. A buffered pre-terminal progress frame retains its
+authorized replay start as a temporary renderer owner, so the terminal removes
+the live row rather than leaving ownerless multiline output. The UI publishes
+that baseline, then starts and progress frames only with an owner through their
+first terminal. The first terminal remains visible even without a materialized
+start, while later starts or progress frames are suppressed. The fold disables
 unconditionally. Encountering tool-bearing history flushes retained plain
 history because tool reconstruction has cross-event ordering dependencies.
 If live retention reaches the aggregate bound, the UI flushes the reconstructed

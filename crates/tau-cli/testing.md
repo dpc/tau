@@ -39,7 +39,12 @@ dependencies, and catch-up/lifecycle orderings. The chat UI receives
 it folds durable starts against canonical terminals through
 `session.replay_complete`, retains only current-session loaded-agent starts joined
 to provider-declared calls in that agent's replayed transcript, and places buffered
-live lifecycle frames after that baseline. `tool.request` remains excluded
+live starts and progress after that baseline only while their lifecycle owner
+is materialized, stopping at the first terminal. The first terminal remains
+visible even without a materialized start. A buffered pre-terminal progress
+frame keeps its authorized replay start temporarily so its terminal can remove
+the live row; later starts or progress frames are suppressed.
+`tool.request` remains excluded
 historically and live because request admission does not establish a dispatched
 pending lifecycle and the renderer does not consume it. Generic and non-chat
 subscribers can still select requests. These choices refine the exact-by-default
