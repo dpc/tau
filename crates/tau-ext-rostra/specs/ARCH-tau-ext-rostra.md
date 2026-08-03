@@ -184,9 +184,21 @@ After the first report, a hard five-minute per-agent interval limits canonical
 Rostra reports and the payload-free external-message wakes they cause. This
 does not promise a five-minute interval between model runs: normal harness
 busy-agent batching remains authoritative and may coalesce or delay work.
-Count and size limits never bypass those timing limits. A report has at most
-32 post previews and 48 KiB of projected text, carries at most 16 KiB of
-extension metadata, uses the durable `rostra-batch-v1:<attempt>` message ID,
-summarizes omitted posts, and advances the acknowledged materialization range.
-Omitted posts remain in the existing Rostra pull-queryable local view rather
-than creating an activation backlog.
+Count limits never bypass those timing limits. A report is a count-only,
+lossy wake with exactly `Rostra received 1 new followed post.` or
+`Rostra received {count} new followed posts.` as its body. Tau's generic
+authenticated external-message envelope supplies the sole model-visible
+provenance/trust boundary. The private `rostra-new-posts-v2` metadata retains
+only the opaque scanned-through cursor needed for the live canonical-echo
+checkpoint. The durable `rostra-batch-v1:<attempt>` message ID remains
+monotonic. The identity-bound `rostra-notifications-v1.cbor` checkpoint-file
+schema remains unchanged.
+
+The wake means new work exists in the current following timeline, not that its
+count identifies an exact recoverable batch. Agents inspect the current view
+with `rostra_list_posts({"timeline":"following"})` and then
+`rostra_read_post`; concurrent activity and pagination can prevent recovering
+the announced rows exactly. Posts, identifiers, authors, tags, timestamps, and
+bodies never enter new notification reports or Tau journals. Tau neither
+rewrites nor migrates historical journal facts, which remain replayable with
+their historical bodies.

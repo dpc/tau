@@ -101,7 +101,6 @@ fn durable_report_spacing_survives_reconstruction() {
         end: cursor(5),
         first_queued_at: now.checked_sub(MAX_BATCH_AGE).expect("monotonic start"),
         last_queued_at: now.checked_sub(IDLE_DEBOUNCE).expect("monotonic idle"),
-        preview: Vec::new(),
         count: 1,
     });
     assert!(
@@ -181,6 +180,24 @@ fn canonical_delivery_checkpoint_survives_restart() {
     assert_eq!(registration.committed, cursor(17));
 }
 
+/// Ensures count-only report metadata changes do not migrate the durable v1
+/// checkpoint file that existing notification registrations must still load.
+#[test]
+fn durable_checkpoint_file_schema_remains_v1() {
+    let (directory, mut state) = configured_state();
+    let agent = AgentId::parse("agent").expect("agent id");
+    state.enable(agent, cursor(4)).expect("enable");
+    let path = directory.path().join("rostra-notifications-v1.cbor");
+    let bytes = std::fs::read(path).expect("state file");
+    let stored: StoredState =
+        ciborium::de::from_reader(bytes.as_slice()).expect("stored state schema");
+    assert_eq!(stored.schema, "rostra-notifications-v1");
+    let mut restarted = State::default();
+    restarted
+        .configure(publisher(), identity(), directory.path())
+        .expect("existing v1 checkpoint loads");
+}
+
 /// Ensures replayed or stale canonical facts cannot checkpoint an un-emitted
 /// page.
 #[test]
@@ -215,7 +232,6 @@ fn pending_page_continuation_runs_until_a_report_is_inflight() {
         end: cursor(17),
         first_queued_at: now,
         last_queued_at: now,
-        preview: Vec::new(),
         count: 1,
     });
     let deadline = state.next_deadline().expect("continuation deadline");
@@ -359,7 +375,6 @@ fn retry_backoff_overrides_overdue_pending_report() {
         end: cursor(17),
         first_queued_at: now.checked_sub(MAX_BATCH_AGE).expect("old pending page"),
         last_queued_at: now.checked_sub(MAX_BATCH_AGE).expect("old pending page"),
-        preview: Vec::new(),
         count: 1,
     });
     let retry_at = now
@@ -384,7 +399,6 @@ fn merged_rows_extend_idle_debounce_but_keep_batch_age_cap() {
                 .checked_sub(Duration::from_secs(29))
                 .expect("first selected row"),
             last_queued_at: now,
-            preview: Vec::new(),
             count: 2,
         }),
         inflight_end: None,

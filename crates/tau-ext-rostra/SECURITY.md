@@ -68,15 +68,17 @@ or identity-mismatched stores fail closed.
 `rostra_notifications` never treats a Rostra author as a Tau sender. An
 agent must explicitly enable its own preference. The worker selects only
 direct-followee posts matching their persona selector, excludes self posts and
-historical syncs, and projects every selected field as bounded hostile external
-content. It uses the bounded durable materialization feed to recover from lossy
-broadcasts. A batch becomes eligible no sooner than 30 seconds after quiet and
-at five minutes after it starts; canonical delivery can be delayed by normal
-harness processing. It emits no more often than every five minutes per agent.
-The latter bounds
-canonical reports and Rostra-caused wakes, not model execution: normal harness
-busy batching can coalesce or delay work. A report previews at most 32 posts
-within 48 KiB and summarizes excess; all excess remains pull-queryable.
+historical syncs, and reports only their count. It uses the bounded durable
+materialization feed to recover from lossy broadcasts. A batch becomes eligible
+no sooner than 30 seconds after quiet and at five minutes after it starts;
+canonical delivery can be delayed by normal harness processing. It emits no
+more often than every five minutes per agent. The latter bounds canonical
+reports and Rostra-caused wakes, not model execution: normal harness busy
+batching can coalesce or delay work. The generic authenticated external-message
+envelope contains the exact count-only notice; no selected post content or
+metadata enters the report or Tau journal. Agents must inspect the current
+following timeline with the pull tools and cannot recover the exact announced
+batch.
 The identity-bound policy/checkpoint file uses a mode-0600 temporary file,
 file sync, atomic rename, and parent-directory sync. If that final directory
 sync fails after rename, the extension installs the visible candidate in memory,

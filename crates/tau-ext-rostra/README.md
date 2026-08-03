@@ -70,9 +70,14 @@ no sooner than 30 seconds after the last eligible row and at five minutes after
 the first; canonical delivery can be delayed by normal harness processing. It
 never emits more than once per agent every five minutes. That rate limit applies to Rostra
 reports and their normal harness wakes, not model runs: the harness may batch,
-coalesce, or delay work for a busy agent. Each report previews at most 32 posts
-and 48 KiB, summarizes omitted posts, and leaves every post queryable through
-the existing pull tools.
+coalesce, or delay work for a busy agent. Each report is a count-only wake:
+`Rostra received 1 new followed post.` or `Rostra
+received {count} new followed posts.` The generic authenticated
+external-message envelope is its only provenance/trust wrapper. It contains no
+post body, ID, author, tags, or timestamp. The notice means new work exists in
+the current following timeline; inspect it with
+`rostra_list_posts({"timeline":"following"})`, then `rostra_read_post`.
+Concurrent activity means this does not recover the exact announced batch.
 
 See [`ARCH-tau-ext-rostra`](specs/ARCH-tau-ext-rostra.md) and
 [`SECURITY.md`](SECURITY.md) for the complete contract and trust boundary.

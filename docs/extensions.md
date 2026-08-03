@@ -55,8 +55,13 @@ database initialization and current follow-epoch timestamps. It becomes
 eligible after 30 seconds of quiet or five minutes of batch age, then limits
 each agent's canonical Rostra reports and normal wakes to one every five
 minutes. That does not rate-limit model runs; normal busy-agent batching can
-coalesce or delay them. Reports preview at most 32 posts and 48 KiB, summarize
-excess, and leave excess in the Rostra pull-queryable local view.
+coalesce or delay them. Reports are count-only, lossy wakes: their body is
+`Rostra received 1 new followed post.` or `Rostra received {count} new followed
+posts.` The generic authenticated external-message envelope is the sole
+provenance/trust wrapper. A wake contains no post body, ID, author, tags, or
+timestamp; inspect the current following timeline with
+`rostra_list_posts({"timeline":"following"})` and `rostra_read_post`. That
+cannot recover the exact announced batch.
 
 
 ## Tau Swarm

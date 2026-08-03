@@ -143,9 +143,14 @@ both local database initialization and the current follow epoch.
 The preference activates live delivery only after its agent is loaded and its
 replay completes. Each such opted-in agent gets independent serial batches.
 Tau reports after 30 seconds of quiet or five minutes of batch age, at most
-once per five minutes per agent. Reports contain at most 32 previews and 48
-KiB, summarize omitted posts, and leave those posts queryable through the read
-tools. Harness busy-agent batching can still coalesce or delay model runs.
+once per five minutes per agent. Each report is a count-only lossy wake:
+`Rostra received 1 new followed post.` or `Rostra received {count} new followed
+posts.` It contains no post body, ID, author, tags, or timestamp beyond Tau's
+generic authenticated external-message envelope. Inspect the current following
+timeline with `rostra_list_posts({"timeline":"following"})`, then
+`rostra_read_post`; concurrent activity means this cannot recover the exact
+announced batch. Harness busy-agent batching can still coalesce or delay model
+runs.
 
 The extension's identity-bound atomic
 `rostra-notifications-v1.cbor` checkpoint file is separate from Rostra's

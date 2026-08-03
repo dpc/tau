@@ -4,8 +4,6 @@ use std::time::Instant;
 
 use rostra_client::SocialPostMaterializationCursor;
 
-use crate::notification_post::Post;
-
 /// One bounded page awaiting report acknowledgement.
 #[derive(Clone, Debug)]
 pub(crate) struct Pending {
@@ -15,8 +13,6 @@ pub(crate) struct Pending {
     pub(crate) first_queued_at: Instant,
     /// Last selected row in monotonic time.
     pub(crate) last_queued_at: Instant,
-    /// Bounded model-visible prefix.
-    pub(crate) preview: Vec<Post>,
-    /// Count including omitted previews.
+    /// Number of selected posts represented by this wake.
     pub(crate) count: usize,
 }

@@ -6,7 +6,6 @@
 mod cursor;
 mod notification_page;
 mod notification_pending;
-mod notification_post;
 mod notification_registration;
 mod notification_state;
 mod notification_tool;

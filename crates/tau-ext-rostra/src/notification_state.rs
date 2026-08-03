@@ -14,19 +14,14 @@ use tau_proto::{AgentId, CborValue, ExtensionName, MessageDelivered};
 
 use crate::notification_page::ScannedPage;
 pub(crate) use crate::notification_pending::Pending;
-pub(crate) use crate::notification_post::Post;
 pub(crate) use crate::notification_registration::{Registration, StoredRegistration};
 
 /// Extension-data schema carried by each canonical Rostra batch.
-pub(crate) const SCHEMA: &str = "rostra-new-posts-v1";
+pub(crate) const SCHEMA: &str = "rostra-new-posts-v2";
 /// Schema for the extension-owned durable notification file.
 const STATE_SCHEMA: &str = "rostra-notifications-v1";
 /// Upper bound for the entire policy/checkpoint file.
 const MAX_STATE_FILE_BYTES: usize = 1024 * 1024;
-/// Maximum posts rendered into one model-visible report.
-pub(crate) const MAX_PREVIEW_POSTS: usize = 32;
-/// Maximum bytes in one model-visible report body.
-pub(crate) const MAX_REPORT_BYTES: usize = 48 * 1024;
 /// Maximum materializations resolved in one source page.
 pub(crate) const MATERIALIZATION_PAGE: usize = 128;
 /// Idle time after the final eligible materialization before a report becomes
@@ -457,10 +452,6 @@ impl State {
         if let Some(pending) = registration.pending.as_mut() {
             pending.end = page.scanned_through;
             if page.count != 0 {
-                let capacity = MAX_PREVIEW_POSTS.saturating_sub(pending.preview.len());
-                pending
-                    .preview
-                    .extend(page.preview.into_iter().take(capacity));
                 pending.count += page.count;
                 pending.last_queued_at = Instant::now();
             }
@@ -479,7 +470,6 @@ impl State {
                     .checked_sub(Duration::from_millis(elapsed))
                     .unwrap_or(now),
                 last_queued_at: now,
-                preview: page.preview,
                 count: page.count,
             });
         }
@@ -530,7 +520,6 @@ impl State {
         &mut self,
         agent: &AgentId,
         end: SocialPostMaterializationCursor,
-        preview: Vec<Post>,
         count: usize,
     ) {
         let now = Instant::now();
@@ -539,7 +528,6 @@ impl State {
                 end,
                 first_queued_at: now.checked_sub(MAX_BATCH_AGE).unwrap_or(now),
                 last_queued_at: now.checked_sub(MAX_BATCH_AGE).unwrap_or(now),
-                preview,
                 count,
             });
         }
