@@ -29,9 +29,6 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   cargoLock = {
     lockFile = ../../Cargo.lock;
-    outputHashes = {
-      "tau-swarm-api-0.2.0" = "sha256-+vzecsq/t1UheuJuVFDnHU2wqyEDXp5OId+tw+Mt2/U=";
-    };
   };
 
   cargoBuildFlags = [

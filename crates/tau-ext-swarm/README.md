@@ -129,7 +129,7 @@ test verifies paired historical/live startup selectors. A hermetic fake Swarm
 transport drives the real reconnecting client through credential
 authentication, indeterminate retry, and terminal rejection. A concrete
 `IrohConnector` test verifies that expected-peer mismatch fails before network
-connection. A test-only exact `tau-swarm-core` 0.2.0 dependency runs the real
+connection. A test-only exact `tau-swarm-core` 0.3.0 dependency runs the real
 published Iroh server through authentication, declaration, snapshot publication,
 remote prompt dispatch, and direct application loopback. A composed
 `TauExtensionRunner` vertical additionally drives Configure, replay boundaries,

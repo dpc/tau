@@ -1289,7 +1289,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1447,7 +1447,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3359,7 +3359,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4192,7 +4192,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4793,7 +4793,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4872,7 +4872,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4893,7 +4893,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5052,7 +5052,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6259,16 +6259,18 @@ dependencies = [
 
 [[package]]
 name = "tau-swarm-api"
-version = "0.2.0"
-source = "git+https://radicle.dpc.pw/z314Jo4iWg73MqBtsKDiJPvZHdZV7.git?rev=b135666818aaf5822aaee18b55ad16412a72d5ac#b135666818aaf5822aaee18b55ad16412a72d5ac"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e711761f4294261fc457e26207af8670ac0891613096283ce9efc54586253544"
 dependencies = [
  "getrandom 0.4.3",
 ]
 
 [[package]]
 name = "tau-swarm-client"
-version = "0.2.0"
-source = "git+https://radicle.dpc.pw/z314Jo4iWg73MqBtsKDiJPvZHdZV7.git?rev=b135666818aaf5822aaee18b55ad16412a72d5ac#b135666818aaf5822aaee18b55ad16412a72d5ac"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f5ae4be95bef00b045ae8cca9903bd3e48c45615f5239913473ba11bb1b4919"
 dependencies = [
  "async-trait",
  "tau-swarm-api",
@@ -6278,8 +6280,9 @@ dependencies = [
 
 [[package]]
 name = "tau-swarm-client-api"
-version = "0.2.0"
-source = "git+https://radicle.dpc.pw/z314Jo4iWg73MqBtsKDiJPvZHdZV7.git?rev=b135666818aaf5822aaee18b55ad16412a72d5ac#b135666818aaf5822aaee18b55ad16412a72d5ac"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f9a842a059444d63009113bf15501ebbd879889f0807258b6df5b25fcb336e0"
 dependencies = [
  "bincode",
  "tau-swarm-api",
@@ -6287,16 +6290,18 @@ dependencies = [
 
 [[package]]
 name = "tau-swarm-core"
-version = "0.2.0"
-source = "git+https://radicle.dpc.pw/z314Jo4iWg73MqBtsKDiJPvZHdZV7.git?rev=b135666818aaf5822aaee18b55ad16412a72d5ac#b135666818aaf5822aaee18b55ad16412a72d5ac"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38150c6d1c3c6d9795d7f70b64eed0ea37b37fb4adcf0e309a4f88d5aac95231"
 dependencies = [
  "tau-swarm-api",
 ]
 
 [[package]]
 name = "tau-swarm-iroh"
-version = "0.2.0"
-source = "git+https://radicle.dpc.pw/z314Jo4iWg73MqBtsKDiJPvZHdZV7.git?rev=b135666818aaf5822aaee18b55ad16412a72d5ac#b135666818aaf5822aaee18b55ad16412a72d5ac"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "447d7415681e19b53f83dc288bdbc32851c74761e26625a469fed75847632f0a"
 dependencies = [
  "async-trait",
  "iroh",
@@ -6365,7 +6370,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7194,7 +7199,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
