@@ -103,6 +103,18 @@ thread so the harness event loop is not blocked.
 ## Embedded one-shot runs
 
 Embedded helpers such as `run_embedded_message` do not create a daemon socket. They construct a harness in-process, run one interaction, and shut it down. Socket activation and runtime-dir attach discovery do not apply to embedded one-shot runs.
+
+
+## Waiting for input and background tools
+
+`wait({})` consumes the next completed background call for the current
+conversation, and `wait({"tool_call_id":"..."})` consumes that exact call.
+`wait({"timeout_minutes":N})` instead waits for activating input without
+consuming either input or background results. `N` must be a positive integer;
+values above 1,440 minutes are silently capped at 1,440. `timeout_minutes` and
+`tool_call_id` are mutually exclusive.
+
+
 ## Manual compaction tools
 
 The enabled-by-default `compact {}` tool durably compacts the calling agent

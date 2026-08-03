@@ -825,11 +825,18 @@ fn wait_args_reject_non_string_and_empty_tool_call_id() {
     );
 }
 
-/// Input waits accept positive whole minutes, clamp before conversion, reject
-/// ambiguous or malformed forms, and explicitly diagnose the removed boolean.
+/// Input waits accept positive whole minutes, cap at 1,440 minutes before
+/// conversion, reject ambiguous or malformed forms, and explicitly diagnose the
+/// removed boolean.
 #[test]
 fn wait_args_parse_explicit_input_mode_and_reject_ambiguous_forms() {
-    for (minutes, effective) in [(1, 1), (60, 60), (61, 60), (i64::MAX, 60)] {
+    for (minutes, effective) in [
+        (1, 1),
+        (1_439, 1_439),
+        (1_440, 1_440),
+        (1_441, 1_440),
+        (i64::MAX, 1_440),
+    ] {
         assert_eq!(
             parse_wait_args(&wait_args_input(minutes)),
             Ok(WaitTarget::AnyInput(Duration::from_secs(effective * 60)))
@@ -840,7 +847,7 @@ fn wait_args_parse_explicit_input_mode_and_reject_ambiguous_forms() {
             CborValue::Text("timeout_minutes".to_owned()),
             CborValue::Integer(u64::MAX.into()),
         )])),
-        Ok(WaitTarget::AnyInput(Duration::from_secs(60 * 60)))
+        Ok(WaitTarget::AnyInput(Duration::from_secs(1_440 * 60)))
     );
     for minutes in [0, -1] {
         assert_eq!(
@@ -1131,6 +1138,51 @@ fn input_wait_deadlines_are_ordered_and_expire_exactly_once() {
             .len(),
         1
     );
+    assert_eq!(tracker.next_input_wait_deadline(), None);
+}
+
+/// A request above the input-wait ceiling installs a 1,440-minute monotonic
+/// deadline and remains wakeable before that deadline without a real long
+/// sleep.
+#[test]
+fn capped_input_wait_uses_24_hour_deadline_and_wakes_immediately() {
+    let now = Instant::now();
+    let owner = conv("owner");
+    let mut tracker = WaitTracker::default();
+    let start = tracker.handle_wait_invoke_at(
+        &owner,
+        "wait-capped".into(),
+        wait_tool_name(),
+        &wait_args_input(1_441),
+        now,
+        observation(),
+    );
+
+    assert!(start.reply.is_none());
+    assert_eq!(tracker.input_waiters[&owner].request.display_args, "1440m");
+    let effective_timeout = Duration::from_secs(1_440 * 60);
+    assert_eq!(
+        tracker.next_input_wait_deadline(),
+        Some(now + effective_timeout)
+    );
+    assert!(
+        tracker
+            .expire_input_waits(now + effective_timeout - Duration::from_secs(1))
+            .is_empty()
+    );
+
+    let replies = tracker.activate_waits_for(&owner, tau_proto::ObservationId::random());
+    assert_eq!(replies.len(), 1);
+    let (result, display) =
+        reply_result_with_display(replies.into_iter().next().expect("input reply"));
+    assert_eq!(
+        result,
+        CborValue::Map(vec![(
+            CborValue::Text("input_available".to_owned()),
+            CborValue::Bool(true),
+        )])
+    );
+    assert_eq!(display.expect("input display").args, "1440m");
     assert_eq!(tracker.next_input_wait_deadline(), None);
 }
 

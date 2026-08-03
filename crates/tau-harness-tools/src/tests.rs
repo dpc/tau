@@ -282,11 +282,17 @@ fn wait_spec_documents_optional_non_consuming_input_mode() {
             .get("maximum")
             .is_none()
     );
+    assert!(
+        parameters["properties"]["timeout_minutes"]["description"]
+            .as_str()
+            .expect("timeout description")
+            .contains("above 1,440 are treated as 1,440")
+    );
     assert!(parameters["properties"].get("any_input").is_none());
     assert!(parameters.get("required").is_none());
     let description = spec.description.expect("wait description");
     assert!(description.contains("`wait({\"timeout_minutes\":N})`"));
-    assert!(description.contains("cap values above 60"));
+    assert!(description.contains("cap values above 1,440"));
     assert!(description.contains("do not consume"));
 }
 
@@ -1195,7 +1201,7 @@ fn wait_initial_display_shows_normalized_input_timeout() {
             .initial_display(&timeout_call(1_000_000))
             .expect("capped wait display")
             .args,
-        "60m"
+        "1440m"
     );
     assert_eq!(
         state

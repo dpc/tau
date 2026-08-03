@@ -130,8 +130,9 @@ pub(crate) const WAIT_TOOL_NAME: &str = "wait";
 ///
 /// An absent `timeout_minutes` selects background-completion waiting and
 /// returns `None`. A positive integer selects activating-input waiting and is
-/// clamped to 60 minutes. Zero, negative, non-integer, unknown, or conflicting
-/// arguments return an error rather than choosing a wait mode implicitly.
+/// clamped to 1,440 minutes. Zero, negative, non-integer, unknown, or
+/// conflicting arguments return an error rather than choosing a wait mode
+/// implicitly.
 pub fn normalized_wait_timeout_minutes(arguments: &CborValue) -> Result<Option<u64>, String> {
     normalized_wait_timeout_minutes_inner(arguments)
 }

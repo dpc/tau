@@ -27,7 +27,7 @@ fn input_wait_call(call_id: &str) -> AgentToolCall {
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(vec![(
             CborValue::Text("timeout_minutes".to_owned()),
-            CborValue::Integer(60.into()),
+            CborValue::Integer(1_440.into()),
         )]),
     }
 }

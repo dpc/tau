@@ -8,8 +8,8 @@ Activating-input waits span tool argument and display handling, event-loop waite
 
 `wait({"timeout_minutes":N})` is a runtime-only, target-scoped suspension inside
 an existing tool round. `N` must be a positive CBOR integer; zero, negatives,
-fractions, and other types are errors. Values above 60 are silently treated as
-60 before duration conversion. The legacy `any_input` field is explicitly
+fractions, and other types are errors. Values above 1,440 are silently treated
+as 1,440 before duration conversion. The legacy `any_input` field is explicitly
 rejected. The deadline starts when the event loop registers the waiter.
 
 It completes when canonical input for that agent has passed its normal
@@ -22,7 +22,7 @@ it instead completes normally with `timed_out: true` and warning/`timeout` UI
 metadata. Event-loop processing order decides races exactly once.
 
 The provider-owned generic tool display shows the effective bound as compact
-`Nm` arguments, including the 60-minute cap. Argument-free waits retain their
+`Nm` arguments, including the 1,440-minute cap. Argument-free waits retain their
 existing empty argument display. Live progress and retained/replayed result or
 error blocks preserve the same bounded label; cancellation retains the existing
 generic cancellation presentation because that protocol event has no display

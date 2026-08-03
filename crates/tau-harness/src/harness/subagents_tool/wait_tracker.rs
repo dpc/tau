@@ -23,7 +23,7 @@ use super::WAIT_TOOL_NAME;
 const MAX_WAIT_TERMINAL_TOMBSTONES: usize = 1024;
 const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "original_tool_call_id";
 const NO_BACKGROUND_WAIT_CANDIDATES: &str = "no background tool calls are running or completed in this conversation; use `wait({\"timeout_minutes\": N})` with a positive integer N to wait for new activating input";
-const MAX_INPUT_WAIT_MINUTES: i128 = 60;
+const MAX_INPUT_WAIT_MINUTES: i128 = 24 * 60;
 
 /// Render the normalized input-wait timeout for tool display state.
 pub(super) fn wait_timeout_args(timeout: Duration) -> String {
