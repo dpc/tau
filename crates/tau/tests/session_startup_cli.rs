@@ -6,7 +6,9 @@ fn tau_command(temp: &tempfile::TempDir) -> Command {
     command
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .env("XDG_STATE_HOME", temp.path().join("state"))
-        .env("XDG_RUNTIME_DIR", temp.path().join("runtime"));
+        .env("XDG_RUNTIME_DIR", temp.path().join("runtime"))
+        .env_remove("TAU_ENABLE_EXTENSIONS")
+        .env_remove("TAU_PROFILE");
     command
 }
 

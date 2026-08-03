@@ -23,6 +23,7 @@ fn preview_at(home: &Path, environment: Option<&str>, args: &[&str]) -> Output {
         .env("XDG_DATA_HOME", home.join(".data"))
         .env("XDG_RUNTIME_DIR", runtime)
         .env_remove("TAU_ENABLE_EXTENSIONS")
+        .env_remove("TAU_PROFILE")
         .args(args);
     if let Some(environment) = environment {
         command.env("TAU_ENABLE_EXTENSIONS", environment);
@@ -274,6 +275,7 @@ fn previews_reject_non_utf8_extension_environment() {
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", home.path().join(".config"))
             .env("XDG_STATE_HOME", home.path().join(".state"))
+            .env_remove("TAU_PROFILE")
             .env(
                 "TAU_ENABLE_EXTENSIONS",
                 path_std_ffi::OsString::from_vec(vec![0xff]),

@@ -38,6 +38,7 @@ extensions:
         .env("XDG_STATE_HOME", state_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env_remove("TAU_ENABLE_EXTENSIONS")
+        .env_remove("TAU_PROFILE")
         .output()
         .expect("run tau print-tools");
 
