@@ -20,7 +20,7 @@ use tau_proto::{
     AgentId, AgentPromptSteered, AgentPromptSubmitted, AgentReplayComplete, CborValue, Event,
     EventName, EventSelector, ExtInternalPromptSubmitRequest, HarnessInputMessage,
     SessionAgentUnloaded, SessionShutdown, SessionStarted, ToolError, ToolResult, ToolResultKind,
-    ToolSpec, ToolStarted, ToolType, ToolUseState, ToolUseStatus, UnixMicros,
+    ToolSpec, ToolStarted, ToolType, ToolUseState, ToolUseStats, ToolUseStatus, UnixMicros,
 };
 
 /// Protocol/logging name for the utility extension.
@@ -193,6 +193,35 @@ struct ScheduleArgs {
     interval_seconds: Option<u64>,
     /// Internal prompt body to submit when due.
     message: String,
+}
+
+/// Successful live timer result and its terminal-only display projection.
+struct TimerToolCompletion {
+    /// Unchanged model-visible result for the tool invocation.
+    result: CborValue,
+    /// Bounded terminal metadata rendered by the CLI.
+    display: ToolUseState,
+}
+
+/// Model result and display-only facts from one successful timer action.
+struct TimerActionResult {
+    /// Unchanged model-visible result for the action.
+    result: CborValue,
+    /// Bounded fact that selects the terminal display context.
+    outcome: TimerActionOutcome,
+}
+
+/// Operation facts needed only to describe a successful terminal display.
+enum TimerActionOutcome {
+    /// The action's validated arguments already provide sufficient context.
+    NoAdditionalContext,
+    /// A cancellation found no active timer with the requested id.
+    NotActive,
+    /// A list result contained this many timer rows.
+    Listed {
+        /// Number of active timers included in the bounded list result.
+        matches: u64,
+    },
 }
 
 /// Prepared internal prompt for one due timer firing.
@@ -426,7 +455,7 @@ impl TimerRuntime {
         &mut self,
         invoke: &ToolStarted,
         now: UnixMicros,
-    ) -> Result<CborValue, String> {
+    ) -> Result<TimerToolCompletion, String> {
         // A live tool call is delivered only after the connection catch-up phase
         // has released live traffic for this agent, so timers scheduled from it
         // may fire even if the harness did not emit a separate live-load replay
@@ -437,7 +466,14 @@ impl TimerRuntime {
             call_id: invoke.call_id.to_string(),
             arguments: invoke.arguments.clone(),
         };
-        self.apply_successful_invocation(&pending, now)
+        let action = parse_action(&pending.arguments, &pending.call_id)?;
+        let display_args = timer_action_display_args(&action);
+        let TimerActionResult { result, outcome } =
+            self.apply_timer_action(&pending.agent_id, action, now)?;
+        Ok(TimerToolCompletion {
+            result,
+            display: timer_success_display(display_args, outcome),
+        })
     }
 
     fn apply_successful_invocation(
@@ -445,10 +481,27 @@ impl TimerRuntime {
         pending: &PendingInvocation,
         now: UnixMicros,
     ) -> Result<CborValue, String> {
-        match parse_action(&pending.arguments, &pending.call_id)? {
-            TimerAction::Schedule(args) => self.schedule_timer(&pending.agent_id, args, now),
-            TimerAction::Cancel { timer_id } => Ok(self.cancel_timer(&pending.agent_id, &timer_id)),
-            TimerAction::List => Ok(self.list_timers(&pending.agent_id, now)),
+        let action = parse_action(&pending.arguments, &pending.call_id)?;
+        self.apply_timer_action(&pending.agent_id, action, now)
+            .map(|result| result.result)
+    }
+
+    fn apply_timer_action(
+        &mut self,
+        agent_id: &AgentId,
+        action: TimerAction,
+        now: UnixMicros,
+    ) -> Result<TimerActionResult, String> {
+        match action {
+            TimerAction::Schedule(args) => {
+                self.schedule_timer(agent_id, args, now)
+                    .map(|result| TimerActionResult {
+                        result,
+                        outcome: TimerActionOutcome::NoAdditionalContext,
+                    })
+            }
+            TimerAction::Cancel { timer_id } => Ok(self.cancel_timer(agent_id, &timer_id)),
+            TimerAction::List => Ok(self.list_timers(agent_id, now)),
         }
     }
 
@@ -503,7 +556,7 @@ impl TimerRuntime {
         Ok(text_result(format!("scheduled timer `{}`", args.timer_id)))
     }
 
-    fn cancel_timer(&mut self, agent_id: &AgentId, timer_id: &str) -> CborValue {
+    fn cancel_timer(&mut self, agent_id: &AgentId, timer_id: &str) -> TimerActionResult {
         let removed = self
             .timers
             .remove(&TimerKey {
@@ -512,13 +565,19 @@ impl TimerRuntime {
             })
             .is_some();
         if removed {
-            text_result(format!("cancelled timer `{timer_id}`"))
+            TimerActionResult {
+                result: text_result(format!("cancelled timer `{timer_id}`")),
+                outcome: TimerActionOutcome::NoAdditionalContext,
+            }
         } else {
-            text_result(format!("timer `{timer_id}` was not active"))
+            TimerActionResult {
+                result: text_result(format!("timer `{timer_id}` was not active")),
+                outcome: TimerActionOutcome::NotActive,
+            }
         }
     }
 
-    fn list_timers(&self, agent_id: &AgentId, now: UnixMicros) -> CborValue {
+    fn list_timers(&self, agent_id: &AgentId, now: UnixMicros) -> TimerActionResult {
         let mut timers: Vec<_> = self
             .timers
             .values()
@@ -539,10 +598,18 @@ impl TimerRuntime {
                 }
             })
             .collect();
+        let matches = u64::try_from(lines.len())
+            .expect("the bounded timer list contains no more than 64 entries");
         if lines.is_empty() {
-            text_result("no active timers".to_owned())
+            TimerActionResult {
+                result: text_result("no active timers".to_owned()),
+                outcome: TimerActionOutcome::Listed { matches },
+            }
         } else {
-            text_result(lines.join("\n"))
+            TimerActionResult {
+                result: text_result(lines.join("\n")),
+                outcome: TimerActionOutcome::Listed { matches },
+            }
         }
     }
 }
@@ -577,14 +644,14 @@ fn handle_timer_tool(cx: ToolContext<'_, TimerRuntime>) -> ClientResult<()> {
     let result = cx.state.handle_live_tool(cx.invoke, now);
     let display_args = timer_display_args(&cx.invoke.arguments, cx.invoke.call_id.as_str());
     match result {
-        Ok(result) => cx.report_result(ToolResult {
+        Ok(completion) => cx.report_result(ToolResult {
             call_id: cx.invoke.call_id.clone(),
             tool_name: cx.invoke.tool_name.clone(),
             tool_type: ToolType::Function,
-            result,
+            result: completion.result,
             provider_content: Vec::new(),
             kind: ToolResultKind::Final,
-            display: Some(ok_display(display_args)),
+            display: Some(completion.display),
             originator: cx.invoke.originator.clone(),
         }),
         Err(message) => cx.report_error(ToolError {
@@ -696,6 +763,21 @@ fn timer_action_display_args(action: &TimerAction) -> String {
         TimerAction::Cancel { timer_id } => format!("cancel {timer_id}"),
         TimerAction::List => "list".to_owned(),
     }
+}
+
+fn timer_success_display(args: String, outcome: TimerActionOutcome) -> ToolUseState {
+    let mut display = ok_display(args);
+    match outcome {
+        TimerActionOutcome::NoAdditionalContext => {}
+        TimerActionOutcome::NotActive => display.info_chips.push("not active".to_owned()),
+        TimerActionOutcome::Listed { matches } => {
+            display.stats = ToolUseStats {
+                matches: Some(matches),
+                ..Default::default()
+            };
+        }
+    }
+    display
 }
 
 fn fallback_timer_display_args(arguments: &CborValue) -> String {

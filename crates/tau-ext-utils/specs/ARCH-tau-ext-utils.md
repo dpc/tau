@@ -38,4 +38,8 @@ values for valid calls, so compact UI lines can show action and timing details
 without re-parsing untrusted strings. If argument parsing fails, display falls
 back only to whitelisted action labels (`schedule`, `cancel`, `list`) plus
 sanitized timer ids and bounded numeric fields. Unknown actions and invalid timer
-ids are not echoed into `ToolUseState.args`.
+ids are not echoed into `ToolUseState.args`. Successful list displays report the
+bounded number of returned timers as the standard match counter. Schedule and
+successful cancel need no additional chip because their validated action
+arguments already identify the mutation; a static `not active` chip distinguishes
+an idempotent cancel from one that removed a timer without exposing reminder text.

@@ -388,6 +388,82 @@ fn timer_display_args_summarize_cancel_and_list() {
     assert_eq!(timer_display_args(&list, "call-1"), "list");
 }
 
+/// Terminal timer displays must make each successful action useful in compact
+/// history without changing its model-visible result. This covers scheduled,
+/// cancelled, absent, and listed timer lifecycle outcomes deterministically.
+#[test]
+fn timer_completion_display_summarizes_successful_action_outcomes() {
+    let mut rt = runtime();
+    let agent = "agent-one";
+    let schedule = started(
+        "call-schedule",
+        agent,
+        cbor_map(vec![
+            ("action", CborValue::Text("schedule".to_owned())),
+            ("timer_id", CborValue::Text("standup".to_owned())),
+            ("delay_seconds", CborValue::Integer(600.into())),
+            ("message", CborValue::Text("join the call".to_owned())),
+        ]),
+    );
+    let scheduled = rt
+        .handle_live_tool(&schedule, UnixMicros::new(0))
+        .expect("schedule");
+    assert_eq!(
+        scheduled.result,
+        CborValue::Text("scheduled timer `standup`".to_owned())
+    );
+    assert_eq!(scheduled.display.args, "schedule standup in 10m");
+    assert!(scheduled.display.info_chips.is_empty());
+
+    let list = started(
+        "call-list",
+        agent,
+        cbor_map(vec![("action", CborValue::Text("list".to_owned()))]),
+    );
+    let listed = rt
+        .handle_live_tool(&list, UnixMicros::new(0))
+        .expect("list");
+    assert_eq!(
+        listed.result,
+        CborValue::Text("standup: due in 600s, one-shot".to_owned())
+    );
+    assert_eq!(listed.display.args, "list");
+    assert_eq!(listed.display.stats.matches, Some(1));
+    assert!(listed.display.info_chips.is_empty());
+
+    let cancel = started(
+        "call-cancel",
+        agent,
+        cbor_map(vec![
+            ("action", CborValue::Text("cancel".to_owned())),
+            ("timer_id", CborValue::Text("standup".to_owned())),
+        ]),
+    );
+    let cancelled = rt
+        .handle_live_tool(&cancel, UnixMicros::new(0))
+        .expect("cancel");
+    assert_eq!(
+        cancelled.result,
+        CborValue::Text("cancelled timer `standup`".to_owned())
+    );
+    assert!(cancelled.display.info_chips.is_empty());
+
+    let absent = rt
+        .handle_live_tool(&cancel, UnixMicros::new(0))
+        .expect("cancel absent timer");
+    assert_eq!(
+        absent.result,
+        CborValue::Text("timer `standup` was not active".to_owned())
+    );
+    assert_eq!(absent.display.info_chips, ["not active"]);
+
+    let empty = rt
+        .handle_live_tool(&list, UnixMicros::new(0))
+        .expect("empty list");
+    assert_eq!(empty.result, CborValue::Text("no active timers".to_owned()));
+    assert_eq!(empty.display.stats.matches, Some(0));
+}
+
 /// Timer display args do not echo unknown actions or unsafe timer ids.
 #[test]
 fn timer_display_args_do_not_echo_untrusted_fields() {
