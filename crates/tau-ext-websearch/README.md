@@ -86,7 +86,9 @@ model-visible `ToolError` text. Before surfacing them, the extension sanitizes
 echoes of the configured endpoint URL, request target, query keys/values,
 fragment, and userinfo, then applies a final model-visible error cap. Oversized
 JSON-RPC error messages are replaced with a compact deterministic error instead
-of echoing provider text.
+of echoing provider text. HTTP 429 responses instead produce the generic bounded
+advice `web service rate-limited the request; try again later.` without reading
+or echoing the provider body.
 
 Tests use local stubs or loopback HTTP servers and do not contact live providers.
 

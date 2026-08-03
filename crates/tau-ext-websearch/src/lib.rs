@@ -72,6 +72,8 @@ const TRUNCATED_SUFFIX: &str = "… (truncated)";
 const REDACTED_COMPONENT: &str = "…";
 const WEB_CONTENT_CLOSE: &str = "</tau_web_content>";
 const WEB_CONTENT_CLOSE_VISIBLE: &str = "&lt;/tau_web_content&gt;";
+const HTTP_TOO_MANY_REQUESTS: u16 = 429;
+const RATE_LIMITED_ERROR: &str = "web service rate-limited the request; try again later.";
 
 #[derive(Clone, Copy)]
 enum WebAdapter {
@@ -872,6 +874,9 @@ fn post_mcp(
             )
         })?;
     let mut response = response;
+    if response.status().as_u16() == HTTP_TOO_MANY_REQUESTS {
+        return Err(RATE_LIMITED_ERROR.to_owned());
+    }
     if !response.status().is_success() {
         let code = response.status().as_u16();
         let body = sanitize_endpoint_error(&read_capped(response.body_mut().as_reader()), endpoint);

@@ -10,6 +10,9 @@ Cover registration/default policy, endpoint parsing, rejection, and
 application, provider argument forwarding and local rejection, no-Authorization
 behavior, JSON/SSE decode, independent response/output/error caps, redaction,
 saturation with responsive control handling, and replay suppression.
+Use loopback servers to verify that HTTP 429 takes the shared generic
+rate-limit path for both hosted clients and never projects hostile, oversized
+error bodies or endpoint secrets.
 
 Successful-result coverage must exercise Exa search, Parallel search, and
 Parallel fetch with exact canonical `<tau_web_content>` attributes. Adversarial
