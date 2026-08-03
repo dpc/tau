@@ -1,9 +1,11 @@
 //! Fixed read and authenticated-write public interface.
 
-use tau_proto::ToolSpec;
+use tau_proto::{ToolGroup, ToolGroupName, ToolSpec};
 
 /// Status tool's exact public name.
 pub(crate) const STATUS_TOOL: &str = "rostra_status";
+/// Group exposing the complete standard Rostra capability surface.
+pub(crate) const TOOL_GROUP: &str = "rostra";
 /// Timeline-list tool's exact public name.
 pub(crate) const LIST_TOOL: &str = "rostra_list_posts";
 /// Post-read tool's exact public name.
@@ -24,6 +26,14 @@ pub(crate) const PROFILE_UPDATE_TOOL: &str = "rostra_update_profile";
 pub(crate) const VOTE_TOOL: &str = "rostra_vote";
 /// Agent-scoped following-notification preference tool's exact public name.
 pub(crate) const NOTIFICATIONS_TOOL: &str = "rostra_notifications";
+
+/// Declare the shared tool-policy group for all Rostra tools.
+pub(crate) fn tool_group() -> ToolGroup {
+    ToolGroup {
+        name: ToolGroupName::new(TOOL_GROUP),
+        prompt_fragment: None,
+    }
+}
 
 /// Declare the local-view status tool.
 pub(crate) fn status_spec() -> ToolSpec {

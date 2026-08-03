@@ -1,7 +1,7 @@
 //! Prompt capability and tool-policy behavior is specified by
 //! `SPEC-tau-harness-prompt-dispatch`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::os::unix::net::UnixStream;
 
 use tau_config::settings::{AgentRole, ShellToolStyle, TauDirs, ToolPolicy};
@@ -192,6 +192,35 @@ fn register_swarm_tools(harness: &mut Harness, prefix: Option<&str>) {
     }
 }
 
+fn register_rostra_tools(harness: &mut Harness) {
+    let group = ToolGroup {
+        name: ToolGroupName::new("rostra"),
+        prompt_fragment: None,
+    };
+    for name in [
+        "rostra_status",
+        "rostra_list_posts",
+        "rostra_read_post",
+        "rostra_get_profile",
+        "rostra_post",
+        "rostra_react",
+        "rostra_follow",
+        "rostra_unfollow",
+        "rostra_update_profile",
+        "rostra_vote",
+        "rostra_notifications",
+    ] {
+        harness.registry.register_with_prompt_fragment(
+            &crate::test_connection_id("rostra"),
+            ToolRegistration {
+                tool: tagged_tool(name, true, &[]),
+                tool_group: Some(group.clone()),
+                prompt_fragment: None,
+            },
+        );
+    }
+}
+
 /// Ensures a role cannot force-enable image-producing tools on a provider route
 /// that did not explicitly publish both image-input and image-tool-result
 /// support.
@@ -239,6 +268,17 @@ fn effective_tool_names(harness: &Harness) -> Vec<String> {
         "dir_lock",
         "compact",
         "agent_compact",
+        "rostra_status",
+        "rostra_list_posts",
+        "rostra_read_post",
+        "rostra_get_profile",
+        "rostra_post",
+        "rostra_react",
+        "rostra_follow",
+        "rostra_unfollow",
+        "rostra_update_profile",
+        "rostra_vote",
+        "rostra_notifications",
     ];
     let model = harness.selected_model.as_ref();
     harness
@@ -459,6 +499,62 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
         !prefixed_tools
             .iter()
             .any(|tool| tool.name == "work_swarm_update")
+    );
+}
+
+/// Ensures the Rostra group enables every read, authenticated-write, and
+/// notification tool, while an exact Rostra name remains a narrow opt-in.
+#[test]
+fn rostra_tools_support_group_and_exact_role_opt_in() {
+    let mut group_enabled = policy_harness(
+        &[],
+        AgentRole {
+            tools: Some(Vec::new()),
+            enable_tool_groups: vec![ToolGroupName::new("rostra")],
+            ..AgentRole::default()
+        },
+    );
+    register_rostra_tools(&mut group_enabled.harness);
+    let group_tools = effective_tool_names(&group_enabled.harness);
+    let group_rostra_tools = group_tools
+        .iter()
+        .filter(|name| name.starts_with("rostra_"))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        group_rostra_tools,
+        BTreeSet::from([
+            "rostra_status".to_owned(),
+            "rostra_list_posts".to_owned(),
+            "rostra_read_post".to_owned(),
+            "rostra_get_profile".to_owned(),
+            "rostra_post".to_owned(),
+            "rostra_react".to_owned(),
+            "rostra_follow".to_owned(),
+            "rostra_unfollow".to_owned(),
+            "rostra_update_profile".to_owned(),
+            "rostra_vote".to_owned(),
+            "rostra_notifications".to_owned(),
+        ])
+    );
+
+    let mut exact_enabled = policy_harness(
+        &[],
+        AgentRole {
+            tools: Some(Vec::new()),
+            enable_tools: vec![ToolName::new("rostra_post")],
+            ..AgentRole::default()
+        },
+    );
+    register_rostra_tools(&mut exact_enabled.harness);
+    let exact_tools = effective_tool_names(&exact_enabled.harness);
+    assert_eq!(
+        exact_tools
+            .iter()
+            .filter(|name| name.starts_with("rostra_"))
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["rostra_post".to_owned()])
     );
 }
 

@@ -180,7 +180,7 @@ impl TauExtension for RostraExtension {
                 |_scope| {
                     Ok(tau_proto::ToolRegistrationDeclared {
                         tool: specs::notifications_spec(),
-                        tool_group: None,
+                        tool_group: Some(specs::tool_group()),
                         prompt_fragment: None,
                     })
                 },
@@ -199,16 +199,66 @@ impl TauExtension for RostraExtension {
                 cancel_call(cx.state, cx.event().target_call_id.clone());
                 Ok(())
             })
-            .tool(specs::status_spec(), handle_tool)
-            .tool(specs::list_spec(), handle_tool)
-            .tool(specs::read_spec(), handle_tool)
-            .tool(specs::profile_spec(), handle_tool)
-            .tool(specs::post_spec(), handle_tool)
-            .tool(specs::react_spec(), handle_tool)
-            .tool(specs::follow_spec(), handle_tool)
-            .tool(specs::unfollow_spec(), handle_tool)
-            .tool(specs::profile_update_spec(), handle_tool)
-            .tool(specs::vote_spec(), handle_tool)
+            .tool_with_group_and_prompt_fragment(
+                specs::status_spec(),
+                Some(specs::tool_group()),
+                None,
+                handle_tool,
+            )
+            .tool_with_group_and_prompt_fragment(
+                specs::list_spec(),
+                Some(specs::tool_group()),
+                None,
+                handle_tool,
+            )
+            .tool_with_group_and_prompt_fragment(
+                specs::read_spec(),
+                Some(specs::tool_group()),
+                None,
+                handle_tool,
+            )
+            .tool_with_group_and_prompt_fragment(
+                specs::profile_spec(),
+                Some(specs::tool_group()),
+                None,
+                handle_tool,
+            )
+            .tool_with_group_and_prompt_fragment(
+                specs::post_spec(),
+                Some(specs::tool_group()),
+                None,
+                handle_tool,
+            )
+            .tool_with_group_and_prompt_fragment(
+                specs::react_spec(),
+                Some(specs::tool_group()),
+                None,
+                handle_tool,
+            )
+            .tool_with_group_and_prompt_fragment(
+                specs::follow_spec(),
+                Some(specs::tool_group()),
+                None,
+                handle_tool,
+            )
+            .tool_with_group_and_prompt_fragment(
+                specs::unfollow_spec(),
+                Some(specs::tool_group()),
+                None,
+                handle_tool,
+            )
+            .tool_with_group_and_prompt_fragment(
+                specs::profile_update_spec(),
+                Some(specs::tool_group()),
+                None,
+                handle_tool,
+            )
+            .tool_with_group_and_prompt_fragment(
+                specs::vote_spec(),
+                Some(specs::tool_group()),
+                None,
+                handle_tool,
+            )
             .ready_message("Rostra local synchronized view ready");
     }
 }

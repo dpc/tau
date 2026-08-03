@@ -120,7 +120,9 @@ policy is the only current authorization boundary: supplying the mnemonic
 delegates signing authority to every role allowed these tool names. Tau has no
 genuine human per-call confirmation primitive, so a model-supplied confirmation
 field would not add authority protection. Operators must limit these tools to
-trusted roles.
+trusted roles. `enable_tool_groups: [rostra]` grants the whole interface: the
+four reads, six signed writes, and `rostra_notifications`. An operator who
+needs a smaller surface must use exact tool-name policy.
 
 `rostra_notifications` is a separately scoped, per-agent opt-in tool with the
 strict argument shape `{"enabled": boolean}`. Its extension-owned crash-durable

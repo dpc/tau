@@ -26,8 +26,9 @@ use crate::projection::{
 };
 use crate::specs::{
     FOLLOW_TOOL, LIST_TOOL, POST_TOOL, PROFILE_TOOL, PROFILE_UPDATE_TOOL, REACT_TOOL, READ_TOOL,
-    STATUS_TOOL, UNFOLLOW_TOOL, VOTE_TOOL, follow_spec, list_spec, post_spec, profile_spec,
-    profile_update_spec, react_spec, read_spec, status_spec, unfollow_spec, vote_spec,
+    STATUS_TOOL, TOOL_GROUP, UNFOLLOW_TOOL, VOTE_TOOL, follow_spec, list_spec, post_spec,
+    profile_spec, profile_update_spec, react_spec, read_spec, status_spec, unfollow_spec,
+    vote_spec,
 };
 use crate::tools::write::{
     handle as handle_signed_tool, parse_tags, pause_before_test_publication, validate_body,
@@ -258,6 +259,83 @@ fn tool_declarations_match_approved_slice() {
             .and_then(|schema| schema.get("additionalProperties"))
             == Some(&serde_json::Value::Bool(false))
     }));
+}
+
+/// Ensures the extension declares every standard Rostra tool in the one policy
+/// group that grants the complete Rostra capability surface.
+#[test]
+fn standard_tool_registrations_share_rostra_group() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let secret = RostraIdSecretKey::generate();
+    let (extension_input, harness_input) = UnixStream::pair().expect("input stream pair");
+    let output = SharedWriter::default();
+    let runner_output = output.clone();
+    let runner = thread::spawn(move || {
+        run(extension_input, runner_output).map_err(|error| error.to_string())
+    });
+    let mut writer = HarnessOutputWriter::new(harness_input);
+    writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "identity_mnemonic_secret": "rostra_identity_mnemonic",
+            })),
+            instance_name: tau_proto::ExtensionName::parse("std-rostra").expect("extension name"),
+            tool_prefix: None,
+            state_dir: Some(temporary.path().join("state")),
+            secrets: BTreeMap::from([(
+                "rostra_identity_mnemonic".to_owned(),
+                tau_proto::SecretValue::new(secret.to_string()),
+            )]),
+        }))
+        .expect("configure Rostra");
+    writer.flush().expect("flush configuration");
+    wait_for_output_event(&output, |_event| {
+        output_events(&output)
+            .iter()
+            .filter(|event| matches!(event, Event::ToolRegistrationDeclared(_)))
+            .count()
+            == 11
+    });
+
+    let registrations = output_events(&output)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::ToolRegistrationDeclared(registration) => Some(registration),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(registrations.len(), 11);
+    assert_eq!(
+        registrations
+            .iter()
+            .map(|registration| registration.tool.name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            STATUS_TOOL,
+            LIST_TOOL,
+            READ_TOOL,
+            PROFILE_TOOL,
+            POST_TOOL,
+            REACT_TOOL,
+            FOLLOW_TOOL,
+            UNFOLLOW_TOOL,
+            PROFILE_UPDATE_TOOL,
+            VOTE_TOOL,
+            crate::specs::NOTIFICATIONS_TOOL,
+        ])
+    );
+    assert!(registrations.iter().all(|registration| {
+        registration
+            .tool_group
+            .as_ref()
+            .is_some_and(|group| group.name.as_str() == TOOL_GROUP)
+    }));
+
+    drop(writer);
+    runner
+        .join()
+        .expect("Rostra runner thread")
+        .expect("Rostra runner succeeds");
 }
 
 /// Ensures private setup removes inherited group/world directory access.

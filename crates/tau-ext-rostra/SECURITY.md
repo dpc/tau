@@ -43,7 +43,10 @@ but does not prevent other devices from creating forks, and the upstream head
 merger can sign a merge event. The existing eight-read admission cap remains.
 Tool policy controls which roles receive signing capability. Tau has no
 genuine human per-call confirmation; operators must grant these tools only to
-roles trusted to make permanent external statements.
+roles trusted to make permanent external statements. `enable_tool_groups:
+[rostra]` grants all four local-view reads, all six persistent signed writes,
+and `rostra_notifications`; use exact tool-name policy instead when a role
+needs a smaller surface.
 
 Tool output is capped at 128 KiB, including bounded tag count and aggregate tag
 bytes. The upstream store can still deserialize a full accepted Rostra payload
