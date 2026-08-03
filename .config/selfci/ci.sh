@@ -42,6 +42,19 @@ function job_cargo() {
   then
     selfci step fail
   fi
+
+  if [[ "${TAU_CI_FULL:-false}" == "true" ]]; then
+    # The report inventories current debt while the aggregate applies both
+    # blocking CRAP gates. Baselines are regenerated only after accepted,
+    # intentional score changes, not on every full CI run.
+    selfci step start "Nix cargo-crap checks"
+    if ! nix build -L --no-link \
+      .#ci.crapReport \
+      .#ci.crap
+    then
+      selfci step fail
+    fi
+  fi
 }
 
 function job_site() {

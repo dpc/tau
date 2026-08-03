@@ -65,3 +65,14 @@ nix build -L .#ci.crapAbsolute
 nix build -L .#ci.crap
 selfci check
 ```
+
+`selfci check` skips the expensive LLVM coverage and cargo-crap lane by
+default. Set `TAU_CI_FULL=true` when a maintainer needs that full local CI
+lane, including its debt inventory and both blocking gates:
+
+```bash
+TAU_CI_FULL=true selfci check --candidate <change-id>
+```
+
+Do not add `crapBaseline` to routine CI: regenerate it only after an accepted,
+intentional CRAP-score change lands on mainline.

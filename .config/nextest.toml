@@ -16,3 +16,25 @@ slow-timeout = { period = "30s", terminate-after = 1 }
 [[profile.default.overrides]]
 filter = "package(tau-e2e-tests) & binary(cancellation_liveness)"
 slow-timeout = { period = "15s", terminate-after = 1 }
+
+# LLVM coverage instrumentation makes the same test binaries materially slower.
+# Keep that allowance isolated from ordinary developer and CI test runs.
+[profile.coverage]
+inherits = "default"
+slow-timeout = { period = "20s", terminate-after = 1 }
+
+[[profile.coverage.overrides]]
+filter = "package(tau-e2e-tests) & binary(deterministic_provider)"
+slow-timeout = { period = "120s", terminate-after = 1 }
+
+[[profile.coverage.overrides]]
+filter = "package(tau-e2e-tests) & binary(core_resume)"
+slow-timeout = { period = "60s", terminate-after = 1 }
+
+[[profile.coverage.overrides]]
+filter = "package(tau-e2e-tests) & binary(core_shell_resume)"
+slow-timeout = { period = "60s", terminate-after = 1 }
+
+[[profile.coverage.overrides]]
+filter = "package(tau-e2e-tests) & binary(cancellation_liveness)"
+slow-timeout = { period = "30s", terminate-after = 1 }

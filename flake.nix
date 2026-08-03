@@ -326,7 +326,7 @@
               cargoArtifacts = workspaceCcov;
               buildPhaseCargoCommand = ''
                 source <(cargo llvm-cov show-env --export-prefix)
-                cargo nextest run --locked --workspace --all-targets --cargo-profile $CARGO_PROFILE ${nextestReporterArgs}
+                cargo nextest run --locked --workspace --all-targets --profile coverage --cargo-profile $CARGO_PROFILE ${nextestReporterArgs}
                 mkdir -p $out
                 cargo llvm-cov report --profile $CARGO_PROFILE --lcov --output-path $out/lcov.info
                 test -s $out/lcov.info
