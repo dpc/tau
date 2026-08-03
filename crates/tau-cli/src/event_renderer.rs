@@ -376,7 +376,7 @@ pub(crate) struct EventRenderer {
     /// unknown prompts are still allowed for the no-agent adoptable
     /// transcript path.
     finished_provider_prompts: HashSet<String>,
-    /// Active watched-agent indicator blocks keyed by watched agent id.
+    /// Visible watched-agent status-row blocks keyed by watched agent id.
     watched_agent_blocks: HashMap<String, tau_cli_term::BlockId>,
     /// Shared current visible agent mirror for prompt submission.
     current_agent_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -617,7 +617,7 @@ struct DraftRetargeter {
 #[derive(Default)]
 struct AgentUiState {
     output: tau_cli_term::OutputSnapshot,
-    /// Active watched-agent indicator blocks that belong to this output
+    /// Visible watched-agent status-row blocks that belong to this output
     /// snapshot.
     ///
     /// These rows are transient global UI for the currently selected watcher,
@@ -1194,8 +1194,8 @@ struct PromptState {
 #[derive(Default)]
 struct ToolCallState {
     /// Live tool-call block in the active-tools area. `None` for sub-agent
-    /// tool calls whose UI is suppressed while generic watched-agent indicators
-    /// summarize their owner agent's activity.
+    /// tool calls whose UI is suppressed while generic watched-agent status
+    /// rows summarize their owner agent's activity.
     block_id: Option<tau_cli_term::BlockId>,
     /// Empty history placeholder allocated at the tool call's logical
     /// transcript position. Final results fill this block so live progress
@@ -1484,6 +1484,8 @@ fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<ToolCallIte
 
 /// Semantic state of a visible direct watched-agent row.
 pub(crate) enum WatchedAgentActivity<'a> {
+    /// The direct watch is idle and has no running watched descendant.
+    Idle,
     /// The directed watch edge reports a running outer turn.
     Running,
     /// The edge is idle but its target watches an active descendant.
@@ -1493,7 +1495,7 @@ pub(crate) enum WatchedAgentActivity<'a> {
     },
 }
 
-/// Builds the generic tool-block-shaped display for a watched-agent indicator.
+/// Builds the generic tool-block-shaped display for a watched-agent status row.
 ///
 /// This intentionally reuses [`tau_proto::ToolUseState`] counter formatting so
 /// rows keep the compact generic layout, stable `@agent_id` identity, and
@@ -1547,10 +1549,6 @@ pub(crate) fn watched_agent_tool_display(
         status_text: String::new(),
         ..Default::default()
     };
-    let (runtime_state, witness) = match activity {
-        WatchedAgentActivity::Running => ("running", None),
-        WatchedAgentActivity::Watching { witness } => ("watching", Some(witness)),
-    };
     let mut rendered = render_tool_use_state_without_status(&format!("@{agent_id}"), &display);
     rendered.tool_name_style = Some(tau_themes::names::WATCHING_NAME);
     if let Some(display_name) = display_name.map(str::trim).filter(|name| !name.is_empty()) {
@@ -1572,22 +1570,30 @@ pub(crate) fn watched_agent_tool_display(
             no_leading_space: false,
         });
     }
-    if runtime_state == "watching" {
-        rendered.leading_segments.push(ToolLineSegment {
-            text: runtime_state.to_owned(),
-            status: ToolStatus::Info,
-            no_leading_space: false,
-        });
-    }
-    if let Some(witness) = witness {
-        rendered.suffixes.insert(
-            0,
-            ToolLineSegment {
-                text: format!("-> @{witness}"),
-                status: ToolStatus::Agent,
+    match activity {
+        WatchedAgentActivity::Idle => {}
+        WatchedAgentActivity::Running => {
+            rendered.leading_segments.push(ToolLineSegment {
+                text: "running".to_owned(),
+                status: ToolStatus::Info,
                 no_leading_space: false,
-            },
-        );
+            });
+        }
+        WatchedAgentActivity::Watching { witness } => {
+            rendered.leading_segments.push(ToolLineSegment {
+                text: "watching".to_owned(),
+                status: ToolStatus::Info,
+                no_leading_space: false,
+            });
+            rendered.suffixes.insert(
+                0,
+                ToolLineSegment {
+                    text: format!("-> @{witness}"),
+                    status: ToolStatus::Agent,
+                    no_leading_space: false,
+                },
+            );
+        }
     }
     rendered
 }
@@ -1808,15 +1814,6 @@ impl EventRenderer {
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<HashMap<String, String>>> {
         self.agent_display_names.clone()
-    }
-
-    /// Returns the current-session cached work status for one watched agent.
-    #[cfg(test)]
-    pub(crate) fn watched_agent_work_status(
-        &self,
-        agent_id: &str,
-    ) -> Option<&tau_proto::AgentWatchWorkStatusNotification> {
-        self.watched_agent_work_statuses.get(agent_id)
     }
 
     /// Returns the canonical cumulative per-agent costs shared with input
@@ -2144,19 +2141,16 @@ impl EventRenderer {
             .cloned()
             .unwrap_or_default();
         let projection = self.watch_activity_projection();
-        let mut active: Vec<String> = watched
+        let mut visible: Vec<String> = watched
             .into_iter()
-            .filter(|agent_id| {
-                projection.edge_is_directly_running(&current, agent_id)
-                    || projection.watcher_is_active(agent_id)
-            })
+            .filter(|agent_id| self.watched_agent_is_visible(agent_id))
             .collect();
-        active.sort();
-        let active_set: HashSet<_> = active.iter().cloned().collect();
+        visible.sort();
+        let visible_set: HashSet<_> = visible.iter().cloned().collect();
         let stale: Vec<_> = self
             .watched_agent_blocks
             .keys()
-            .filter(|agent_id| !active_set.contains(*agent_id))
+            .filter(|agent_id| !visible_set.contains(*agent_id))
             .cloned()
             .collect();
         for agent_id in stale {
@@ -2164,7 +2158,7 @@ impl EventRenderer {
                 self.handle.remove_block(block_id);
             }
         }
-        for (index, agent_id) in active.iter().enumerate() {
+        for (index, agent_id) in visible.iter().enumerate() {
             let block = self.watched_agent_block(&current, agent_id, &projection);
             let block_id = if let Some(block_id) = self.watched_agent_blocks.get(agent_id).copied()
             {
@@ -2177,13 +2171,29 @@ impl EventRenderer {
                 self.watched_agent_blocks.insert(agent_id.clone(), block_id);
                 block_id
             };
-            let later_blocks = active[index + 1..].iter().filter_map(|later_agent_id| {
+            let later_blocks = visible[index + 1..].iter().filter_map(|later_agent_id| {
                 self.watched_agent_blocks.get(later_agent_id).copied()
             });
             self.handle
                 .push_above_active_before_any(block_id, later_blocks);
         }
         self.handle.redraw();
+    }
+
+    /// Returns whether a direct watched-agent row remains visible for its
+    /// current self-reported task status.
+    ///
+    /// A missing snapshot is the canonical unreported state. Work status,
+    /// rather than transient turn activity, owns row lifetime so running
+    /// and idle transitions can only redraw the existing row. A `Done`
+    /// report is the one terminal status that removes the row.
+    fn watched_agent_is_visible(&self, agent_id: &str) -> bool {
+        !matches!(
+            self.watched_agent_work_statuses
+                .get(agent_id)
+                .map(|status| status.phase),
+            Some(tau_proto::AgentWorkStatusPhase::Done)
+        )
     }
 
     fn agent_has_active_prompt(&self, agent_id: &str) -> bool {
@@ -2370,12 +2380,10 @@ impl EventRenderer {
             .flatten();
         let activity = if directly_running {
             WatchedAgentActivity::Running
+        } else if let Some(witness) = witness.as_deref() {
+            WatchedAgentActivity::Watching { witness }
         } else {
-            WatchedAgentActivity::Watching {
-                witness: witness
-                    .as_deref()
-                    .expect("recursive activity has a directly running witness"),
-            }
+            WatchedAgentActivity::Idle
         };
         let display = watched_agent_tool_display(
             display_name.as_deref(),
@@ -3630,6 +3638,7 @@ impl EventRenderer {
             .ok()
     }
 
+    /// Returns the session-wide number of active watched side agents.
     fn active_side_agent_count(&self) -> usize {
         let mut watched = HashSet::new();
         for watched_agent_ids in self.watched_agents.values() {

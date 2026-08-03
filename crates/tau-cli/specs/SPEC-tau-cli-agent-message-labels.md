@@ -72,16 +72,17 @@ input to the selected existing agent makes that exact target `active` for
 subsequent navigation; complete harness stats, not the local prompt event, update
 the CLI cache.
 
-Current CLI activity rows come from the latest watched-agent `TurnState` record
-cached on each directed watch edge. `Running` renders as active and `Idle` does
-not. Before an edge receives its first `TurnState`, active prompt tracking for
-the target is the edge-local compatibility/catch-up fallback. Structured
-`WorkStatus` reports supply transcript status updates and current-session row
-presentation metadata, but do not replace `TurnState` as activity-row authority.
+Current CLI watched status rows come from the current-session semantic
+`WorkStatus` snapshot for each direct target. Absent status is unreported;
+unreported, working, blocked, and unknown remain visible, and done alone
+removes the row. `TurnState` controls activity decoration only: Running renders
+direct activity, while Idle retains the status row without an activity marker.
+Before an edge receives its first `TurnState`, active prompt tracking for the
+target is the edge-local compatibility/catch-up fallback.
 
 The CLI derives recursive activity exactly over the current live watch DAG. A
 direct target whose edge reports Running renders as `@id (display name) phase
-title`, followed by existing tool/context telemetry. The stable id is primary;
+title running`, followed by existing tool/context telemetry. The stable id is primary;
 the display name is optional persisted UI metadata; phase/title are the watched
 agent's own structured `WorkStatus` report. Under width pressure the display
 name yields before the title, while identity and phase retain their existing

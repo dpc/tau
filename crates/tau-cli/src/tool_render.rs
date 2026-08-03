@@ -347,9 +347,9 @@ pub(crate) struct ToolSummaryDisplay {
 
 /// Build the completion descriptor for a finished `agent_start` call.
 ///
-/// Current first-party rendering uses generic watched-agent indicators for live
-/// child activity, so this helper only shapes the final metadata/error line for
-/// the already-completed spawn tool.
+/// Current first-party rendering uses generic watched-agent status rows for
+/// live child activity, so this helper only shapes the final metadata/error
+/// line for the already-completed spawn tool.
 pub(crate) fn build_delegate_completion_display(
     cached: Option<&ToolUseState>,
     details: &CborValue,

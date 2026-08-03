@@ -12,6 +12,7 @@ pub(crate) type WatchEdge = (String, String);
 #[derive(Debug, Default)]
 pub(crate) struct WatchActivityProjection {
     /// Watchers that own or can reach a directly running watch edge.
+    #[cfg(test)]
     active_watchers: HashSet<String>,
     /// Watch targets effective for the session-wide side-agent count.
     effective_targets: HashSet<String>,
@@ -68,6 +69,7 @@ impl WatchActivityProjection {
             },
         );
         Self {
+            #[cfg(test)]
             active_watchers,
             effective_targets,
             direct_edges,
@@ -83,6 +85,7 @@ impl WatchActivityProjection {
 
     /// Returns whether an agent watches a directly or recursively active
     /// target.
+    #[cfg(test)]
     pub(crate) fn watcher_is_active(&self, watcher: &str) -> bool {
         self.active_watchers.contains(watcher)
     }

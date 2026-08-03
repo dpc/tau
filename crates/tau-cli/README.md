@@ -27,17 +27,19 @@ UI code must render tool calls through generic `ToolUseState`, `ToolUsePayload`,
 
 Harness sub-agent activity is rendered from generic events, not
 delegation-specific UI paths. `agent.watches_updated` identifies which agents
-are observed; structured watch state decides whether an observed agent is in an
-outer agent turn, from activating input through terminal response. Individual
-provider invocations are inner model rounds, and prompt/provider events are only
-a pre-snapshot compatibility fallback. `agent.stats_updated` provides generic
-counters and provider response stats provide live response throughput details
-for that running turn. A direct target reads `running`; an idle direct target that
-watches an active descendant remains visible as `watching -> @descendant`. This
-recursive projection is exact over the live watch DAG, keeps one row per direct
-target, and contributes unique effective targets to the session-wide bottom
-`@N` chip. Merely live, selectable, non-suspended, or idle leaf agents must not
-appear as active watched-agent work.
+are observed; current-session structured work status keeps a direct watched row
+visible while it is unreported, working, blocked, or unknown, and removes it
+only after done. Structured watch turn state decides only whether that row is
+running or watching a descendant. Individual provider invocations are inner
+model rounds, and prompt/provider events are only a pre-snapshot compatibility
+fallback. `agent.stats_updated` provides generic counters and provider response
+stats provide live response throughput details for that running turn. An idle
+direct target retains its status row, and one that watches an active descendant
+adds `watching -> @descendant`. This recursive projection is exact over the live
+watch DAG, keeps one row per direct target, and contributes unique effective
+targets to the session-wide bottom `@N` chip. Merely live, selectable,
+non-suspended, or idle leaf agents do not appear as active watched-agent work or
+contribute to that count.
 
 Prompt navigation modes are harness-owned current-session daemon memory:
 ordinary agents default to `active`, delegated agents default to `active-auto`,

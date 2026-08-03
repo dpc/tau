@@ -5146,7 +5146,7 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         work_status: Default::default(),
     }));
     sync(&handle);
-    assert!(!vt.screen_contains(90, "running [engineer_1]"));
+    assert!(!vt.screen_contains(90, "@engineer_1 unreported"));
 
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
@@ -9800,10 +9800,12 @@ fn render_provider_compaction_item_when_response_finishes() {
     assert!(!vt.screen_contains(80, "compacted"));
 }
 
-/// Ensures watched rows replace the start-derived label with the watched
-/// agent's own work status while retaining display metadata and telemetry.
+/// Ensures idle watched status rows repaint with self-reported work and stats.
+///
+/// The initial unreported row must appear before model activity, then update in
+/// place when the agent reports working and its counters change.
 #[test]
-fn watched_agent_stats_redraw_active_indicator() {
+fn watched_agent_stats_redraws_status_row() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -9826,7 +9828,7 @@ fn watched_agent_stats_redraw_active_indicator() {
         },
     ));
     sync(&handle);
-    assert!(!vt.screen_contains(100, "running [engineer_1]"));
+    assert!(vt.screen_contains(100, "@engineer_1 unreported"));
 
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
         model_params: Some(tau_proto::ModelParams::default()),
@@ -9864,7 +9866,7 @@ fn watched_agent_stats_redraw_active_indicator() {
         vt.screen_text(100)
     );
     assert!(
-        eventually_screen_contains(&vt, 100, "@engineer_1 unreported %3/3"),
+        eventually_screen_contains(&vt, 100, "@engineer_1 unreported running %3/3"),
         "watched-agent stats should repaint with tool-call-style counters without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
@@ -9893,7 +9895,7 @@ fn watched_agent_stats_redraw_active_indicator() {
                 status_epoch: 1,
                 phase: tau_proto::AgentWorkStatusPhase::Working,
                 title: Some("investigate session".to_owned()),
-                initial: false,
+                initial: true,
             }),
             watch_long_wait: None,
             message: String::new(),
@@ -9903,7 +9905,7 @@ fn watched_agent_stats_redraw_active_indicator() {
         eventually_screen_contains(
             &vt,
             100,
-            "@engineer_1 (worker display) working investigate session %3/3",
+            "@engineer_1 (worker display) working investigate session running %3/3",
         ),
         "the watched row should use the agent's own status title and display name: {:?}",
         vt.screen_text(100)
@@ -9914,7 +9916,6 @@ fn watched_agent_stats_redraw_active_indicator() {
             agent_id: agent_id("engineer_1"),
         },
     ));
-    assert!(renderer.watched_agent_work_status("engineer_1").is_none());
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: test_session_id("s1"),
@@ -10000,9 +10001,12 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
     );
 }
 
-/// Recursive activity keeps one row for the selected agent's direct target,
-/// uses a stable descendant witness, and yields to direct-running wording in
-/// place.
+/// Direct watched rows must exist before any turn starts, remain a hierarchical
+/// projection while a descendant runs, and let a direct turn replace its
+/// witness.
+///
+/// This prevents a parent row from flickering out between child model rounds or
+/// flattening the child into the selected agent's watch list.
 #[test]
 fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
     let (_term, handle, vt) = setup(100, 24);
@@ -10011,6 +10015,10 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
     renderer.switch_agent("manager".to_owned());
     for (watcher, watched) in [("manager", "reviewer"), ("reviewer", "worker")] {
         renderer.handle(&Event::AgentWatchesUpdated(
@@ -10023,6 +10031,12 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
             },
         ));
     }
+    sync(&handle);
+    assert!(vt.screen_contains(100, "@reviewer unreported"));
+    assert!(
+        !vt.screen_contains(100, "[worker] @worker"),
+        "idle descendants must not be flattened into manager rows"
+    );
     let prompt_started = |agent: &str| {
         Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
             model_params: Some(tau_proto::ModelParams::default()),
@@ -10063,7 +10077,7 @@ fn watched_agent_recursive_row_is_not_flattened_and_direct_wins() {
 /// which would otherwise create a duplicate simultaneous row for the same
 /// watched agent on the next refresh.
 #[test]
-fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
+fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -10114,7 +10128,7 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "@engineer_1 unreported %13/13",
+        "@engineer_1 unreported running %13/13",
     ));
 
     renderer.switch_agent("other_1".to_owned());
@@ -10142,21 +10156,19 @@ fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
         .collect();
     assert_eq!(
         watching_rows,
-        vec!["@engineer_1 unreported %42/42"],
+        vec!["@engineer_1 unreported running %42/42"],
         "watched-agent row should update in place after transcript restore: {:?}",
         vt.screen_text(100)
     );
 }
 
-/// Ensures watched-agent status blocks follow provider prompt lifetime rather
-/// than staying visible until a later `agent.stats_updated` idle snapshot.
+/// A provider response must stop only transient activity, not the watched row.
 ///
-/// The live session regression showed a watched agent with `%15/15` counters
-/// remaining on screen after it had produced a provider response. Removing the
-/// block on `provider.response_finished` prevents a missed or delayed idle stat
-/// from leaving a stale watched-agent line behind.
+/// The row remains available for the agent's task status until the agent
+/// reports `done`; a provider terminal cannot make it flicker away between
+/// model rounds.
 #[test]
-fn watched_agent_response_finished_removes_active_indicator() {
+fn watched_agent_response_finished_keeps_status_row() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -10207,7 +10219,7 @@ fn watched_agent_response_finished_removes_active_indicator() {
     assert!(eventually_screen_contains(
         &vt,
         100,
-        "@engineer_1 unreported %15/15",
+        "@engineer_1 unreported running %15/15",
     ));
 
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -10237,16 +10249,16 @@ fn watched_agent_response_finished_removes_active_indicator() {
     sync(&handle);
 
     assert!(
-        !vt.screen_contains(100, "running [engineer_1]"),
-        "watched-agent block should be removed when provider response finishes: {:?}",
+        vt.screen_contains(100, "@engineer_1 unreported %15/15"),
+        "watched-agent row should remain after provider response finishes: {:?}",
         vt.screen_text(100)
     );
 }
 
 /// A watched agent turn spans every model round and intervening tool round, so
-/// prompt-terminal events must not make its running row flicker.
+/// prompt-terminal events must not make its status row flicker.
 #[test]
-fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
+fn watched_agent_turn_state_keeps_status_row_across_model_rounds() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -10351,16 +10363,145 @@ fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
     ));
     sync(&handle);
     assert!(
-        !vt.screen_contains(100, "running [engineer_1]"),
-        "the row ends only at the harness-authored agent-turn idle edge"
+        vt.screen_contains(100, "@engineer_1 unreported"),
+        "the row remains after the harness-authored agent-turn idle edge"
     );
 }
 
-/// Ensures provider-level prompt submission also starts watched-agent running
-/// UI for backends or replay paths that do not emit an explicit
-/// `agent.prompt_started` event before provider work begins.
+/// A direct watched row must use the canonical task-status phase for lifetime.
+///
+/// Missing status is unreported; working and blocked preserve the same row
+/// through turn start and stop, while done is the only phase that removes it.
 #[test]
-fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
+fn watched_agent_status_row_survives_turn_transitions_until_done() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: test_session_id("s1"),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.switch_agent("parent_1".to_owned());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: test_session_id("s1"),
+            watcher_id: agent_id("parent_1"),
+            watched_agent_ids: vec![agent_id("engineer_1")],
+            changed_agent_id: Some(agent_id("engineer_1")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
+    let watch_state = |message_id: &str, state| {
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse(message_id)
+                .expect("test identifier must satisfy its grammar"),
+            sender_id: agent_id("engineer_1"),
+            sender_session_id: None,
+            recipient_id: agent_id("parent_1"),
+            kind: tau_proto::AgentMessageKind::WatchTurnState,
+            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+                session_id: test_session_id("s1"),
+                subscription_id: "watch-1".to_owned(),
+                state,
+                initial: false,
+                turn_generation: 1,
+            }),
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            message: String::new(),
+        })
+    };
+    let watch_status = |message_id: &str, phase, title: Option<&str>| {
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse(message_id)
+                .expect("test identifier must satisfy its grammar"),
+            sender_id: agent_id("engineer_1"),
+            sender_session_id: None,
+            recipient_id: agent_id("parent_1"),
+            kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+                session_id: test_session_id("s1"),
+                subscription_id: "watch-1".to_owned(),
+                status_epoch: 1,
+                phase,
+                title: title.map(str::to_owned),
+                initial: false,
+            }),
+            watch_long_wait: None,
+            message: String::new(),
+        })
+    };
+
+    sync(&handle);
+    assert!(
+        vt.screen_contains(100, "@engineer_1 unreported"),
+        "an absent status snapshot is canonically unreported"
+    );
+
+    renderer.handle(&watch_status(
+        "status-unreported",
+        tau_proto::AgentWorkStatusPhase::Unreported,
+        None,
+    ));
+    renderer.handle(&watch_state(
+        "turn-started",
+        tau_proto::AgentRuntimeState::Running,
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "@engineer_1 unreported running"));
+    renderer.handle(&watch_state(
+        "turn-stopped",
+        tau_proto::AgentRuntimeState::Idle,
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "@engineer_1 unreported"));
+
+    renderer.handle(&watch_status(
+        "status-working",
+        tau_proto::AgentWorkStatusPhase::Working,
+        Some("implement fix"),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "@engineer_1 working implement fix"));
+
+    renderer.handle(&watch_status(
+        "status-blocked",
+        tau_proto::AgentWorkStatusPhase::Blocked,
+        Some("await input"),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "@engineer_1 blocked await input"));
+
+    renderer.handle(&watch_status(
+        "status-unknown",
+        tau_proto::AgentWorkStatusPhase::Unknown,
+        None,
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(100, "@engineer_1 unknown"));
+
+    renderer.handle(&watch_status(
+        "status-done",
+        tau_proto::AgentWorkStatusPhase::Done,
+        Some("finished"),
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "@engineer_1 done finished"));
+}
+
+/// Provider-prompt fallback must clear activity on terminal without removing
+/// the watched row.
+///
+/// This covers backends or replay paths that omit `agent.prompt_started` before
+/// provider work, preventing their terminal event from looking like task done.
+#[test]
+fn watched_agent_provider_prompt_terminal_keeps_status_row() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -10427,20 +10568,21 @@ fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
     sync(&handle);
 
     assert!(
-        !vt.screen_contains(100, "running [engineer_1]"),
-        "provider-fallback watched-agent block should be removed on finish: {:?}",
+        vt.screen_contains(100, "@engineer_1 unreported"),
+        "provider-fallback terminal should retain the watched status row: {:?}",
         vt.screen_text(100)
     );
 }
 
-/// Ensures provider response updates use their explicit agent id as the active
-/// prompt owner, then terminal cleanup removes that prompt from all owners.
+/// Provider response updates use their explicit agent id as the active prompt
+/// owner, then terminal cleanup clears activity without removing its status
+/// row.
 ///
 /// This prevents a provider-update-only path from accidentally marking the
 /// current/originator agent active and leaving the watched response owner stale
 /// after `provider.response_finished`.
 #[test]
-fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
+fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -10506,14 +10648,14 @@ fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
     sync(&handle);
 
     assert!(
-        !vt.screen_contains(100, "running [engineer_1]"),
-        "watched-agent block should clear by terminal prompt id: {:?}",
+        vt.screen_contains(100, "@engineer_1 unreported"),
+        "terminal prompt id should clear activity but retain the status row: {:?}",
         vt.screen_text(100)
     );
 }
 
-/// Ensures terminal prompt events tombstone their prompt id so delayed start or
-/// create events cannot resurrect stale watched-agent blocks.
+/// Terminal prompt events tombstone their prompt id so delayed start or create
+/// events cannot reactivate a persistent watched status row.
 #[test]
 fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
     let (_term, handle, vt) = setup(100, 24);
@@ -10585,8 +10727,8 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
     sync(&handle);
 
     assert!(
-        !vt.screen_contains(100, "running [engineer_1]"),
-        "delayed start/create must not resurrect terminal prompt: {:?}",
+        vt.screen_contains(100, "@engineer_1 unreported"),
+        "delayed start/create must retain, not reactivate, the status row: {:?}",
         vt.screen_text(100)
     );
 }
@@ -12802,14 +12944,17 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         .iter()
         .map(|segment| segment.text.as_str())
         .collect();
-    assert_eq!(leading, vec!["(review)", "working", "review changes"]);
+    assert_eq!(
+        leading,
+        vec!["(review)", "working", "review changes", "running"]
+    );
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(texts, vec!["%2/3", "#133.4k/200k"]);
 
     let block = render_tool_block(&theme, &display);
     assert_eq!(
         priority_header_text(&block, 100),
-        "@engineer_1 (review) working review changes %2/3 #133.4k/200k"
+        "@engineer_1 (review) working review changes running %2/3 #133.4k/200k"
     );
     let running = priority_header_cells(&block, 100)[0].clone();
     assert_eq!(
@@ -12889,71 +13034,6 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME)
     );
     assert_eq!(watching.style.fg, Some(Color::DarkYellow));
-}
-
-/// Watch work status must remain session-scoped so old-session notifications
-/// cannot label a reused agent id after the UI changes sessions.
-#[test]
-fn watched_agent_work_status_rejects_old_sessions_and_clears_on_switch() {
-    let (_term, handle, _vt) = setup(80, 24);
-    let mut renderer = EventRenderer::new(
-        handle,
-        tau_cli_term::CompletionData::new(),
-        cli_test_theme(),
-    );
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s1"),
-        reason: SessionStartReason::New,
-    }));
-    let message = |session_id: &str, title: &str| {
-        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse(format!("status-{session_id}"))
-                .expect("test identifier must satisfy its grammar"),
-            sender_id: agent_id("worker"),
-            sender_session_id: None,
-            recipient_id: agent_id("manager"),
-            kind: tau_proto::AgentMessageKind::WatchWorkStatus,
-            watch_turn_state: None,
-            watch_provider_status: None,
-            watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
-                session_id: test_session_id(session_id),
-                subscription_id: "watch-worker".to_owned(),
-                status_epoch: 1,
-                phase: tau_proto::AgentWorkStatusPhase::Working,
-                title: Some(title.to_owned()),
-                initial: false,
-            }),
-            watch_long_wait: None,
-            message: String::new(),
-        })
-    };
-
-    renderer.handle(&message("old", "stale task"));
-    assert!(renderer.watched_agent_work_status("worker").is_none());
-    renderer.handle(&message("s1", "current task"));
-    assert_eq!(
-        renderer
-            .watched_agent_work_status("worker")
-            .and_then(|status| status.title.as_deref()),
-        Some("current task")
-    );
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s1"),
-        reason: SessionStartReason::Resume,
-    }));
-    assert!(renderer.watched_agent_work_status("worker").is_none());
-    renderer.handle(&message("s1", "current task"));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s2"),
-        reason: SessionStartReason::Resume,
-    }));
-    assert!(renderer.watched_agent_work_status("worker").is_none());
-    renderer.handle(&message("s2", "new-session task"));
-    renderer.handle(&Event::SessionStarted(SessionStarted {
-        session_id: test_session_id("s3"),
-        reason: SessionStartReason::New,
-    }));
-    assert!(renderer.watched_agent_work_status("worker").is_none());
 }
 
 #[test]

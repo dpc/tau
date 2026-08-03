@@ -439,6 +439,38 @@ fn watched_agent_turn_state_is_authoritative_for_running_counts() {
     );
 }
 
+/// A direct status row must retain its terminal block identity while turn state
+/// starts and stops, preventing visible remove-and-reinsert flicker.
+#[test]
+fn watched_agent_turn_state_reuses_status_row_block() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            watcher_id: agent_id("manager"),
+            watched_agent_ids: vec![agent_id("worker")],
+            changed_agent_id: Some(agent_id("worker")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
+    renderer.current_agent_id = Some("manager".to_owned());
+    renderer.refresh_watched_agent_blocks();
+    let row_id = renderer.watched_agent_blocks["worker"];
+
+    renderer.handle(&watch_turn_state_event(
+        "running",
+        tau_proto::AgentRuntimeState::Running,
+    ));
+    assert_eq!(renderer.watched_agent_blocks["worker"], row_id);
+    renderer.handle(&watch_turn_state_event(
+        "idle",
+        tau_proto::AgentRuntimeState::Idle,
+    ));
+    assert_eq!(renderer.watched_agent_blocks["worker"], row_id);
+}
+
 /// The global side-agent count must include intermediate watched ancestors in a
 /// recursive chain while retaining unique target counting.
 #[test]
@@ -1360,6 +1392,15 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
         Some(tau_proto::SessionId::parse("session-1").expect("valid session ID"));
     renderer.current_agent_id = Some("manager".to_owned());
     renderer.displayed_agent_id = Some("manager".to_owned());
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: tau_proto::SessionId::parse("session-1").expect("valid session ID"),
+            watcher_id: agent_id("manager"),
+            watched_agent_ids: vec![agent_id("worker")],
+            changed_agent_id: Some(agent_id("worker")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
     let status_event = |message_id: &str, phase, title, initial| {
         tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
             message_id: tau_proto::AgentMessageId::parse(message_id).expect("valid message ID"),
@@ -1395,7 +1436,8 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
     assert_eq!(renderer.message_history.len(), 0);
     assert_eq!(
         renderer
-            .watched_agent_work_status("worker")
+            .watched_agent_work_statuses
+            .get("worker")
             .expect("initial snapshot cached")
             .phase,
         tau_proto::AgentWorkStatusPhase::Unreported
@@ -1414,7 +1456,8 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
     assert_eq!(renderer.message_history.len(), 1);
     assert_eq!(
         renderer
-            .watched_agent_work_status("worker")
+            .watched_agent_work_statuses
+            .get("worker")
             .expect("explicit transition cached")
             .phase,
         tau_proto::AgentWorkStatusPhase::Working
