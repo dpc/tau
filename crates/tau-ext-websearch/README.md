@@ -17,7 +17,9 @@ registered in the same extension but disabled by default for role-level opt-in.
 - `websearch_parallel_fetch`, advertised to models as `web_fetch`, fetches and
   extracts a page through the same unauthenticated Parallel MCP endpoint. This
   tool is also disabled by default. JSON-convertible provider-specific arguments
-  are passed through in addition to the documented `url` field.
+  are passed through in addition to the documented singular `url` field. Its
+  adapter consumes that field and sends Parallel the required wire shape
+  `urls: [url]`, replacing any provider-specific input field named `urls`.
 
 No Parallel API key is supported: there is no `api_key` config, and the
 extension does not send an Authorization header.

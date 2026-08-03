@@ -430,10 +430,15 @@ fn dispatch_tool_invoke(
             parallel_client,
             PARALLEL_REMOTE_SEARCH_TOOL,
             "query",
+            passthrough_parallel_arguments,
         ),
-        PARALLEL_FETCH_TOOL_NAME => {
-            dispatch_parallel(invoke, parallel_client, PARALLEL_REMOTE_FETCH_TOOL, "url")
-        }
+        PARALLEL_FETCH_TOOL_NAME => dispatch_parallel(
+            invoke,
+            parallel_client,
+            PARALLEL_REMOTE_FETCH_TOOL,
+            "url",
+            adapt_parallel_fetch_arguments,
+        ),
         _ => Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
@@ -521,9 +526,11 @@ fn dispatch_parallel(
     client: &dyn ParallelClient,
     remote_tool: &'static str,
     required_field: &str,
+    adapt_arguments: fn(serde_json::Value) -> Result<serde_json::Value, String>,
 ) -> Event {
     match validate_parallel_args(&invoke.arguments, required_field)
         .and_then(|()| cbor_to_json(&invoke.arguments))
+        .and_then(adapt_arguments)
     {
         Ok(arguments) => match client.call(remote_tool, arguments) {
             Ok(text) => {
@@ -552,6 +559,34 @@ fn dispatch_parallel(
         },
         Err(message) => tool_error(invoke, message),
     }
+}
+
+fn passthrough_parallel_arguments(
+    arguments: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    Ok(arguments)
+}
+
+fn adapt_parallel_fetch_arguments(
+    mut arguments: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let object = arguments
+        .as_object_mut()
+        .ok_or_else(|| "arguments must be an object".to_owned())?;
+    let url = object
+        .remove("url")
+        .ok_or_else(|| "missing string argument: url".to_owned())?;
+    let serde_json::Value::String(url) = url else {
+        return Err("`url` must be a string".to_owned());
+    };
+    if url.trim().is_empty() {
+        return Err("`url` must not be empty".to_owned());
+    }
+    object.insert(
+        "urls".to_owned(),
+        serde_json::Value::Array(vec![serde_json::Value::String(url)]),
+    );
+    Ok(arguments)
 }
 
 fn project_web_content(

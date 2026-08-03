@@ -431,6 +431,17 @@ fn registers_exa_by_default_and_parallel_tools_disabled() {
             .map(|name| name.as_str()),
         Some(MODEL_VISIBLE_FETCH_TOOL_NAME)
     );
+    let fetch_parameters = tools[2].parameters.as_ref().expect("fetch parameters");
+    assert_eq!(
+        fetch_parameters["properties"]["url"]["type"],
+        serde_json::Value::String("string".to_owned())
+    );
+    assert_eq!(fetch_parameters["required"], serde_json::json!(["url"]));
+    assert!(fetch_parameters["properties"].get("urls").is_none());
+    assert_eq!(
+        fetch_parameters["additionalProperties"],
+        serde_json::Value::Bool(true)
+    );
     assert!(!tools[2].enabled_by_default);
 }
 
@@ -961,8 +972,8 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
     assert_eq!(calls[0].1["max_results"], 3);
 }
 
-/// Ensures Parallel fetch dispatches to the remote `web_fetch` MCP tool with
-/// its URL argument.
+/// Ensures the singular model-visible fetch URL becomes Parallel's one-element
+/// `urls` array without losing provider-specific arguments.
 #[test]
 fn forwards_parallel_fetch_to_web_fetch() {
     let searcher = StubSearcher::ok("unused");
@@ -974,10 +985,22 @@ fn forwards_parallel_fetch_to_web_fetch() {
         .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-7".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("url".to_owned()),
-                CborValue::Text("https://example.com".to_owned()),
-            )]),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("url".to_owned()),
+                    CborValue::Text("https://example.com".to_owned()),
+                ),
+                (
+                    CborValue::Text("objective".to_owned()),
+                    CborValue::Text("extract the main article".to_owned()),
+                ),
+                (
+                    CborValue::Text("urls".to_owned()),
+                    CborValue::Array(vec![CborValue::Text(
+                        "https://wrong.example.com".to_owned(),
+                    )]),
+                ),
+            ]),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -999,7 +1022,12 @@ fn forwards_parallel_fetch_to_web_fetch() {
     let calls = parallel.calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, PARALLEL_REMOTE_FETCH_TOOL);
-    assert_eq!(calls[0].1["url"], "https://example.com");
+    assert_eq!(
+        calls[0].1["urls"],
+        serde_json::json!(["https://example.com"])
+    );
+    assert!(calls[0].1.get("url").is_none());
+    assert_eq!(calls[0].1["objective"], "extract the main article");
 }
 
 /// Ensures Parallel calls enforce their advertised required fields locally
@@ -1027,6 +1055,55 @@ fn parallel_missing_required_argument_is_rejected_before_forwarding() {
         panic!("expected ToolError, got {event:?}");
     };
     assert!(err.message.contains("query"), "message: {}", err.message);
+    assert!(parallel.calls.lock().expect("lock").is_empty());
+}
+
+/// Ensures missing or non-string model-visible fetch URLs fail before an
+/// adapter can issue a malformed Parallel request.
+#[test]
+fn parallel_fetch_invalid_url_is_rejected_before_forwarding() {
+    let parallel = StubParallelClient::ok("unused");
+    for (call_id, arguments) in [
+        ("call-missing-url", CborValue::Map(Vec::new())),
+        (
+            "call-non-string-url",
+            CborValue::Map(vec![(
+                CborValue::Text("url".to_owned()),
+                CborValue::Integer(1.into()),
+            )]),
+        ),
+        (
+            "call-duplicate-url-ending-non-string",
+            CborValue::Map(vec![
+                (
+                    CborValue::Text("url".to_owned()),
+                    CborValue::Text("https://example.com".to_owned()),
+                ),
+                (
+                    CborValue::Text("url".to_owned()),
+                    CborValue::Integer(1.into()),
+                ),
+            ]),
+        ),
+    ] {
+        let event = dispatch_parallel(
+            ToolStarted {
+                call_id: call_id.into(),
+                tool_name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
+                arguments,
+                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                originator: tau_proto::PromptOriginator::User,
+            },
+            parallel.as_ref(),
+            PARALLEL_REMOTE_FETCH_TOOL,
+            "url",
+            adapt_parallel_fetch_arguments,
+        );
+        let Event::ToolError(error) = event else {
+            panic!("expected ToolError, got {event:?}");
+        };
+        assert!(error.message.contains("url"), "message: {}", error.message);
+    }
     assert!(parallel.calls.lock().expect("lock").is_empty());
 }
 
@@ -1373,6 +1450,7 @@ fn hosted_mcp_rate_limits_ignore_untrusted_bodies() {
         &parallel,
         PARALLEL_REMOTE_SEARCH_TOOL,
         "query",
+        passthrough_parallel_arguments,
     );
     let Event::ToolError(parallel_error) = parallel_event else {
         panic!("expected ToolError, got {parallel_event:?}");
@@ -1600,10 +1678,10 @@ fn parallel_config_rejects_api_key_field() {
     assert!(err.to_string().contains("api_key"), "err: {err}");
 }
 
-/// Ensures the real Parallel HTTP client sends MCP headers/body but never an
-/// Authorization header.
+/// Ensures the fetch adapter sends Parallel's plural URL wire shape while the
+/// real MCP client retains its unauthenticated request headers.
 #[test]
-fn parallel_http_client_posts_tools_call_without_authorization_header() {
+fn parallel_fetch_adapter_posts_urls_array_without_authorization_header() {
     // Regression coverage for the Parallel.ai integration: the first-party
     // extension intentionally uses the default unauthenticated MCP endpoint and
     // must not invent API-key config or send Authorization headers.
@@ -1641,13 +1719,23 @@ fn parallel_http_client_posts_tools_call_without_authorization_header() {
     });
 
     let client = HttpParallelClient::new(endpoint);
-    let text = client
-        .call(
-            PARALLEL_REMOTE_SEARCH_TOOL,
-            serde_json::json!({ "query": "rust" }),
-        )
-        .expect("call");
-    assert_eq!(text, "ok");
+    let event = dispatch_parallel(
+        ToolStarted {
+            call_id: "parallel-fetch-wire-shape".into(),
+            tool_name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("url".to_owned()),
+                CborValue::Text("https://example.com/article".to_owned()),
+            )]),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        },
+        &client,
+        PARALLEL_REMOTE_FETCH_TOOL,
+        "url",
+        adapt_parallel_fetch_arguments,
+    );
+    assert!(matches!(event, Event::ToolResult(_)), "event: {event:?}");
 
     let (headers, body) = server.join().expect("join");
     assert!(
@@ -1664,6 +1752,10 @@ fn parallel_http_client_posts_tools_call_without_authorization_header() {
     );
     let body: serde_json::Value = serde_json::from_str(&body).expect("json body");
     assert_eq!(body["method"], "tools/call");
-    assert_eq!(body["params"]["name"], PARALLEL_REMOTE_SEARCH_TOOL);
-    assert_eq!(body["params"]["arguments"]["query"], "rust");
+    assert_eq!(body["params"]["name"], PARALLEL_REMOTE_FETCH_TOOL);
+    assert_eq!(
+        body["params"]["arguments"]["urls"],
+        serde_json::json!(["https://example.com/article"])
+    );
+    assert!(body["params"]["arguments"].get("url").is_none());
 }
