@@ -1296,89 +1296,43 @@ impl FakeState {
         action: ScenarioActionV2,
     ) -> ClientResult<()> {
         match action {
-            ScenarioActionV2::Text { response, .. } => {
-                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
-                    prompt,
-                    vec![assistant_message(response)],
-                    ProviderStopReason::EndTurn,
-                )))
-            }
-            ScenarioActionV2::StandaloneCompaction { summary } => {
-                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
-                    prompt,
-                    vec![assistant_message(summary)],
-                    ProviderStopReason::EndTurn,
-                )))
-            }
-            ScenarioActionV2::CompactedText {
-                user_text: _,
-                summary: _,
-                removed_user_text: _,
-                response,
-            } => handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
-                prompt,
-                vec![assistant_message(response)],
-                ProviderStopReason::EndTurn,
-            ))),
-            ScenarioActionV2::StandaloneCompactionError {
-                failure_kind,
-                error,
-            } => {
-                let mut terminal = finished(prompt, Vec::new(), ProviderStopReason::Error);
-                terminal.error = Some(error);
-                terminal.failure_kind = Some(failure_kind);
-                handle.emit_transient(Event::ProviderResponseFinishedReported(terminal))
-            }
-            ScenarioActionV2::StandaloneCompactionHold { timeout_ms } => {
-                self.emit_hold_until_cancel(prompt, handle, timeout_ms)
-            }
-            ScenarioActionV2::DummyToolCall { call_id, .. } => {
-                let tool_name = ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME);
-                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
-                    prompt,
-                    vec![ContextItem::ToolCall(ToolCallItem {
-                        call_id,
-                        name: tool_name,
-                        tool_type: ToolType::Function,
-                        arguments: CborValue::Map(Vec::new()),
-                        raw_arguments_json: Some("{}".to_owned()),
-                        responses_envelope: None,
-                    })],
-                    ProviderStopReason::ToolCalls,
-                )))
-            }
-            ScenarioActionV2::DummyToolResult {
-                call_id, response, ..
-            } => {
-                let _ = call_id;
-                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
-                    prompt,
-                    vec![assistant_message(response)],
-                    ProviderStopReason::EndTurn,
-                )))
-            }
-            ScenarioActionV2::DummyToolRepair { response, .. } => {
-                handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
-                    prompt,
-                    vec![assistant_message(response)],
-                    ProviderStopReason::EndTurn,
-                )))
-            }
-            action @ (ScenarioActionV2::AgentStartCall { .. }
-            | ScenarioActionV2::AgentWatchCall { .. }) => {
-                self.emit_agent_tool_call(prompt, handle, action)
-            }
-            ScenarioActionV2::AgentStartResult { response, .. }
+            ScenarioActionV2::Text { response, .. }
+            | ScenarioActionV2::CompactedText { response, .. }
+            | ScenarioActionV2::DummyToolResult { response, .. }
+            | ScenarioActionV2::DummyToolRepair { response, .. }
+            | ScenarioActionV2::AgentStartResult { response, .. }
             | ScenarioActionV2::AgentWatchResult { response, .. }
             | ScenarioActionV2::WatchNotifications { response, .. }
             | ScenarioActionV2::WatchNotificationChains {
                 completion: response,
                 ..
-            } => handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
-                prompt,
-                vec![assistant_message(response)],
-                ProviderStopReason::EndTurn,
-            ))),
+            }
+            | ScenarioActionV2::CoreShellCreateResult { response, .. }
+            | ScenarioActionV2::CoreShellResumeEditResult { response, .. } => {
+                emit_text_response(prompt, handle, response)
+            }
+            ScenarioActionV2::StandaloneCompaction { summary } => {
+                emit_text_response(prompt, handle, summary)
+            }
+            ScenarioActionV2::StandaloneCompactionError {
+                failure_kind,
+                error,
+            }
+            | ScenarioActionV2::Error {
+                failure_kind,
+                error,
+                ..
+            } => emit_error_response(prompt, handle, failure_kind, error),
+            ScenarioActionV2::StandaloneCompactionHold { timeout_ms } => {
+                self.emit_hold_until_cancel(prompt, handle, timeout_ms)
+            }
+            ScenarioActionV2::DummyToolCall { call_id, .. } => {
+                emit_dummy_tool_call(prompt, handle, call_id)
+            }
+            action @ (ScenarioActionV2::AgentStartCall { .. }
+            | ScenarioActionV2::AgentWatchCall { .. }) => {
+                self.emit_agent_tool_call(prompt, handle, action)
+            }
             ScenarioActionV2::CoreShellWorkdirCall { call_id, .. } => emit_tool_call(
                 handle,
                 prompt,
@@ -1409,23 +1363,6 @@ impl FakeState {
                     &format!("before:{nonce}"),
                 ),
             ),
-            ScenarioActionV2::CoreShellCreateResult { response, .. }
-            | ScenarioActionV2::CoreShellResumeEditResult { response, .. } => handle
-                .emit_transient(Event::ProviderResponseFinishedReported(finished(
-                    prompt,
-                    vec![assistant_message(response)],
-                    ProviderStopReason::EndTurn,
-                ))),
-            ScenarioActionV2::Error {
-                failure_kind,
-                error,
-                ..
-            } => {
-                let mut terminal = finished(prompt, Vec::new(), ProviderStopReason::Error);
-                terminal.error = Some(error);
-                terminal.failure_kind = Some(failure_kind);
-                handle.emit_transient(Event::ProviderResponseFinishedReported(terminal))
-            }
             ScenarioActionV2::Disconnect { reason, .. } => {
                 self.trace(&format!("deliberate_disconnect={reason}"))?;
                 Err(ClientError::handler(format!(
@@ -1440,30 +1377,35 @@ impl FakeState {
                 participants,
                 response,
                 ..
-            } => {
-                let pending = self.barriers.entry(barrier.clone()).or_default();
-                pending.push(BarrierParticipant {
-                    prompt: prompt.clone(),
-                    response,
-                });
-                if pending.len() > participants {
-                    return Err(ClientError::handler("barrier over-subscribed"));
-                }
-                if pending.len() == participants {
-                    let completed = self.barriers.remove(&barrier).unwrap_or_default();
-                    for participant in completed {
-                        handle.emit_transient(Event::ProviderResponseFinishedReported(
-                            finished(
-                                &participant.prompt,
-                                vec![assistant_message(participant.response)],
-                                ProviderStopReason::EndTurn,
-                            ),
-                        ))?;
-                    }
-                }
-                Ok(())
+            } => self.emit_barrier_text(prompt, handle, barrier, participants, response),
+        }
+    }
+
+    /// Queues one participant and completes its barrier when every lane
+    /// arrived.
+    fn emit_barrier_text(
+        &mut self,
+        prompt: &tau_proto::AgentPromptCreated,
+        handle: &tau_client::ClientHandle,
+        barrier: String,
+        participants: usize,
+        response: String,
+    ) -> ClientResult<()> {
+        let pending = self.barriers.entry(barrier.clone()).or_default();
+        pending.push(BarrierParticipant {
+            prompt: prompt.clone(),
+            response,
+        });
+        if participants < pending.len() {
+            return Err(ClientError::handler("barrier over-subscribed"));
+        }
+        if pending.len() == participants {
+            let completed = self.barriers.remove(&barrier).unwrap_or_default();
+            for participant in completed {
+                emit_text_response(&participant.prompt, handle, participant.response)?;
             }
         }
+        Ok(())
     }
 
     /// Starts one bounded cancellation hold and publishes its semantic
@@ -2089,6 +2031,53 @@ impl FakeState {
         }
         Ok(())
     }
+}
+
+/// Publishes one normal assistant-text provider completion.
+fn emit_text_response(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+    response: String,
+) -> ClientResult<()> {
+    handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+        prompt,
+        vec![assistant_message(response)],
+        ProviderStopReason::EndTurn,
+    )))
+}
+
+/// Publishes one typed terminal provider failure.
+fn emit_error_response(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+    failure_kind: tau_proto::ProviderFailureKind,
+    error: String,
+) -> ClientResult<()> {
+    let mut terminal = finished(prompt, Vec::new(), ProviderStopReason::Error);
+    terminal.error = Some(error);
+    terminal.failure_kind = Some(failure_kind);
+    handle.emit_transient(Event::ProviderResponseFinishedReported(terminal))
+}
+
+/// Publishes the allowlisted deterministic dummy-tool invocation.
+fn emit_dummy_tool_call(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+    call_id: tau_proto::ToolCallId,
+) -> ClientResult<()> {
+    let tool_name = ToolName::new(tau_ext_test_dummy::RESTART_TEST_DUMMY_TOOL_NAME);
+    handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+        prompt,
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id,
+            name: tool_name,
+            tool_type: ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: Some("{}".to_owned()),
+            responses_envelope: None,
+        })],
+        ProviderStopReason::ToolCalls,
+    )))
 }
 
 fn assistant_message(text: String) -> ContextItem {

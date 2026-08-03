@@ -835,47 +835,13 @@ pub(crate) fn run_chat(
 ) -> Result<(), CliError> {
     use tau_cli_term::{CommandCompletion, HighTerm};
 
-    let startup_profile = if attach {
-        None
-    } else {
-        cli_overrides
-            .profile
-            .map(|profile| profile.as_str().to_owned())
-    };
-    let state_dir = tau_session_inspect::default_state_dir();
-    let ui_logging = if ephemeral {
-        ui_logging::init_ephemeral()
-    } else {
-        ui_logging::init(&state_dir)?
-    };
-    tracing::info!(
-        target: "tau_cli::ui",
-        ui_id = ui_logging.ui_id(),
-        ui_dir = %ui_logging.dir().display(),
-        log_path = %ui_logging.log_path().display(),
-        session_id = %session_id,
+    let (startup_profile, ui_logging, mut daemon, startup_started_at) = start_chat_daemon(
+        session_id,
         attach,
-        "terminal UI starting"
-    );
-
-    let startup_started_at = Instant::now();
-    let daemon_output = if attach {
-        None
-    } else {
-        Some(daemon_output_for_session(
-            session_id.as_str(),
-            storage_mode_from_ephemeral(ephemeral),
-            session_status,
-        )?)
-    };
-    let mut daemon = resolve_daemon(
-        attach,
-        session_id.as_str(),
         session_status,
-        daemon_output,
         startup_role,
         cli_overrides,
-        storage_mode_from_ephemeral(ephemeral),
+        ephemeral,
     )?;
     let harness_socket_path = daemon.socket_path();
     let ui_io_meter = UiIoMeter::with_diagnostics();
@@ -1440,6 +1406,54 @@ pub(crate) fn run_chat(
     tracing::info!(target: "tau_cli::ui", reason, "terminal UI exiting");
 
     Ok(())
+}
+
+/// Starts or attaches the daemon and establishes process-local UI logging.
+fn start_chat_daemon(
+    session_id: &tau_proto::SessionId,
+    attach: bool,
+    session_status: SessionLaunchStatus,
+    startup_role: Option<&str>,
+    cli_overrides: DaemonCliOverrides<'_>,
+    ephemeral: bool,
+) -> Result<(Option<String>, ui_logging::UiLogging, DaemonHandle, Instant), CliError> {
+    let startup_profile = (!attach)
+        .then(|| {
+            cli_overrides
+                .profile
+                .map(|profile| profile.as_str().to_owned())
+        })
+        .flatten();
+    let state_dir = tau_session_inspect::default_state_dir();
+    let ui_logging = if ephemeral {
+        ui_logging::init_ephemeral()
+    } else {
+        ui_logging::init(&state_dir)?
+    };
+    tracing::info!(
+        target: "tau_cli::ui",
+        ui_id = ui_logging.ui_id(),
+        ui_dir = %ui_logging.dir().display(),
+        log_path = %ui_logging.log_path().display(),
+        session_id = %session_id,
+        attach,
+        "terminal UI starting"
+    );
+    let startup_started_at = Instant::now();
+    let storage_mode = storage_mode_from_ephemeral(ephemeral);
+    let daemon_output = (!attach)
+        .then(|| daemon_output_for_session(session_id.as_str(), storage_mode, session_status))
+        .transpose()?;
+    let daemon = resolve_daemon(
+        attach,
+        session_id.as_str(),
+        session_status,
+        daemon_output,
+        startup_role,
+        cli_overrides,
+        storage_mode,
+    )?;
+    Ok((startup_profile, ui_logging, daemon, startup_started_at))
 }
 
 /// Performs the blocking admission read on an owned thread, retaining its
@@ -2562,6 +2576,20 @@ impl<'a> TerminalInputSession<'a> {
         if self.handle_debug_utility_command(text) {
             return true;
         }
+        if self.handle_agent_picker_command(text) {
+            return true;
+        }
+        if self.handle_version_command(text) {
+            return true;
+        }
+        if self.handle_provider_auth_command(text) {
+            return true;
+        }
+        self.handle_utility_alias_command(text)
+    }
+
+    /// Handles the command that opens the local agent picker.
+    fn handle_agent_picker_command(&mut self, text: &str) -> bool {
         if let Some(command) = parse_agent_picker_command(text) {
             match command {
                 Ok(filter) => self.pick_agent(filter),
@@ -2569,6 +2597,11 @@ impl<'a> TerminalInputSession<'a> {
             }
             return true;
         }
+        false
+    }
+
+    /// Handles the no-argument local version command and invalid variants.
+    fn handle_version_command(&self, text: &str) -> bool {
         if text == ":version" {
             self.output.system_info(&crate::version_label());
             return true;
@@ -2577,6 +2610,11 @@ impl<'a> TerminalInputSession<'a> {
             self.output.system_info(":version takes no arguments");
             return true;
         }
+        false
+    }
+
+    /// Handles provider authentication before the generic command aliases.
+    fn handle_provider_auth_command(&self, text: &str) -> bool {
         if let Some(provider) = text.strip_prefix(":provider-auth ") {
             let provider = provider.trim();
             if !provider.is_empty() {
@@ -2590,6 +2628,11 @@ impl<'a> TerminalInputSession<'a> {
             run_provider_auth("", &|message| output.system_info(message));
             return true;
         }
+        false
+    }
+
+    /// Routes command aliases that mutate this terminal input session.
+    fn handle_utility_alias_command(&mut self, text: &str) -> bool {
         if text == ":theme" || text.starts_with(":theme ") {
             self.handle_theme_command(text);
             return true;

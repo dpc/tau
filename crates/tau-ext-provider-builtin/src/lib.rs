@@ -4452,158 +4452,256 @@ where
             context,
             on_quota,
         ),
-        PromptBackend::ChatCompletions { provider, model } => {
-            let canceled_before = TurnAbort::is_aborted(retry_ctx);
-            if canceled_before {
-                finish_canceled(agent_prompt_id, prompt, writer)?;
-                return Ok(None);
-            }
-            let outcome = run_prompt_attempt(
-                agent_prompt_id,
-                prompt,
-                provider,
-                model,
-                context.debug_provider_requests,
-                writer,
-                &mut || TurnAbort::is_aborted(retry_ctx),
-                context.runtime.network(),
-            );
-            match outcome {
-                ChatCompletionsAttemptOutcome::Finished(finished) => {
-                    if TurnAbort::is_aborted(retry_ctx) {
-                        emit_chat_completions_partial_clear(
-                            agent_prompt_id,
-                            prompt,
-                            "request canceled; discarding tentative provider output",
-                            writer,
-                        )?;
-                        finish_canceled(agent_prompt_id, prompt, writer)?;
-                        return Ok(None);
-                    }
-                    writer.write_message(&HarnessInputMessage::emit_transient(
-                        Event::ProviderResponseFinishedReported(*finished),
-                    ))?;
-                    writer.flush()?;
-                    Ok(None)
-                }
-                ChatCompletionsAttemptOutcome::Terminal { finished, progress } => {
-                    if progress == tau_provider_chat_completions::SemanticProgress::Parsed {
-                        emit_chat_completions_partial_clear(
-                            agent_prompt_id,
-                            prompt,
-                            "provider stream ended with an error; discarding partial output",
-                            writer,
-                        )?;
-                    }
-                    writer.write_message(&HarnessInputMessage::emit_transient(
-                        Event::ProviderResponseFinishedReported(*finished),
-                    ))?;
-                    writer.flush()?;
-                    Ok(None)
-                }
-                ChatCompletionsAttemptOutcome::Retry { decision, progress } => {
-                    if progress == tau_provider_chat_completions::SemanticProgress::Parsed {
-                        emit_chat_completions_partial_clear(
-                            agent_prompt_id,
-                            prompt,
-                            "provider stream interrupted after partial output; preparing retry",
-                            writer,
-                        )?;
-                    }
-                    Ok(Some(PromptAttemptRetry {
-                        decision,
-                        live_detail: None,
-                    }))
-                }
-                ChatCompletionsAttemptOutcome::Canceled { progress } => {
-                    if progress == tau_provider_chat_completions::SemanticProgress::Parsed {
-                        emit_chat_completions_partial_clear(
-                            agent_prompt_id,
-                            prompt,
-                            "request canceled; discarding partial provider output",
-                            writer,
-                        )?;
-                    }
-                    finish_canceled(agent_prompt_id, prompt, writer)?;
-                    Ok(None)
-                }
-            }
-        }
-        PromptBackend::PublicResponses { provider, model } => {
-            if TurnAbort::is_aborted(retry_ctx) {
-                finish_canceled(agent_prompt_id, prompt, writer)?;
-                return Ok(None);
-            }
-            match run_responses_prompt_attempt(
-                agent_prompt_id,
-                prompt,
-                provider,
-                model,
-                writer,
-                &mut || TurnAbort::is_aborted(retry_ctx),
-                context.runtime.network(),
-            ) {
-                ResponsesAttemptOutcome::Finished(finished) => {
-                    if TurnAbort::is_aborted(retry_ctx) {
-                        emit_chat_completions_partial_clear(
-                            agent_prompt_id,
-                            prompt,
-                            "request canceled; discarding tentative provider output",
-                            writer,
-                        )?;
-                        finish_canceled(agent_prompt_id, prompt, writer)?;
-                        return Ok(None);
-                    }
-                    writer.write_message(&HarnessInputMessage::emit_transient(
-                        Event::ProviderResponseFinishedReported(*finished),
-                    ))?;
-                    writer.flush()?;
-                    Ok(None)
-                }
-                ResponsesAttemptOutcome::Terminal { finished, progress } => {
-                    if progress.has_timed_semantic_output {
-                        emit_chat_completions_partial_clear(
-                            agent_prompt_id,
-                            prompt,
-                            "provider stream ended with an error; discarding partial output",
-                            writer,
-                        )?;
-                    }
-                    writer.write_message(&HarnessInputMessage::emit_transient(
-                        Event::ProviderResponseFinishedReported(*finished),
-                    ))?;
-                    writer.flush()?;
-                    Ok(None)
-                }
-                ResponsesAttemptOutcome::Retry { decision, progress } => {
-                    if progress.has_timed_semantic_output {
-                        emit_chat_completions_partial_clear(
-                            agent_prompt_id,
-                            prompt,
-                            "provider stream interrupted after partial output; preparing retry",
-                            writer,
-                        )?;
-                    }
-                    Ok(Some(PromptAttemptRetry {
-                        decision,
-                        live_detail: None,
-                    }))
-                }
-                ResponsesAttemptOutcome::Canceled { progress } => {
-                    if progress.has_timed_semantic_output {
-                        emit_chat_completions_partial_clear(
-                            agent_prompt_id,
-                            prompt,
-                            "request canceled; discarding partial provider output",
-                            writer,
-                        )?;
-                    }
-                    finish_canceled(agent_prompt_id, prompt, writer)?;
-                    Ok(None)
-                }
-            }
-        }
+        PromptBackend::ChatCompletions { provider, model } => handle_chat_completions_backend(
+            agent_prompt_id,
+            prompt,
+            provider,
+            model,
+            writer,
+            retry_ctx,
+            context,
+        ),
+        PromptBackend::PublicResponses { provider, model } => handle_public_responses_backend(
+            agent_prompt_id,
+            prompt,
+            provider,
+            model,
+            writer,
+            retry_ctx,
+            context,
+        ),
     }
+}
+
+/// Runs one Chat Completions attempt and reports its terminal or retry outcome.
+fn handle_chat_completions_backend<R, W: Write>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    provider: &ChatCompletionsProvider,
+    model: &ChatCompletionsModel,
+    writer: &mut PeerOutputWriter<W>,
+    retry_ctx: &mut R,
+    context: ChatGptPromptExecutionContext<'_>,
+) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
+where
+    R: TurnAbort,
+{
+    if TurnAbort::is_aborted(retry_ctx) {
+        finish_canceled(agent_prompt_id, prompt, writer)?;
+        return Ok(None);
+    }
+    let outcome = run_prompt_attempt(
+        agent_prompt_id,
+        prompt,
+        provider,
+        model,
+        context.debug_provider_requests,
+        writer,
+        &mut || TurnAbort::is_aborted(retry_ctx),
+        context.runtime.network(),
+    );
+    match outcome {
+        ChatCompletionsAttemptOutcome::Finished(finished) => finish_backend_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            retry_ctx,
+            *finished,
+            true,
+            "request canceled; discarding tentative provider output",
+        ),
+        ChatCompletionsAttemptOutcome::Terminal { finished, progress } => finish_terminal_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            *finished,
+            progress == tau_provider_chat_completions::SemanticProgress::Parsed,
+        ),
+        ChatCompletionsAttemptOutcome::Retry { decision, progress } => finish_retry_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            decision,
+            progress == tau_provider_chat_completions::SemanticProgress::Parsed,
+        ),
+        ChatCompletionsAttemptOutcome::Canceled { progress } => finish_canceled_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            progress == tau_provider_chat_completions::SemanticProgress::Parsed,
+        ),
+    }
+}
+
+/// Runs one public Responses attempt and reports its terminal or retry outcome.
+fn handle_public_responses_backend<R, W: Write>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    provider: &ResponsesProvider,
+    model: &ResponsesModel,
+    writer: &mut PeerOutputWriter<W>,
+    retry_ctx: &mut R,
+    context: ChatGptPromptExecutionContext<'_>,
+) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
+where
+    R: TurnAbort,
+{
+    if TurnAbort::is_aborted(retry_ctx) {
+        finish_canceled(agent_prompt_id, prompt, writer)?;
+        return Ok(None);
+    }
+    match run_responses_prompt_attempt(
+        agent_prompt_id,
+        prompt,
+        provider,
+        model,
+        writer,
+        &mut || TurnAbort::is_aborted(retry_ctx),
+        context.runtime.network(),
+    ) {
+        ResponsesAttemptOutcome::Finished(finished) => finish_backend_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            retry_ctx,
+            *finished,
+            true,
+            "request canceled; discarding tentative provider output",
+        ),
+        ResponsesAttemptOutcome::Terminal { finished, progress } => finish_terminal_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            *finished,
+            progress.has_timed_semantic_output,
+        ),
+        ResponsesAttemptOutcome::Retry { decision, progress } => finish_retry_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            decision,
+            progress.has_timed_semantic_output,
+        ),
+        ResponsesAttemptOutcome::Canceled { progress } => finish_canceled_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            progress.has_timed_semantic_output,
+        ),
+    }
+}
+
+/// Emits a successful final response unless a concurrent cancellation won.
+fn finish_backend_attempt<R, W: Write>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    writer: &mut PeerOutputWriter<W>,
+    retry_ctx: &mut R,
+    finished: ProviderResponseFinished,
+    has_partial_output: bool,
+    cancellation_detail: &str,
+) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
+where
+    R: TurnAbort,
+{
+    if TurnAbort::is_aborted(retry_ctx) {
+        clear_partial_backend_response(
+            agent_prompt_id,
+            prompt,
+            writer,
+            has_partial_output,
+            cancellation_detail,
+        )?;
+        finish_canceled(agent_prompt_id, prompt, writer)?;
+        return Ok(None);
+    }
+    emit_finished_backend_response(writer, finished)?;
+    Ok(None)
+}
+
+/// Emits a terminal backend result after clearing any rendered partial
+/// response.
+fn finish_terminal_attempt<W: Write>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    writer: &mut PeerOutputWriter<W>,
+    finished: ProviderResponseFinished,
+    has_partial_output: bool,
+) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>> {
+    clear_partial_backend_response(
+        agent_prompt_id,
+        prompt,
+        writer,
+        has_partial_output,
+        "provider stream ended with an error; discarding partial output",
+    )?;
+    emit_finished_backend_response(writer, finished)?;
+    Ok(None)
+}
+
+/// Returns retry evidence after clearing any rendered partial response.
+fn finish_retry_attempt<W: Write>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    writer: &mut PeerOutputWriter<W>,
+    decision: RetryDecision,
+    has_partial_output: bool,
+) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>> {
+    clear_partial_backend_response(
+        agent_prompt_id,
+        prompt,
+        writer,
+        has_partial_output,
+        "provider stream interrupted after partial output; preparing retry",
+    )?;
+    Ok(Some(PromptAttemptRetry {
+        decision,
+        live_detail: None,
+    }))
+}
+
+/// Finishes a cancellation after clearing any rendered partial response.
+fn finish_canceled_attempt<W: Write>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    writer: &mut PeerOutputWriter<W>,
+    has_partial_output: bool,
+) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>> {
+    clear_partial_backend_response(
+        agent_prompt_id,
+        prompt,
+        writer,
+        has_partial_output,
+        "request canceled; discarding partial provider output",
+    )?;
+    finish_canceled(agent_prompt_id, prompt, writer)?;
+    Ok(None)
+}
+
+/// Clears partial provider text only when the backend reported semantic output.
+fn clear_partial_backend_response<W: Write>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    writer: &mut PeerOutputWriter<W>,
+    has_partial_output: bool,
+    detail: &str,
+) -> Result<(), Box<dyn Error>> {
+    if has_partial_output {
+        emit_chat_completions_partial_clear(agent_prompt_id, prompt, detail, writer)?;
+    }
+    Ok(())
+}
+
+/// Serializes and flushes one terminal provider response report.
+fn emit_finished_backend_response<W: Write>(
+    writer: &mut PeerOutputWriter<W>,
+    finished: ProviderResponseFinished,
+) -> Result<(), Box<dyn Error>> {
+    writer.write_message(&HarnessInputMessage::emit_transient(
+        Event::ProviderResponseFinishedReported(finished),
+    ))?;
+    writer.flush()?;
+    Ok(())
 }
 
 fn emit_chat_completions_partial_clear<W: Write>(
