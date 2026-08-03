@@ -11,6 +11,7 @@ mod notification_registration;
 mod notification_state;
 mod notification_tool;
 mod notifications;
+mod post_rate_limit;
 mod projection;
 mod specs;
 mod tools;
@@ -31,6 +32,8 @@ use tau_proto::{Event, EventSelector, SessionAgentLoaded, SessionAgentUnloaded, 
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, oneshot};
 use tokio::task::AbortHandle;
+
+use crate::post_rate_limit::{PostRateLimit, PostRateLimitWindow};
 
 /// Logging target used by this extension.
 pub const LOG_TARGET: &str = "rostra";
@@ -80,6 +83,8 @@ where
         running: Arc::new(Mutex::new(HashMap::new())),
         permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOLS)),
         write_lock: Arc::new(AsyncMutex::new(())),
+        post_rate_limit: PostRateLimit::default(),
+        post_rate_limit_window: Arc::new(Mutex::new(PostRateLimitWindow::default())),
         notifications: Arc::new(Mutex::new(notification_state::State::default())),
         notifications_wake: Arc::new(Notify::new()),
         notifications_task: None,
@@ -95,6 +100,9 @@ where
 struct ExtConfig {
     /// Name of the Tau-managed mnemonic secret for this identity.
     identity_mnemonic_secret: String,
+    /// Rolling quota for self-authored Rostra social-post events.
+    #[serde(default)]
+    post_rate_limit: PostRateLimit,
 }
 
 /// Runtime state owned by one extension process.
@@ -111,6 +119,10 @@ pub(crate) struct RostraState {
     permits: Arc<Semaphore>,
     /// Serializes lazy activation and all authenticated publications.
     write_lock: Arc<AsyncMutex<()>>,
+    /// Configured rolling quota for post, reply, and reaction publications.
+    post_rate_limit: PostRateLimit,
+    /// Runtime-only current-window admissions for the configured identity.
+    post_rate_limit_window: Arc<Mutex<PostRateLimitWindow>>,
     /// Extension-owned agent notification preferences and feed checkpoints.
     pub(crate) notifications: Arc<Mutex<notification_state::State>>,
     /// Wakes reconciliation after local policy or lifecycle mutations.
@@ -163,6 +175,11 @@ impl TauExtension for RostraExtension {
                 |cx| {
                     cx.state.client = None;
                     cx.state.identity_secret = None;
+                    cx.state.post_rate_limit = PostRateLimit::default();
+                    *cx.state
+                        .post_rate_limit_window
+                        .lock()
+                        .expect("post rate-limit state lock") = PostRateLimitWindow::default();
                     abort_all(&cx.state.running);
                     if let Some(task) = cx.state.notifications_task.take() {
                         task.abort();
@@ -334,6 +351,11 @@ fn configure(
         .map_err(|message| ClientError::handler(format!("storage_failure: {message}")))?;
     state.client = Some(client);
     state.identity_secret = Some(identity_secret);
+    state.post_rate_limit = config.post_rate_limit;
+    *state
+        .post_rate_limit_window
+        .lock()
+        .expect("post rate-limit state lock") = PostRateLimitWindow::default();
     Ok(())
 }
 
@@ -463,6 +485,8 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
     let running = Arc::clone(&cx.state.running);
     let identity_secret = cx.state.identity_secret;
     let write_lock = Arc::clone(&cx.state.write_lock);
+    let post_rate_limit = cx.state.post_rate_limit;
+    let post_rate_limit_window = Arc::clone(&cx.state.post_rate_limit_window);
     let call_id = invoke.call_id.clone();
     let (start_tx, start_rx) = oneshot::channel();
     let worker = cx
@@ -491,6 +515,8 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
                         &query_client,
                         identity_secret,
                         write_lock,
+                        post_rate_limit,
+                        post_rate_limit_window,
                         task_publication_admitted,
                     )
                     .await

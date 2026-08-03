@@ -2,10 +2,10 @@
 
 use std::collections::BTreeSet;
 use std::str::FromStr as _;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock, mpsc};
+use std::sync::{OnceLock, mpsc};
 
 use rostra_client::{Client, ExternalEventId};
 use rostra_core::event::content_kind::PersonasTagsSelector;
@@ -14,6 +14,7 @@ use rostra_core::id::RostraIdSecretKey;
 use tau_proto::ToolStarted;
 
 use super::{ToolFailure, ToolTextResult, decode_args, parse_identity};
+use crate::post_rate_limit::{PostRateLimit, PostRateLimitWindow};
 use crate::specs::{
     FOLLOW_TOOL, POST_TOOL, PROFILE_UPDATE_TOOL, REACT_TOOL, UNFOLLOW_TOOL, VOTE_TOOL,
 };
@@ -85,10 +86,19 @@ pub(crate) async fn handle(
     client: &Client,
     secret: RostraIdSecretKey,
     write_lock: Arc<tokio::sync::Mutex<()>>,
+    post_rate_limit: PostRateLimit,
+    post_rate_limit_window: Arc<Mutex<PostRateLimitWindow>>,
     publication_admitted: Arc<AtomicBool>,
 ) -> ToolTextResult {
     validate(invoke)?;
     let _write_guard = write_lock.lock().await;
+    if matches!(invoke.tool_name.as_str(), POST_TOOL | REACT_TOOL) {
+        post_rate_limit_window
+            .lock()
+            .expect("post rate-limit state lock")
+            .reserve(post_rate_limit)
+            .map_err(|failure| ToolFailure::rate_limited(failure.retry_after_seconds))?;
+    }
     client
         .unlock_active(secret)
         .await

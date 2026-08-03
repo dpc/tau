@@ -31,8 +31,10 @@ use crate::specs::{
     vote_spec,
 };
 use crate::tools::write::{
-    handle as handle_signed_tool, parse_tags, pause_before_test_publication, validate_body,
+    handle as handle_signed_tool_with_limit, parse_tags, pause_before_test_publication,
+    validate_body,
 };
+use crate::tools::{ToolFailure, tool_error};
 
 /// Thread-safe protocol writer used to observe asynchronous extension output.
 #[derive(Clone, Default)]
@@ -57,6 +59,26 @@ impl Write for SharedWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+/// Run one signed tool with the production default post-like quota.
+async fn handle_signed_tool(
+    invoke: &tau_proto::ToolStarted,
+    client: &Client,
+    secret: RostraIdSecretKey,
+    write_lock: Arc<AsyncMutex<()>>,
+    publication_admitted: Arc<AtomicBool>,
+) -> Result<String, crate::tools::ToolFailure> {
+    handle_signed_tool_with_limit(
+        invoke,
+        client,
+        secret,
+        write_lock,
+        PostRateLimit::default(),
+        Arc::new(Mutex::new(PostRateLimitWindow::default())),
+        publication_admitted,
+    )
+    .await
 }
 
 /// Ensures a native cursor cannot be replayed across timeline or author
@@ -142,8 +164,9 @@ fn following_selectors_apply_only_and_except_tags() {
     assert!(except_professional.matches_tags(&post_tags));
 }
 
-/// Ensures configuration accepts only a Tau secret reference, never a duplicate
-/// public identity or inline mnemonic.
+/// Ensures configuration accepts only a Tau secret reference and an optional
+/// strict positive post-rate-limit object, never an identity or inline
+/// mnemonic.
 #[test]
 fn config_schema_requires_mnemonic_secret_reference() {
     assert!(
@@ -152,6 +175,20 @@ fn config_schema_requires_mnemonic_secret_reference() {
         }))
         .is_ok()
     );
+    for invalid_limit in [
+        serde_json::json!({"max_events":0,"window_seconds":1}),
+        serde_json::json!({"max_events":1,"window_seconds":0}),
+        serde_json::json!({"max_events":1,"window_seconds":1,"extra":true}),
+        serde_json::Value::Null,
+    ] {
+        assert!(
+            serde_json::from_value::<ExtConfig>(serde_json::json!({
+                "identity_mnemonic_secret":"rostra_identity_mnemonic",
+                "post_rate_limit": invalid_limit,
+            }))
+            .is_err()
+        );
+    }
     for excluded in [
         "identity",
         "public_mode",
@@ -169,8 +206,9 @@ fn config_schema_requires_mnemonic_secret_reference() {
     assert!(serde_json::from_value::<ExtConfig>(serde_json::json!({})).is_err());
 }
 
-/// Ensures configuration derives the identity from its Tau secret and leaves
-/// the full client unsigned until an authenticated tool call activates it.
+/// Ensures configuration derives the identity from its Tau secret, leaves the
+/// client unsigned until a signed call, and resets runtime quota state on
+/// successful reconfiguration.
 #[test]
 fn mnemonic_configuration_derives_read_only_identity() {
     let runtime = RuntimeBuilder::new_multi_thread()
@@ -186,6 +224,8 @@ fn mnemonic_configuration_derives_read_only_identity() {
         running: Arc::new(Mutex::new(HashMap::new())),
         permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOLS)),
         write_lock: Arc::new(AsyncMutex::new(())),
+        post_rate_limit: PostRateLimit::default(),
+        post_rate_limit_window: Arc::new(Mutex::new(PostRateLimitWindow::default())),
         notifications: Arc::new(Mutex::new(notification_state::State::default())),
         notifications_wake: Arc::new(Notify::new()),
         notifications_task: None,
@@ -206,6 +246,7 @@ fn mnemonic_configuration_derives_read_only_identity() {
         &configure_event,
         ExtConfig {
             identity_mnemonic_secret: mnemonic_secret.to_owned(),
+            post_rate_limit: PostRateLimit::default(),
         },
     )
     .expect("valid mnemonic configuration");
@@ -218,6 +259,44 @@ fn mnemonic_configuration_derives_read_only_identity() {
         .expect("runtime")
         .block_on(client.db().get_self_current_head());
     assert_eq!(current_head, None);
+    let limit: PostRateLimit = serde_json::from_value(serde_json::json!({
+        "max_events": 1,
+        "window_seconds": 3600,
+    }))
+    .expect("test limit");
+    state
+        .post_rate_limit_window
+        .lock()
+        .expect("post rate-limit state lock")
+        .reserve(limit)
+        .expect("fill runtime quota");
+    let reconfigure_event = tau_proto::Configure {
+        tool_prefix: None,
+        config: tau_proto::CborValue::Map(Vec::new()),
+        instance_name: tau_proto::ExtensionName::parse("std-rostra").expect("test extension name"),
+        state_dir: Some(temporary.path().join("reconfigured-state")),
+        secrets: BTreeMap::from([(
+            mnemonic_secret.to_owned(),
+            tau_proto::SecretValue::new(secret.to_string()),
+        )]),
+    };
+    configure(
+        &mut state,
+        &reconfigure_event,
+        ExtConfig {
+            identity_mnemonic_secret: mnemonic_secret.to_owned(),
+            post_rate_limit: limit,
+        },
+    )
+    .expect("successful reconfiguration");
+    assert!(
+        state
+            .post_rate_limit_window
+            .lock()
+            .expect("post rate-limit state lock")
+            .reserve(limit)
+            .is_ok()
+    );
 }
 
 /// Ensures all declarations retain exact names and strict object schemas.
@@ -526,6 +605,7 @@ fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
     let configure = tau_proto::Configure {
         config: tau_proto::json_to_cbor(&serde_json::json!({
             "identity_mnemonic_secret": "rostra_identity_mnemonic",
+            "post_rate_limit": {"max_events": 2, "window_seconds": 3600},
         })),
         instance_name: tau_proto::ExtensionName::parse("std-rostra").expect("extension name"),
         tool_prefix: None,
@@ -604,6 +684,23 @@ fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
     cancelled_committed
         .recv_timeout(Duration::from_secs(2))
         .expect("cancelled publication commits exactly once");
+    let mut limited_invoke = signed_invoke(
+        "rostra_post",
+        serde_json::json!({"body":"quota after uncertain writes"}),
+    );
+    limited_invoke.call_id = tau_proto::ToolCallId::new("rate-limited-after-uncertain-write");
+    writer
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
+            limited_invoke.clone(),
+        )))
+        .expect("start post after uncertain writes");
+    writer.flush().expect("flush limited post");
+    wait_for_output_event(&output, |event| {
+        matches!(
+            event,
+            Event::ToolErrorReported(error) if error.call_id == limited_invoke.call_id
+        )
+    });
     thread::sleep(Duration::from_millis(100));
 
     drop(writer);
@@ -643,6 +740,23 @@ fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
         event,
         Event::ToolErrorReported(error) if error.call_id == cancelled_invoke.call_id
     )));
+    let Some(Event::ToolErrorReported(rate_limited)) = events.iter().find(|event| {
+        matches!(
+            event,
+            Event::ToolErrorReported(error) if error.call_id == limited_invoke.call_id
+        )
+    }) else {
+        panic!("post after retained uncertain writes must be rate limited");
+    };
+    assert!(rate_limited.message.starts_with("rate_limited:"));
+    let details = rate_limited.details.as_ref().expect("rate-limit details");
+    assert_eq!(
+        tau_proto::cbor_text_field(details, "category").as_deref(),
+        Some("rate_limited")
+    );
+    let retry_after =
+        tau_proto::cbor_int_field(details, "retry_after_seconds").expect("retry-after integer");
+    assert!(0 < retry_after && retry_after <= 3_600);
 }
 
 /// Keeps outbound post source below the approved local content bound.
@@ -900,6 +1014,231 @@ async fn invalid_signed_input_does_not_activate_or_store() {
     .await;
     assert!(result.is_err());
     assert_eq!(client.db().get_self_current_head().await, None);
+}
+
+/// Ensures posts, replies, and reactions consume one shared runtime quota while
+/// follow, profile-update, and vote mutations remain available.
+#[tokio::test(flavor = "multi_thread")]
+async fn post_rate_limit_covers_only_post_like_writes() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let secret = RostraIdSecretKey::generate();
+    let identity = secret.id();
+    let database = Database::open(temporary.path().join("rostra.redb"), identity)
+        .await
+        .expect("database");
+    let client = Client::builder(identity)
+        .start_background_tasks(false)
+        .db(database)
+        .public_mode(false)
+        .build()
+        .await
+        .expect("read-only client");
+    let write_lock = Arc::new(AsyncMutex::new(()));
+    let limit: PostRateLimit = serde_json::from_value(serde_json::json!({
+        "max_events": 3,
+        "window_seconds": 3600,
+    }))
+    .expect("test limit");
+    let window = Arc::new(Mutex::new(PostRateLimitWindow::default()));
+    assert!(
+        handle_signed_tool_with_limit(
+            &signed_invoke("rostra_post", serde_json::json!({"body":""})),
+            &client,
+            secret,
+            Arc::clone(&write_lock),
+            limit,
+            Arc::clone(&window),
+            write_boundary(),
+        )
+        .await
+        .is_err()
+    );
+    let post = handle_signed_tool_with_limit(
+        &signed_invoke("rostra_post", serde_json::json!({"body":"parent"})),
+        &client,
+        secret,
+        Arc::clone(&write_lock),
+        limit,
+        Arc::clone(&window),
+        write_boundary(),
+    )
+    .await
+    .expect("post");
+    let post_id =
+        serde_json::from_str::<serde_json::Value>(&post).expect("post result")["event_id"]
+            .as_str()
+            .expect("post ID")
+            .to_owned();
+
+    for (name, arguments) in [
+        (
+            "rostra_follow",
+            serde_json::json!({"identity":RostraIdSecretKey::generate().id().to_string()}),
+        ),
+        (
+            "rostra_update_profile",
+            serde_json::json!({"display_name":"Tau","bio":"quota test"}),
+        ),
+        (
+            "rostra_unfollow",
+            serde_json::json!({"identity":RostraIdSecretKey::generate().id().to_string()}),
+        ),
+        (
+            "rostra_vote",
+            serde_json::json!({"post_id":post_id,"vote":"up"}),
+        ),
+    ] {
+        handle_signed_tool_with_limit(
+            &signed_invoke(name, arguments),
+            &client,
+            secret,
+            Arc::clone(&write_lock),
+            limit,
+            Arc::clone(&window),
+            write_boundary(),
+        )
+        .await
+        .expect("excluded mutation");
+    }
+    handle_signed_tool_with_limit(
+        &signed_invoke(
+            "rostra_post",
+            serde_json::json!({"body":"reply","reply_to":post_id}),
+        ),
+        &client,
+        secret,
+        Arc::clone(&write_lock),
+        limit,
+        Arc::clone(&window),
+        write_boundary(),
+    )
+    .await
+    .expect("reply");
+    handle_signed_tool_with_limit(
+        &signed_invoke(
+            "rostra_react",
+            serde_json::json!({"post_id":post_id,"reaction":"👍"}),
+        ),
+        &client,
+        secret,
+        Arc::clone(&write_lock),
+        limit,
+        Arc::clone(&window),
+        write_boundary(),
+    )
+    .await
+    .expect("reaction");
+    let error = handle_signed_tool_with_limit(
+        &signed_invoke("rostra_post", serde_json::json!({"body":"over quota"})),
+        &client,
+        secret,
+        write_lock,
+        limit,
+        window,
+        write_boundary(),
+    )
+    .await
+    .expect_err("fourth post-like write");
+    let Event::ToolError(error) = crate::tools::tool_error(
+        &signed_invoke("rostra_post", serde_json::json!({"body":"over quota"})),
+        error,
+    ) else {
+        panic!("rate limit must produce a tool error");
+    };
+    assert!(error.message.starts_with("rate_limited:"));
+    let details = error.details.expect("structured rate-limit details");
+    let tau_proto::CborValue::Map(entries) = &details else {
+        panic!("rate-limit details must be a map");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        tau_proto::cbor_text_field(&details, "category").as_deref(),
+        Some("rate_limited")
+    );
+    let retry_after =
+        tau_proto::cbor_int_field(&details, "retry_after_seconds").expect("retry-after integer");
+    assert!(0 < retry_after && retry_after <= 3_600);
+}
+
+/// Ensures rate-limit terminals expose exactly the fixed structured details
+/// shape instead of requiring model code to parse the bounded prose.
+#[test]
+fn rate_limit_error_has_exact_structured_details() {
+    let invoke = signed_invoke("rostra_post", serde_json::json!({"body":"limited"}));
+    let Event::ToolError(error) = tool_error(&invoke, ToolFailure::rate_limited(17)) else {
+        panic!("rate limit must produce a tool error");
+    };
+    assert_eq!(
+        error.message,
+        "rate_limited: post rate limit reached; retry after 17 seconds"
+    );
+    let tau_proto::CborValue::Map(entries) = error.details.expect("rate-limit details") else {
+        panic!("rate-limit details must be a map");
+    };
+    assert_eq!(entries.len(), 2);
+    let details = tau_proto::CborValue::Map(entries);
+    assert_eq!(
+        tau_proto::cbor_text_field(&details, "category").as_deref(),
+        Some("rate_limited")
+    );
+    assert_eq!(
+        tau_proto::cbor_int_field(&details, "retry_after_seconds"),
+        Some(17)
+    );
+}
+
+/// Ensures concurrent callers share the serialized runtime reservation and only
+/// one caller can claim a final quota slot.
+#[tokio::test(flavor = "multi_thread")]
+async fn post_rate_limit_serializes_the_final_slot() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let secret = RostraIdSecretKey::generate();
+    let identity = secret.id();
+    let database = Database::open(temporary.path().join("rostra.redb"), identity)
+        .await
+        .expect("database");
+    let client = Client::builder(identity)
+        .start_background_tasks(false)
+        .db(database)
+        .public_mode(false)
+        .build()
+        .await
+        .expect("read-only client");
+    let write_lock = Arc::new(AsyncMutex::new(()));
+    let limit: PostRateLimit = serde_json::from_value(serde_json::json!({
+        "max_events": 1,
+        "window_seconds": 3600,
+    }))
+    .expect("test limit");
+    let window = Arc::new(Mutex::new(PostRateLimitWindow::default()));
+    let first_invoke = signed_invoke("rostra_post", serde_json::json!({"body":"first"}));
+    let second_invoke = signed_invoke("rostra_post", serde_json::json!({"body":"second"}));
+    let first = handle_signed_tool_with_limit(
+        &first_invoke,
+        &client,
+        secret,
+        Arc::clone(&write_lock),
+        limit,
+        Arc::clone(&window),
+        write_boundary(),
+    );
+    let second = handle_signed_tool_with_limit(
+        &second_invoke,
+        &client,
+        secret,
+        write_lock,
+        limit,
+        window,
+        write_boundary(),
+    );
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(
+        [first, second]
+            .iter()
+            .filter(|result| result.is_ok())
+            .count(),
+        1
+    );
 }
 
 /// Ensures concurrent signed calls serialize into one local head chain rather

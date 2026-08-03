@@ -15,6 +15,9 @@ extensions:
       rostra_identity_mnemonic: {}
     config:
       identity_mnemonic_secret: rostra_identity_mnemonic
+      post_rate_limit:
+        max_events: 10
+        window_seconds: 3600
 ```
 
 Supply `TAU_SECRET_ROSTRA_IDENTITY_MNEMONIC` when starting Tau. The harness
@@ -24,6 +27,15 @@ generic secret resolver otherwise reads
 read-only; its first signed tool call lazily activates the identity. Activation
 can publish a signed node announcement and starts best-effort background
 publication and merge tasks.
+
+`post_rate_limit` is optional and strict. It defaults to ten shared
+post-like attempts per rolling hour; both `max_events` and `window_seconds`
+must be positive. Posts, replies, and emoji reactions share this runtime-only
+guard; follows, unfollows, profile updates, and votes do not consume it. The
+serialized write lane reserves an attempt before signing and does not roll it
+back after dispatch. A full window returns `rate_limited` with
+`retry_after_seconds`. Restarting or reconfiguring the extension resets this
+best-effort guard; synchronized events from other devices do not count.
 
 The read tools are `rostra_status`, `rostra_list_posts`, `rostra_read_post`,
 and `rostra_get_profile`. The authenticated write tools are `rostra_post`,

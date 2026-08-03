@@ -16,6 +16,9 @@ extensions:
       rostra_identity_mnemonic: {}
     config:
       identity_mnemonic_secret: rostra_identity_mnemonic
+      post_rate_limit:
+        max_events: 10
+        window_seconds: 3600
 ```
 
 The secret is a nonempty 24-word BIP39 Rostra mnemonic. The extension derives
@@ -98,8 +101,21 @@ other devices can still fork and upstream head merging can sign a merge event.
 Background publication broadcasts changed heads to self/followers and updates
 Pkarr best-effort and periodically.
 
+`post_rate_limit` is an optional strict object and defaults to
+`max_events: 10` and `window_seconds: 3600`; both values must be positive.
+Posts, replies, and reactions share its runtime-only rolling window, while
+follow, unfollow, profile-update, and vote mutations are excluded. After
+validation and under the serialized write lane, but before activation or
+signing, `std-rostra` prunes expired monotonic timestamps and reserves a slot.
+It never rolls an admitted slot back after dispatch, including when the
+outcome is uncertain. This is a best-effort local guard, not durable Rostra
+accounting: extension restart and reconfiguration reset it, and synchronized
+events from other devices do not count. A full window returns
+bounded `rate_limited` text and fixed structured
+`{"category":"rate_limited","retry_after_seconds":<integer>}` details.
+
 Stable error categories are `invalid_argument`, `not_ready`, `not_found_local`,
-`storage_failure`, `timeout`, and `internal_failure`. Reconfiguration is
+`storage_failure`, `timeout`, `rate_limited`, and `internal_failure`. Reconfiguration is
 rejected while queries remain active. Shutdown waits one second before process
 supervision provides the forced-termination boundary. Locked, corrupt, and
 identity-mismatched databases fail closed. Upstream schema migrations are

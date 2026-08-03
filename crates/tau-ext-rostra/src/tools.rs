@@ -7,13 +7,14 @@ mod status;
 pub(crate) mod write;
 
 use std::str::FromStr as _;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use rostra_client::{Client, RostraId};
 use rostra_core::id::RostraIdSecretKey;
 use tau_proto::{CborValue, Event, ToolError, ToolResult, ToolStarted};
 
+use crate::post_rate_limit::{PostRateLimit, PostRateLimitWindow};
 use crate::projection::sanitize_line;
 use crate::specs::{
     FOLLOW_TOOL, LIST_TOOL, POST_TOOL, PROFILE_TOOL, PROFILE_UPDATE_TOOL, REACT_TOOL, READ_TOOL,
@@ -23,10 +24,22 @@ use crate::specs::{
 /// Stable categorized tool failure.
 #[derive(Debug)]
 pub(crate) struct ToolFailure {
-    /// Machine-stable category prefix.
-    category: ToolFailureCategory,
+    /// Failure category and any category-specific structured metadata.
+    kind: ToolFailureKind,
     /// Bounded human-readable diagnostic.
     message: String,
+}
+
+/// One failure's category and category-specific structured metadata.
+#[derive(Clone, Copy, Debug)]
+enum ToolFailureKind {
+    /// A failure category without structured fields.
+    Category(ToolFailureCategory),
+    /// A full runtime post quota with its exact retry time.
+    RateLimited {
+        /// Whole seconds until a post-like attempt can retry.
+        retry_after_seconds: u64,
+    },
 }
 
 /// Closed set of model-visible failure categories.
@@ -53,11 +66,32 @@ impl ToolFailureCategory {
     }
 }
 
+impl ToolFailureKind {
+    /// Return the stable model-visible category spelling.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Category(category) => category.as_str(),
+            Self::RateLimited { .. } => "rate_limited",
+        }
+    }
+
+    /// Return structured metadata only for the category that defines it.
+    fn details(self) -> Option<CborValue> {
+        let Self::RateLimited {
+            retry_after_seconds,
+        } = self
+        else {
+            return None;
+        };
+        Some(rate_limit_details(retry_after_seconds))
+    }
+}
+
 impl ToolFailure {
     /// Construct one categorized failure.
     pub(super) fn new(category: ToolFailureCategory, message: impl Into<String>) -> Self {
         Self {
-            category,
+            kind: ToolFailureKind::Category(category),
             message: message.into(),
         }
     }
@@ -103,6 +137,16 @@ impl ToolFailure {
             "local Rostra signed-event transaction failed",
         )
     }
+
+    /// Report a full configured rolling post quota.
+    pub(crate) fn rate_limited(retry_after_seconds: u64) -> Self {
+        Self {
+            kind: ToolFailureKind::RateLimited {
+                retry_after_seconds,
+            },
+            message: format!("post rate limit reached; retry after {retry_after_seconds} seconds"),
+        }
+    }
 }
 
 type ToolTextResult = Result<String, ToolFailure>;
@@ -113,6 +157,8 @@ pub(crate) async fn dispatch(
     client: &Client,
     identity_secret: Option<RostraIdSecretKey>,
     write_lock: Arc<tokio::sync::Mutex<()>>,
+    post_rate_limit: PostRateLimit,
+    post_rate_limit_window: Arc<Mutex<PostRateLimitWindow>>,
     publication_admitted: Arc<AtomicBool>,
 ) -> ToolTextResult {
     match invoke.tool_name.as_str() {
@@ -122,7 +168,16 @@ pub(crate) async fn dispatch(
         PROFILE_TOOL => profile::handle(invoke, client).await,
         POST_TOOL | REACT_TOOL | FOLLOW_TOOL | UNFOLLOW_TOOL | PROFILE_UPDATE_TOOL | VOTE_TOOL => {
             let secret = identity_secret.ok_or_else(ToolFailure::not_ready)?;
-            write::handle(invoke, client, secret, write_lock, publication_admitted).await
+            write::handle(
+                invoke,
+                client,
+                secret,
+                write_lock,
+                post_rate_limit,
+                post_rate_limit_window,
+                publication_admitted,
+            )
+            .await
         }
         _ => Err(ToolFailure::invalid("unknown Rostra tool")),
     }
@@ -166,10 +221,24 @@ pub(crate) fn tool_error(invoke: &ToolStarted, error: ToolFailure) -> Event {
         display: None,
         message: format!(
             "{}: {}",
-            error.category.as_str(),
+            error.kind.as_str(),
             sanitize_line(&error.message, 240)
         ),
-        details: None,
+        details: error.kind.details(),
         originator: invoke.originator.clone(),
     })
+}
+
+/// Encode the fixed structured details for a full runtime post quota.
+fn rate_limit_details(retry_after_seconds: u64) -> CborValue {
+    CborValue::Map(vec![
+        (
+            CborValue::Text("category".to_owned()),
+            CborValue::Text("rate_limited".to_owned()),
+        ),
+        (
+            CborValue::Text("retry_after_seconds".to_owned()),
+            CborValue::Integer(retry_after_seconds.into()),
+        ),
+    ])
 }

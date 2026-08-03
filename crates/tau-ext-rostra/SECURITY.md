@@ -41,6 +41,15 @@ unknown outcome is possibly signed, stored, and published.
 One write mutex serializes local signed calls. It avoids avoidable local forks
 but does not prevent other devices from creating forks, and the upstream head
 merger can sign a merge event. The existing eight-read admission cap remains.
+Before signing `rostra_post` or `rostra_react`, that same lane reserves one
+entry in an in-memory monotonic-time rolling window. It deliberately remains a
+best-effort local anti-spam guard: it resets on extension restart or
+reconfiguration, has no durable counter, and does not count synchronized
+same-identity events from other devices. The reservation is retained after
+dispatch so a failed or uncertain write cannot immediately bypass the guard.
+Follows, unfollows, profile updates, and votes do not consume it. A full window
+returns bounded `rate_limited` text plus fixed structured
+`retry_after_seconds` details.
 Tool policy controls which roles receive signing capability. Tau has no
 genuine human per-call confirmation; operators must grant these tools only to
 roles trusted to make permanent external statements. `enable_tool_groups:
