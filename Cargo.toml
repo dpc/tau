@@ -66,9 +66,9 @@ unwrap_used = "deny"
 [workspace.dependencies]
 httpdate = "1.0.3"
 proptest = "1.7"
-rostra-client = "0.1.1"
-rostra-client-db = "0.1.1"
-rostra-core = "0.1.1"
+rostra-client = "0.1.2"
+rostra-client-db = "0.1.2"
+rostra-core = "0.1.2"
 # Internal crates
 tau-actions = { path = "crates/tau-actions" }
 tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel" }

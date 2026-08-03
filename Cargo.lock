@@ -4491,7 +4491,7 @@ dependencies = [
  "quinn",
  "rustls",
  "rustls-pki-types",
- "rustls-platform-verifier 0.6.2",
+ "rustls-platform-verifier 0.7.0",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4557,9 +4557,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-client"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8e36583ecad787bfb9a444ba63466c00f42d3c19dcc72851ad74d83fd549b6d"
+checksum = "1dff6698e3ddef58284cbb05dcc9fc509e346fae51fcdeac745a4b429edf5d7b"
 dependencies = [
  "anyhow",
  "backon",
@@ -4597,9 +4597,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-client-db"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96427be745e841fde708fbec1edcdee4bdeca58ae0f41e7ed48627a3846b30a3"
+checksum = "6546d6ee701f01f12f0e7b24ff75c4ac8a60efc74fa17e88723151d2dcf56ec4"
 dependencies = [
  "anyhow",
  "backon",
@@ -4634,9 +4634,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-core"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73912ec9a7cea8679e0d204c44b65ef40e4f9ed7a61193f8c0ced48c84ab953c"
+checksum = "7e41a105e0ceb9c15d77310f4e8bcc1aee8c16f949a4b3e5c4b786e0826c3aff"
 dependencies = [
  "bech32",
  "bincode",
@@ -4661,9 +4661,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-djot"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7ff8819a7c230a19c646fe374c1caf06b81fa53a2d90dca15d08ac36a32ab77"
+checksum = "f5723f7dc6c5a06e2f5bc00cc6595222d751339b5ee5c08a35fcba099fd71b46"
 dependencies = [
  "async-trait",
  "jotup",
@@ -4672,9 +4672,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-p2p"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07752d675e3a2eef19034fd7ac3b8b52494878e413a7e3140efd94d3e53f7202"
+checksum = "d9f7f4cc02f2b4c95461ef9d1a4b84819574644fdd2bf269501356143905c691"
 dependencies = [
  "anyhow",
  "bao-tree",
@@ -4695,9 +4695,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-p2p-api"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2589f2604e05f0156480c5083cccb43a9082239917ca16e17a5c43336cb529b4"
+checksum = "5a14c2c77047c2bf5b221af30ed01fb06ffe7be2393edce9fcbca1443c14832a"
 dependencies = [
  "anyhow",
  "futures",
@@ -4710,18 +4710,18 @@ dependencies = [
 
 [[package]]
 name = "rostra-util"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dde0ca9617c0c1ba95babc7f4355e982fa347c12390748a927d1191d5524ac6e"
+checksum = "05a5a362459cb13d0bce69535c82f68f8d477a58ece46c572570446b93c25aeb"
 dependencies = [
  "snafu",
 ]
 
 [[package]]
 name = "rostra-util-dedup-chan"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fae0ad28dc312328f952fea52a96db920e1873a4e8ff942ab7a11dc36cea5e13"
+checksum = "dd5563c6ac55c00d7d3d9407136760b8bcc9fc435eaa48d67a6e8c34bc970e6e"
 dependencies = [
  "snafu",
  "tokio",
@@ -4729,18 +4729,18 @@ dependencies = [
 
 [[package]]
 name = "rostra-util-error"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "364fc0db1d891030d947860a1d0f7651d5808dee3babd49938e9ab48de09dafd"
+checksum = "af791a184dea84973e35dda970550733f04bd4b6288c3af372a7b4eee5d6c95b"
 dependencies = [
  "snafu",
 ]
 
 [[package]]
 name = "rostra-util-fmt"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f56bbae9e3126fbb0a01638f82f96c466fdb8a1d4a5a1f7ec5a1673d10552c99"
+checksum = "38bf496685538aa5d7d4ed7d382aa99224347d4a10a36dc7cba21bdd2aa78a96"
 
 [[package]]
 name = "rrule"
