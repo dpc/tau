@@ -43,6 +43,18 @@ impl<R: std::io::Read> EventReader<R> {
         }
     }
 
+    fn read_event_including_display_progress(
+        &mut self,
+    ) -> Result<Option<Event>, tau_proto::DecodeError> {
+        loop {
+            match self.inner.read_message()? {
+                None => return Ok(None),
+                Some(HarnessInputMessage::Emit(emit)) => return Ok(Some(*emit.event)),
+                Some(_) => continue,
+            }
+        }
+    }
+
     fn read_config_error(&mut self) -> Result<Option<ConfigError>, tau_proto::DecodeError> {
         loop {
             match self.inner.read_message()? {
@@ -179,6 +191,14 @@ impl StubParallelClient {
             response: Mutex::new(Ok(text.into())),
         })
     }
+
+    fn err(message: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            endpoints: Mutex::new(Vec::new()),
+            response: Mutex::new(Err(message.into())),
+        })
+    }
 }
 
 impl ParallelClient for StubParallelClient {
@@ -307,8 +327,8 @@ fn spawn_extension_with_prefix(
     (reader, writer)
 }
 
-/// A configured namespace changes wire names without changing first-party
-/// dispatch, and terminal events retain the namespaced wire identity.
+/// A configured namespace retains safe query labels through progress and
+/// terminal display while dispatching by the logical first-party tool name.
 #[test]
 fn prefixed_exa_invocation_dispatches_by_logical_name() {
     let searcher = StubSearcher::ok("prefixed result");
@@ -328,11 +348,30 @@ fn prefixed_exa_invocation_dispatches_by_logical_name() {
     writer.write_event(&started).expect("write");
     writer.flush().expect("flush");
 
-    let event = reader.read_event().expect("read").expect("result");
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("progress");
+    let Event::ToolProgressReported(progress) = event else {
+        panic!("expected ToolProgress, got {event:?}");
+    };
+    assert_eq!(
+        progress.display.expect("display").args,
+        "query: namespaced query"
+    );
+
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("result");
     let Event::ToolResultReported(result) = event else {
         panic!("expected ToolResult, got {event:?}");
     };
     assert_eq!(result.tool_name.as_str(), "work_websearch_exa");
+    assert_eq!(
+        result.display.expect("display").args,
+        "query: namespaced query"
+    );
     assert_eq!(
         searcher.calls.lock().expect("calls").as_slice(),
         &[("namespaced query".to_owned(), DEFAULT_NUM_RESULTS)]
@@ -359,6 +398,79 @@ fn exa_started(call_id: &str, query: &str) -> Event {
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
         originator: tau_proto::PromptOriginator::User,
     })
+}
+
+/// Ensures web-tool display metadata escapes layout controls and truncates
+/// whole escaped units rather than retaining a partial escape sequence.
+#[test]
+fn display_metadata_escapes_and_bounds_atomic_units() {
+    let value = format!("{}\nmore", "x".repeat(155));
+    assert_eq!(
+        bounded_display_metadata(&value),
+        format!("{}…", "x".repeat(155))
+    );
+    assert!(bounded_display_metadata(&value).len() <= DISPLAY_ARGUMENT_MAX_BYTES);
+    assert_eq!(
+        bounded_display_metadata("line\u{1b}[2J\u{202e}"),
+        "line\\u{001B}[2J\\u{202E}"
+    );
+    assert_eq!(
+        bounded_display_metadata(&format!("{}\n🦀", "x".repeat(150))),
+        format!("{}…", "x".repeat(150))
+    );
+    assert_eq!(
+        bounded_display_metadata(&format!("{}🦀🦀", "x".repeat(154))),
+        format!("{}…", "x".repeat(154))
+    );
+}
+
+/// Ensures web search labels use submitted queries and web fetch labels use
+/// only a requested host, never a configured endpoint or URL secret.
+#[test]
+fn display_args_project_only_safe_model_submitted_targets() {
+    let search_arguments = CborValue::Map(vec![(
+        CborValue::Text("query".to_owned()),
+        CborValue::Text("fresh releases".to_owned()),
+    )]);
+    assert_eq!(
+        display_args(&search_arguments, &ToolName::new(EXA_TOOL_NAME)),
+        Some("query: fresh releases".to_owned())
+    );
+
+    let fetch_arguments = CborValue::Map(vec![(
+        CborValue::Text("url".to_owned()),
+        CborValue::Text(
+            "https://model-user:model-secret@requested.example/path?model-token=secret".to_owned(),
+        ),
+    )]);
+    assert_eq!(
+        display_args(&fetch_arguments, &ToolName::new(PARALLEL_FETCH_TOOL_NAME)),
+        Some("fetch: requested.example".to_owned())
+    );
+
+    let malformed_fetch_arguments = CborValue::Map(vec![(
+        CborValue::Text("url".to_owned()),
+        CborValue::Text("not a URL\nwith controls".to_owned()),
+    )]);
+    assert_eq!(
+        display_args(
+            &malformed_fetch_arguments,
+            &ToolName::new(PARALLEL_FETCH_TOOL_NAME)
+        ),
+        Some("fetch: not a URL\\u{000A}with controls".to_owned())
+    );
+
+    let hostless_fetch_arguments = CborValue::Map(vec![(
+        CborValue::Text("url".to_owned()),
+        CborValue::Text("data:text/plain,model-secret".to_owned()),
+    )]);
+    assert_eq!(
+        display_args(
+            &hostless_fetch_arguments,
+            &ToolName::new(PARALLEL_FETCH_TOOL_NAME)
+        ),
+        Some("fetch: (hostless URL)".to_owned())
+    );
 }
 
 fn configure_message(config: serde_json::Value) -> HarnessOutputMessage {
@@ -445,8 +557,9 @@ fn registers_exa_by_default_and_parallel_tools_disabled() {
     assert!(!tools[2].enabled_by_default);
 }
 
-/// Ensures Exa invocations preserve model arguments, return text, and populate
-/// display stats for harness UI regressions.
+/// Ensures an Exa query uses its last duplicate value in initial progress and
+/// final success display while forwarding that value and preserving result
+/// stats.
 #[test]
 fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
     let searcher = StubSearcher::ok("Title: hi\nURL: https://x\n");
@@ -458,6 +571,10 @@ fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("query".to_owned()),
+                    CborValue::Text("stale query".to_owned()),
+                ),
                 (
                     CborValue::Text("query".to_owned()),
                     CborValue::Text("rust async runtime comparison".to_owned()),
@@ -473,7 +590,22 @@ fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
         .expect("write");
     writer.flush().expect("flush");
 
-    let event = reader.read_event().expect("read").expect("event");
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("progress");
+    let Event::ToolProgressReported(progress) = event else {
+        panic!("expected ToolProgress, got {event:?}");
+    };
+    assert_eq!(
+        progress.display.expect("display").args,
+        "query: rust async runtime comparison"
+    );
+
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("event");
     let Event::ToolResultReported(result) = event else {
         panic!("expected ToolResult, got {event:?}");
     };
@@ -487,6 +619,7 @@ fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
         "<tau_web_content adapter=\"exa\" operation=\"search\" content_trust=\"external\">Title: hi\\u{000A}URL: https://x\\u{000A}</tau_web_content>"
     );
     let display = result.display.expect("display");
+    assert_eq!(display.args, "query: rust async runtime comparison");
     assert!(display.info_chips.is_empty());
     assert_eq!(display.stats.matches, Some(1));
     assert_eq!(display.stats.lines, Some(2));
@@ -498,8 +631,8 @@ fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
     assert_eq!(calls[0].1, 3);
 }
 
-/// Ensures Exa searches keep the documented result-count default when callers
-/// omit the optional argument.
+/// Ensures Exa searches keep the documented result-count default while progress
+/// display retains the submitted query when callers omit the optional argument.
 #[test]
 fn defaults_num_results_when_omitted() {
     let searcher = StubSearcher::ok("ok");
@@ -520,7 +653,22 @@ fn defaults_num_results_when_omitted() {
         .expect("write");
     writer.flush().expect("flush");
 
-    let event = reader.read_event().expect("read").expect("event");
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("progress");
+    let Event::ToolProgressReported(progress) = event else {
+        panic!("expected ToolProgress, got {event:?}");
+    };
+    assert_eq!(
+        progress.display.expect("display").args,
+        "query: hello world"
+    );
+
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("event");
     assert!(matches!(event, Event::ToolResultReported(_)));
     assert_eq!(
         searcher.calls.lock().expect("lock")[0].1,
@@ -584,7 +732,8 @@ fn missing_query_returns_tool_error() {
     assert!(err.message.contains("query"), "message: {}", err.message);
 }
 
-/// Ensures upstream Exa failures are reported to the model as Tau tool errors.
+/// Ensures an upstream Exa failure retains its query through progress and the
+/// terminal error while reporting the error to the model.
 #[test]
 fn searcher_error_surfaces_as_tool_error() {
     let searcher = StubSearcher::err("upstream timed out");
@@ -610,12 +759,25 @@ fn searcher_error_surfaces_as_tool_error() {
         .expect("write");
     writer.flush().expect("flush");
 
-    let event = reader.read_event().expect("read").expect("event");
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("progress");
+    let Event::ToolProgressReported(progress) = event else {
+        panic!("expected ToolProgress, got {event:?}");
+    };
+    assert_eq!(progress.display.expect("display").args, "query: anything");
+
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("event");
     let Event::ToolErrorReported(err) = event else {
         panic!("expected ToolError, got {event:?}");
     };
     assert_eq!(err.message, "upstream timed out");
     assert_eq!(err.originator, originator);
+    assert_eq!(err.display.expect("display").args, "query: anything");
 }
 
 /// Ensures tool replies keep the original prompt originator so side prompts and
@@ -641,6 +803,7 @@ fn tool_result_preserves_prompt_originator() {
             originator: originator.clone(),
         },
         searcher.as_ref(),
+        String::new(),
     );
 
     let Event::ToolResult(result) = event else {
@@ -684,8 +847,8 @@ fn rejects_num_results_out_of_range() {
     assert!(err.message.contains(">= 1"), "message: {}", err.message);
 }
 
-/// Ensures excess concurrent searches return a busy error instead of blocking
-/// the protocol reader behind the in-flight limit.
+/// Ensures a busy terminal retains its submitted query instead of blocking the
+/// protocol reader behind the in-flight limit.
 ///
 /// See `SPEC-tau-ext-websearch-runtime-safeguards`.
 #[test]
@@ -714,6 +877,7 @@ fn returns_busy_error_when_in_flight_limit_is_full() {
     };
     assert_eq!(err.call_id.as_str(), "busy-call");
     assert!(err.message.contains("busy"), "message: {}", err.message);
+    assert_eq!(err.display.expect("display").args, "query: blocked");
     searcher.release();
     for _ in 0..MAX_IN_FLIGHT {
         let event = reader.read_event().expect("read").expect("event");
@@ -916,8 +1080,9 @@ fn malformed_endpoint_is_rejected_during_configure() {
     assert!(err.message.contains("valid URL"), "err: {err:?}");
 }
 
-/// Ensures Parallel search forwards provider-specific passthrough arguments to
-/// the remote MCP tool.
+/// Ensures Parallel search retains its query through progress/success display
+/// while forwarding provider-specific passthrough arguments to the remote MCP
+/// tool.
 #[test]
 fn forwards_parallel_search_to_web_search_and_returns_text() {
     let searcher = StubSearcher::ok("unused");
@@ -950,7 +1115,22 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
         .expect("write");
     writer.flush().expect("flush");
 
-    let event = reader.read_event().expect("read").expect("event");
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("progress");
+    let Event::ToolProgressReported(progress) = event else {
+        panic!("expected ToolProgress, got {event:?}");
+    };
+    assert_eq!(
+        progress.display.expect("display").args,
+        "query: latest rust release"
+    );
+
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("event");
     let Event::ToolResultReported(result) = event else {
         panic!("expected ToolResult, got {event:?}");
     };
@@ -963,6 +1143,10 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
                 .to_owned()
         )
     );
+    assert_eq!(
+        result.display.expect("display").args,
+        "query: latest rust release"
+    );
     assert_eq!(result.originator, originator);
 
     let calls = parallel.calls.lock().expect("lock");
@@ -972,8 +1156,8 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
     assert_eq!(calls[0].1["max_results"], 3);
 }
 
-/// Ensures the singular model-visible fetch URL becomes Parallel's one-element
-/// `urls` array without losing provider-specific arguments.
+/// Ensures the last duplicate model-visible fetch URL becomes Parallel's
+/// one-element `urls` array while its host remains in progress/success display.
 #[test]
 fn forwards_parallel_fetch_to_web_fetch() {
     let searcher = StubSearcher::ok("unused");
@@ -986,6 +1170,10 @@ fn forwards_parallel_fetch_to_web_fetch() {
             call_id: "call-7".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
             arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("url".to_owned()),
+                    CborValue::Text("https://stale.example.com".to_owned()),
+                ),
                 (
                     CborValue::Text("url".to_owned()),
                     CborValue::Text("https://example.com".to_owned()),
@@ -1007,7 +1195,22 @@ fn forwards_parallel_fetch_to_web_fetch() {
         .expect("write");
     writer.flush().expect("flush");
 
-    let event = reader.read_event().expect("read").expect("event");
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("progress");
+    let Event::ToolProgressReported(progress) = event else {
+        panic!("expected ToolProgress, got {event:?}");
+    };
+    assert_eq!(
+        progress.display.expect("display").args,
+        "fetch: example.com"
+    );
+
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("event");
     let Event::ToolResultReported(result) = event else {
         panic!("expected ToolResult, got {event:?}");
     };
@@ -1018,6 +1221,7 @@ fn forwards_parallel_fetch_to_web_fetch() {
                 .to_owned()
         )
     );
+    assert_eq!(result.display.expect("display").args, "fetch: example.com");
 
     let calls = parallel.calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
@@ -1028,6 +1232,54 @@ fn forwards_parallel_fetch_to_web_fetch() {
     );
     assert!(calls[0].1.get("url").is_none());
     assert_eq!(calls[0].1["objective"], "extract the main article");
+}
+
+/// Ensures a malformed Parallel fetch target remains visibly escaped through
+/// progress and terminal error without copying provider error content into it.
+#[test]
+fn parallel_fetch_error_retains_safe_target_display() {
+    let parallel = StubParallelClient::err("upstream fetch failed");
+    let (mut reader, mut writer) = spawn_extension(StubSearcher::ok("unused"), parallel);
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolStarted(ToolStarted {
+            call_id: "call-fetch-error".into(),
+            tool_name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("url".to_owned()),
+                CborValue::Text("not a URL\nwith controls".to_owned()),
+            )]),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("write");
+    writer.flush().expect("flush");
+
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("progress");
+    let Event::ToolProgressReported(progress) = event else {
+        panic!("expected ToolProgress, got {event:?}");
+    };
+    assert_eq!(
+        progress.display.expect("display").args,
+        "fetch: not a URL\\u{000A}with controls"
+    );
+
+    let event = reader
+        .read_event_including_display_progress()
+        .expect("read")
+        .expect("error");
+    let Event::ToolErrorReported(error) = event else {
+        panic!("expected ToolError, got {event:?}");
+    };
+    assert_eq!(error.message, "upstream fetch failed");
+    assert_eq!(
+        error.display.expect("display").args,
+        "fetch: not a URL\\u{000A}with controls"
+    );
 }
 
 /// Ensures Parallel calls enforce their advertised required fields locally
@@ -1098,6 +1350,7 @@ fn parallel_fetch_invalid_url_is_rejected_before_forwarding() {
             PARALLEL_REMOTE_FETCH_TOOL,
             "url",
             adapt_parallel_fetch_arguments,
+            String::new(),
         );
         let Event::ToolError(error) = event else {
             panic!("expected ToolError, got {event:?}");
@@ -1303,6 +1556,7 @@ fn post_escape_oversize_result_is_rejected_without_truncation() {
             originator: tau_proto::PromptOriginator::User,
         },
         searcher.as_ref(),
+        String::new(),
     );
     let Event::ToolError(error) = event else {
         panic!("expected ToolError, got {event:?}");
@@ -1451,6 +1705,7 @@ fn hosted_mcp_rate_limits_ignore_untrusted_bodies() {
         PARALLEL_REMOTE_SEARCH_TOOL,
         "query",
         passthrough_parallel_arguments,
+        String::new(),
     );
     let Event::ToolError(parallel_error) = parallel_event else {
         panic!("expected ToolError, got {parallel_event:?}");
@@ -1734,6 +1989,7 @@ fn parallel_fetch_adapter_posts_urls_array_without_authorization_header() {
         PARALLEL_REMOTE_FETCH_TOOL,
         "url",
         adapt_parallel_fetch_arguments,
+        String::new(),
     );
     assert!(matches!(event, Event::ToolResult(_)), "event: {event:?}");
 

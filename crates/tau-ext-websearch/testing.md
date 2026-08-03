@@ -10,6 +10,14 @@ Cover registration/default policy, endpoint parsing, rejection, and
 application, provider argument forwarding and local rejection, no-Authorization
 behavior, JSON/SSE decode, independent response/output/error caps, redaction,
 saturation with responsive control handling, and replay suppression.
+
+Display-state lifecycle tests must assert the same safe query/fetch target appears
+on progress, success, error, and busy terminals. Exercise the Exa and Parallel
+paths, including a configured tool-name prefix. Treat query/URL labels as
+untrusted metadata: cover control/layout escaping, byte bounds that preserve whole
+escaped units, fetch-host projection without URL userinfo/query secrets, and the
+absence of configured provider endpoints or returned content.
+
 Use loopback servers to verify that HTTP 429 takes the shared generic
 rate-limit path for both hosted clients and never projects hostile, oversized
 error bodies or endpoint secrets.

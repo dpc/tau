@@ -18,6 +18,16 @@ advertise: false
 Roles can opt into the Parallel tools by enabling the Tau-internal tool names in the role/tool configuration.
 
 
+## Terminal display
+
+Tau's terminal tool headers show the submitted `query` for `web_search` and the
+requested host from submitted `url` for `web_fetch` throughout progress, success,
+error, and busy states. These short labels are escaped and bounded untrusted
+metadata from the model tool call. Valid fetch labels omit URL userinfo/query
+values; hostless URLs use a fixed marker, and all labels avoid configured Exa/Parallel MCP endpoints, provider
+diagnostics, metadata, and content.
+
+
 ## Configuration
 
 Configured under `extensions.std-websearch.config`:

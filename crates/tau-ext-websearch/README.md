@@ -92,6 +92,15 @@ of echoing provider text. HTTP 429 responses instead produce the generic bounded
 advice `web service rate-limited the request; try again later.` without reading
 or echoing the provider body.
 
+Terminal tool headers retain a compact display target for every lifecycle state:
+`web_search` shows its submitted `query`, while `web_fetch` shows only the parsed
+host from its submitted `url` (or a fixed hostless-URL marker / safely escaped
+malformed input). This
+presentation metadata comes only from the model tool call, never configured Exa or
+Parallel endpoints, provider diagnostics, metadata, or content. Tau escapes
+controls and structural Unicode visibly and bounds the value at whole escaped-unit
+boundaries, so it cannot inject terminal layout or leave a partial escape.
+
 Tests use local stubs or loopback HTTP servers and do not contact live providers.
 
 ## Tracing

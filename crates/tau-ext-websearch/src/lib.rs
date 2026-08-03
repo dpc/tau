@@ -66,6 +66,10 @@ const MAX_NUM_RESULTS: u32 = 100;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_IN_FLIGHT: usize = 8;
 const ERROR_BODY_MAX_BYTES: usize = 64 * 1024;
+/// Maximum UTF-8 byte length for one escaped web-tool display argument.
+const DISPLAY_ARGUMENT_MAX_BYTES: usize = 160;
+/// Suffix marking a display argument shortened at an escaped-unit boundary.
+const DISPLAY_ARGUMENT_TRUNCATION_MARKER: &str = "…";
 const SUCCESS_BODY_MAX_BYTES: usize = 1024 * 1024;
 const TOOL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TRUNCATED_SUFFIX: &str = "… (truncated)";
@@ -381,6 +385,7 @@ fn parallel_fetch_tool_spec() -> ToolSpec {
 fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> ClientResult<()> {
     let invoke = cx.invoke().clone();
     let local_tool_name = cx.local_tool_name().clone();
+    let display_args = display_args(&invoke.arguments, &local_tool_name).unwrap_or_default();
     let handle = cx.handle();
     let searcher = Arc::clone(&cx.state.searcher);
     let parallel_client = Arc::clone(&cx.state.parallel_client);
@@ -393,6 +398,7 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
                 searcher.as_ref(),
                 parallel_client.as_ref(),
                 &handle,
+                display_args,
             );
         });
     } else {
@@ -401,6 +407,7 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
             tool_error(
                 invoke,
                 "websearch is busy; too many searches are already running".to_owned(),
+                display_args,
             ),
         )?;
     }
@@ -413,8 +420,9 @@ fn dispatch_tool_invoke(
     searcher: &dyn Searcher,
     parallel_client: &dyn ParallelClient,
     handle: &ClientHandle,
+    display_args: String,
 ) {
-    if let Some(display) = initial_display(&invoke, local_tool_name) {
+    if let Some(display) = initial_display(local_tool_name, display_args.clone()) {
         let _ = handle.report_tool_progress_detached(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -424,13 +432,14 @@ fn dispatch_tool_invoke(
         });
     }
     let event = match local_tool_name.as_str() {
-        EXA_TOOL_NAME => dispatch_exa(invoke, searcher),
+        EXA_TOOL_NAME => dispatch_exa(invoke, searcher, display_args),
         PARALLEL_SEARCH_TOOL_NAME => dispatch_parallel(
             invoke,
             parallel_client,
             PARALLEL_REMOTE_SEARCH_TOOL,
             "query",
             passthrough_parallel_arguments,
+            display_args,
         ),
         PARALLEL_FETCH_TOOL_NAME => dispatch_parallel(
             invoke,
@@ -438,12 +447,13 @@ fn dispatch_tool_invoke(
             PARALLEL_REMOTE_FETCH_TOOL,
             "url",
             adapt_parallel_fetch_arguments,
+            display_args,
         ),
         _ => Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             tool_type: tau_proto::ToolType::Function,
-            display: Some(error_display("unknown tool")),
+            display: Some(error_display("unknown tool", display_args)),
             message: "unknown tool".to_owned(),
             details: None,
             originator: invoke.originator,
@@ -461,18 +471,12 @@ fn report_terminal_detached(handle: &ClientHandle, event: Event) -> ClientResult
     handle.report_tool_terminal_detached(outcome)
 }
 
-fn initial_display(invoke: &ToolStarted, local_tool_name: &ToolName) -> Option<ToolUseState> {
-    let args = match local_tool_name.as_str() {
-        EXA_TOOL_NAME => parse_exa_args(&invoke.arguments)
-            .map(|(query, _)| query)
-            .unwrap_or_default(),
-        PARALLEL_SEARCH_TOOL_NAME => {
-            cbor_text_field(&invoke.arguments, "query").unwrap_or_default()
-        }
-        PARALLEL_FETCH_TOOL_NAME => cbor_text_field(&invoke.arguments, "url").unwrap_or_default(),
-        _ => return None,
-    };
-    Some(ToolUseState {
+fn initial_display(local_tool_name: &ToolName, args: String) -> Option<ToolUseState> {
+    matches!(
+        local_tool_name.as_str(),
+        EXA_TOOL_NAME | PARALLEL_SEARCH_TOOL_NAME | PARALLEL_FETCH_TOOL_NAME
+    )
+    .then_some(ToolUseState {
         args,
         status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
@@ -480,21 +484,80 @@ fn initial_display(invoke: &ToolStarted, local_tool_name: &ToolName) -> Option<T
     })
 }
 
+/// Project a model-submitted search query or fetch target for terminal display.
+///
+/// Valid fetch URLs expose only a parsed requested host, not userinfo, paths,
+/// query values, configured provider endpoints, or provider-returned data.
+fn display_args(arguments: &CborValue, local_tool_name: &ToolName) -> Option<String> {
+    match local_tool_name.as_str() {
+        EXA_TOOL_NAME | PARALLEL_SEARCH_TOOL_NAME => cbor_text_field(arguments, "query")
+            .map(|query| format!("query: {}", bounded_display_metadata(&query))),
+        PARALLEL_FETCH_TOOL_NAME => cbor_text_field(arguments, "url").map(|url| {
+            let target = match Url::parse(&url) {
+                Ok(url) => url
+                    .host_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "(hostless URL)".to_owned()),
+                Err(_) => url,
+            };
+            format!("fetch: {}", bounded_display_metadata(&target))
+        }),
+        _ => None,
+    }
+}
+
+/// Escape and bound untrusted display metadata without splitting visible
+/// escapes.
+fn bounded_display_metadata(value: &str) -> String {
+    let mut display = String::new();
+    let mut unit_starts = Vec::new();
+    for character in value.chars() {
+        let mut unit = String::new();
+        if tau_proto::requires_visible_escape(character) {
+            let _ = write!(unit, "\\u{{{:04X}}}", character as u32);
+        } else {
+            unit.push(character);
+        }
+        if display.len() + unit.len() <= DISPLAY_ARGUMENT_MAX_BYTES {
+            unit_starts.push(display.len());
+            display.push_str(&unit);
+            continue;
+        }
+        while DISPLAY_ARGUMENT_MAX_BYTES < display.len() + DISPLAY_ARGUMENT_TRUNCATION_MARKER.len()
+        {
+            let start = unit_starts
+                .pop()
+                .expect("display argument max exceeds every escaped unit");
+            display.truncate(start);
+        }
+        display.push_str(DISPLAY_ARGUMENT_TRUNCATION_MARKER);
+        break;
+    }
+    display
+}
+
 fn cbor_text_field(arguments: &CborValue, key: &str) -> Option<String> {
+    match cbor_field(arguments, key) {
+        Some(CborValue::Text(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// Return the same last duplicate map field that CBOR-to-JSON conversion keeps.
+fn cbor_field<'a>(arguments: &'a CborValue, key: &str) -> Option<&'a CborValue> {
     let CborValue::Map(entries) = arguments else {
         return None;
     };
     entries
         .iter()
-        .find_map(|(entry_key, value)| match (entry_key, value) {
-            (CborValue::Text(entry_key), CborValue::Text(value)) if entry_key == key => {
-                Some(value.clone())
-            }
+        .rev()
+        .find_map(|(entry_key, value)| match entry_key {
+            CborValue::Text(entry_key) if entry_key == key => Some(value),
             _ => None,
         })
 }
 
-fn dispatch_exa(invoke: ToolStarted, searcher: &dyn Searcher) -> Event {
+fn dispatch_exa(invoke: ToolStarted, searcher: &dyn Searcher, display_args: String) -> Event {
     match parse_exa_args(&invoke.arguments) {
         Ok((query, num_results)) => match searcher.search(&query, num_results) {
             Ok(text) => {
@@ -502,7 +565,7 @@ fn dispatch_exa(invoke: ToolStarted, searcher: &dyn Searcher) -> Event {
                 let projected =
                     match project_web_content(WebAdapter::Exa, WebOperation::Search, &text) {
                         Ok(projected) => projected,
-                        Err(message) => return tool_error(invoke, message),
+                        Err(message) => return tool_error(invoke, message, display_args),
                     };
                 Event::ToolResult(ToolResult {
                     call_id: invoke.call_id,
@@ -511,13 +574,13 @@ fn dispatch_exa(invoke: ToolStarted, searcher: &dyn Searcher) -> Event {
                     result: CborValue::Text(projected),
                     provider_content: Vec::new(),
                     kind: tau_proto::ToolResultKind::Final,
-                    display: Some(exa_ok_display(&text)),
+                    display: Some(exa_ok_display(&text, display_args)),
                     originator: invoke.originator,
                 })
             }
-            Err(message) => tool_error(invoke, message),
+            Err(message) => tool_error(invoke, message, display_args),
         },
-        Err(message) => tool_error(invoke, message),
+        Err(message) => tool_error(invoke, message, display_args),
     }
 }
 
@@ -527,6 +590,7 @@ fn dispatch_parallel(
     remote_tool: &'static str,
     required_field: &str,
     adapt_arguments: fn(serde_json::Value) -> Result<serde_json::Value, String>,
+    display_args: String,
 ) -> Event {
     match validate_parallel_args(&invoke.arguments, required_field)
         .and_then(|()| cbor_to_json(&invoke.arguments))
@@ -538,11 +602,17 @@ fn dispatch_parallel(
                 let operation = match remote_tool {
                     PARALLEL_REMOTE_SEARCH_TOOL => WebOperation::Search,
                     PARALLEL_REMOTE_FETCH_TOOL => WebOperation::Fetch,
-                    _ => return tool_error(invoke, "unknown Parallel operation".to_owned()),
+                    _ => {
+                        return tool_error(
+                            invoke,
+                            "unknown Parallel operation".to_owned(),
+                            display_args,
+                        );
+                    }
                 };
                 let projected = match project_web_content(WebAdapter::Parallel, operation, &text) {
                     Ok(projected) => projected,
-                    Err(message) => return tool_error(invoke, message),
+                    Err(message) => return tool_error(invoke, message, display_args),
                 };
                 Event::ToolResult(ToolResult {
                     call_id: invoke.call_id,
@@ -551,13 +621,13 @@ fn dispatch_parallel(
                     result: CborValue::Text(projected),
                     provider_content: Vec::new(),
                     kind: tau_proto::ToolResultKind::Final,
-                    display: Some(ok_display(&text)),
+                    display: Some(ok_display(&text, display_args)),
                     originator: invoke.originator,
                 })
             }
-            Err(message) => tool_error(invoke, message),
+            Err(message) => tool_error(invoke, message, display_args),
         },
-        Err(message) => tool_error(invoke, message),
+        Err(message) => tool_error(invoke, message, display_args),
     }
 }
 
@@ -620,12 +690,12 @@ fn project_web_content(
     Ok(output)
 }
 
-fn tool_error(invoke: ToolStarted, message: String) -> Event {
+fn tool_error(invoke: ToolStarted, message: String, display_args: String) -> Event {
     Event::ToolError(ToolError {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
-        display: Some(error_display(&message)),
+        display: Some(error_display(&message, display_args)),
         message,
         details: Some(invoke.arguments),
         originator: invoke.originator,
@@ -636,27 +706,27 @@ fn validate_parallel_args(arguments: &CborValue, required_field: &str) -> Result
     let CborValue::Map(entries) = arguments else {
         return Err("arguments must be an object".to_owned());
     };
-    for (key, value) in entries {
-        let CborValue::Text(key) = key else {
+    for (key, _) in entries {
+        let CborValue::Text(_) = key else {
             return Err("argument object keys must be strings".to_owned());
         };
-        if key == required_field {
-            let CborValue::Text(text) = value else {
-                return Err(format!("`{required_field}` must be a string"));
-            };
-            if text.trim().is_empty() {
-                return Err(format!("`{required_field}` must not be empty"));
-            }
-            return Ok(());
-        }
     }
-    Err(format!("missing string argument: {required_field}"))
+    let Some(value) = cbor_field(arguments, required_field) else {
+        return Err(format!("missing string argument: {required_field}"));
+    };
+    let CborValue::Text(text) = value else {
+        return Err(format!("`{required_field}` must be a string"));
+    };
+    if text.trim().is_empty() {
+        return Err(format!("`{required_field}` must not be empty"));
+    }
+    Ok(())
 }
 
-fn ok_display(response: &str) -> ToolUseState {
+fn ok_display(response: &str, args: String) -> ToolUseState {
     let has_response = !response.is_empty();
     ToolUseState {
-        args: String::new(),
+        args,
         stats: ToolUseStats {
             matches: None,
             lines: has_response.then_some(response.lines().count() as u64),
@@ -668,8 +738,8 @@ fn ok_display(response: &str) -> ToolUseState {
     }
 }
 
-fn exa_ok_display(response: &str) -> ToolUseState {
-    let mut display = ok_display(response);
+fn exa_ok_display(response: &str, args: String) -> ToolUseState {
+    let mut display = ok_display(response, args);
     let titles = response
         .lines()
         .filter(|line| line.starts_with("Title:"))
@@ -682,7 +752,7 @@ fn exa_ok_display(response: &str) -> ToolUseState {
     display
 }
 
-fn error_display(message: &str) -> ToolUseState {
+fn error_display(message: &str, args: String) -> ToolUseState {
     let status_text = message
         .lines()
         .map(str::trim)
@@ -690,7 +760,7 @@ fn error_display(message: &str) -> ToolUseState {
         .unwrap_or("")
         .to_owned();
     ToolUseState {
-        args: String::new(),
+        args,
         status: ToolUseStatus::Error,
         status_text,
         ..Default::default()
