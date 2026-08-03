@@ -106,28 +106,26 @@ fn context_only_chunk_can_position_later_update_chunk() {
     );
 }
 
+/// Ensures a one-file freeform patch retains its semantically escaped path in
+/// the UI-only diff payload, because no compact input argument identifies it.
 #[test]
-fn format_single_file_diff_payload() {
-    let summary = format_summary(&[AppliedChange {
-        display_path: "file.txt".to_owned(),
+fn single_file_diff_payload_keeps_the_escaped_file_path() {
+    let changes = [AppliedChange {
+        display_path: "line\\tbreak.txt".to_owned(),
         path: PathBuf::from("file.txt"),
         status: ChangeStatus::Modify,
         old_content: "before\n".to_owned(),
         new_content: Some("after\n".to_owned()),
-    }]);
-    assert!(matches!(
-        display_payload_for_changes(
-            &[AppliedChange {
-                display_path: "file.txt".to_owned(),
-                path: PathBuf::from("file.txt"),
-                status: ChangeStatus::Modify,
-                old_content: "before\n".to_owned(),
-                new_content: Some("after\n".to_owned()),
-            }],
-            &summary,
-        ),
-        Some(ToolUsePayload::Diff(_))
-    ));
+    }];
+    let summary = format_summary(&changes);
+    let payload = display_payload_for_changes(&changes, &summary);
+    let Some(ToolUsePayload::Diffs { files }) = payload else {
+        panic!("single apply_patch change must retain its file path");
+    };
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, "line\\tbreak.txt");
+    assert_eq!(files[0].diff.added, 1);
+    assert_eq!(files[0].diff.removed, 1);
 }
 
 /// Ensures `*** Add File` cannot silently clobber an existing path; callers

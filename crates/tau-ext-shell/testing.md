@@ -25,6 +25,11 @@ all-or-nothing failure, BOM and mixed-line-ending preservation, local inserted
 line endings, compact results, no-op diff suppression, and the ordinary durable
 structured diff for changed UTF-8 files.
 
+`apply_patch` tests retain path-labelled UI-only diffs for every changed file,
+including single-file updates, add/modify/delete multi-file patches, moves,
+escaped paths, and partial failures. CLI rendering tests require exactly one
+path header per changed file before its hunks.
+
 Workdir coverage includes initialization, replay precedence, malformed state,
 setter admission/commit/cancellation, concurrent rejection, and call-local
 `cwd`/`workdir` behavior. Harness-boundary tests cover provider cardinality,

@@ -13257,6 +13257,58 @@ fn render_multi_diff_tool_block_preserves_file_boundaries() {
     assert!(text.contains("\n-beta"));
 }
 
+/// Ensures a one-file `Diffs` payload still labels its hunks, because freeform
+/// apply_patch calls have no compact argument path that could identify them.
+#[test]
+fn render_multi_diff_tool_block_labels_single_file_hunks_once() {
+    use tau_proto::{
+        DiffHunk, DiffLine, DiffSummary, FileDiffSummary, ToolUsePayload, ToolUseState,
+        ToolUseStatus,
+    };
+
+    let files = vec![FileDiffSummary {
+        path: "src/lib.rs".into(),
+        diff: DiffSummary {
+            added: 1,
+            removed: 1,
+            hunks: vec![DiffHunk {
+                old_start: 3,
+                old_count: 1,
+                new_start: 3,
+                new_count: 1,
+                lines: vec![
+                    DiffLine::Remove { text: "old".into() },
+                    DiffLine::Add { text: "new".into() },
+                ],
+            }],
+        },
+    }];
+    let display = render_tool_use_state(
+        "apply_patch",
+        &ToolUseState {
+            status: ToolUseStatus::Success,
+            status_text: "ok".into(),
+            payload: Some(ToolUsePayload::Diffs {
+                files: files.clone(),
+            }),
+            ..Default::default()
+        },
+    );
+    let block = render_multi_diff_tool_block(&cli_test_theme(), &display, &files, true);
+    let text: String = block
+        .priority_line_body_content()
+        .expect("priority body")
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect();
+
+    assert_eq!(text.matches("--- src/lib.rs").count(), 1);
+    assert!(text.contains("@@ -3,1 +3,1 @@"));
+    assert!(text.contains("\n-old"));
+    assert!(text.contains("\n+new"));
+}
+
 #[test]
 fn synthesize_fallback_display_is_minimal() {
     let ok = synthesize_fallback_display("my_tool", None);

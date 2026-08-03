@@ -1876,13 +1876,14 @@ pub enum ToolUseStatus {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolUsePayload {
-    /// Structured file diff. The renderer derives the `+N -M` chip
-    /// from the summary's `added`/`removed` and renders the hunks
+    /// Anonymous structured file diff. Use this only when the generic display
+    /// state already identifies the changed file. The renderer derives the
+    /// `+N -M` chip from the summary's `added`/`removed` and renders the hunks
     /// below the chip row.
     Diff(DiffSummary),
-    /// Structured diffs for a multi-file mutation. Each entry carries its
-    /// display path so UIs can keep file boundaries while rendering the
-    /// same hunk/inline data as a single-file diff.
+    /// One or more path-labelled structured file diffs. Each entry carries its
+    /// display path so UIs can keep file boundaries while rendering the same
+    /// hunk/inline data as an anonymous single-file diff.
     Diffs { files: Vec<crate::FileDiffSummary> },
     /// Plain text rendered below the chip row. Used when the inline
     /// args label would be too noisy (e.g. multi-line shell commands).

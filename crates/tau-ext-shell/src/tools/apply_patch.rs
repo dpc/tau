@@ -410,15 +410,6 @@ impl<'world> HunkApplier<'world> {
 }
 
 fn display_payload_for_changes(changes: &[AppliedChange], summary: &str) -> Option<ToolUsePayload> {
-    if changes.len() == 1 {
-        let change = &changes[0];
-        let new_content = change.new_content.as_deref().unwrap_or_default();
-        return Some(ToolUsePayload::Diff(compute_diff(
-            &change.old_content,
-            new_content,
-        )));
-    }
-
     let files = changes
         .iter()
         .map(|change| {

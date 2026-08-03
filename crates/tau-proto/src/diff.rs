@@ -22,7 +22,7 @@ pub struct DiffSummary {
     /// Empty when the file is unchanged.
     pub hunks: Vec<DiffHunk>,
 }
-/// Structured diff for one changed file inside a multi-file mutation.
+/// Structured diff for one changed file in a path-labelled mutation payload.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FileDiffSummary {
     /// Display path for the changed file, matching the tool's status summary.

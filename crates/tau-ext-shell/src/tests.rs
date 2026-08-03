@@ -4008,6 +4008,9 @@ fn extension_edit_creates_directories() {
     writer.flush().expect("flush");
 }
 
+/// Ensures a completed one-file freeform patch exposes the changed file only
+/// through UI-only structured metadata, allowing the terminal to label hunks
+/// without duplicating the compact model-visible result.
 #[test]
 fn extension_apply_patch_updates_file() {
     let tempdir = TempDir::new().expect("tempdir");
@@ -4048,6 +4051,12 @@ fn extension_apply_patch_updates_file() {
             file_path.display()
         ))
     );
+    let display = result.display.expect("apply_patch display");
+    let Some(ToolUsePayload::Diffs { files }) = display.payload else {
+        panic!("single-file apply_patch must retain its structured display path");
+    };
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, file_path.display().to_string());
 
     writer
         .write_frame(&disconnect_frame(None))
@@ -4100,8 +4109,9 @@ fn extension_apply_patch_reports_context_mismatch_without_writing() {
     writer.flush().expect("flush");
 }
 
-/// Ensures apply_patch escapes control characters in model-visible path fields
-/// so malicious filenames cannot inject fake summary or error lines.
+/// Ensures apply_patch semantically escapes paths in model-visible summaries
+/// and UI-only diffs so malicious filenames cannot inject fake records or
+/// headers.
 #[test]
 fn extension_apply_patch_escapes_control_characters_in_paths() {
     let tempdir = TempDir::new().expect("tempdir");
@@ -4141,6 +4151,13 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
         !output.contains("line\tbreak.txt"),
         "path tab should be escaped in output: {output}"
     );
+    let display = result.display.expect("apply_patch display");
+    let Some(ToolUsePayload::Diffs { files }) = display.payload else {
+        panic!("apply_patch display must preserve escaped path metadata");
+    };
+    assert_eq!(files.len(), 1);
+    assert!(files[0].path.contains("line\\tbreak.txt"));
+    assert!(!files[0].path.contains("line\tbreak.txt"));
 
     let created_path = tempdir.path().join("created\tfile.txt");
     let missing_path = tempdir.path().join("missing\tfile.txt");
@@ -4169,6 +4186,13 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
         "escaped error path missing: {}",
         error.message
     );
+    let display = error.display.expect("partial apply_patch display");
+    let Some(ToolUsePayload::Diffs { files }) = display.payload else {
+        panic!("partial apply_patch display must preserve the changed file path");
+    };
+    assert_eq!(files.len(), 1);
+    assert!(files[0].path.contains("created\\tfile.txt"));
+    assert!(!files[0].path.contains("created\tfile.txt"));
     let details = error.details.expect("partial changes details");
     let CborValue::Map(entries) = details else {
         panic!("expected structured partial change details");
@@ -4257,6 +4281,8 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
     writer.flush().expect("flush");
 }
 
+/// Ensures a successful move labels its destination in UI-only diff metadata,
+/// so the terminal describes the file that now owns the changed contents.
 #[test]
 fn extension_apply_patch_move_renames_file() {
     let tempdir = TempDir::new().expect("tempdir");
@@ -4284,7 +4310,15 @@ fn extension_apply_patch_move_renames_file() {
     writer.flush().expect("flush");
 
     let result = reader.read_event().expect("read").expect("result");
-    assert!(matches!(result, Event::ToolResult(_)));
+    let Event::ToolResult(result) = result else {
+        panic!("expected tool result");
+    };
+    let display = result.display.expect("apply_patch display");
+    let Some(ToolUsePayload::Diffs { files }) = display.payload else {
+        panic!("moved apply_patch file must retain its destination path");
+    };
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, dst.display().to_string());
     assert!(!src.exists(), "source path should be removed after move");
     assert_eq!(fs::read_to_string(&dst).expect("read back"), "after\n");
 
@@ -4462,6 +4496,8 @@ fn extension_apply_patch_applies_multiple_chunks() {
     writer.flush().expect("flush");
 }
 
+/// Ensures a later patch failure retains an already-added file as a one-entry,
+/// path-labelled `Diffs` payload while reporting the later failed operation.
 #[test]
 fn extension_apply_patch_failure_after_partial_success_leaves_changes() {
     let tempdir = TempDir::new().expect("tempdir");
@@ -4520,9 +4556,12 @@ fn extension_apply_patch_failure_after_partial_success_leaves_changes() {
             if key == "path" && value == &created_path.display().to_string()
     )));
     let display = error.display.expect("error display");
-    let Some(ToolUsePayload::Diff(diff)) = display.payload else {
+    let Some(ToolUsePayload::Diffs { files }) = display.payload else {
         panic!("expected structured diff payload for partial apply_patch failure");
     };
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, created_path.display().to_string());
+    let diff = &files[0].diff;
     assert_eq!(diff.added, 1);
     assert_eq!(diff.removed, 0);
     assert!(
