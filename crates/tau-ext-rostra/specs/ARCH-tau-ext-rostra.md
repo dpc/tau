@@ -2,7 +2,7 @@
 
 `tau-ext-rostra` is the disabled-by-default built-in `std-rostra` tool
 extension. One instance owns one Rostra identity. It uses the exact
-`rostra-client = 0.1.0` full client with relay-only Iroh peer transport and
+`rostra-client = 0.1.1` full client with relay-only Iroh peer transport and
 Pkarr HTTPS/DNS discovery; it never enables direct peer-IP transport.
 
 The operator configures a declared Tau secret and a strict reference to it:
@@ -77,11 +77,11 @@ local view; empty and `not_found_local` results never claim global absence.
 Pages default to 20 and never exceed 50 records. List excerpts stop near 240
 Unicode scalar values, and detailed Djot stops at 64 KiB. Versioned bounded
 cursors bind continuation to its timeline and author filter. Tau pins
-`rostra-client`, `rostra-client-db`, and `rostra-core` to upstream Rostra revision
-`045345bd5001776eb338ea2c1f55dd60637db4cd`, whose materialization feed API and
-upstream database migration are separately approved external prerequisites. Tau
-adds no Rostra table, schema, or migration; all client construction, networking,
-and storage access still go through `rostra-client`.
+`rostra-client`, `rostra-client-db`, and `rostra-core` to the synchronized
+crates.io Rostra 0.1.1 release, whose materialization feed API and upstream
+database migration are separately approved external prerequisites. Tau adds no
+Rostra table, schema, or migration; all client construction, networking, and
+storage access still go through `rostra-client`.
 
 The protocol reader only validates and schedules work. Reads run independently
 under an eight-query admission cap. Writes take one mutex across activation and

@@ -4557,8 +4557,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-client"
-version = "0.1.0"
-source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8e36583ecad787bfb9a444ba63466c00f42d3c19dcc72851ad74d83fd549b6d"
 dependencies = [
  "anyhow",
  "backon",
@@ -4596,8 +4597,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-client-db"
-version = "0.1.0"
-source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96427be745e841fde708fbec1edcdee4bdeca58ae0f41e7ed48627a3846b30a3"
 dependencies = [
  "anyhow",
  "backon",
@@ -4632,8 +4634,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-core"
-version = "0.1.0"
-source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73912ec9a7cea8679e0d204c44b65ef40e4f9ed7a61193f8c0ced48c84ab953c"
 dependencies = [
  "bech32",
  "bincode",
@@ -4658,8 +4661,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-djot"
-version = "0.1.0"
-source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ff8819a7c230a19c646fe374c1caf06b81fa53a2d90dca15d08ac36a32ab77"
 dependencies = [
  "async-trait",
  "jotup",
@@ -4668,8 +4672,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-p2p"
-version = "0.1.0"
-source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07752d675e3a2eef19034fd7ac3b8b52494878e413a7e3140efd94d3e53f7202"
 dependencies = [
  "anyhow",
  "bao-tree",
@@ -4690,8 +4695,9 @@ dependencies = [
 
 [[package]]
 name = "rostra-p2p-api"
-version = "0.1.0"
-source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2589f2604e05f0156480c5083cccb43a9082239917ca16e17a5c43336cb529b4"
 dependencies = [
  "anyhow",
  "futures",
@@ -4704,16 +4710,18 @@ dependencies = [
 
 [[package]]
 name = "rostra-util"
-version = "0.1.0"
-source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dde0ca9617c0c1ba95babc7f4355e982fa347c12390748a927d1191d5524ac6e"
 dependencies = [
  "snafu",
 ]
 
 [[package]]
 name = "rostra-util-dedup-chan"
-version = "0.1.0"
-source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fae0ad28dc312328f952fea52a96db920e1873a4e8ff942ab7a11dc36cea5e13"
 dependencies = [
  "snafu",
  "tokio",
@@ -4721,16 +4729,18 @@ dependencies = [
 
 [[package]]
 name = "rostra-util-error"
-version = "0.1.0"
-source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "364fc0db1d891030d947860a1d0f7651d5808dee3babd49938e9ab48de09dafd"
 dependencies = [
  "snafu",
 ]
 
 [[package]]
 name = "rostra-util-fmt"
-version = "0.1.0"
-source = "git+https://radicle.dpc.pw/zzK566qFsZnXomX2juRjxj9K1LuF.git?rev=045345bd5001776eb338ea2c1f55dd60637db4cd#045345bd5001776eb338ea2c1f55dd60637db4cd"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f56bbae9e3126fbb0a01638f82f96c466fdb8a1d4a5a1f7ec5a1673d10552c99"
 
 [[package]]
 name = "rrule"
