@@ -772,6 +772,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge-cli-ui",
             "tau-self-knowledge-email",
             "tau-self-knowledge-ext-pim",
+            "tau-self-knowledge-ext-rostra",
             "tau-self-knowledge-ext-provider-builtin",
             "tau-self-knowledge-ext-rhai",
             "tau-self-knowledge-ext-shell",
@@ -811,6 +812,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     assert!(skill.content.contains("tau-self-knowledge-cli-ui"));
     assert!(skill.content.contains("tau-self-knowledge-email"));
     assert!(skill.content.contains("tau-self-knowledge-ext-pim"));
+    assert!(skill.content.contains("tau-self-knowledge-ext-rostra"));
     assert!(
         skill
             .content
@@ -905,6 +907,45 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     assert!(!pim.add_to_prompt);
     assert!(pim.content.contains("{pim_config}"));
     assert!(pim.content.contains("Google Calendar authorization"));
+
+    let rostra = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-ext-rostra")
+        .expect("built-in Rostra extension skill");
+    assert!(!rostra.add_to_prompt);
+    assert!(rostra.content.contains("std-rostra"));
+    for tool in [
+        "rostra_status",
+        "rostra_list_posts",
+        "rostra_read_post",
+        "rostra_get_profile",
+        "rostra_post",
+        "rostra_react",
+        "rostra_follow",
+        "rostra_unfollow",
+        "rostra_update_profile",
+        "rostra_vote",
+        "rostra_notifications",
+    ] {
+        assert!(
+            rostra.content.contains(tool),
+            "missing {tool} documentation"
+        );
+    }
+    for behavior in [
+        "post_rate_limit",
+        "relay-only Iroh",
+        "locally durable signed transaction",
+        "publication is asynchronous best effort",
+        "unknown\noutcome",
+        "`message.delivered` echo",
+        "retry_after_seconds",
+    ] {
+        assert!(
+            rostra.content.contains(behavior),
+            "missing {behavior} documentation"
+        );
+    }
 
     let provider_builtin = skills
         .iter()

@@ -179,6 +179,10 @@ const BUILT_IN_SKILL_SOURCES: &[BuiltInSkillSource] = &[
         content: include_str!("../self-knowledge/tau-self-knowledge-ext-pim.md"),
     },
     BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-ext-rostra.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-ext-rostra.md"),
+    },
+    BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-ext-provider-builtin.md",
         content: include_str!("../self-knowledge/tau-self-knowledge-ext-provider-builtin.md"),
     },
