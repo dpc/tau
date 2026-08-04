@@ -39,7 +39,7 @@ use chat_completions::{
     PromptAttemptOutcome as ChatCompletionsAttemptOutcome, fetch_openrouter_models,
     models_for_provider as chat_models_for_provider, run_prompt_attempt,
 };
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Confirm, Input, Password, Select};
 use oauth_refresh_rejection::{OAuthRefreshRejectionCache, RefreshCredentialsError};
 use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
 #[cfg(feature = "quota-test-support")]
@@ -56,12 +56,16 @@ use tau_client::{
     ExtensionDataClient, ManualExtensionRuntime, ManualRuntimePoll, ManualRuntimeWaker,
     RawEventContext, TauExtension, TauExtensionRunner,
 };
+use tau_config::provider_settings::{
+    ProviderCredentialReference, ProviderCredentialSlot, parse_provider_credential_reference,
+};
+use tau_config::settings::BuiltinComponentIdentity;
 use tau_proto::{
     ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessInputReader, ModelId,
     ModelName, PeerOutputWriter, ProviderBackend, ProviderBackendKind, ProviderBackendTransport,
     ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderModelsDeclared, ProviderName,
     ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseStats,
-    ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason,
+    ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason, SecretValue,
 };
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider_codex::{
@@ -137,6 +141,9 @@ impl ChatGptProfile {
 pub struct BuiltinProviderProfiles {
     providers: BTreeMap<ProviderName, BuiltinProviderProfile>,
     credential_paths: BTreeMap<ProviderName, tau_proto::ExtensionDataPath>,
+    /// API-key profiles whose empty record means an unavailable named source,
+    /// rather than an intentionally keyless direct-entry profile.
+    named_api_key_profiles: HashSet<ProviderName>,
 }
 
 impl BuiltinProviderProfiles {
@@ -784,47 +791,102 @@ fn provider_cli_entry_is_builtin(name: &str, entry: &tau_config::settings::Exten
     if entry.enable == Some(false) || entry.role.as_deref().is_some_and(|role| role != "provider") {
         return false;
     }
-    if name == "provider-builtin" {
-        return entry.command.is_none() && entry.suffix.as_deref().is_none_or(is_builtin_suffix)
-            || entry.suffix.as_deref().is_some_and(is_builtin_suffix);
+    let component = entry
+        .command
+        .is_none()
+        .then(|| {
+            entry
+                .suffix
+                .as_deref()
+                .and_then(BuiltinComponentIdentity::from_tau_owned_suffix)
+        })
+        .flatten();
+    if name == "provider-builtin" && entry.suffix.is_none() {
+        return entry.command.is_none();
     }
-    entry.role.as_deref() == Some("provider")
-        && entry.suffix.as_deref().is_some_and(is_builtin_suffix)
-}
-
-fn is_builtin_suffix(suffix: &[String]) -> bool {
-    suffix == ["component", "ext-provider-builtin"]
+    component == Some(BuiltinComponentIdentity::Provider)
+        && (name == "provider-builtin" || entry.role.as_deref() == Some("provider"))
 }
 
 const PROVIDER_CLI_HELP: &str = "\
 Usage: tau provider [--extension INSTANCE] <subcommand>
 
 Subcommands:
-  add                            Add or replace a provider profile interactively
+  add [KIND]                     Add or replace a provider profile
   remove <name>                  Remove a provider profile
-  list                           List provider profiles";
+  list                           List provider profiles
+
+Provider kinds:
+  chatgpt           ChatGPT / Codex
+  chat-completions  OpenAI-compatible Chat Completions
+  responses         OpenAI Responses API
+  openrouter        OpenRouter";
+
+/// One canonical provider-kind choice accepted by the setup command.
+///
+/// The token is the only non-interactive spelling.  The label is deliberately
+/// human-oriented because the same table drives the interactive picker.
+struct ProviderKindDescriptor {
+    /// Canonical machine token accepted after `tau provider add`.
+    token: &'static str,
+    /// Human-readable picker label.
+    label: &'static str,
+}
+
+/// The complete, canonical provider-kind catalog.
+const PROVIDER_KINDS: [ProviderKindDescriptor; 4] = [
+    ProviderKindDescriptor {
+        token: "chatgpt",
+        label: "ChatGPT / Codex",
+    },
+    ProviderKindDescriptor {
+        token: "chat-completions",
+        label: "OpenAI-compatible Chat Completions",
+    },
+    ProviderKindDescriptor {
+        token: "responses",
+        label: "OpenAI Responses API",
+    },
+    ProviderKindDescriptor {
+        token: "openrouter",
+        label: "OpenRouter",
+    },
+];
 
 fn cmd_add(
     args: &[String],
     network: &tau_provider::OutboundNetworkPolicy,
     extension_instance: &tau_proto::ExtensionName,
 ) -> Result<(), Box<dyn Error>> {
-    if !args.is_empty() {
-        return Err(
-            "tau provider add does not accept arguments; it prompts for all provider details"
-                .into(),
-        );
-    }
-    let kind: String = Input::new()
-        .with_prompt("Provider kind (chatgpt, completions API, responses API, or openrouter)")
-        .default("chatgpt".to_owned())
-        .interact_text()?;
-    match kind.trim() {
+    let kind = match args {
+        [] => {
+            let labels = PROVIDER_KINDS
+                .iter()
+                .map(|kind| kind.label)
+                .collect::<Vec<_>>();
+            PROVIDER_KINDS[Select::new()
+                .with_prompt("Provider kind")
+                .items(&labels)
+                .interact()?]
+            .token
+        }
+        [kind] if PROVIDER_KINDS.iter().any(|known| known.token == kind) => kind,
+        [kind] => {
+            let valid = PROVIDER_KINDS
+                .iter()
+                .map(|known| known.token)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!("unknown provider kind '{kind}'; valid kinds: {valid}").into());
+        }
+        _ => return Err("tau provider add accepts at most one KIND".into()),
+    };
+    match kind {
         "chatgpt" => cmd_add_chatgpt(network, extension_instance)?,
-        "completions API" | "chat-completions" => cmd_add_chat_completions(extension_instance)?,
-        "responses API" | "responses" => cmd_add_responses(extension_instance)?,
+        "chat-completions" => cmd_add_chat_completions(extension_instance)?,
+        "responses" => cmd_add_responses(extension_instance)?,
         "openrouter" => cmd_add_openrouter(network, extension_instance)?,
-        other => return Err(format!("unknown provider kind: {other}").into()),
+        _ => unreachable!("provider kind came from the closed descriptor table"),
     }
     Ok(())
 }
@@ -835,10 +897,8 @@ fn cmd_add_responses(extension_instance: &tau_proto::ExtensionName) -> Result<()
         .with_prompt("Base URL")
         .default("https://api.openai.com/v1".to_owned())
         .interact_text()?;
-    let api_key: String = Input::new()
-        .with_prompt("API key (empty for keyless/local providers)")
-        .allow_empty(true)
-        .interact_text()?;
+    let api_key_source = prompt_api_key(extension_instance, true)?;
+    let api_key = api_key_source.value();
     let models_input: String = Input::new()
         .with_prompt("Models (comma-separated)")
         .interact_text()?;
@@ -867,6 +927,7 @@ fn cmd_add_responses(extension_instance: &tau_proto::ExtensionName) -> Result<()
             max_output_tokens: 8192,
             transport,
         }),
+        api_key_source,
     )?;
     Ok(())
 }
@@ -896,6 +957,7 @@ fn cmd_add_chatgpt(
             auth,
             responses_lite_compatibility,
         }),
+        ApiKeySource::Keyless,
     )?;
     Ok(())
 }
@@ -908,10 +970,8 @@ fn cmd_add_chat_completions(
         .with_prompt("Base URL")
         .default("https://api.openai.com/v1".to_owned())
         .interact_text()?;
-    let api_key: String = Input::new()
-        .with_prompt("API key (empty for keyless/local providers)")
-        .allow_empty(true)
-        .interact_text()?;
+    let api_key_source = prompt_api_key(extension_instance, true)?;
+    let api_key = api_key_source.value();
     let models_input: String = Input::new()
         .with_prompt("Models (comma-separated)")
         .default("gpt-4o,gpt-4o-mini".to_owned())
@@ -930,6 +990,7 @@ fn cmd_add_chat_completions(
         extension_instance,
         &name,
         &BuiltinProviderProfile::ChatCompletions(profile),
+        api_key_source,
     )?;
     Ok(())
 }
@@ -946,10 +1007,8 @@ fn cmd_add_openrouter(
     extension_instance: &tau_proto::ExtensionName,
 ) -> Result<(), Box<dyn Error>> {
     let name = prompt_provider_name("openrouter")?;
-    let api_key: String = Input::new()
-        .with_prompt("API key")
-        .allow_empty(true)
-        .interact_text()?;
+    let api_key_source = prompt_api_key(extension_instance, false)?;
+    let api_key = api_key_source.value();
     let models_input: String = Input::new()
         .with_prompt("Models (comma-separated, or press enter to fetch from OpenRouter)")
         .allow_empty(true)
@@ -965,6 +1024,7 @@ fn cmd_add_openrouter(
         extension_instance,
         &name,
         &BuiltinProviderProfile::OpenRouter(profile),
+        api_key_source,
     )?;
     Ok(())
 }
@@ -988,7 +1048,11 @@ fn cmd_remove(
 
 fn cmd_list(extension_instance: &tau_proto::ExtensionName) -> Result<(), Box<dyn Error>> {
     let store = setup_store::SetupStore::open_default()?;
-    let profiles = load_settings_profiles(store.settings_files(extension_instance)?);
+    let setup_store::SetupSnapshot {
+        settings,
+        credentials,
+    } = store.snapshot(extension_instance)?;
+    let profiles = load_settings_profiles(settings);
     if profiles.providers.is_empty() {
         println!("No provider profiles configured.");
         return Ok(());
@@ -996,15 +1060,10 @@ fn cmd_list(extension_instance: &tau_proto::ExtensionName) -> Result<(), Box<dyn
     for (name, profile) in profiles.providers {
         match profile {
             BuiltinProviderProfile::Chatgpt(profile) => {
-                let status = match store
-                    .credential(
-                        extension_instance,
-                        &name,
-                        setup_store::CredentialSlot::OAuth,
-                    )
-                    .ok()
+                let status = match credentials
+                    .get(&(name.clone(), ProviderCredentialSlot::OAuth))
                     .and_then(|bytes| {
-                        serde_json::from_slice::<credential_record::ChatGptOAuthCredential>(&bytes)
+                        serde_json::from_slice::<credential_record::ChatGptOAuthCredential>(bytes)
                             .ok()
                     }) {
                     Some(record) if record.is_unexpired(now_ms()) => "logged-in",
@@ -1019,7 +1078,7 @@ fn cmd_list(extension_instance: &tau_proto::ExtensionName) -> Result<(), Box<dyn
                 println!("{name}\tchatgpt\t{status}\t{mode}");
             }
             BuiltinProviderProfile::ChatCompletions(provider) => {
-                let auth_status = setup_api_key_status(&store, extension_instance, &name);
+                let auth_status = setup_api_key_status(&credentials, &name);
                 let models = provider
                     .models
                     .iter()
@@ -1032,7 +1091,7 @@ fn cmd_list(extension_instance: &tau_proto::ExtensionName) -> Result<(), Box<dyn
                 );
             }
             BuiltinProviderProfile::OpenRouter(profile) => {
-                let auth_status = setup_api_key_status(&store, extension_instance, &name);
+                let auth_status = setup_api_key_status(&credentials, &name);
                 let models = profile
                     .models
                     .iter()
@@ -1044,7 +1103,7 @@ fn cmd_list(extension_instance: &tau_proto::ExtensionName) -> Result<(), Box<dyn
                 );
             }
             BuiltinProviderProfile::Responses(provider) => {
-                let auth_status = setup_api_key_status(&store, extension_instance, &name);
+                let auth_status = setup_api_key_status(&credentials, &name);
                 let models = provider
                     .models
                     .iter()
@@ -1062,20 +1121,13 @@ fn cmd_list(extension_instance: &tau_proto::ExtensionName) -> Result<(), Box<dyn
 }
 
 fn setup_api_key_status(
-    store: &setup_store::SetupStore,
-    extension_instance: &tau_proto::ExtensionName,
+    credentials: &std::collections::BTreeMap<(ProviderName, ProviderCredentialSlot), Vec<u8>>,
     provider: &ProviderName,
 ) -> &'static str {
-    match store
-        .credential(
-            extension_instance,
-            provider,
-            setup_store::CredentialSlot::ApiKey,
-        )
-        .ok()
-        .and_then(|bytes| {
-            serde_json::from_slice::<credential_record::ApiKeyCredential>(&bytes).ok()
-        }) {
+    match credentials
+        .get(&(provider.clone(), ProviderCredentialSlot::ApiKey))
+        .and_then(|bytes| serde_json::from_slice::<credential_record::ApiKeyCredential>(bytes).ok())
+    {
         Some(record) if record.has_value() => "api-key",
         _ => "no-api-key",
     }
@@ -1142,16 +1194,102 @@ fn parse_responses_model_list(input: &str) -> Result<Vec<ResponsesModel>, Box<dy
     Ok(models)
 }
 
+/// Identifies whether an API-key record is direct user input, an intentionally
+/// empty keyless profile, or a restart-refreshable configured named secret.
+enum ApiKeySource {
+    /// A masked terminal prompt supplied the value.
+    Direct(SecretValue),
+    /// The profile is genuinely keyless.
+    Keyless,
+    /// Trusted setup materialized this configured secret name.
+    Named {
+        /// Exact configured source name serialized into provider settings.
+        name: String,
+        /// Declaration captured from the targeted extension configuration.
+        declaration: tau_config::settings::ExtensionSecretEntry,
+    },
+}
+
+impl ApiKeySource {
+    /// Return the setup-time value or the empty materialization placeholder.
+    fn value(&self) -> String {
+        match self {
+            Self::Direct(value) => value.expose_secret().to_owned(),
+            Self::Keyless | Self::Named { .. } => String::new(),
+        }
+    }
+}
+
+/// Prompt for an API-key authority without ever echoing a secret value.
+fn prompt_api_key(
+    extension_instance: &tau_proto::ExtensionName,
+    allow_keyless: bool,
+) -> Result<ApiKeySource, Box<dyn Error>> {
+    let named_secrets = configured_secrets(extension_instance)?;
+    let mut choices = vec!["Enter API key now"];
+    if !named_secrets.is_empty() {
+        choices.push("Use configured named secret");
+    }
+    if allow_keyless {
+        choices.push("No API key");
+    }
+    let selected = choices[Select::new()
+        .with_prompt("API key source")
+        .items(&choices)
+        .interact()?];
+    match selected {
+        "Enter API key now" => Ok(ApiKeySource::Direct(SecretValue::new(
+            Password::new().with_prompt("API key").interact()?,
+        ))),
+        "Use configured named secret" => {
+            let names = named_secrets
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>();
+            let index = Select::new()
+                .with_prompt("Configured named secret")
+                .items(&names)
+                .interact()?;
+            let (name, declaration) = named_secrets[index].clone();
+            Ok(ApiKeySource::Named { name, declaration })
+        }
+        "No API key" => Ok(ApiKeySource::Keyless),
+        _ => unreachable!("API-key source came from the offered picker choices"),
+    }
+}
+
+/// Return secret declarations for the exact targeted provider instance.
+fn configured_secrets(
+    extension_instance: &tau_proto::ExtensionName,
+) -> Result<Vec<(String, tau_config::settings::ExtensionSecretEntry)>, Box<dyn Error>> {
+    let settings = tau_config::settings::load_harness_settings()?;
+    let mut declarations = settings
+        .extensions
+        .get(extension_instance.as_str())
+        .and_then(|entry| entry.secrets.as_ref())
+        .map(|secrets| {
+            secrets
+                .iter()
+                .map(|(name, declaration)| (name.clone(), declaration.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    declarations.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(declarations)
+}
+
 fn save_profile(
     extension_instance: &tau_proto::ExtensionName,
     name: &ProviderName,
     profile: &BuiltinProviderProfile,
+    api_key_source: ApiKeySource,
 ) -> Result<(), Box<dyn Error>> {
     let ProviderSetupPayload {
         settings,
         slot,
         secret,
-    } = provider_setup_payload(name, profile)?;
+        named_source,
+    } = provider_setup_payload(name, profile, api_key_source)?;
     let settings_path =
         setup_store::SetupStore::open_default()?.apply(&setup_store::ProviderSetupPlan {
             extension_instance: extension_instance.clone(),
@@ -1161,6 +1299,7 @@ fn save_profile(
                 path: slot.path(name),
                 contents: setup_store::SecretBytes::new(secret),
             },
+            named_source,
         })?;
     eprintln!(
         "Provider '{name}' registered for extension '{extension_instance}'. Settings: {}",
@@ -1175,14 +1314,17 @@ struct ProviderSetupPayload {
     /// Credential-free provider settings.
     settings: Vec<u8>,
     /// Closed credential family and exact path authority.
-    slot: setup_store::CredentialSlot,
+    slot: ProviderCredentialSlot,
     /// Complete serialized typed credential record.
     secret: Vec<u8>,
+    /// Named source resolved only after the instance lifecycle lock is held.
+    named_source: Option<setup_store::NamedSecretSource>,
 }
 
 fn provider_setup_payload(
     name: &ProviderName,
     profile: &BuiltinProviderProfile,
+    api_key_source: ApiKeySource,
 ) -> Result<ProviderSetupPayload, Box<dyn Error>> {
     use credential_record::{ApiKeyCredential, ChatGptOAuthCredential};
 
@@ -1194,7 +1336,7 @@ fn provider_setup_payload(
         BuiltinProviderProfile::Chatgpt(profile) => {
             object.remove("auth");
             (
-                setup_store::CredentialSlot::OAuth,
+                ProviderCredentialSlot::OAuth,
                 serde_json::to_vec(&ChatGptOAuthCredential::from(profile.auth.clone()))?,
             )
         }
@@ -1202,7 +1344,7 @@ fn provider_setup_payload(
             object.remove("api_key");
             object.remove("api_key_secret");
             (
-                setup_store::CredentialSlot::ApiKey,
+                ProviderCredentialSlot::ApiKey,
                 serde_json::to_vec(&ApiKeyCredential::new(profile.api_key.clone()))?,
             )
         }
@@ -1210,7 +1352,7 @@ fn provider_setup_payload(
             object.remove("api_key");
             object.remove("api_key_secret");
             (
-                setup_store::CredentialSlot::ApiKey,
+                ProviderCredentialSlot::ApiKey,
                 serde_json::to_vec(&ApiKeyCredential::new(profile.api_key.clone()))?,
             )
         }
@@ -1218,23 +1360,30 @@ fn provider_setup_payload(
             object.remove("api_key");
             object.remove("api_key_secret");
             (
-                setup_store::CredentialSlot::ApiKey,
+                ProviderCredentialSlot::ApiKey,
                 serde_json::to_vec(&ApiKeyCredential::new(profile.api_key.clone()))?,
             )
         }
     };
-    let secret_path = slot.path(name);
-    object.insert(
-        "credential".to_owned(),
-        serde_json::json!({
-            "kind": slot.reference_kind(),
-            "secret_path": secret_path.as_str(),
-        }),
-    );
+    let reference = ProviderCredentialReference::new(
+        name,
+        slot,
+        match &api_key_source {
+            ApiKeySource::Named { name, .. } => Some(name.as_str()),
+            ApiKeySource::Direct(_) | ApiKeySource::Keyless => None,
+        },
+    )?;
+    object.insert("credential".to_owned(), reference.to_value());
     Ok(ProviderSetupPayload {
         settings: serde_json::to_vec_pretty(&settings)?,
         slot,
         secret,
+        named_source: match api_key_source {
+            ApiKeySource::Named { name, declaration } => {
+                Some(setup_store::NamedSecretSource { name, declaration })
+            }
+            ApiKeySource::Direct(_) | ApiKeySource::Keyless => None,
+        },
     })
 }
 
@@ -1242,10 +1391,13 @@ fn load_settings_profiles(files: Vec<(ProviderName, Vec<u8>)>) -> BuiltinProvide
     let mut profiles = BuiltinProviderProfiles::default();
     for (name, contents) in files {
         match parse_settings_profile(&name, &contents) {
-            Ok((profile, credential_path)) => {
+            Ok((profile, credential_path, named_api_key)) => {
                 profiles
                     .credential_paths
                     .insert(name.clone(), credential_path);
+                if named_api_key {
+                    profiles.named_api_key_profiles.insert(name.clone());
+                }
                 profiles.providers.insert(name, profile);
             }
             Err(error) => {
@@ -1264,65 +1416,44 @@ fn load_settings_profiles(files: Vec<(ProviderName, Vec<u8>)>) -> BuiltinProvide
 fn parse_settings_profile(
     name: &ProviderName,
     contents: &[u8],
-) -> Result<(BuiltinProviderProfile, tau_proto::ExtensionDataPath), Box<dyn Error>> {
+) -> Result<(BuiltinProviderProfile, tau_proto::ExtensionDataPath, bool), Box<dyn Error>> {
     let mut value: serde_json::Value = serde_json::from_slice(contents)?;
     let object = value
         .as_object_mut()
         .ok_or("provider settings must be an object")?;
-    if object.contains_key("auth")
-        || object.contains_key("api_key")
-        || object.contains_key("api_key_secret")
-    {
-        return Err("provider settings must not contain credential fields".into());
-    }
-    let credential = object
+    let reference = parse_provider_credential_reference(name, object)?;
+    object
         .remove("credential")
-        .ok_or("provider settings are missing a credential reference")?;
-    let credential = credential
-        .as_object()
-        .ok_or("provider credential reference must be an object")?;
-    if credential.len() != 2 {
-        return Err("provider credential reference has unknown fields".into());
-    }
-    let kind = credential
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("provider credential reference is missing kind")?;
-    let secret_path = credential
-        .get("secret_path")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("provider credential reference is missing secret_path")?;
-    let expected_slot;
-    match kind {
-        "oauth" => {
-            expected_slot = "oauth.json";
+        .expect("validated reference must be present");
+    match reference.slot() {
+        ProviderCredentialSlot::OAuth => {
             object.insert("auth".to_owned(), serde_json::json!({}));
         }
-        "api_key" => {
-            expected_slot = "api-key.json";
+        ProviderCredentialSlot::ApiKey => {
             object.insert("api_key".to_owned(), serde_json::json!(""));
         }
-        _ => return Err("unknown provider credential reference kind".into()),
     }
     let profile: BuiltinProviderProfile = serde_json::from_value(value)?;
     let profile_matches_kind = matches!(
-        (&profile, kind),
-        (BuiltinProviderProfile::Chatgpt(_), "oauth")
-            | (
-                BuiltinProviderProfile::ChatCompletions(_)
-                    | BuiltinProviderProfile::OpenRouter(_)
-                    | BuiltinProviderProfile::Responses(_),
-                "api_key"
-            )
+        (&profile, reference.slot()),
+        (
+            BuiltinProviderProfile::Chatgpt(_),
+            ProviderCredentialSlot::OAuth
+        ) | (
+            BuiltinProviderProfile::ChatCompletions(_)
+                | BuiltinProviderProfile::OpenRouter(_)
+                | BuiltinProviderProfile::Responses(_),
+            ProviderCredentialSlot::ApiKey
+        )
     );
     if !profile_matches_kind {
         return Err("provider credential kind does not match provider settings kind".into());
     }
-    let expected_path = format!("providers/{name}/{expected_slot}");
-    if secret_path != expected_path {
-        return Err("provider credential reference does not match its provider and kind".into());
-    }
-    Ok((profile, tau_proto::ExtensionDataPath::new(expected_path)))
+    Ok((
+        profile,
+        reference.path().clone(),
+        reference.named_source().is_some(),
+    ))
 }
 
 fn hydrate_profile_credentials(
@@ -1367,24 +1498,39 @@ fn hydrate_profile_credentials(
                     .map(credential_record::ChatGptOAuthCredential::into_auth)
                     .map(|auth| profile.auth = auth)
             }
-            Some(BuiltinProviderProfile::ChatCompletions(profile)) => {
-                serde_json::from_slice::<credential_record::ApiKeyCredential>(&contents)
-                    .map_err(|_| ())
-                    .map(credential_record::ApiKeyCredential::into_value)
-                    .map(|value| profile.api_key = value)
-            }
-            Some(BuiltinProviderProfile::OpenRouter(profile)) => {
-                serde_json::from_slice::<credential_record::ApiKeyCredential>(&contents)
-                    .map_err(|_| ())
-                    .map(credential_record::ApiKeyCredential::into_value)
-                    .map(|value| profile.api_key = value)
-            }
-            Some(BuiltinProviderProfile::Responses(profile)) => {
-                serde_json::from_slice::<credential_record::ApiKeyCredential>(&contents)
-                    .map_err(|_| ())
-                    .map(credential_record::ApiKeyCredential::into_value)
-                    .map(|value| profile.api_key = value)
-            }
+            Some(BuiltinProviderProfile::ChatCompletions(profile)) => serde_json::from_slice::<
+                credential_record::ApiKeyCredential,
+            >(&contents)
+            .map_err(|_| ())
+            .map(credential_record::ApiKeyCredential::into_value)
+            .and_then(|value| {
+                (!profiles.named_api_key_profiles.contains(&name) || !value.trim().is_empty())
+                    .then_some(value)
+                    .ok_or(())
+            })
+            .map(|value| profile.api_key = value),
+            Some(BuiltinProviderProfile::OpenRouter(profile)) => serde_json::from_slice::<
+                credential_record::ApiKeyCredential,
+            >(&contents)
+            .map_err(|_| ())
+            .map(credential_record::ApiKeyCredential::into_value)
+            .and_then(|value| {
+                (!profiles.named_api_key_profiles.contains(&name) || !value.trim().is_empty())
+                    .then_some(value)
+                    .ok_or(())
+            })
+            .map(|value| profile.api_key = value),
+            Some(BuiltinProviderProfile::Responses(profile)) => serde_json::from_slice::<
+                credential_record::ApiKeyCredential,
+            >(&contents)
+            .map_err(|_| ())
+            .map(credential_record::ApiKeyCredential::into_value)
+            .and_then(|value| {
+                (!profiles.named_api_key_profiles.contains(&name) || !value.trim().is_empty())
+                    .then_some(value)
+                    .ok_or(())
+            })
+            .map(|value| profile.api_key = value),
             None => continue,
         };
         if valid.is_err() {

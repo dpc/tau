@@ -17,7 +17,9 @@ workspace = true
 [dependencies]
 config.workspace = true
 dirs.workspace = true
+fs2.workspace = true
 indexmap.workspace = true
+libc.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true

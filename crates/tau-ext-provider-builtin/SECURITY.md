@@ -59,6 +59,16 @@ Unavailable, malformed, wrong-kind, or wrong-version records exclude the
 provider. Diagnostics may identify provider names and safe error categories but
 never secret paths, values, or host filesystem paths.
 
+Named API-key sources are setup/startup authorities, not runtime credential
+inputs. Setup resolves the exact configured declaration only while holding the
+provider-settings instance lock, then takes the Secret lock, publishes the typed
+record, and activates settings last. Harness startup uses the same lock order
+and one shared closed reference parser, publishes empty typed records for
+unavailable bindings, and retains that locked settings generation for
+Configure. Bound declaration values never enter Configure, logs, notices, or
+provider settings; warnings expose only configured instance, provider, and
+source names.
+
 ## Provider cancellation boundary
 
 Broadcast cancellation uses two synchronized generations. The provider runtime

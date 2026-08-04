@@ -1,5 +1,6 @@
 use std::sync::Mutex;
 
+use tau_config::settings::ExtensionSecretEntry;
 use tempfile::TempDir;
 
 use super::*;
@@ -25,6 +26,7 @@ fn config_with_secret(optional: bool) -> Config {
                 command: "tau".to_owned(),
                 args: Vec::new(),
                 role: None,
+                component: None,
                 require: true,
                 cwd: None,
                 config: serde_json::json!({}),
@@ -174,6 +176,28 @@ fn missing_optional_secret_is_omitted() {
 }
 
 #[test]
+fn provider_bound_secret_is_excluded_from_configure() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path().join("secrets");
+    std::fs::create_dir_all(&dir).expect("mkdir secrets");
+    std::fs::write(dir.join("mail_password.yaml"), "provider-only").expect("write");
+    let bound = BTreeMap::from([(
+        "std-email".to_owned(),
+        BTreeSet::from(["mail_password".to_owned()]),
+    )]);
+
+    let resolved = resolve_extension_secrets_excluding(
+        &config_with_secret(false),
+        td.path(),
+        &SecretSources::default(),
+        &bound,
+    )
+    .expect("resolve secrets");
+
+    assert!(resolved.secrets["std-email"].is_empty());
+}
+
+#[test]
 fn invalid_secret_names_are_rejected_before_path_join() {
     let mut config = config_with_secret(false);
     let mut secrets = BTreeMap::new();
@@ -190,34 +214,21 @@ fn invalid_secret_names_are_rejected_before_path_join() {
     assert!(err.to_string().contains("../bad"));
 }
 
-fn validate_env_pairs_for_test(
-    pairs: impl IntoIterator<Item = (String, String)>,
-) -> Result<SecretSources, SecretsError> {
-    let mut env = HashMap::new();
-    for (key, value) in pairs {
-        if let Some(suffix) = key.strip_prefix(ENV_PREFIX) {
-            let name = suffix.to_ascii_lowercase();
-            validate_secret_name(&name, "environment")?;
-            if !value.is_empty() && env.insert(name.clone(), value).is_some() {
-                return Err(SecretsError::EnvCollision { name });
-            }
-        }
-    }
-    Ok(SecretSources { env })
-}
-
 #[test]
+#[allow(unsafe_code)]
 fn secret_sources_debug_redacts_values() {
     // Secret source values may come from TAU_SECRET_* environment variables;
     // Debug output must stay safe if the type is logged accidentally.
-    let sources = SecretSources {
-        env: HashMap::from([("mail_password".to_owned(), "super-secret".to_owned())]),
-    };
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    // SAFETY: serialized test-only environment mutation.
+    unsafe { std::env::set_var("TAU_SECRET_MAIL_PASSWORD", "super-secret") };
+    let sources =
+        load_config_secret_sources(EnvironmentDisposition::RemoveAfterSnapshot).expect("sources");
 
     let rendered = format!("{sources:?}");
 
     assert!(rendered.contains("mail_password"));
-    assert!(rendered.contains("env_secret_count"));
+    assert!(rendered.contains("names"));
     assert!(!rendered.contains("super-secret"));
 }
 
@@ -234,11 +245,4 @@ fn normalized_env_name_collisions_are_rejected() {
     assert!(err.to_string().contains("collide"));
     assert!(std::env::var("TAU_SECRET_COLLIDE").is_err());
     assert!(std::env::var("TAU_SECRET_collide").is_err());
-
-    let err = validate_env_pairs_for_test([
-        ("TAU_SECRET_COLLIDE".to_owned(), "one".to_owned()),
-        ("TAU_SECRET_collide".to_owned(), "two".to_owned()),
-    ])
-    .expect_err("collision should fail");
-    assert!(err.to_string().contains("collide"));
 }

@@ -13,8 +13,8 @@ use std::{fmt, sync as path_std_sync};
 
 use tau_config::settings as path_tau_config_settings;
 use tau_config::settings::{
-    ExtensionCliOverride, ExtensionEntry, ExtensionSecretEntry, HarnessConfigCliOverride,
-    HarnessSettings, ProfileName, RoleCliOverride, SettingsError,
+    BuiltinComponentIdentity, ExtensionCliOverride, ExtensionEntry, ExtensionSecretEntry,
+    HarnessConfigCliOverride, HarnessSettings, ProfileName, RoleCliOverride, SettingsError,
 };
 
 const TEST_DUMMY_EXTENSION_NAME: &str = "test-dummy";
@@ -71,6 +71,8 @@ pub struct ExtensionConfig {
     pub command: String,
     pub args: Vec<String>,
     pub role: Option<String>,
+    /// Resolved Tau-owned component authority, absent for external commands.
+    pub component: Option<BuiltinComponentIdentity>,
     /// Immutable structural tool prefix assigned to this instance.
     pub tool_prefix: Option<tau_proto::ToolNamePrefix>,
     /// Whether harness startup requires this extension to initialize.
@@ -153,6 +155,11 @@ struct ResolvedExtension {
     enable: bool,
     require: bool,
     role: Option<String>,
+    /// Tau-owned component authority retained only while the resolved
+    /// command provenance remains built-in/current-Tau and its suffix
+    /// identifies that exact component. Explicit command replacement clears
+    /// it.
+    component: Option<BuiltinComponentIdentity>,
     tool_prefix: Option<tau_proto::ToolNamePrefix>,
     cwd: Option<PathBuf>,
     config: serde_json::Value,
@@ -263,6 +270,7 @@ fn seed_builtin_extension_entries(
 
 impl ResolvedExtension {
     fn from_builtin(builtin: BuiltinExtension) -> Self {
+        let component = BuiltinComponentIdentity::from_tau_owned_suffix(&builtin.suffix);
         Self {
             prefix: builtin.prefix,
             command: Some(builtin.command),
@@ -270,6 +278,7 @@ impl ResolvedExtension {
             enable: builtin.enable,
             require: builtin.require,
             role: builtin.role,
+            component,
             tool_prefix: None,
             cwd: builtin.cwd,
             config: builtin.config,
@@ -285,6 +294,15 @@ impl ResolvedExtension {
             enable: user.enable.unwrap_or(true),
             require: user.require.unwrap_or(true),
             role: user.role.clone(),
+            component: user
+                .command
+                .is_none()
+                .then(|| {
+                    BuiltinComponentIdentity::from_tau_owned_suffix(
+                        user.suffix.as_deref().unwrap_or_default(),
+                    )
+                })
+                .flatten(),
             tool_prefix: user.tool_prefix.clone().flatten(),
             cwd: user.cwd.clone().flatten(),
             config: user
@@ -301,6 +319,7 @@ impl ResolvedExtension {
         }
         if let Some(command) = user.command.as_ref() {
             self.command = Some(command.clone());
+            self.component = None;
             // Setting `command` replaces the built-in's full argv tail.
             // `suffix` is cleared so users overriding only `command`
             // don't accidentally inherit the built-in's subcommand
@@ -309,6 +328,9 @@ impl ResolvedExtension {
             self.suffix = Vec::new();
         }
         if let Some(suffix) = user.suffix.as_ref() {
+            self.component = (self.component.is_some() || self.command.is_none())
+                .then(|| BuiltinComponentIdentity::from_tau_owned_suffix(suffix))
+                .flatten();
             self.suffix = suffix.clone();
         }
         if let Some(enable) = user.enable {
@@ -359,6 +381,7 @@ impl ResolvedExtension {
             command: program,
             args,
             role: self.role,
+            component: self.component,
             tool_prefix: self.tool_prefix,
             require: self.require,
             cwd: self.cwd,

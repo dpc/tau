@@ -13,4 +13,6 @@
 
 pub mod atomic;
 pub mod provider_debug_capture;
+pub mod provider_settings;
+pub mod secret_sources;
 pub mod settings;

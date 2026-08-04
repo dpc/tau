@@ -321,6 +321,20 @@ version-zero credential before model publication and at prompt boundaries.
 Credential rotation therefore takes effect without restart; settings changes
 require restart. Missing or malformed credentials exclude that provider.
 
+`tau provider add [KIND]` accepts exactly `chatgpt`, `chat-completions`,
+`responses`, or `openrouter`; without `KIND` it presents those same choices in
+a picker. API-key profiles explicitly select direct masked entry, a configured
+named secret, or (only for keyless/local-compatible backends) no key. A named
+source is recorded without its value, materialized into the canonical Secret
+record by setup and again on harness restart, and never read by provider runtime
+except through Secret RPC. If the named source is unavailable, setup fails before
+activating settings; a later restart invalidates its old materialization, omits
+the profile, and publishes a source-name-only warning. A bound declaration is
+consumed for materialization and is not copied into `Configure.secrets`.
+Provider setup/removal and startup serialize per configured instance; the exact
+startup settings snapshot that selects the source also becomes the immutable
+Configure snapshot.
+
 Generic Chat Completions models do not support standalone compaction. A local
 model can opt in to Tau summary compaction by declaring its context window plus
 an explicit `local_summary_compaction` object:
@@ -352,12 +366,15 @@ retaining image metadata and a loss marker. Empty, malformed, truncated, or
 over-limit summaries fail the durable transaction without fallback or resend.
 
 `tau-provider-responses` implements the public `/responses` protocol over
-API-key HTTP/SSE or WebSocket for the `responses` profile. `tau provider add`
-labels the existing generic
-Chat Completions choice `completions API` and this choice `responses API`.
+API-key HTTP/SSE or WebSocket for the `responses` profile. The
+`tau provider add` picker labels these kinds `OpenAI-compatible Chat
+Completions` and `OpenAI Responses API`.
 Responses profiles require a base URL, explicit models, and a `transport` value
 spelled `sse` or `websocket`; omitted values from older profiles mean `sse`.
-The wizard asks for transport after the endpoint, API key, and models. It
+For API-key profiles, the wizard first selects `Enter API key now`, `Use
+configured named secret` when declarations exist, or `No API key` where
+keyless operation is supported. Only direct entry opens the masked value
+prompt. It asks for transport after the endpoint, API-key authority, and models. It
 preselects WebSocket only for the exact official
 `https://api.openai.com/v1` base URL and otherwise preselects SSE. Tau does not
 infer endpoint support at runtime or discover models. Every turn sends the complete typed

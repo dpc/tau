@@ -23,6 +23,7 @@ blake3.workspace = true
 dialoguer.workspace = true
 dirs.workspace = true
 fs2.workspace = true
+libc.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

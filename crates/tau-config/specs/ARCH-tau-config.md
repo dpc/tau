@@ -180,3 +180,17 @@ target, preserving user-managed indirection. It writes to a randomized sibling
 temp file, applies the resolved permissions at creation time on Unix and again
 after open for exactness, removes temp files on post-create failures, renames
 over the destination, and syncs the parent directory where supported.
+
+## Provider credential configuration
+
+`tau-config` owns the dependency-neutral closed provider credential-reference
+schema, canonical slot paths, named-secret source resolution, and nofollow
+per-instance provider-settings lifecycle lock. Provider setup, harness startup,
+and provider runtime share that parser and resolver rather than interpreting
+credential authority independently. Harness source capture removes one-shot
+environment variables before child spawn; setup retains them. Both modes share
+normalization, collision, environment-before-file precedence, trimming,
+optionality, UTF-8 failure, and safe-name rules.
+`BuiltinComponentIdentity` separately preserves Tau-owned component authority
+through argv wrapping without deriving authority from flattened executable
+arguments.

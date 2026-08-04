@@ -192,6 +192,10 @@ fn resolve_extensions_returns_builtins_when_user_config_empty() {
     assert_eq!(resolved[0].command, "tau");
     assert_eq!(resolved[0].args, vec!["component", "ext-provider-builtin"]);
     assert_eq!(resolved[0].role.as_deref(), Some("provider"));
+    assert_eq!(
+        resolved[0].component,
+        Some(tau_config::settings::BuiltinComponentIdentity::Provider)
+    );
     assert_eq!(resolved[1].name, "core-shell");
     assert_eq!(resolved[2].name, "std-notifications");
     assert_eq!(resolved[3].name, "std-websearch");
@@ -475,6 +479,10 @@ fn resolve_extensions_prefix_wraps_builtin_command() {
         provider.args,
         vec!["user@host", "tau", "component", "ext-provider-builtin"]
     );
+    assert_eq!(
+        provider.component,
+        Some(tau_config::settings::BuiltinComponentIdentity::Provider)
+    );
 }
 
 #[test]
@@ -496,6 +504,7 @@ fn resolve_extensions_user_command_replaces_builtin_command() {
     assert_eq!(provider.args, vec!["--flag"]);
     // Role is preserved from the built-in default.
     assert_eq!(provider.role.as_deref(), Some("provider"));
+    assert_eq!(provider.component, None);
 }
 
 #[test]

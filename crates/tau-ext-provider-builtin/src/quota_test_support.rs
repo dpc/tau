@@ -128,6 +128,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
     let profiles = BuiltinProviderProfiles {
         providers,
         credential_paths: Default::default(),
+        named_api_key_profiles: Default::default(),
     };
     let reload_profiles = profiles.clone();
     let result = run_inner_with_prompt_executor(

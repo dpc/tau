@@ -49,16 +49,31 @@ instance exists. Setup writes the credential first and settings last; removal
 deletes settings first. Restart Tau after settings changes. Credential rotation
 is observed at the next prompt boundary without restart.
 
+`tau provider add [KIND]` accepts `chatgpt`, `chat-completions`, `responses`,
+or `openrouter`; no kind opens a picker. API-key setup explicitly selects masked
+direct entry, a configured named secret, or keyless mode where supported.
+Named-secret values are materialized only into the instance's canonical Secret
+record. Setup refuses an unavailable selected source before writing settings;
+restart re-imports the current source and disables the profile with a redacted,
+source-name-only notice if it has become unavailable. Bound declarations do not
+enter `Configure.secrets`; one per-instance lifecycle lock binds startup source
+selection, typed-secret publication, and the retained Configure settings
+snapshot.
+
 Supported profile kinds:
 
 - `chatgpt` — ChatGPT/Codex OAuth credentials for the Responses backend.
-- `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, typed API-key credential, model list, max output tokens, extra body, and compatibility options. `tau provider add` accepts `chat-completions` at the interactive provider-kind prompt.
+- `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, typed API-key credential, model list, max output tokens, extra body, and compatibility options. The provider-kind picker labels it `OpenAI-compatible Chat Completions`.
 - `openrouter` — OpenRouter profile with a typed API-key credential and either explicit or fetched models.
 - `responses` — generic public Responses endpoint with base URL, optional API
   typed API-key credential, explicit `sse` or `websocket` transport, and an explicit model list.
-  Omitted transport in an older profile means SSE. `tau provider add` calls this selection
-  `responses API`; it calls the existing Chat Completions selection
-  `completions API`.
+  Omitted transport in an older profile means SSE. The provider-kind picker
+  labels it `OpenAI Responses API`.
+
+For API-key profiles, setup asks for the authority first: `Enter API key now`,
+`Use configured named secret` when declarations exist, or `No API key` where
+the profile kind supports keyless operation. Only direct entry opens the masked
+value prompt.
 
 Settings contain only a deterministic Secret-scope credential reference.
 Provider startup loads and validates that typed record before publishing models.

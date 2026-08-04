@@ -891,3 +891,15 @@ from malicious same-UID code or misuse of credentials returned to an authorized
 extension. Secret payloads remain absent from logs, events, journals, generic
 debug output, and errors. See
 [`SPEC-extension-secret-storage`](specs/SPEC-extension-secret-storage.md).
+
+Named provider API-key bindings use one closed parser shared by setup, harness,
+and provider runtime. The harness consumes the configured declaration without
+forwarding its value in `Configure.secrets`, refreshes only canonical API-key
+records, and replaces unavailable bindings with empty typed records plus
+value-redacted warnings. A per-instance provider-settings lock precedes the
+Secret-scope lock in setup, removal, and startup, binding source selection and
+credential publication to the exact retained Configure snapshot. Typed
+Tau-component identity, rather than executable argv resemblance, grants this
+authority. Source read/decoding failures preserve older records and fail or skip
+the provider according to its required policy. Memory-only startup forwards no
+built-in provider declaration values.

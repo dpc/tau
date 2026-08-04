@@ -1241,6 +1241,7 @@ dependencies = [
  "console",
  "shell-words",
  "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
@@ -5783,7 +5784,9 @@ version = "0.1.0"
 dependencies = [
  "config",
  "dirs",
+ "fs2",
  "indexmap",
+ "libc",
  "rand 0.8.6",
  "serde",
  "serde_json",
@@ -5876,6 +5879,7 @@ dependencies = [
  "dialoguer",
  "dirs",
  "fs2",
+ "libc",
  "proptest",
  "reqwest 0.12.28",
  "serde",

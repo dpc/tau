@@ -26,6 +26,10 @@ fn provider_setup_component_identity_is_exact() {
         tau_config::settings::ExtensionEntry {
             role: Some("provider".to_owned()),
             command: Some(vec!["ext-provider-builtin".to_owned()]),
+            suffix: Some(vec![
+                "component".to_owned(),
+                "ext-provider-builtin".to_owned(),
+            ]),
             ..Default::default()
         },
         tau_config::settings::ExtensionEntry {
@@ -42,7 +46,7 @@ fn provider_setup_component_identity_is_exact() {
 }
 
 /// Proves the canonical built-in name inherits identity only while its command
-/// remains inherited; an explicit replacement must restate the exact suffix.
+/// remains inherited; an explicit replacement cannot claim built-in authority.
 #[test]
 fn default_provider_setup_identity_rejects_command_replacement_without_suffix() {
     assert!(provider_cli_entry_is_builtin(
@@ -56,6 +60,31 @@ fn default_provider_setup_identity_rejects_command_replacement_without_suffix() 
             ..Default::default()
         },
     ));
+}
+
+/// Proves list/status treats direct values as active and every empty,
+/// malformed, missing, or orphan-like API-key record as inactive.
+#[test]
+fn setup_api_key_status_is_closed_and_value_aware() {
+    let provider = ProviderName::new("status");
+    let key = (provider.clone(), ProviderCredentialSlot::ApiKey);
+    for (record, expected) in [
+        (
+            Some(br#"{"version":0,"kind":"api_key","value":"active"}"#.to_vec()),
+            "api-key",
+        ),
+        (
+            Some(br#"{"version":0,"kind":"api_key","value":""}"#.to_vec()),
+            "no-api-key",
+        ),
+        (Some(b"malformed".to_vec()), "no-api-key"),
+        (None, "no-api-key"),
+    ] {
+        let credentials = record
+            .map(|record| BTreeMap::from([(key.clone(), record)]))
+            .unwrap_or_default();
+        assert_eq!(setup_api_key_status(&credentials, &provider), expected);
+    }
 }
 
 /// Proves unsupported credential versions fail during deserialization before
@@ -266,15 +295,22 @@ fn login_subcommand_is_not_part_of_provider_registry_cli() {
     );
 }
 
+/// Canonical provider-kind tokens remain the only accepted non-interactive
+/// spellings, so setup never preserves human picker labels as aliases.
 #[test]
-fn add_rejects_positional_arguments() {
-    // `tau provider add` owns the full setup flow and prompts for both kind and
-    // provider namespace, so stale direct forms must not keep working.
-    let args = vec!["add".to_owned(), "chatgpt".to_owned()];
-
-    let error = run_provider_cli(&args).expect_err("add arguments should fail");
-
-    assert!(error.to_string().contains("does not accept arguments"));
+fn provider_kind_catalog_has_exact_canonical_tokens() {
+    assert_eq!(
+        PROVIDER_KINDS
+            .iter()
+            .map(|descriptor| descriptor.token)
+            .collect::<Vec<_>>(),
+        ["chatgpt", "chat-completions", "responses", "openrouter"]
+    );
+    assert!(
+        !PROVIDER_KINDS
+            .iter()
+            .any(|descriptor| descriptor.token == "completions API")
+    );
 }
 
 #[test]
@@ -410,6 +446,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
     };
     let mut profiles = BuiltinProviderProfiles {
         credential_paths: Default::default(),
+        named_api_key_profiles: Default::default(),
         providers: BTreeMap::from([
             (
                 first.clone(),
@@ -573,6 +610,7 @@ fn chatgpt_profile_modes_are_independent_and_startup_stable() {
     let lite = ProviderName::new("lite");
     let mut startup = BuiltinProviderProfiles {
         credential_paths: Default::default(),
+        named_api_key_profiles: Default::default(),
         providers: BTreeMap::from([
             (
                 standard.clone(),
@@ -696,6 +734,7 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
     };
     let mut profiles = BuiltinProviderProfiles {
         credential_paths: Default::default(),
+        named_api_key_profiles: Default::default(),
         providers: BTreeMap::from([(
             provider_name.clone(),
             BuiltinProviderProfile::ChatCompletions(provider),
@@ -741,6 +780,7 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
     };
     let mut profiles = BuiltinProviderProfiles {
         credential_paths: Default::default(),
+        named_api_key_profiles: Default::default(),
         providers: BTreeMap::from([(
             provider_name.clone(),
             BuiltinProviderProfile::OpenRouter(profile),

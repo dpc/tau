@@ -33,9 +33,41 @@ The CLI owns credential-free provider settings below `$XDG_STATE_HOME/tau/provid
 
 Version-zero credential records use a typed `kind`: `chatgpt_oauth` contains complete access token, refresh token, expiry, and account id; `api_key` contains the complete API-key value. Provider settings contain only a typed credential reference into `providers/<provider>/`.
 
-Provider setup targets the exact enabled built-in provider extension instance. Omission selects only `provider-builtin`; renamed or duplicate instances require `--extension`, and missing, disabled, wrong-role, or wrong-component targets fail rather than being guessed.
+Provider setup targets the exact enabled built-in provider extension instance.
+Resolution preserves a typed Tau-component identity before flattening wrapped
+argv; an explicit replacement command cannot claim that identity merely by
+copying component suffix tokens. Omission selects only `provider-builtin`;
+renamed or duplicate instances require `--extension`, and missing, disabled,
+wrong-role, or wrong-component targets fail rather than being guessed.
 
 Add writes the secret first and settings last. Remove deletes settings first and the secret last. There is no cross-file transaction or automatic orphan collector. Runtime reads credentials through Secret RPC before use and reloads them for prompt-time rotation. OAuth refresh replaces only its complete typed secret with compare-and-swap; a concurrent loser reloads the winning generation instead of reusing a rotated token.
+
+An API-key settings reference may bind the canonical record to one declared
+named harness secret without serializing its value. The shared closed parser
+rejects malformed sources, OAuth bindings, noncanonical paths, unknown fields,
+and unsafe or whitespace names for setup, startup, and provider runtime alike.
+The bound declaration is materialization authority and its value is omitted from
+`Configure.secrets`.
+
+Setup and removal serialize on the provider-settings instance directory, then
+the Secret-scope directory. Setup resolves the selected declaration while
+holding the instance lock, writes the complete typed secret, and writes settings
+last as activation. Removal deletes settings first as deactivation, then removes
+closed credential slots. Startup takes the same locks in the same order: under
+the instance lock it captures one bounded settings generation, resolves every
+valid named binding from the one-shot source snapshot, and under one Secret lock
+publishes the resulting typed records. Configure later uses that retained
+settings generation instead of rereading the directory.
+
+An actually unavailable or undeclared bound source replaces the old materialization with
+an empty API-key record, suppresses that profile, and produces a mandatory
+source-name-only warning. Direct-entry and keyless records have no binding and
+are never changed by startup refresh. Source I/O and decoding failures do not
+overwrite an older record: they fail a required provider or skip an optional
+provider with a redacted warning. Settings snapshot/materialization failures
+follow the same required/optional policy. Memory-only harnesses perform no
+settings snapshot, source resolution, or materialization and omit all
+declaration values owned by the typed built-in provider component.
 
 Legacy `auth.d`, `ProviderStore`, `AuthFile`, inline API keys, and mixed settings/credential records have no runtime reader or migration. Users re-register providers and manually remove legacy files.
 

@@ -496,6 +496,16 @@ pub(super) fn run_extension_data_write_file_with_limit(
     contents: Vec<u8>,
     max_bytes: u64,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    write_extension_data_file_with_limit_locked(root, path, contents, max_bytes)
+}
+
+/// Replace one complete file while the caller holds the Secret-scope lock.
+pub(super) fn write_extension_data_file_with_limit_locked(
+    root: &Path,
+    path: String,
+    contents: Vec<u8>,
+    max_bytes: u64,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
     ensure_request_contents_within_limit(&contents, max_bytes)?;
     let rel = sanitize_extension_data_path(&path, false)?;
     let path = checked_extension_data_path(root, &rel, true)?;

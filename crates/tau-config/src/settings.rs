@@ -1822,6 +1822,24 @@ impl HarnessSettings {
     }
 }
 
+/// Stable identity for a Tau-owned component command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinComponentIdentity {
+    /// Tau's built-in provider component.
+    Provider,
+}
+
+impl BuiltinComponentIdentity {
+    /// Resolve identity from suffix tokens only after the caller has
+    /// established that the command slot is Tau-owned or inherited as the
+    /// current Tau executable. Arbitrary explicit commands must not call
+    /// this to claim component authority.
+    #[must_use]
+    pub fn from_tau_owned_suffix(suffix: &[String]) -> Option<Self> {
+        (suffix == ["component", "ext-provider-builtin"]).then_some(Self::Provider)
+    }
+}
+
 /// One entry in the harness's `extensions` map.
 ///
 /// All fields are optional on the wire so users can override just the

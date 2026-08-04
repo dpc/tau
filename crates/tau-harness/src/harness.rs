@@ -110,96 +110,8 @@ use crate::harness::extension_data::{
 /// Model-visible reminder to report meaningful work through the status tool.
 pub(crate) const STATUS_REMINDER: &str = "Reminder: call `status` when starting a task; use an informative `task_name`, not an opaque identifier or task/ticket number alone, and batch it with other calls when possible.";
 
-/// Maximum number of CLI-owned settings files sent to one extension at startup.
-const MAX_EXTENSION_SETTINGS_FILES: usize = 4_096;
-/// Maximum bytes accepted from one CLI-owned settings file.
-const MAX_EXTENSION_SETTINGS_FILE_BYTES: u64 = 1024 * 1024;
-/// Maximum total settings bytes, reserving one MiB of the protocol frame for
-/// Configure's CBOR envelope, file names, and extension configuration.
-const MAX_EXTENSION_SETTINGS_SNAPSHOT_BYTES: u64 =
-    tau_proto::MAX_PROTOCOL_MESSAGE_BYTES - MAX_EXTENSION_SETTINGS_FILE_BYTES;
+use tau_config::secret_sources::SecretSources;
 
-fn load_extension_settings_files(
-    state_dir: &Path,
-    extension_name: &str,
-) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    use std::io::Read as _;
-
-    let root = tau_config::settings::extension_provider_settings_dir_of(state_dir, extension_name)
-        .map_err(|error| error.to_string())?;
-    match std::fs::symlink_metadata(&root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err("settings root is not a real directory".to_owned());
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
-        Err(error) => return Err(format!("could not inspect settings directory: {error}")),
-    }
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
-        Err(error) => return Err(format!("could not list settings directory: {error}")),
-    };
-    let mut files = BTreeMap::new();
-    let mut total_bytes = 0_u64;
-    for (index, entry) in entries.enumerate() {
-        if MAX_EXTENSION_SETTINGS_FILES <= index {
-            return Err(format!(
-                "settings directory exceeds {MAX_EXTENSION_SETTINGS_FILES} entries"
-            ));
-        }
-        let entry = entry.map_err(|error| format!("could not read settings entry: {error}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("could not inspect settings entry: {error}"))?;
-        if !file_type.is_file() || file_type.is_symlink() {
-            return Err("settings directory contains a non-regular entry".to_owned());
-        }
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| "settings file name is not UTF-8".to_owned())?;
-        if !name.ends_with(".json")
-            || tau_proto::ProviderName::try_new(name.trim_end_matches(".json").to_owned()).is_err()
-        {
-            return Err("settings file name is not a valid provider JSON name".to_owned());
-        }
-        let mut contents = Vec::new();
-        open_settings_file_no_follow(&entry.path())
-            .and_then(|file| {
-                file.take(MAX_EXTENSION_SETTINGS_FILE_BYTES + 1)
-                    .read_to_end(&mut contents)
-            })
-            .map_err(|error| format!("could not read settings file: {error}"))?;
-        if MAX_EXTENSION_SETTINGS_FILE_BYTES < contents.len() as u64 {
-            return Err(format!(
-                "settings file exceeds {MAX_EXTENSION_SETTINGS_FILE_BYTES} bytes"
-            ));
-        }
-        total_bytes = total_bytes.saturating_add(contents.len() as u64);
-        if MAX_EXTENSION_SETTINGS_SNAPSHOT_BYTES < total_bytes {
-            return Err(format!(
-                "settings snapshot exceeds {MAX_EXTENSION_SETTINGS_SNAPSHOT_BYTES} bytes"
-            ));
-        }
-        files.insert(name, contents);
-    }
-    Ok(files)
-}
-
-#[cfg(unix)]
-fn open_settings_file_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn open_settings_file_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
-    path_std_fs::File::open(path)
-}
 #[cfg(test)]
 use crate::harness::extension_data::{
     append_extension_data_file, atomic_replace_extension_data_file, checked_extension_data_path,
@@ -215,6 +127,7 @@ use crate::harness::interception::{
     PendingIntercept, PostCommitContinuation, PromptDispatchContinuation, PromptDispatchPhase,
 };
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
+use crate::harness::provider_startup::ProviderStartupSnapshot;
 use crate::harness::subagents_tool::SubagentToolState;
 use crate::harness::working_final::{CommittedWorkingFinal, WorkingFinalDisposition};
 use crate::internal_tools::InternalToolHandlers;
@@ -230,7 +143,9 @@ use crate::prompt::{
     assemble_prompt_context_from, built_in_system_prompt_templates, render_agents_context_message,
     render_effective_prompt_message, try_build_system_prompt_with_tool_template_context,
 };
-use crate::secrets::{ResolvedExtensionSecrets, load_secret_sources, resolve_extension_secrets};
+use crate::secrets::{
+    ResolvedExtensionSecrets, load_secret_sources, resolve_extension_secrets_excluding,
+};
 use crate::settings::{
     Config, ExtensionStartupDiagnostic, load_harness_settings_or_warn,
     load_harness_settings_without_environment_or_warn,
@@ -1828,6 +1743,7 @@ mod extension_data;
 mod extensions;
 mod interception;
 mod pending_notices;
+mod provider_startup;
 mod replay;
 mod semantic_event_router;
 mod subagents_tool;
@@ -2215,6 +2131,8 @@ pub struct Harness {
     /// Runtime state root for this harness. Extension-specific persistent
     /// directories are allocated below this path and sent in Configure.
     pub(crate) state_dir: PathBuf,
+    /// Provider settings captured under instance lifecycle locks before spawn.
+    provider_settings_snapshots: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
     /// Whether runtime settings reloads ignore startup environment transports.
     ignore_startup_environment: bool,
     /// Session membership store. Owns the folded loaded-agent set for each
@@ -3239,6 +3157,7 @@ impl Harness {
             action_registry: ActionRegistry::new(),
             internal_tool_handlers: Vec::new(),
             state_dir: parts.state_dir,
+            provider_settings_snapshots: BTreeMap::new(),
             ignore_startup_environment: parts.ignore_startup_environment,
             store: parts.store,
             agent_store: parts.agent_store,
@@ -3869,14 +3788,10 @@ impl Harness {
     fn resolve_startup_extension_secrets(
         config: &Config,
         state_dir: &Path,
-        ignore_startup_environment: bool,
+        secret_sources: &SecretSources,
+        provider_bound_names: &BTreeMap<String, BTreeSet<String>>,
     ) -> Result<ResolvedExtensionSecrets, HarnessError> {
-        let secret_sources = if ignore_startup_environment {
-            Default::default()
-        } else {
-            load_secret_sources().map_err(|error| HarnessError::Participant(error.to_string()))?
-        };
-        resolve_extension_secrets(config, state_dir, &secret_sources)
+        resolve_extension_secrets_excluding(config, state_dir, secret_sources, provider_bound_names)
             .map_err(|error| HarnessError::Participant(error.to_string()))
     }
 
@@ -3906,11 +3821,38 @@ impl Harness {
         let (store, agent_store) =
             Self::open_startup_stores(&state_dir, &sessions_dir, launch.storage_mode)?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session store opened");
-        let extension_secrets = Self::resolve_startup_extension_secrets(
+        let secret_sources = if ignore_startup_environment {
+            Default::default()
+        } else {
+            load_secret_sources().map_err(|error| HarnessError::Participant(error.to_string()))?
+        };
+        let ProviderStartupSnapshot {
+            settings: provider_settings_snapshots,
+            bound_names: provider_bound_names,
+            diagnostics: provider_diagnostics,
+            skipped_extensions: provider_skipped_extensions,
+        } = if launch.storage_mode.is_memory_only() {
+            ProviderStartupSnapshot {
+                bound_names: provider_startup::memory_only_provider_bound_names(config),
+                ..Default::default()
+            }
+        } else {
+            provider_startup::snapshot_and_materialize_named_provider_credentials(
+                config,
+                &state_dir,
+                &secret_sources,
+            )?
+        };
+        let mut extension_secrets = Self::resolve_startup_extension_secrets(
             config,
             &state_dir,
-            ignore_startup_environment,
+            &secret_sources,
+            &provider_bound_names,
         )?;
+        extension_secrets.diagnostics.extend(provider_diagnostics);
+        extension_secrets
+            .skipped_extensions
+            .extend(provider_skipped_extensions);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "loading harness settings");
         let (harness_settings, harness_settings_error) = if ignore_startup_environment {
             load_harness_settings_without_environment_or_warn(&dirs)
@@ -3935,6 +3877,7 @@ impl Harness {
             ignore_startup_environment,
             project_root,
         })?;
+        harness.provider_settings_snapshots = provider_settings_snapshots;
         harness.enabled_extension_names = config
             .extensions
             .keys()
@@ -17444,21 +17387,10 @@ impl Harness {
         {
             BTreeMap::new()
         } else {
-            match load_extension_settings_files(&self.state_dir, entry.name.as_str()) {
-                Ok(files) => files,
-                Err(error) => {
-                    let _ = self.bus.send_to(
-                        source_id,
-                        None,
-                        HarnessOutputMessage::Disconnect(Disconnect {
-                            reason: Some(format!(
-                                "failed to load provider settings snapshot: {error}"
-                            )),
-                        }),
-                    );
-                    return;
-                }
-            }
+            self.provider_settings_snapshots
+                .get(entry.name.as_str())
+                .cloned()
+                .unwrap_or_default()
         };
         if let Some(state_dir) = &state_dir
             && let Err(error) = std::fs::create_dir_all(state_dir)

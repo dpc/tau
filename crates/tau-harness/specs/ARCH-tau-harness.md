@@ -419,3 +419,12 @@ instances, gives `Configure.settings_files` only to those persistent providers,
 and fails supervised startup closed. Tool and memory-only instances receive
 neither provider-settings surface, as specified by
 [SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).
+For built-in Providers, startup locks each instance settings directory, captures
+one bounded generation, resolves its valid named API-key bindings without
+forwarding those declaration values in Configure, publishes typed records under
+the second-level Secret lock, and retains the same generation for
+`Configure.settings_files`. A typed component identity survives argv wrapping
+and prevents external replacement commands from gaining this authority. Actual
+absence suppresses stale credentials; source errors preserve the previous record
+and follow required/optional extension startup policy. Memory-only startup
+forwards no built-in provider declarations despite reading no settings.

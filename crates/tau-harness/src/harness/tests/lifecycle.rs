@@ -2,12 +2,16 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io as path_std_io;
 use std::io::ErrorKind;
 
+use tau_config::secret_sources::SecretSources;
+use tau_config::settings::BuiltinComponentIdentity;
+
 use super::*;
 use crate::agent::PendingPrompt;
 use crate::event::SUPERVISED_CLEANUP_GRACE;
 use crate::extension::{
     ExtensionConnectCommand, ExtensionEntry, ExtensionState, spawn_in_process, spawn_supervised,
 };
+use crate::harness::provider_startup::{self, ProviderStartupSnapshot};
 use crate::harness::{
     EXTENSION_RESTART_DELAY, MAX_EXTENSION_RESTART_ATTEMPTS, MAX_EXTENSION_RESTART_NOTICE_BYTES,
     PendingTool, PendingUiShellCommand, PromptFragmentSource, UiShellRouteId,
@@ -15,7 +19,7 @@ use crate::harness::{
     prompt_snapshot_tool_error_message, tool_available_again_notice_prompt,
     tool_unavailable_notice_prompt, unavailable_tool_error_message, validate_protocol_version,
 };
-use crate::settings::ExtensionConfig;
+use crate::settings::{CoreMode, ExtensionConfig};
 use crate::{event_log as path_crate_event_log, settings as path_crate_settings};
 
 fn test_session_id(value: impl Into<String>) -> tau_proto::SessionId {
@@ -117,6 +121,7 @@ fn supervised_test_config(name: &str, script: &str) -> ExtensionConfig {
         command: "sh".to_owned(),
         args: vec!["-c".to_owned(), script.to_owned()],
         role: None,
+        component: None,
         require: true,
         cwd: None,
         config: serde_json::json!({}),
@@ -470,6 +475,7 @@ fn configure_supervised_extension(
         command: "tau-test-extension".to_owned(),
         args: vec!["--stdio".to_owned()],
         role: (kind == tau_proto::ClientKind::Provider).then(|| "provider".to_owned()),
+        component: None,
         require: true,
         cwd: None,
         config: serde_json::json!({}),
@@ -497,6 +503,46 @@ fn configure_supervised_extension(
             _ => None,
         })
         .expect("configure sent")
+}
+
+fn builtin_provider_startup_config(
+    source_declaration: Option<tau_config::settings::ExtensionSecretEntry>,
+) -> crate::settings::Config {
+    crate::settings::Config {
+        core: crate::settings::CoreConfig {
+            mode: CoreMode::Embedded,
+        },
+        extensions: BTreeMap::from([(
+            "provider-work".to_owned(),
+            crate::settings::ExtensionConfig {
+                name: "provider-work".to_owned(),
+                command: "tau".to_owned(),
+                args: vec!["component".to_owned(), "ext-provider-builtin".to_owned()],
+                role: Some("provider".to_owned()),
+                component: Some(BuiltinComponentIdentity::Provider),
+                tool_prefix: None,
+                require: true,
+                cwd: None,
+                config: serde_json::json!({}),
+                secrets: source_declaration
+                    .map(|declaration| BTreeMap::from([("provider_key".to_owned(), declaration)]))
+                    .unwrap_or_default(),
+            },
+        )]),
+        extension_startup_diagnostics: Vec::new(),
+    }
+}
+
+fn named_provider_settings() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "kind": "chat_completions",
+        "credential": {
+            "kind": "api_key",
+            "secret_path": "providers/deepseek/api-key.json",
+            "source": {"kind": "named_secret", "name": "provider_key"}
+        }
+    }))
+    .expect("settings")
 }
 
 fn insert_extension_entry_with_meter(
@@ -1555,6 +1601,10 @@ fn persistent_provider_configure_includes_settings_snapshot() {
     std::fs::create_dir_all(&settings).expect("settings directory");
     std::fs::write(settings.join("provider.json"), b"provider-settings").expect("settings");
     let mut h = quiet_provider_harness(&sp).expect("start");
+    h.provider_settings_snapshots.insert(
+        "provider-work".to_owned(),
+        BTreeMap::from([("provider.json".to_owned(), b"provider-settings".to_vec())]),
+    );
 
     let configure =
         configure_supervised_extension(&mut h, "provider-work", tau_proto::ClientKind::Provider);
@@ -1586,6 +1636,335 @@ fn memory_only_provider_configure_ignores_stale_settings() {
         configure_supervised_extension(&mut h, "provider-memory", tau_proto::ClientKind::Provider);
 
     assert!(configure.settings_files.is_empty());
+}
+
+/// Proves memory-only startup suppresses built-in provider declarations without
+/// reading settings or creating a persistent materialized credential.
+#[test]
+fn memory_only_provider_configure_omits_named_declaration_value() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    std::fs::create_dir_all(state.join("secrets")).expect("source root");
+    std::fs::write(state.join("secrets/provider_key.yaml"), "must-not-cross").expect("source");
+    let config =
+        builtin_provider_startup_config(Some(tau_config::settings::ExtensionSecretEntry {
+            optional: false,
+        }));
+    let bound_names = provider_startup::memory_only_provider_bound_names(&config);
+    let resolved = Harness::resolve_startup_extension_secrets(
+        &config,
+        &state,
+        &SecretSources::default(),
+        &bound_names,
+    )
+    .expect("memory-only secret suppression");
+    assert!(resolved.secrets["provider-work"].is_empty());
+    let mut harness = quiet_provider_harness(state.join("harness")).expect("harness");
+
+    let configure = configure_supervised_extension(
+        &mut harness,
+        "provider-work",
+        tau_proto::ClientKind::Provider,
+    );
+
+    assert!(configure.settings_files.is_empty());
+    assert!(configure.secrets.is_empty());
+    assert!(
+        !state
+            .join("secrets/ext/provider-work/providers/deepseek/api-key.json")
+            .exists()
+    );
+}
+
+/// Proves startup materialization, source selection, and Configure all use one
+/// settings generation retained after the instance lifecycle lock is released.
+#[test]
+fn provider_startup_retains_materialized_settings_snapshot() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let settings =
+        tau_config::settings::extension_provider_settings_dir_of(&state, "provider-work")
+            .expect("settings");
+    std::fs::create_dir_all(&settings).expect("settings root");
+    let original = named_provider_settings();
+    std::fs::write(settings.join("deepseek.json"), &original).expect("settings");
+    std::fs::create_dir_all(state.join("secrets")).expect("source root");
+    std::fs::write(state.join("secrets/provider_key.yaml"), " first-key \n").expect("source");
+
+    let ProviderStartupSnapshot {
+        settings: snapshots,
+        bound_names,
+        diagnostics,
+        ..
+    } = provider_startup::snapshot_and_materialize_named_provider_credentials(
+        &builtin_provider_startup_config(Some(tau_config::settings::ExtensionSecretEntry {
+            optional: false,
+        })),
+        &state,
+        &SecretSources::default(),
+    )
+    .expect("startup snapshot");
+
+    std::fs::write(
+        settings.join("deepseek.json"),
+        br#"{"changed":"after-snapshot"}"#,
+    )
+    .expect("concurrent replacement");
+    let mut harness = quiet_provider_harness(state.join("configure-state")).expect("harness");
+    harness.provider_settings_snapshots = snapshots;
+    let configure = configure_supervised_extension(
+        &mut harness,
+        "provider-work",
+        tau_proto::ClientKind::Provider,
+    );
+    assert_eq!(
+        configure.settings_files["deepseek.json"], original,
+        "Configure must use the generation that authorized materialization"
+    );
+    assert!(bound_names["provider-work"].contains("provider_key"));
+    assert!(diagnostics.is_empty());
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(state.join("secrets/ext/provider-work/providers/deepseek/api-key.json"))
+            .expect("materialized record"),
+    )
+    .expect("typed record");
+    assert_eq!(record["value"], "first-key");
+}
+
+/// Proves a missing declaration overwrites an older named materialization with
+/// an empty typed record and emits only a value-redacted disabling diagnostic.
+#[test]
+fn provider_startup_missing_declaration_suppresses_stale_credential() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let settings =
+        tau_config::settings::extension_provider_settings_dir_of(&state, "provider-work")
+            .expect("settings");
+    std::fs::create_dir_all(&settings).expect("settings root");
+    std::fs::write(settings.join("deepseek.json"), named_provider_settings()).expect("settings");
+    let credential = state.join("secrets/ext/provider-work/providers/deepseek/api-key.json");
+    std::fs::create_dir_all(credential.parent().expect("parent")).expect("credential root");
+    std::fs::write(
+        &credential,
+        br#"{"version":0,"kind":"api_key","value":"stale-secret"}"#,
+    )
+    .expect("stale credential");
+
+    let ProviderStartupSnapshot {
+        bound_names,
+        diagnostics,
+        ..
+    } = provider_startup::snapshot_and_materialize_named_provider_credentials(
+        &builtin_provider_startup_config(None),
+        &state,
+        &SecretSources::default(),
+    )
+    .expect("startup snapshot");
+
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&credential).expect("credential"))
+            .expect("typed record");
+    assert_eq!(record["value"], "");
+    assert!(bound_names["provider-work"].contains("provider_key"));
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].message.contains("deepseek"));
+    assert!(!diagnostics[0].message.contains("stale-secret"));
+    let mut harness = quiet_provider_harness(state.join("notice-state")).expect("harness");
+    harness.emit_extension_startup_diagnostics(&diagnostics);
+    assert!(event_log_contains_source_event(
+        &harness,
+        HARNESS_CONNECTION_ID,
+        |event| matches!(
+            event,
+            Event::HarnessNotice(notice)
+                if notice.always_show
+                    && notice.level == tau_proto::NoticeLevel::Warning
+                    && notice.message.contains("deepseek")
+                    && !notice.message.contains("stale-secret")
+        )
+    ));
+}
+
+/// Proves provider snapshot failures follow the extension's required/optional
+/// startup policy instead of unconditionally aborting the harness.
+#[cfg(unix)]
+#[test]
+fn provider_startup_settings_failure_skips_optional_but_rejects_required() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    std::fs::create_dir_all(&state).expect("state");
+    symlink(temp.path(), state.join("provider-settings")).expect("settings symlink");
+    let mut optional = builtin_provider_startup_config(None);
+    optional
+        .extensions
+        .get_mut("provider-work")
+        .expect("provider")
+        .require = false;
+
+    let snapshot = provider_startup::snapshot_and_materialize_named_provider_credentials(
+        &optional,
+        &state,
+        &SecretSources::default(),
+    )
+    .expect("optional provider failure");
+    assert!(snapshot.skipped_extensions.contains("provider-work"));
+    assert_eq!(snapshot.diagnostics.len(), 1);
+    assert!(
+        provider_startup::snapshot_and_materialize_named_provider_credentials(
+            &builtin_provider_startup_config(None),
+            &state,
+            &SecretSources::default(),
+        )
+        .is_err()
+    );
+}
+
+/// Proves malformed source data never destructively replaces the previous
+/// credential; optional providers skip while required providers fail startup.
+#[test]
+fn provider_startup_source_error_preserves_stale_credential() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let settings =
+        tau_config::settings::extension_provider_settings_dir_of(&state, "provider-work")
+            .expect("settings");
+    std::fs::create_dir_all(&settings).expect("settings root");
+    std::fs::write(settings.join("deepseek.json"), named_provider_settings()).expect("settings");
+    std::fs::create_dir_all(state.join("secrets")).expect("source root");
+    std::fs::write(state.join("secrets/provider_key.yaml"), [0xff]).expect("invalid source");
+    let credential = state.join("secrets/ext/provider-work/providers/deepseek/api-key.json");
+    std::fs::create_dir_all(credential.parent().expect("credential parent"))
+        .expect("credential root");
+    let stale = br#"{"version":0,"kind":"api_key","value":"stale"}"#;
+    std::fs::write(&credential, stale).expect("stale credential");
+    let mut optional =
+        builtin_provider_startup_config(Some(tau_config::settings::ExtensionSecretEntry {
+            optional: false,
+        }));
+    optional
+        .extensions
+        .get_mut("provider-work")
+        .expect("provider")
+        .require = false;
+
+    let snapshot = provider_startup::snapshot_and_materialize_named_provider_credentials(
+        &optional,
+        &state,
+        &SecretSources::default(),
+    )
+    .expect("optional provider failure");
+    assert!(snapshot.skipped_extensions.contains("provider-work"));
+    assert_eq!(std::fs::read(&credential).expect("credential"), stale);
+    let error = provider_startup::snapshot_and_materialize_named_provider_credentials(
+        &builtin_provider_startup_config(Some(tau_config::settings::ExtensionSecretEntry {
+            optional: false,
+        })),
+        &state,
+        &SecretSources::default(),
+    )
+    .expect_err("required source error")
+    .to_string();
+    assert!(!error.contains(state.to_string_lossy().as_ref()));
+    assert!(!error.contains("provider_key.yaml"));
+    assert_eq!(std::fs::read(credential).expect("credential"), stale);
+}
+
+/// Proves direct and keyless credential records are outside startup
+/// rematerialization authority when their settings contain no named source.
+#[test]
+fn provider_startup_does_not_replace_direct_or_keyless_records() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let settings =
+        tau_config::settings::extension_provider_settings_dir_of(&state, "provider-work")
+            .expect("settings");
+    std::fs::create_dir_all(&settings).expect("settings root");
+    for (provider, value) in [("direct", "direct-key"), ("keyless", "")] {
+        std::fs::write(
+            settings.join(format!("{provider}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "kind": "chat_completions",
+                "credential": {
+                    "kind": "api_key",
+                    "secret_path": format!("providers/{provider}/api-key.json")
+                }
+            }))
+            .expect("settings"),
+        )
+        .expect("settings file");
+        let credential = state.join(format!(
+            "secrets/ext/provider-work/providers/{provider}/api-key.json"
+        ));
+        std::fs::create_dir_all(credential.parent().expect("parent")).expect("credential root");
+        std::fs::write(
+            credential,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 0, "kind": "api_key", "value": value
+            }))
+            .expect("credential"),
+        )
+        .expect("credential file");
+    }
+
+    provider_startup::snapshot_and_materialize_named_provider_credentials(
+        &builtin_provider_startup_config(None),
+        &state,
+        &SecretSources::default(),
+    )
+    .expect("startup snapshot");
+
+    for (provider, value) in [("direct", "direct-key"), ("keyless", "")] {
+        let record: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(state.join(format!(
+                "secrets/ext/provider-work/providers/{provider}/api-key.json"
+            )))
+            .expect("credential"),
+        )
+        .expect("typed record");
+        assert_eq!(record["value"], value);
+    }
+}
+
+/// Proves all configured Provider instances retain bounded settings snapshots,
+/// while named credential materialization remains restricted to the exact
+/// built-in provider component.
+#[test]
+fn custom_provider_retains_settings_without_builtin_materialization() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = temp.path().join("state");
+    let settings =
+        tau_config::settings::extension_provider_settings_dir_of(&state, "provider-work")
+            .expect("settings");
+    std::fs::create_dir_all(&settings).expect("settings root");
+    std::fs::write(settings.join("custom.json"), br#"{"custom":true}"#).expect("settings");
+    let mut config = builtin_provider_startup_config(None);
+    config
+        .extensions
+        .get_mut("provider-work")
+        .expect("provider")
+        .args = vec!["custom-provider".to_owned()];
+
+    let ProviderStartupSnapshot {
+        settings: snapshots,
+        bound_names,
+        diagnostics,
+        ..
+    } = provider_startup::snapshot_and_materialize_named_provider_credentials(
+        &config,
+        &state,
+        &SecretSources::default(),
+    )
+    .expect("startup snapshot");
+
+    assert_eq!(
+        snapshots["provider-work"]["custom.json"],
+        br#"{"custom":true}"#
+    );
+    assert!(bound_names.is_empty());
+    assert!(diagnostics.is_empty());
+    assert!(!state.join("secrets/ext/provider-work").exists());
 }
 
 /// Memory-only lifecycle still completes Hello/Configure while delegating no
@@ -2280,6 +2659,7 @@ fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
                 command,
                 args: vec!["--token=argument-secret".to_owned()],
                 role: None,
+                component: None,
                 require: false,
                 cwd: None,
                 config: serde_json::json!({"token": "config-secret"}),

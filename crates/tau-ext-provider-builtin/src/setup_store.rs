@@ -1,7 +1,17 @@
 //! CLI-owned provider registration storage.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::{fs as path_std_fs, io as path_std_io};
+
+use tau_config::provider_settings::{
+    ProviderCredentialSlot, ProviderSettingsInstanceLock, ProviderSettingsLockAttempt,
+};
+use tau_config::secret_sources::{
+    EnvironmentDisposition, load_secret_sources, resolve_declared_secret,
+};
+
+use crate::credential_record::ApiKeyCredential;
 
 /// One complete provider registration publication.
 pub(crate) struct ProviderSetupPlan {
@@ -13,6 +23,17 @@ pub(crate) struct ProviderSetupPlan {
     pub(crate) settings: Vec<u8>,
     /// Complete typed credential record.
     pub(crate) secret: SecretWrite,
+    /// Configured named source resolved inside the instance transaction.
+    pub(crate) named_source: Option<NamedSecretSource>,
+}
+
+/// One exact configured declaration selected by the setup picker.
+#[derive(Clone)]
+pub(crate) struct NamedSecretSource {
+    /// Declared source name serialized into credential-free settings.
+    pub(crate) name: String,
+    /// Exact targeted-extension declaration controlling optionality.
+    pub(crate) declaration: tau_config::settings::ExtensionSecretEntry,
 }
 
 /// One opaque complete secret write.
@@ -29,40 +50,12 @@ pub(crate) struct SecretBytes(
     Vec<u8>,
 );
 
-/// Closed credential slots owned by version-zero built-in providers.
-#[derive(Clone, Copy)]
-pub(crate) enum CredentialSlot {
-    /// ChatGPT OAuth record.
-    OAuth,
-    /// API-key record.
-    ApiKey,
-}
-
-impl CredentialSlot {
-    /// Returns the only filename owned by this credential family.
-    fn file_name(self) -> &'static str {
-        match self {
-            Self::OAuth => "oauth.json",
-            Self::ApiKey => "api-key.json",
-        }
-    }
-
-    fn all() -> [Self; 2] {
-        [Self::OAuth, Self::ApiKey]
-    }
-
-    /// Builds the exact Secret-scope path for one provider registration.
-    pub(crate) fn path(self, provider: &tau_proto::ProviderName) -> tau_proto::ExtensionDataPath {
-        tau_proto::ExtensionDataPath::new(format!("providers/{provider}/{}", self.file_name()))
-    }
-
-    /// Returns the credential-reference discriminator persisted in settings.
-    pub(crate) fn reference_kind(self) -> &'static str {
-        match self {
-            Self::OAuth => "oauth",
-            Self::ApiKey => "api_key",
-        }
-    }
+/// Coherent settings and credential bytes captured under lifecycle locks.
+pub(crate) struct SetupSnapshot {
+    /// Credential-free provider settings in deterministic provider order.
+    pub(crate) settings: Vec<(tau_proto::ProviderName, Vec<u8>)>,
+    /// Existing closed credential slots keyed by provider and family.
+    pub(crate) credentials: BTreeMap<(tau_proto::ProviderName, ProviderCredentialSlot), Vec<u8>>,
 }
 
 impl SecretBytes {
@@ -90,6 +83,15 @@ impl std::fmt::Debug for SecretBytes {
 pub(crate) struct SetupStore {
     /// Tau user-state root.
     state_dir: PathBuf,
+    /// Test-only signal after a nonblocking lock attempt confirms contention.
+    #[cfg(test)]
+    contention: Option<std::sync::Arc<std::sync::Barrier>>,
+    /// Test-only barriers that pause while holding the instance lock.
+    #[cfg(test)]
+    acquired: Option<(
+        std::sync::Arc<std::sync::Barrier>,
+        std::sync::Arc<std::sync::Barrier>,
+    )>,
 }
 
 impl SetupStore {
@@ -101,40 +103,74 @@ impl SetupStore {
                 "cannot determine Tau state directory",
             )
         })?;
-        Ok(Self { state_dir })
+        Ok(Self {
+            state_dir,
+            #[cfg(test)]
+            contention: None,
+            #[cfg(test)]
+            acquired: None,
+        })
     }
 
     #[cfg(test)]
     fn open_in(state_dir: impl Into<PathBuf>) -> Self {
         Self {
             state_dir: state_dir.into(),
+            contention: None,
+            acquired: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_contention(mut self, barrier: std::sync::Arc<std::sync::Barrier>) -> Self {
+        self.contention = Some(barrier);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_acquired_pause(
+        mut self,
+        entered: std::sync::Arc<std::sync::Barrier>,
+        release: std::sync::Arc<std::sync::Barrier>,
+    ) -> Self {
+        self.acquired = Some((entered, release));
+        self
+    }
+
+    fn acquire_instance_lock(
+        &self,
+        extension_instance: &tau_proto::ExtensionName,
+    ) -> path_std_io::Result<Option<ProviderSettingsInstanceLock>> {
+        let lock = match ProviderSettingsInstanceLock::try_acquire_existing(
+            &self.state_dir,
+            extension_instance.as_str(),
+        )? {
+            ProviderSettingsLockAttempt::Missing => None,
+            ProviderSettingsLockAttempt::Acquired(lock) => Some(lock),
+            ProviderSettingsLockAttempt::Contended => {
+                #[cfg(test)]
+                if let Some(barrier) = &self.contention {
+                    barrier.wait();
+                }
+                ProviderSettingsInstanceLock::acquire_existing(
+                    &self.state_dir,
+                    extension_instance.as_str(),
+                )?
+            }
+        };
+        #[cfg(test)]
+        if lock.is_some()
+            && let Some((entered, release)) = &self.acquired
+        {
+            entered.wait();
+            release.wait();
+        }
+        Ok(lock)
     }
 
     /// Applies secret-first and settings-last, making the settings write the
     /// registration activation point.
     pub(crate) fn apply(&self, plan: &ProviderSetupPlan) -> path_std_io::Result<PathBuf> {
-        use fs2::FileExt as _;
-
-        let secret_root = tau_config::settings::extension_secret_dir_of(
-            &self.state_dir,
-            plan.extension_instance.as_str(),
-        )
-        .map_err(path_std_io::Error::other)?;
-        ensure_private_directory_tree(
-            &self.state_dir,
-            &PathBuf::from("secrets/ext").join(plan.extension_instance.as_str()),
-        )?;
-        let secret_lock = path_std_fs::File::open(&secret_root)?;
-        secret_lock.lock_exclusive()?;
-        let secret_rel = sanitize_secret_path(plan.secret.path.as_str())?;
-        reject_existing_symlink_components(&secret_root, &secret_rel)?;
-        if let Some(parent) = secret_rel.parent() {
-            ensure_private_directory_tree(&secret_root, parent)?;
-        }
-        atomic_private_write(&secret_root.join(secret_rel), plan.secret.contents.expose())?;
-        fs2::FileExt::unlock(&secret_lock)?;
-
         let settings_root = tau_config::settings::extension_provider_settings_dir_of(
             &self.state_dir,
             plan.extension_instance.as_str(),
@@ -144,6 +180,65 @@ impl SetupStore {
             &self.state_dir,
             &PathBuf::from("provider-settings").join(plan.extension_instance.as_str()),
         )?;
+        // Serialize setup with harness startup: settings generation decides which
+        // named source may materialize, so this lock must precede Secret scope.
+        let _settings_lock = self
+            .acquire_instance_lock(&plan.extension_instance)?
+            .ok_or_else(|| {
+                path_std_io::Error::new(
+                    path_std_io::ErrorKind::NotFound,
+                    "provider settings directory disappeared before locking",
+                )
+            })?;
+        let named_contents = match &plan.named_source {
+            Some(source) => {
+                let sources = load_secret_sources(EnvironmentDisposition::Retain)
+                    .map_err(path_std_io::Error::other)?;
+                let value = resolve_declared_secret(
+                    &self.state_dir,
+                    &sources,
+                    plan.extension_instance.as_str(),
+                    &source.name,
+                    &source.declaration,
+                )
+                .map_err(path_std_io::Error::other)?
+                .ok_or_else(|| {
+                    path_std_io::Error::new(
+                        path_std_io::ErrorKind::NotFound,
+                        format!("configured named secret '{}' is unavailable", source.name),
+                    )
+                })?;
+                Some(
+                    serde_json::to_vec(&ApiKeyCredential::new(value.expose_secret().to_owned()))
+                        .map_err(path_std_io::Error::other)?,
+                )
+            }
+            None => None,
+        };
+        let secret_root = tau_config::settings::extension_secret_dir_of(
+            &self.state_dir,
+            plan.extension_instance.as_str(),
+        )
+        .map_err(path_std_io::Error::other)?;
+        ensure_private_directory_tree(
+            &self.state_dir,
+            &PathBuf::from("secrets/ext").join(plan.extension_instance.as_str()),
+        )?;
+        use fs2::FileExt as _;
+        let secret_lock = open_directory_no_follow(&secret_root)?;
+        secret_lock.lock_exclusive()?;
+        let secret_rel = sanitize_secret_path(plan.secret.path.as_str())?;
+        reject_existing_symlink_components(&secret_root, &secret_rel)?;
+        if let Some(parent) = secret_rel.parent() {
+            ensure_private_directory_tree(&secret_root, parent)?;
+        }
+        atomic_private_write(
+            &secret_root.join(secret_rel),
+            named_contents
+                .as_deref()
+                .unwrap_or_else(|| plan.secret.contents.expose()),
+        )?;
+        fs2::FileExt::unlock(&secret_lock)?;
         let settings_rel = PathBuf::from(format!("{}.json", plan.provider));
         reject_existing_symlink_components(&settings_root, &settings_rel)?;
         let settings_path = settings_root.join(settings_rel);
@@ -165,6 +260,18 @@ impl SetupStore {
             extension_instance.as_str(),
         )
         .map_err(path_std_io::Error::other)?;
+        ensure_private_directory_tree(
+            &self.state_dir,
+            &PathBuf::from("provider-settings").join(extension_instance.as_str()),
+        )?;
+        let settings_lock = self
+            .acquire_instance_lock(extension_instance)?
+            .ok_or_else(|| {
+                path_std_io::Error::new(
+                    path_std_io::ErrorKind::NotFound,
+                    "provider settings directory disappeared before locking",
+                )
+            })?;
         let settings_rel = PathBuf::from(format!("{provider}.json"));
         reject_existing_symlink_components(&settings_root, &settings_rel)?;
         let settings_path = settings_root.join(settings_rel);
@@ -174,7 +281,7 @@ impl SetupStore {
             extension_instance.as_str(),
         )
         .map_err(path_std_io::Error::other)?;
-        let secret_lock = match path_std_fs::File::open(&secret_root) {
+        let secret_lock = match open_directory_no_follow(&secret_root) {
             Ok(lock) => {
                 lock.lock_exclusive()?;
                 Some(lock)
@@ -184,22 +291,18 @@ impl SetupStore {
         };
         let secret_rel = PathBuf::from("providers").join(provider.as_str());
         reject_existing_symlink_components(&secret_root, &secret_rel)?;
-        for slot in CredentialSlot::all() {
-            let _ = remove_file_sync(
-                &secret_root
-                    .join("providers")
-                    .join(provider.as_str())
-                    .join(slot.file_name()),
-            )?;
+        for slot in ProviderCredentialSlot::all() {
+            let _ = remove_file_sync(&secret_root.join(slot.path(provider).as_str()))?;
         }
         if let Some(secret_lock) = secret_lock {
             fs2::FileExt::unlock(&secret_lock)?;
         }
+        drop(settings_lock);
         Ok(removed)
     }
 
     /// Returns the selected instance's credential-free settings files.
-    pub(crate) fn settings_files(
+    fn settings_files_unlocked(
         &self,
         extension_instance: &tau_proto::ExtensionName,
     ) -> path_std_io::Result<Vec<(tau_proto::ProviderName, Vec<u8>)>> {
@@ -234,25 +337,88 @@ impl SetupStore {
         Ok(files)
     }
 
+    /// Capture settings and matching credential slots under the universal
+    /// instance-before-Secret lock order, releasing both before presentation.
+    pub(crate) fn snapshot(
+        &self,
+        extension_instance: &tau_proto::ExtensionName,
+    ) -> path_std_io::Result<SetupSnapshot> {
+        use fs2::FileExt as _;
+
+        let settings_lock = self.acquire_instance_lock(extension_instance)?;
+        let Some(_settings_lock) = settings_lock else {
+            return Ok(SetupSnapshot {
+                settings: Vec::new(),
+                credentials: BTreeMap::new(),
+            });
+        };
+        let settings = self.settings_files_unlocked(extension_instance)?;
+        let secret_root = tau_config::settings::extension_secret_dir_of(
+            &self.state_dir,
+            extension_instance.as_str(),
+        )
+        .map_err(path_std_io::Error::other)?;
+        let secret_lock = match open_directory_no_follow(&secret_root) {
+            Ok(lock) => {
+                lock.lock_exclusive()?;
+                Some(lock)
+            }
+            Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let mut credentials = BTreeMap::new();
+        for (provider, _) in &settings {
+            for slot in ProviderCredentialSlot::all() {
+                match self.credential(extension_instance, provider, slot) {
+                    Ok(bytes) => {
+                        credentials.insert((provider.clone(), slot), bytes);
+                    }
+                    Err(error) if error.kind() == path_std_io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        if let Some(secret_lock) = secret_lock {
+            fs2::FileExt::unlock(&secret_lock)?;
+        }
+        Ok(SetupSnapshot {
+            settings,
+            credentials,
+        })
+    }
+
     /// Reads one deterministic credential slot for safe setup-status
     /// inspection.
     pub(crate) fn credential(
         &self,
         extension_instance: &tau_proto::ExtensionName,
         provider: &tau_proto::ProviderName,
-        slot: CredentialSlot,
+        slot: ProviderCredentialSlot,
     ) -> path_std_io::Result<Vec<u8>> {
         let root = tau_config::settings::extension_secret_dir_of(
             &self.state_dir,
             extension_instance.as_str(),
         )
         .map_err(path_std_io::Error::other)?;
-        let relative = PathBuf::from("providers")
-            .join(provider.as_str())
-            .join(slot.file_name());
+        let relative = PathBuf::from(slot.path(provider).as_str());
         reject_existing_symlink_components(&root, &relative)?;
         path_std_fs::read(root.join(relative))
     }
+}
+
+#[cfg(unix)]
+fn open_directory_no_follow(path: &Path) -> path_std_io::Result<path_std_fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    path_std_fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_directory_no_follow(path: &Path) -> path_std_io::Result<path_std_fs::File> {
+    path_std_fs::File::open(path)
 }
 
 #[cfg(test)]

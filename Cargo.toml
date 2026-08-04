@@ -146,7 +146,9 @@ crossterm = { version = "0.28", default-features = false, features = [
   "bracketed-paste",
   "events",
 ] }
-dialoguer = { version = "0.11", default-features = false }
+dialoguer = { version = "0.11", default-features = false, features = [
+  "password",
+] }
 dirs = { version = "6", default-features = false }
 fs2 = { version = "0.4", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = [
