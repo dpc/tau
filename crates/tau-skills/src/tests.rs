@@ -777,6 +777,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge-ext-rhai",
             "tau-self-knowledge-ext-shell",
             "tau-self-knowledge-ext-slack",
+            "tau-self-knowledge-ext-zulip",
             "tau-self-knowledge-ext-swarm",
             "tau-self-knowledge-ext-std-notifications",
             "tau-self-knowledge-ext-test-dummy",

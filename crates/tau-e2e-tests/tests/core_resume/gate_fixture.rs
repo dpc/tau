@@ -122,6 +122,7 @@ impl GateFixture {
             "std-notifications",
             "std-slack",
             "std-telegram",
+            "std-zulip",
             "std-xmpp",
             "std-utils",
             "std-websearch",

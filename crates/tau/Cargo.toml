@@ -30,6 +30,7 @@ tau-ext-test-dummy.workspace = true
 tau-ext-utils.workspace = true
 tau-ext-websearch.workspace = true
 tau-ext-xmpp.workspace = true
+tau-ext-zulip.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

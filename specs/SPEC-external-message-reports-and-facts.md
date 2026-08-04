@@ -3,7 +3,7 @@
 ## Record justification
 
 The report-to-fact contract spans shared protocol DTOs, harness authority,
-validation, canonicalization and persistence, plus Slack, Telegram, and XMPP
+validation, canonicalization and persistence, plus Slack, Telegram, XMPP, and Zulip
 producers and tool-completion integration. No one implementation area owns the
 complete ordering, identity, replay, and failure behavior.
 
@@ -306,7 +306,7 @@ visible-Unicode metadata escaping. Bodies expose C0/C1, bidi controls,
 zero-width/default-ignorable characters, variation selectors, Hangul fillers,
 and noncharacters visibly, then replace only exact `</message>` collisions. All
 other body text remains literal. Do not add
-Slack, Telegram, or XMPP presentation branches.
+transport-specific presentation branches.
 
 When selected context contains any exact-sentinel projection, insert the shared
 provenance rule once. It states that only the outer Tau-stamped sentinel
@@ -375,10 +375,10 @@ completion, or retry the send. Extension-local retry ledgers remain local.
 
 ## Cross-bridge schema validation
 
-The schema remains transport-neutral. Slack, Telegram, and XMPP derive
+The schema remains transport-neutral. Slack, Telegram, XMPP, and Zulip derive
 publisher-scoped opaque sender and message references from their native
 identities without projecting those identities. Optional bounded displays remain
-presentation-only, and only Slack static routes currently supply configured
+presentation-only, and Slack and Zulip static routes currently supply configured
 conversation aliases. Each bridge reports its existing sender admission outcome
 through `MessageSenderAuth`; XMPP's operator-trusted room membership is not
 upgraded to verified identity.

@@ -5668,6 +5668,7 @@ dependencies = [
  "tau-ext-utils",
  "tau-ext-websearch",
  "tau-ext-xmpp",
+ "tau-ext-zulip",
  "tau-harness",
  "tau-proto",
  "tau-socket",
@@ -6079,6 +6080,22 @@ dependencies = [
  "tokio-xmpp",
  "tracing",
  "xmpp-parsers",
+]
+
+[[package]]
+name = "tau-ext-zulip"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake3",
+ "serde",
+ "serde_json",
+ "tau-client",
+ "tau-core",
+ "tau-proto",
+ "tracing",
+ "ureq",
+ "url",
 ]
 
 [[package]]

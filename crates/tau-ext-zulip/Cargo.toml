@@ -1,0 +1,29 @@
+[package]
+name = "tau-ext-zulip"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tau-client.workspace = true
+tau-proto.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tau-core.workspace = true

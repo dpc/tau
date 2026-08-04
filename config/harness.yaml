@@ -145,6 +145,21 @@
 #       allowed_user_ids: [123456789]
 #       # Optional for a private chat; if omitted, send /start to link it.
 #       chat_id: 123456789
+#   std-zulip:
+#     enable: true
+#     secrets:
+#       zulip_bot_email: {}
+#       zulip_api_key: {}
+#       zulip_identity_key: {}
+#     config:
+#       site: https://chat.example.com
+#       bot_email_secret: zulip_bot_email
+#       api_key_secret: zulip_api_key
+#       identity_key_secret: zulip_identity_key
+#       allowed_user_ids: [42]
+#       direct_messages: { receive: all_messages }
+#       conversations:
+#         - { alias: ops, stream_id: 7, topic: deploy, receive: mentions_only, proactive_send: true }
 #   std-xmpp:
 #     enable: true
 #     secrets:

@@ -68,6 +68,13 @@
         config: {},
     },
     {
+        name: "std-zulip",
+        suffix: ["component", "ext-zulip"],
+        role: "tool",
+        enable: false,
+        config: {},
+    },
+    {
         name: "std-xmpp",
         suffix: ["component", "ext-xmpp"],
         role: "tool",

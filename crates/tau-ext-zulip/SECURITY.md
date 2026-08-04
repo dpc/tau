@@ -1,0 +1,11 @@
+# Zulip extension security
+
+The configured same-user extension process is trusted local IPC, while every Zulip response, event, sender field, topic, Markdown body, and display label is untrusted external input. See the root `SECURITY.md` and [`ARCH-external-message-boundary`](../../specs/ARCH-external-message-boundary.md).
+
+`std-zulip` is disabled by default. Enabling the extension does not enable its tools; role policy controls registration, discovery, send, and reaction surfaces. HTTP Basic credentials stay in managed secrets and appear only in the Authorization header. A separate stable managed identity-key secret pseudonymizes publisher-domain identifiers, so routine API-key rotation does not change sender or conversation identity. Rotating the identity key deliberately starts a new opaque identity namespace. Queue IDs and native routes stay process-local. Logs and notices contain categorical outcomes, never secrets, response bodies, message text, native IDs, or queue IDs.
+
+Exact numeric sender allowlists and configured direct-message/stream/topic receive policy gate prompt-producing ingress. Aliases and descriptions never grant authority. Source-bound reply and reaction selectors resolve only bounded local ownership under the same agent and current generations. Proactive send uses only configured aliases. Generic message facts contain descriptive opaque identity and conversation provenance, not actionable native authority.
+
+Zulip organization administrators and conversation members may read transported content. This bridge does not provide end-to-end encryption. `all_messages` broadens prompt-injection and model-spend exposure. Queue loss creates an explicit live-only gap rather than silent backlog recovery. Process restart loses duplicate and reply authority.
+
+Review changes that affect authentication, API-base validation, allowlists, route overlap, DM participant derivation, mention admission, queue gaps, response/event/message bounds, report-before-result ordering, native-ID leakage, mutation ownership, stale-generation checks, or secret redaction. Shared event/journal or harness-extension interface changes require the root persistence/interface gate and are outside this component.

@@ -613,6 +613,17 @@ bounded retry body.
 Slack-specific review triggers and failure/replay invariants are recorded in
 [`crates/tau-ext-slack/SECURITY.md`](crates/tau-ext-slack/SECURITY.md).
 
+The disabled-by-default Zulip bridge uses bot HTTP Basic authentication and
+native event-queue long polling. Exact numeric sender allowlists and configured
+DM or stream/topic policies gate ingress. Queue identifiers and native
+participant, stream, topic, and message routes remain extension-local authority;
+model tools accept only current configured aliases or bounded Tau-issued source
+references. Queue expiry reconnects at a fresh live tip and warns about a
+possible gap rather than fetching missed backlog. Successful sends report before
+their tool result, while ambiguous provider outcomes are not automatically
+retried. Zulip-specific review triggers are recorded in
+[`crates/tau-ext-zulip/SECURITY.md`](crates/tau-ext-zulip/SECURITY.md).
+
 ## Standalone compaction recovery reliability
 
 Standalone compaction and its continuation are harness-owned durable work. Every

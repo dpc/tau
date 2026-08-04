@@ -202,6 +202,10 @@ authorization explicit:
   to explicitly registered agents. An experimental local gateway can own one
   bot's polling and route it to multiple Tau sidecars. See the
   [Telegram README](crates/tau-ext-telegram/README.md).
+- **Zulip:** the disabled-by-default bot bridge uses native event queues for
+  allowlisted direct messages and configured stream/topic routes, with
+  source-bound replies and reactions. See the
+  [Zulip README](crates/tau-ext-zulip/README.md).
 - **XMPP:** the disabled-by-default bridge supports fixed recipients or
   per-agent MUC rooms with allowlisted senders and TLS transport. See the
   [XMPP README](crates/tau-ext-xmpp/README.md).
