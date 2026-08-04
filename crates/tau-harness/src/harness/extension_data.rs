@@ -10,6 +10,8 @@ use std::{fs as path_std_fs, io as path_std_io, path as path_std_path, time as p
 
 /// Maximum bytes accepted for one extension-owned data file.
 const MAX_EXTENSION_DATA_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum bytes accepted for one secret-scope file.
+pub(super) const MAX_SECRET_DATA_FILE_BYTES: u64 = 1024 * 1024;
 /// Maximum directory entries scanned by one extension data list operation.
 const MAX_EXTENSION_DATA_LIST_ENTRIES: usize = 4096;
 
@@ -118,6 +120,9 @@ pub(super) fn checked_extension_data_path(
     set_private_dir_permissions(root)
         .map_err(|error| ExtensionDataError::io("failed to chmod extension data root", error))?;
     reject_symlink_ancestors(root, rel)?;
+    if allow_missing_leaf {
+        create_private_ancestor_dirs(root, rel)?;
+    }
     let full = root.join(rel);
     match std::fs::symlink_metadata(&full) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(ExtensionDataError::new(
@@ -137,6 +142,38 @@ pub(super) fn checked_extension_data_path(
             error,
         )),
     }
+}
+
+fn create_private_ancestor_dirs(root: &Path, rel: &Path) -> Result<(), ExtensionDataError> {
+    let mut current = root.to_path_buf();
+    let mut components = rel.components().peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            break;
+        }
+        current.push(component.as_os_str());
+        match std::fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(error) if error.kind() == path_std_io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(ExtensionDataError::io(
+                    "failed to create extension data directory",
+                    error,
+                ));
+            }
+        }
+        let metadata = std::fs::symlink_metadata(&current)
+            .map_err(|error| ExtensionDataError::io("failed to inspect data directory", error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ExtensionDataError::new(
+                tau_proto::ExtensionDataErrorKind::NotDir,
+                "extension data path ancestor is not a real directory",
+            ));
+        }
+        set_private_dir_permissions(&current)
+            .map_err(|error| ExtensionDataError::io("failed to chmod data directory", error))?;
+    }
+    Ok(())
 }
 
 fn reject_symlink_ancestors(root: &Path, rel: &Path) -> Result<(), ExtensionDataError> {
@@ -230,20 +267,27 @@ fn quota_exceeded(message: impl Into<String>) -> ExtensionDataError {
     ExtensionDataError::new(tau_proto::ExtensionDataErrorKind::QuotaExceeded, message)
 }
 
-fn ensure_request_contents_within_limit(contents: &[u8]) -> Result<(), ExtensionDataError> {
-    if contents.len() as u64 > MAX_EXTENSION_DATA_FILE_BYTES {
+fn ensure_request_contents_within_limit(
+    contents: &[u8],
+    max_bytes: u64,
+) -> Result<(), ExtensionDataError> {
+    if max_bytes < contents.len() as u64 {
         return Err(quota_exceeded(format!(
-            "extension data write is {} bytes; limit is {MAX_EXTENSION_DATA_FILE_BYTES} bytes",
+            "extension data write is {} bytes; limit is {max_bytes} bytes",
             contents.len()
         )));
     }
     Ok(())
 }
 
-fn ensure_file_len_within_limit(rel: &Path, len: u64) -> Result<(), ExtensionDataError> {
-    if MAX_EXTENSION_DATA_FILE_BYTES < len {
+fn ensure_file_len_within_limit(
+    rel: &Path,
+    len: u64,
+    max_bytes: u64,
+) -> Result<(), ExtensionDataError> {
+    if max_bytes < len {
         return Err(quota_exceeded(format!(
-            "`{}` is {len} bytes; limit is {MAX_EXTENSION_DATA_FILE_BYTES} bytes",
+            "`{}` is {len} bytes; limit is {max_bytes} bytes",
             rel.display()
         )));
     }
@@ -406,6 +450,15 @@ pub(super) fn run_extension_data_read_file(
     root: &Path,
     path: String,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    run_extension_data_read_file_with_limit(root, path, MAX_EXTENSION_DATA_FILE_BYTES)
+}
+
+/// Reads one file while enforcing the selected scope's whole-file limit.
+pub(super) fn run_extension_data_read_file_with_limit(
+    root: &Path,
+    path: String,
+    max_bytes: u64,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
     let rel = sanitize_extension_data_path(&path, false)?;
     let path = checked_extension_data_path(root, &rel, false)?;
     if !path.is_file() {
@@ -419,12 +472,12 @@ pub(super) fn run_extension_data_read_file(
     })?;
     let mut contents = Vec::new();
     file.by_ref()
-        .take(MAX_EXTENSION_DATA_FILE_BYTES + 1)
+        .take(max_bytes + 1)
         .read_to_end(&mut contents)
         .map_err(|error| {
             ExtensionDataError::io(format!("failed to read `{}`", rel.display()), error)
         })?;
-    ensure_file_len_within_limit(&rel, contents.len() as u64)?;
+    ensure_file_len_within_limit(&rel, contents.len() as u64, max_bytes)?;
     Ok(tau_proto::ExtensionDataValue::ReadFile { contents })
 }
 
@@ -433,7 +486,17 @@ pub(super) fn run_extension_data_write_file(
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-    ensure_request_contents_within_limit(&contents)?;
+    run_extension_data_write_file_with_limit(root, path, contents, MAX_EXTENSION_DATA_FILE_BYTES)
+}
+
+/// Replaces one file while enforcing the selected scope's whole-file limit.
+pub(super) fn run_extension_data_write_file_with_limit(
+    root: &Path,
+    path: String,
+    contents: Vec<u8>,
+    max_bytes: u64,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    ensure_request_contents_within_limit(&contents, max_bytes)?;
     let rel = sanitize_extension_data_path(&path, false)?;
     let path = checked_extension_data_path(root, &rel, true)?;
     if path.exists() && !path.is_file() {
@@ -453,7 +516,17 @@ pub(super) fn run_extension_data_create_file(
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-    ensure_request_contents_within_limit(&contents)?;
+    run_extension_data_create_file_with_limit(root, path, contents, MAX_EXTENSION_DATA_FILE_BYTES)
+}
+
+/// Creates one file while enforcing the selected scope's whole-file limit.
+pub(super) fn run_extension_data_create_file_with_limit(
+    root: &Path,
+    path: String,
+    contents: Vec<u8>,
+    max_bytes: u64,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    ensure_request_contents_within_limit(&contents, max_bytes)?;
     let rel = sanitize_extension_data_path(&path, false)?;
     let path = checked_extension_data_path(root, &rel, true)?;
     if path.exists() && !path.is_file() {
@@ -473,7 +546,7 @@ pub(super) fn run_extension_data_append_file(
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-    ensure_request_contents_within_limit(&contents)?;
+    ensure_request_contents_within_limit(&contents, MAX_EXTENSION_DATA_FILE_BYTES)?;
     let rel = sanitize_extension_data_path(&path, false)?;
     let path = checked_extension_data_path(root, &rel, true)?;
     if path.exists() && !path.is_file() {
@@ -487,12 +560,110 @@ pub(super) fn run_extension_data_append_file(
             ExtensionDataError::io(format!("failed to stat `{}`", rel.display()), error)
         })?;
         let appended_len = metadata.len().saturating_add(contents.len() as u64);
-        ensure_file_len_within_limit(&rel, appended_len)?;
+        ensure_file_len_within_limit(&rel, appended_len, MAX_EXTENSION_DATA_FILE_BYTES)?;
     }
     append_extension_data_file(&path, &contents).map_err(|error| {
         ExtensionDataError::io(format!("failed to append `{}`", rel.display()), error)
     })?;
     Ok(tau_proto::ExtensionDataValue::AppendFile)
+}
+
+/// Atomically replaces one complete file when its current BLAKE3 generation
+/// matches `expected_generation`.
+///
+/// Locking the scope directory serializes comparison and replacement across
+/// harness processes sharing the same state root. The replacement itself
+/// retains the normal synchronous file and parent-directory durability
+/// contract.
+pub(super) fn run_extension_data_compare_and_swap_file(
+    root: &Path,
+    path: String,
+    expected_generation: String,
+    contents: Vec<u8>,
+    max_bytes: u64,
+) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    ensure_request_contents_within_limit(&contents, max_bytes)?;
+    let rel = sanitize_extension_data_path(&path, false)?;
+    let root_file = lock_extension_data_scope(root)?;
+    let result = (|| {
+        let path = checked_extension_data_path(root, &rel, false)?;
+        let mut current = Vec::new();
+        open_read_no_follow(&path)
+            .and_then(|mut file| {
+                file.by_ref()
+                    .take(max_bytes + 1)
+                    .read_to_end(&mut current)
+                    .map(|_| ())
+            })
+            .map_err(|error| {
+                ExtensionDataError::io(format!("failed to read `{}`", rel.display()), error)
+            })?;
+        ensure_file_len_within_limit(&rel, current.len() as u64, max_bytes)?;
+        let actual_generation = blake3::hash(&current).to_hex().to_string();
+        if actual_generation != expected_generation {
+            return Err(ExtensionDataError::new(
+                tau_proto::ExtensionDataErrorKind::GenerationMismatch,
+                format!("`{}` changed since it was read", rel.display()),
+            ));
+        }
+        atomic_replace_extension_data_file(&path, &contents).map_err(|error| {
+            ExtensionDataError::io(format!("failed to write `{}`", rel.display()), error)
+        })?;
+        Ok(tau_proto::ExtensionDataValue::CompareAndSwapFile)
+    })();
+    let _ = fs2::FileExt::unlock(&root_file);
+    result
+}
+
+/// Serializes one complete scope mutation against CAS and setup-side writers.
+pub(super) fn with_extension_data_scope_lock<T>(
+    root: &Path,
+    operation: impl FnOnce() -> Result<T, ExtensionDataError>,
+) -> Result<T, ExtensionDataError> {
+    let root_file = lock_extension_data_scope(root)?;
+    let result = operation();
+    let _ = fs2::FileExt::unlock(&root_file);
+    result
+}
+
+fn lock_extension_data_scope(root: &Path) -> Result<std::fs::File, ExtensionDataError> {
+    use fs2::FileExt as _;
+
+    let _ = checked_extension_data_path(root, Path::new(""), true)?;
+    let root_file = open_directory_no_follow(root)
+        .map_err(|error| ExtensionDataError::io("failed to open data scope", error))?;
+    root_file
+        .lock_exclusive()
+        .map_err(|error| ExtensionDataError::io("failed to lock data scope", error))?;
+    Ok(root_file)
+}
+
+#[cfg(unix)]
+fn open_directory_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    path_std_fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_directory_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    path_std_fs::File::open(path)
+}
+
+#[cfg(unix)]
+fn open_read_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    path_std_fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_read_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    path_std_fs::File::open(path)
 }
 
 pub(super) fn run_extension_data_delete_file(

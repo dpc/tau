@@ -291,3 +291,8 @@ already-loaded or journal-bound checkpoint display projection; missing, invalid,
 and unreadable facts remain categorical rows. Any snapshot failure is atomic.
 For live agents, the same event-loop snapshot copies the current harness-owned
 work-status phase and canonical title; unavailable and unloaded rows omit it.
+Configured-instance Secret data is durable in persistent and ephemeral-session
+modes but unavailable in memory-only mode. Its 1 MiB complete-file bound,
+append denial, compare-and-swap generation, permissions, durability, and
+no-follow behavior are governed by
+[SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).

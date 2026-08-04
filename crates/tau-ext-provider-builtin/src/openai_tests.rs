@@ -244,6 +244,7 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
                         .expect("test extension name must satisfy the identifier grammar"),
                     state_dir: None,
                     secrets: path_std_collections::BTreeMap::new(),
+                    settings_files: Default::default(),
                 }))
                 .expect("encode initial configure");
         }
@@ -253,21 +254,6 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
         writer.flush().expect("flush frames");
     }
     bytes
-}
-
-/// Builds an initial or later Configure frame with only the supplied scoped
-/// secrets.
-fn configure_with_secrets(
-    secrets: path_std_collections::BTreeMap<String, SecretValue>,
-) -> HarnessOutputMessage {
-    HarnessOutputMessage::Configure(tau_proto::Configure {
-        tool_prefix: None,
-        config: tau_proto::CborValue::Map(Vec::new()),
-        instance_name: tau_proto::ExtensionName::parse("test-extension")
-            .expect("test extension name must satisfy the identifier grammar"),
-        state_dir: None,
-        secrets,
-    })
 }
 
 /// Waits for a complete runtime output snapshot satisfying `predicate`.
@@ -1423,6 +1409,7 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
         &mut profiles,
         &mut refresh_rejections,
         &test_network_policy(),
+        None,
     )
     .expect("configured Responses backend");
 
@@ -1443,7 +1430,6 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
 
     let router_old = crate::chat_completions::OpenRouterProfile {
         api_key: "router-old".to_owned(),
-        api_key_secret: None,
         models: vec![chat_model("route/model")],
     };
     let router_new = crate::chat_completions::OpenRouterProfile {
@@ -1876,6 +1862,7 @@ fn resolves_chatgpt_to_codex_responses_backend() {
         &mut profiles,
         &mut refresh_rejections,
         &test_network_policy(),
+        None,
     )
     .expect("chatgpt backend");
 
@@ -1900,6 +1887,7 @@ fn chatgpt_phase_metadata_is_model_specific() {
         &mut profiles,
         &mut refresh_rejections,
         &test_network_policy(),
+        None,
     )
     .expect("old codex backend");
     let new = resolve_responses_backend(
@@ -1907,6 +1895,7 @@ fn chatgpt_phase_metadata_is_model_specific() {
         &mut profiles,
         &mut refresh_rejections,
         &test_network_policy(),
+        None,
     )
     .expect("new codex backend");
 
@@ -3667,7 +3656,6 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
         ProviderName::new("router"),
         BuiltinProviderProfile::OpenRouter(OpenRouterProfile {
             api_key: "router-key".to_owned(),
-            api_key_secret: None,
             models: vec![chat_model("router-model")],
         }),
     );
@@ -4848,97 +4836,6 @@ fn replayed_session_dir_controls_live_prompt_debug_policy() {
 
 /// Production startup captures only the initial scoped Configure map, resolves
 /// references before model publication, and never exposes the resolved value.
-#[test]
-fn api_key_secret_configure_snapshot_is_startup_stable_and_redacted() {
-    let first_secret = "first-secret-value";
-    let later_secret = "later-secret-value";
-    let snapshot = Arc::new(Mutex::new(BTreeMap::new()));
-    let snapshot_for_loader = Arc::clone(&snapshot);
-    let observed_keys = Arc::new(Mutex::new(Vec::new()));
-    let observed_for_loader = Arc::clone(&observed_keys);
-    let template = BuiltinProviderProfiles {
-        providers: BTreeMap::from([(
-            ProviderName::new("configured"),
-            BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
-                api_key: String::new(),
-                api_key_secret: Some("first".to_owned()),
-                models: vec![chat_model("configured-model")],
-                ..ChatCompletionsProvider::default()
-            }),
-        )]),
-    };
-    let loader = move || {
-        let mut profiles = template.clone();
-        let secrets = snapshot_for_loader
-            .lock()
-            .expect("lock startup secret snapshot")
-            .clone();
-        profiles
-            .resolve_api_key_secrets(&secrets)
-            .expect("initial configured secret resolves");
-        let BuiltinProviderProfile::ChatCompletions(provider) =
-            &profiles.providers[&ProviderName::new("configured")]
-        else {
-            panic!("configured profile kind")
-        };
-        observed_for_loader
-            .lock()
-            .expect("record resolved key")
-            .push(provider.api_key.clone());
-        profiles
-    };
-    let input = encode_frames(&[
-        configure_with_secrets(BTreeMap::from([(
-            "first".to_owned(),
-            SecretValue::new(first_secret),
-        )])),
-        configure_with_secrets(BTreeMap::from([(
-            "later".to_owned(),
-            SecretValue::new(later_secret),
-        )])),
-        HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
-            reason: Some("done".to_owned()),
-        }),
-    ]);
-    let writer = SharedWriter::default();
-    let output = writer.clone();
-    run_inner_with_configured_secrets(
-        Cursor::new(input),
-        writer,
-        BuiltinProviderProfiles::default(),
-        loader,
-        Arc::clone(&snapshot),
-    )
-    .expect("run provider extension");
-
-    assert_eq!(
-        *observed_keys.lock().expect("resolved keys"),
-        vec![first_secret]
-    );
-    assert_eq!(
-        snapshot
-            .lock()
-            .expect("startup secret snapshot")
-            .keys()
-            .collect::<Vec<_>>(),
-        vec![&"first".to_owned()]
-    );
-    let bytes = output.bytes();
-    let output_text = String::from_utf8_lossy(&bytes);
-    assert!(!output_text.contains(first_secret));
-    assert!(!output_text.contains(later_secret));
-    assert!(
-        decode_frames(&bytes).iter().any(|frame| {
-            matches!(
-                input_event(frame),
-                Some(Event::ProviderModelsDeclared(models))
-                    if models.models.iter().any(|model| model.id.to_string() == "configured/configured-model")
-            )
-        }),
-        "resolved profile must publish its models during startup"
-    );
-}
-
 #[test]
 fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
     // Provider model snapshots need to reach the harness during startup so

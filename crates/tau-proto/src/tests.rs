@@ -2123,6 +2123,7 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
             config: CborValue::Null,
             state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
             secrets: std::collections::BTreeMap::new(),
+            settings_files: Default::default(),
         }),
         HarnessOutputMessage::Disconnect(Disconnect {
             reason: Some("shutdown".to_owned()),
@@ -3573,6 +3574,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
         config: CborValue::Null,
         state_dir: Some(path_std_path::PathBuf::from("/tmp/tau/state/ext/demo")),
         secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
     };
     let json = serde_json::to_value(&with_state).expect("serialize configure");
     assert_eq!(
@@ -3589,6 +3591,7 @@ fn configure_requires_instance_name_and_keeps_state_dir_optional() {
         config: CborValue::Null,
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
     })
     .expect("serialize configure without state dir");
     assert!(without_state.get("state_dir").is_none());
@@ -3609,6 +3612,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
         config: CborValue::Null,
         state_dir: None,
         secrets,
+        settings_files: Default::default(),
     };
 
     let debug = format!("{configure:?}");
@@ -6115,4 +6119,32 @@ fn role_setting_adjustments_are_positive_saturating_and_wire_safe() {
         .expect("deserialize"),
         action
     );
+}
+
+/// Proves Secret request and result diagnostics expose shape and lengths but
+/// never credential payload bytes.
+#[test]
+fn extension_data_debug_redacts_secret_payload_bytes() {
+    let request = crate::ExtensionDataRequest {
+        request_id: "request-1".to_owned(),
+        scope: crate::ExtensionDataScope::Secret,
+        op: crate::ExtensionDataRequestOp::CompareAndSwapFile {
+            path: crate::ExtensionDataPath::new("credential.json"),
+            expected_generation: "generation".to_owned(),
+            contents: b"never-print-request".to_vec(),
+        },
+    };
+    let result = crate::ExtensionDataResult {
+        request_id: "request-1".to_owned(),
+        result: crate::ExtensionDataResultPayload::Ok {
+            value: crate::ExtensionDataValue::ReadFile {
+                contents: b"never-print-result".to_vec(),
+            },
+        },
+    };
+
+    let debug = format!("{request:?} {result:?}");
+    assert!(!debug.contains("never-print-request"));
+    assert!(!debug.contains("never-print-result"));
+    assert!(debug.contains("contents_len"));
 }

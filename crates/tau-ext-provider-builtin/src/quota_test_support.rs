@@ -125,7 +125,10 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
             responses_lite_compatibility: false,
         }),
     );
-    let profiles = BuiltinProviderProfiles { providers };
+    let profiles = BuiltinProviderProfiles {
+        providers,
+        credential_paths: Default::default(),
+    };
     let reload_profiles = profiles.clone();
     let result = run_inner_with_prompt_executor(
         input.clone(),

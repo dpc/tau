@@ -98,13 +98,108 @@ use crate::harness::agent_context::AgentContextStore;
 use crate::harness::agent_watch_provider_deliveries::AgentWatchProviderDeliveries;
 use crate::harness::current_session::CurrentSessionState;
 use crate::harness::extension_data::{
-    ExtensionDataError, run_extension_data_append_file, run_extension_data_create_file,
-    run_extension_data_delete_file, run_extension_data_list_files, run_extension_data_read_file,
-    run_extension_data_rename_file, run_extension_data_write_file,
+    ExtensionDataError, MAX_SECRET_DATA_FILE_BYTES, run_extension_data_append_file,
+    run_extension_data_compare_and_swap_file, run_extension_data_create_file,
+    run_extension_data_create_file_with_limit, run_extension_data_delete_file,
+    run_extension_data_list_files, run_extension_data_read_file,
+    run_extension_data_read_file_with_limit, run_extension_data_rename_file,
+    run_extension_data_write_file, run_extension_data_write_file_with_limit,
+    with_extension_data_scope_lock,
 };
 
 /// Model-visible reminder to report meaningful work through the status tool.
 pub(crate) const STATUS_REMINDER: &str = "Reminder: call `status` when starting a task; use an informative `task_name`, not an opaque identifier or task/ticket number alone, and batch it with other calls when possible.";
+
+/// Maximum number of CLI-owned settings files sent to one extension at startup.
+const MAX_EXTENSION_SETTINGS_FILES: usize = 4_096;
+/// Maximum bytes accepted from one CLI-owned settings file.
+const MAX_EXTENSION_SETTINGS_FILE_BYTES: u64 = 1024 * 1024;
+/// Maximum total settings bytes, reserving one MiB of the protocol frame for
+/// Configure's CBOR envelope, file names, and extension configuration.
+const MAX_EXTENSION_SETTINGS_SNAPSHOT_BYTES: u64 =
+    tau_proto::MAX_PROTOCOL_MESSAGE_BYTES - MAX_EXTENSION_SETTINGS_FILE_BYTES;
+
+fn load_extension_settings_files(
+    state_dir: &Path,
+    extension_name: &str,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    use std::io::Read as _;
+
+    let root = tau_config::settings::extension_provider_settings_dir_of(state_dir, extension_name)
+        .map_err(|error| error.to_string())?;
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err("settings root is not a real directory".to_owned());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(format!("could not inspect settings directory: {error}")),
+    }
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(format!("could not list settings directory: {error}")),
+    };
+    let mut files = BTreeMap::new();
+    let mut total_bytes = 0_u64;
+    for (index, entry) in entries.enumerate() {
+        if MAX_EXTENSION_SETTINGS_FILES <= index {
+            return Err(format!(
+                "settings directory exceeds {MAX_EXTENSION_SETTINGS_FILES} entries"
+            ));
+        }
+        let entry = entry.map_err(|error| format!("could not read settings entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("could not inspect settings entry: {error}"))?;
+        if !file_type.is_file() || file_type.is_symlink() {
+            return Err("settings directory contains a non-regular entry".to_owned());
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "settings file name is not UTF-8".to_owned())?;
+        if !name.ends_with(".json")
+            || tau_proto::ProviderName::try_new(name.trim_end_matches(".json").to_owned()).is_err()
+        {
+            return Err("settings file name is not a valid provider JSON name".to_owned());
+        }
+        let mut contents = Vec::new();
+        open_settings_file_no_follow(&entry.path())
+            .and_then(|file| {
+                file.take(MAX_EXTENSION_SETTINGS_FILE_BYTES + 1)
+                    .read_to_end(&mut contents)
+            })
+            .map_err(|error| format!("could not read settings file: {error}"))?;
+        if MAX_EXTENSION_SETTINGS_FILE_BYTES < contents.len() as u64 {
+            return Err(format!(
+                "settings file exceeds {MAX_EXTENSION_SETTINGS_FILE_BYTES} bytes"
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(contents.len() as u64);
+        if MAX_EXTENSION_SETTINGS_SNAPSHOT_BYTES < total_bytes {
+            return Err(format!(
+                "settings snapshot exceeds {MAX_EXTENSION_SETTINGS_SNAPSHOT_BYTES} bytes"
+            ));
+        }
+        files.insert(name, contents);
+    }
+    Ok(files)
+}
+
+#[cfg(unix)]
+fn open_settings_file_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_settings_file_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    path_std_fs::File::open(path)
+}
 #[cfg(test)]
 use crate::harness::extension_data::{
     append_extension_data_file, atomic_replace_extension_data_file, checked_extension_data_path,
@@ -4080,7 +4175,14 @@ impl Harness {
                         .map_err(|error| HarnessError::Participant(error.to_string()))?,
                 )
             };
-            let spawned = match spawn_supervised(ext_config, kind.clone(), log_path, &self.tx) {
+            let spawned = match spawn_supervised(
+                ext_config,
+                kind.clone(),
+                log_path,
+                &self.tx,
+                &self.state_dir,
+                self.storage_mode.is_memory_only(),
+            ) {
                 Ok(spawned) => spawned,
                 Err(error) if !ext_config.require => {
                     tracing::warn!(
@@ -9673,12 +9775,17 @@ impl Harness {
         request: tau_proto::ExtensionDataRequest,
     ) {
         let request_id = request.request_id;
+        let secret_scope = request.scope == tau_proto::ExtensionDataScope::Secret;
         let result = match self.run_extension_data_request(connection_id, request.scope, request.op)
         {
             Ok(value) => tau_proto::ExtensionDataResultPayload::Ok { value },
             Err(error) => tau_proto::ExtensionDataResultPayload::Error {
                 kind: error.kind,
-                message: error.message,
+                message: if secret_scope {
+                    "secret data operation failed".to_owned()
+                } else {
+                    error.message
+                },
             },
         };
         self.send_extension_data_result(connection_id, request_id, result);
@@ -9690,25 +9797,95 @@ impl Harness {
         scope: tau_proto::ExtensionDataScope,
         op: tau_proto::ExtensionDataRequestOp,
     ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+        let is_secret = scope == tau_proto::ExtensionDataScope::Secret;
         let root = self.extension_data_scope_root(connection_id, scope)?;
         match op {
             tau_proto::ExtensionDataRequestOp::ReadFile { path } => {
-                run_extension_data_read_file(&root, path.into_string())
+                if is_secret {
+                    run_extension_data_read_file_with_limit(
+                        &root,
+                        path.into_string(),
+                        MAX_SECRET_DATA_FILE_BYTES,
+                    )
+                } else {
+                    run_extension_data_read_file(&root, path.into_string())
+                }
             }
             tau_proto::ExtensionDataRequestOp::WriteFile { path, contents } => {
-                run_extension_data_write_file(&root, path.into_string(), contents)
+                if is_secret {
+                    with_extension_data_scope_lock(&root, || {
+                        run_extension_data_write_file_with_limit(
+                            &root,
+                            path.into_string(),
+                            contents,
+                            MAX_SECRET_DATA_FILE_BYTES,
+                        )
+                    })
+                } else {
+                    run_extension_data_write_file(&root, path.into_string(), contents)
+                }
+            }
+            tau_proto::ExtensionDataRequestOp::CompareAndSwapFile {
+                path,
+                expected_generation,
+                contents,
+            } => {
+                if is_secret {
+                    run_extension_data_compare_and_swap_file(
+                        &root,
+                        path.into_string(),
+                        expected_generation,
+                        contents,
+                        MAX_SECRET_DATA_FILE_BYTES,
+                    )
+                } else {
+                    Err(ExtensionDataError::new(
+                        tau_proto::ExtensionDataErrorKind::Permission,
+                        "compare-and-swap is available only for secret data",
+                    ))
+                }
             }
             tau_proto::ExtensionDataRequestOp::CreateFile { path, contents } => {
-                run_extension_data_create_file(&root, path.into_string(), contents)
+                if is_secret {
+                    with_extension_data_scope_lock(&root, || {
+                        run_extension_data_create_file_with_limit(
+                            &root,
+                            path.into_string(),
+                            contents,
+                            MAX_SECRET_DATA_FILE_BYTES,
+                        )
+                    })
+                } else {
+                    run_extension_data_create_file(&root, path.into_string(), contents)
+                }
             }
             tau_proto::ExtensionDataRequestOp::AppendFile { path, contents } => {
-                run_extension_data_append_file(&root, path.into_string(), contents)
+                if is_secret {
+                    Err(ExtensionDataError::new(
+                        tau_proto::ExtensionDataErrorKind::Permission,
+                        "append is unavailable for secret data",
+                    ))
+                } else {
+                    run_extension_data_append_file(&root, path.into_string(), contents)
+                }
             }
             tau_proto::ExtensionDataRequestOp::DeleteFile { path } => {
-                run_extension_data_delete_file(&root, path.into_string())
+                if is_secret {
+                    with_extension_data_scope_lock(&root, || {
+                        run_extension_data_delete_file(&root, path.into_string())
+                    })
+                } else {
+                    run_extension_data_delete_file(&root, path.into_string())
+                }
             }
             tau_proto::ExtensionDataRequestOp::RenameFile { from, to } => {
-                run_extension_data_rename_file(&root, from.into_string(), to.into_string())
+                if is_secret {
+                    with_extension_data_scope_lock(&root, || {
+                        run_extension_data_rename_file(&root, from.into_string(), to.into_string())
+                    })
+                } else {
+                    run_extension_data_rename_file(&root, from.into_string(), to.into_string())
+                }
             }
             tau_proto::ExtensionDataRequestOp::ListFiles { path } => {
                 run_extension_data_list_files(&root, path.into_string())
@@ -9727,17 +9904,19 @@ impl Harness {
                 "extension data is unavailable in memory-only harnesses",
             ));
         }
-        let name = self
-            .extensions
-            .entries
-            .get(connection_id)
-            .map(|entry| entry.name.as_str())
-            .ok_or_else(|| {
-                ExtensionDataError::new(
-                    tau_proto::ExtensionDataErrorKind::Io,
-                    "unknown extension connection",
-                )
-            })?;
+        let entry = self.extensions.entries.get(connection_id).ok_or_else(|| {
+            ExtensionDataError::new(
+                tau_proto::ExtensionDataErrorKind::Io,
+                "unknown extension connection",
+            )
+        })?;
+        if scope == tau_proto::ExtensionDataScope::Secret && entry.supervised_config.is_none() {
+            return Err(ExtensionDataError::new(
+                tau_proto::ExtensionDataErrorKind::Permission,
+                "secret data is unavailable to in-process extensions",
+            ));
+        }
+        let name = entry.name.as_str();
         tau_config::settings::validate_extension_name(name).map_err(|error| {
             ExtensionDataError::new(
                 tau_proto::ExtensionDataErrorKind::InvalidPath,
@@ -9773,6 +9952,13 @@ impl Harness {
                         "could not determine user cache directory",
                     )
                 }),
+            tau_proto::ExtensionDataScope::Secret => tau_config::settings::extension_secret_dir_of(
+                &self.state_dir,
+                name,
+            )
+            .map_err(|error| {
+                ExtensionDataError::new(tau_proto::ExtensionDataErrorKind::Io, error.to_string())
+            }),
         }
     }
 
@@ -16842,7 +17028,14 @@ impl Harness {
                 .map_err(|error| HarnessError::Participant(error.to_string()))?,
             )
         };
-        let spawned = spawn_supervised(&config, kind.clone(), log_path, &self.tx)?;
+        let spawned = spawn_supervised(
+            &config,
+            kind.clone(),
+            log_path,
+            &self.tx,
+            &self.state_dir,
+            self.storage_mode.is_memory_only(),
+        )?;
         let new_connection_id = spawned.connection_id.clone();
         tracing::info!(
             target: "tau_harness::startup",
@@ -17245,6 +17438,28 @@ impl Harness {
                 },
             )
         };
+        let settings_files = if self.storage_mode.is_memory_only()
+            || entry.supervised_config.is_none()
+            || entry.kind != ClientKind::Provider
+        {
+            BTreeMap::new()
+        } else {
+            match load_extension_settings_files(&self.state_dir, entry.name.as_str()) {
+                Ok(files) => files,
+                Err(error) => {
+                    let _ = self.bus.send_to(
+                        source_id,
+                        None,
+                        HarnessOutputMessage::Disconnect(Disconnect {
+                            reason: Some(format!(
+                                "failed to load provider settings snapshot: {error}"
+                            )),
+                        }),
+                    );
+                    return;
+                }
+            }
+        };
         if let Some(state_dir) = &state_dir
             && let Err(error) = std::fs::create_dir_all(state_dir)
         {
@@ -17255,22 +17470,32 @@ impl Harness {
                 "failed to create extension state directory before configure"
             );
         }
-        let _ = self.bus.send_to(
-            source_id,
-            None,
-            HarnessOutputMessage::Configure(tau_proto::Configure {
-                config: tau_proto::json_to_cbor(&config_json),
-                instance_name: self
-                    .extensions
-                    .entries
-                    .get(source_id)
-                    .map(|entry| entry.name.clone())
-                    .expect("configured extension has a stable instance name"),
-                tool_prefix,
-                state_dir,
-                secrets,
-            }),
-        );
+        let configure = HarnessOutputMessage::Configure(tau_proto::Configure {
+            config: tau_proto::json_to_cbor(&config_json),
+            instance_name: self
+                .extensions
+                .entries
+                .get(source_id)
+                .map(|entry| entry.name.clone())
+                .expect("configured extension has a stable instance name"),
+            tool_prefix,
+            state_dir,
+            secrets,
+            settings_files,
+        });
+        let configure_fits = tau_proto::encode_harness_output_to_vec(&configure)
+            .is_ok_and(|encoded| encoded.len() as u64 <= tau_proto::MAX_PROTOCOL_MESSAGE_BYTES);
+        if !configure_fits {
+            let _ = self.bus.send_to(
+                source_id,
+                None,
+                HarnessOutputMessage::Disconnect(Disconnect {
+                    reason: Some("extension Configure exceeds protocol frame limit".to_owned()),
+                }),
+            );
+            return;
+        }
+        let _ = self.bus.send_to(source_id, None, configure);
     }
 
     pub(crate) fn emit_info(&mut self, message: &str) {

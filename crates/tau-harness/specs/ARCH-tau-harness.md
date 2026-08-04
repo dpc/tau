@@ -412,3 +412,10 @@ Results are correlated and requester-directed; they are not events and never
 enter persistence, interception, publication, subscription replay, or extension
 delivery. Exact wire behavior is specified by
 [SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
+The harness owns configured-instance Secret storage, payload-opaque RPC routing,
+and the mandatory outer Linux namespace launcher. It masks the whole secret root,
+mounts CLI-owned provider settings read-only only for configured Provider
+instances, gives `Configure.settings_files` only to those persistent providers,
+and fails supervised startup closed. Tool and memory-only instances receive
+neither provider-settings surface, as specified by
+[SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).

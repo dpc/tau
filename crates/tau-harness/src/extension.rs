@@ -204,30 +204,150 @@ pub fn harness_log_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
     session_logs_dir(sessions_dir, session_id).join("tau-harness.log")
 }
 
-fn supervised_command(config: &ExtensionConfig, pipe_stderr: bool) -> Command {
-    let mut command = Command::new(&config.command);
-    command
-        .args(&config.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
-    if let Some(cwd) = config.cwd.as_ref() {
-        command.current_dir(cwd);
-    }
+fn supervised_command(
+    config: &ExtensionConfig,
+    kind: &ClientKind,
+    pipe_stderr: bool,
+    state_dir: &Path,
+    memory_only: bool,
+) -> Result<(Command, Option<tempfile::TempDir>), HarnessError> {
+    let (mut command, empty_mask) =
+        isolated_supervised_command(config, kind, state_dir, memory_only)?;
+    command.stdin(Stdio::piped()).stdout(Stdio::piped());
     if pipe_stderr {
         command.stderr(Stdio::piped());
     } else {
         command.stderr(Stdio::inherit());
     }
-    command
+    Ok((command, empty_mask))
+}
+
+fn isolated_supervised_command(
+    config: &ExtensionConfig,
+    kind: &ClientKind,
+    state_dir: &Path,
+    memory_only: bool,
+) -> Result<(Command, Option<tempfile::TempDir>), HarnessError> {
+    #[cfg(test)]
+    {
+        let _ = (kind, state_dir, memory_only);
+        let mut command = Command::new(&config.command);
+        command.args(&config.args);
+        if let Some(cwd) = config.cwd.as_ref() {
+            command.current_dir(cwd);
+        }
+        Ok((command, None))
+    }
+
+    #[cfg(not(test))]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let settings_root =
+            prepare_provider_settings_mount(state_dir, &config.name, kind, memory_only)?;
+        let cwd = config
+            .cwd
+            .clone()
+            .unwrap_or(std::env::current_dir()?)
+            .canonicalize()?;
+        let secret_mask_target = if memory_only {
+            state_dir
+                .exists()
+                .then(|| state_dir.canonicalize())
+                .transpose()?
+        } else {
+            create_private_state_tree(
+                state_dir,
+                &PathBuf::from("secrets/ext").join(config.name.as_str()),
+            )?;
+            Some(state_dir.join("secrets"))
+        };
+        if secret_mask_target
+            .as_ref()
+            .is_some_and(|target| cwd.starts_with(target))
+        {
+            return Err(HarnessError::Participant(format!(
+                "extension `{}` cwd must not be at or below masked Tau state",
+                config.name
+            )));
+        }
+        let empty_mask = tempfile::Builder::new()
+            .prefix("tau-extension-secret-mask-")
+            .tempdir()?;
+        std::fs::set_permissions(
+            empty_mask.path(),
+            path_std_fs::Permissions::from_mode(0o700),
+        )?;
+        let mut command = Command::new(&config.command);
+        command.args(&config.args).current_dir("/");
+        crate::extension_launcher::configure_command(
+            &mut command,
+            secret_mask_target.as_deref(),
+            empty_mask.path(),
+            settings_root.as_deref(),
+            &cwd,
+        )
+        .map_err(HarnessError::Participant)?;
+        Ok((command, Some(empty_mask)))
+    }
+}
+
+fn prepare_provider_settings_mount(
+    state_dir: &Path,
+    extension_name: &str,
+    kind: &ClientKind,
+    memory_only: bool,
+) -> Result<Option<PathBuf>, HarnessError> {
+    if memory_only || kind != &ClientKind::Provider {
+        return Ok(None);
+    }
+    let settings_root =
+        tau_config::settings::extension_provider_settings_dir_of(state_dir, extension_name)
+            .map_err(|error| HarnessError::Participant(error.to_string()))?;
+    create_private_state_tree(
+        state_dir,
+        &PathBuf::from("provider-settings").join(extension_name),
+    )?;
+    Ok(Some(settings_root))
+}
+
+fn create_private_state_tree(root: &Path, relative: &Path) -> Result<(), HarnessError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match std::fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(error) if error.kind() == path_std_io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let metadata = std::fs::symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(HarnessError::Participant(
+                "extension private state path crosses a non-directory".to_owned(),
+            ));
+        }
+        std::fs::set_permissions(&current, path_std_fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn spawn_supervised(
     config: &ExtensionConfig,
-    _kind: ClientKind,
+    kind: ClientKind,
     stderr_log_path: Option<PathBuf>,
     tx: &Sender<HarnessEvent>,
+    state_dir: &Path,
+    memory_only: bool,
 ) -> Result<SupervisedSpawn, HarnessError> {
-    let mut command = supervised_command(config, stderr_log_path.is_some());
+    let (mut command, empty_mask) = supervised_command(
+        config,
+        &kind,
+        stderr_log_path.is_some(),
+        state_dir,
+        memory_only,
+    )?;
     for key in std::env::vars()
         .map(|(key, _)| key)
         .filter(|key| key.starts_with("TAU_SECRET_"))
@@ -242,6 +362,7 @@ pub(crate) fn spawn_supervised(
             source,
         ))
     })?;
+    drop(empty_mask);
 
     let child_pid = child.id();
     let stdin = child

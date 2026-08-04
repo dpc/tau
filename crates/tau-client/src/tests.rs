@@ -969,6 +969,7 @@ fn config_with_unknown_field() -> HarnessOutputMessage {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
     })
 }
 
@@ -1027,6 +1028,7 @@ fn configure_message() -> HarnessOutputMessage {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
     })
 }
 
@@ -1306,6 +1308,7 @@ fn configure_application_failure_sends_config_error() {
                     .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: None,
                 secrets: path_std_collections::BTreeMap::new(),
+                settings_files: Default::default(),
             }),
             HarnessOutputMessage::deliver_live(UnixMicros::new(13), notice("after-error")),
         ],
@@ -1353,6 +1356,7 @@ fn configure_application_failure_runs_error_hook() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         })],
     );
 
@@ -1386,6 +1390,7 @@ fn raw_configure_error_emits_config_error_and_continues() {
                     .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: None,
                 secrets: path_std_collections::BTreeMap::new(),
+                settings_files: Default::default(),
             }),
             config_with_unknown_field(),
             HarnessOutputMessage::deliver_live(UnixMicros::new(21), notice("after-error")),
@@ -2963,6 +2968,7 @@ fn manual_loop_dispatch_config_error_continues() {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
     });
     let mut runtime = TauExtensionRunner::new(RawConfigureExtension)
         .start_manual_loop(
@@ -3370,6 +3376,7 @@ fn configured_tool_prefix_maps_registration_and_dispatch() {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
     });
     let (state, frames) = run_messages(
         ToolExtension,
@@ -3455,6 +3462,7 @@ fn manual_loop_uses_configured_tool_scope() {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
     });
     let input = encode_output_messages(&[configure, tool_started("work_owned_tool")]);
     let writer = SharedWriter::default();
@@ -3484,6 +3492,7 @@ fn manual_loop_recv_rejects_changed_prefix_and_preserves_scope() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         })
     };
     let writer = SharedWriter::default();
@@ -3526,6 +3535,7 @@ fn manual_loop_try_recv_rejects_changed_prefix_and_preserves_scope() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         })
     };
     let writer = SharedWriter::default();
@@ -3575,6 +3585,7 @@ fn changed_tool_prefix_is_rejected_without_reconfiguring() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         })
     };
     let (state, frames) = run_messages(
@@ -3601,6 +3612,7 @@ fn changed_tool_prefix_preserves_original_tool_dispatch_scope() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         })
     };
     let (state, frames) = run_messages(
@@ -3639,6 +3651,7 @@ fn client_handle_scopes_dynamic_register_and_unregister() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         }))
         .expect("install scope");
     handle.finish_startup().expect("finish test startup");

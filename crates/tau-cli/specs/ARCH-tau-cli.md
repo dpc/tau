@@ -94,12 +94,12 @@ removing the scratch root.
 Provider credentials for `tau dev tmux start` are local-only by default. The
 helper must not copy provider profiles, tokens, API keys, provider config, or
 provider state from the user's real Tau directories unless the user explicitly
-opts in through `testing.yaml`. That allowlist names exact provider profile
-names only; the helper may copy only the corresponding
-`auth.d/<provider>.json` files into scratch state, must not copy lock files,
-general config, sessions, logs, unrelated provider profiles, whole directories,
-or "all providers", and must refuse symlink/path-traversal attempts around those
-files. Reused scratch destinations must be reconciled to the current allowlist
+opts in through `testing.yaml`. That allowlist names exact extension/provider
+pairs only; the helper may copy only the corresponding credential-free settings
+file and typed credential subtree into scratch state, must not copy general
+config, sessions, logs, unrelated provider profiles, or "all providers", and
+must refuse symlink/path-traversal attempts around those files. Reused scratch
+destinations must be reconciled to the current allowlist
 and must not write through pre-existing symlinks, non-regular files, or
 externally linked entries. Missing or empty testing configuration must be
 surfaced as a warning and must continue with no provider credentials in the
@@ -327,3 +327,7 @@ CLI revalidates the chosen agent against the same category with a second
 snapshot and uses the existing local selection transition. Picker cancellation
 and failure do not retarget the prompt draft. This eligibility projection follows
 [SPEC-tau-proto-session-events](../../tau-proto/specs/SPEC-tau-proto-session-events.md).
+The provider setup CLI owns credential-free per-instance settings publication
+and harness-layout secret initialization. Exact target selection and
+secret-first/settings-last ordering follow
+[SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).

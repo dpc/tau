@@ -566,8 +566,8 @@ validated_string_newtype!(
 ///
 /// Validated at construction: non-empty, no `/` (which would collide
 /// with the [`ModelId`] separator), and only filename-safe characters
-/// (ASCII letters/digits, `_`, `-`, `.`) so a `ProviderName` is also
-/// safe to embed in `auth.d/<name>.json` paths.
+/// (ASCII letters/digits, `_`, `-`, `.`) so a `ProviderName` is also safe to
+/// embed in provider settings and credential paths.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct ProviderName(String);
 

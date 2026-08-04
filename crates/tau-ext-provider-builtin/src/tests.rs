@@ -1,13 +1,102 @@
 use std::sync::atomic as path_std_sync_atomic;
 use std::{io as path_std_io, time as path_std_time};
 
-use tau_provider::storage as path_tau_provider_storage;
 use tau_provider_codex::oauth as path_tau_provider_codex_oauth;
 
 mod compatibility;
 
 use super::*;
 use crate::chat_completions::OpenRouterProfile;
+
+/// Proves setup recognizes only canonical component suffix identity, never an
+/// unrelated command or arbitrary argv token containing the component name.
+#[test]
+fn provider_setup_component_identity_is_exact() {
+    let canonical = tau_config::settings::ExtensionEntry {
+        role: Some("provider".to_owned()),
+        suffix: Some(vec![
+            "component".to_owned(),
+            "ext-provider-builtin".to_owned(),
+        ]),
+        ..Default::default()
+    };
+    assert!(provider_cli_entry_is_builtin("provider-work", &canonical));
+
+    for entry in [
+        tau_config::settings::ExtensionEntry {
+            role: Some("provider".to_owned()),
+            command: Some(vec!["ext-provider-builtin".to_owned()]),
+            ..Default::default()
+        },
+        tau_config::settings::ExtensionEntry {
+            role: Some("provider".to_owned()),
+            suffix: Some(vec![
+                "wrapper".to_owned(),
+                "ext-provider-builtin".to_owned(),
+            ]),
+            ..Default::default()
+        },
+    ] {
+        assert!(!provider_cli_entry_is_builtin("provider-work", &entry));
+    }
+}
+
+/// Proves the canonical built-in name inherits identity only while its command
+/// remains inherited; an explicit replacement must restate the exact suffix.
+#[test]
+fn default_provider_setup_identity_rejects_command_replacement_without_suffix() {
+    assert!(provider_cli_entry_is_builtin(
+        "provider-builtin",
+        &tau_config::settings::ExtensionEntry::default(),
+    ));
+    assert!(!provider_cli_entry_is_builtin(
+        "provider-builtin",
+        &tau_config::settings::ExtensionEntry {
+            command: Some(vec!["provider-builtin".to_owned()]),
+            ..Default::default()
+        },
+    ));
+}
+
+/// Proves unsupported credential versions fail during deserialization before
+/// they can enter provider runtime state.
+#[test]
+fn credential_records_validate_versions_while_decoding() {
+    let oauth = br#"{"version":1,"kind":"chatgpt_oauth","access_token":"a","refresh_token":"r","expires_at_ms":1,"account_id":null}"#;
+    let api_key = br#"{"version":1,"kind":"api_key","value":"k"}"#;
+
+    let oauth_error =
+        match serde_json::from_slice::<credential_record::ChatGptOAuthCredential>(oauth) {
+            Err(error) => error,
+            Ok(_) => panic!("unsupported OAuth version decoded"),
+        };
+    let api_key_error = match serde_json::from_slice::<credential_record::ApiKeyCredential>(api_key)
+    {
+        Err(error) => error,
+        Ok(_) => panic!("unsupported API-key version decoded"),
+    };
+    assert!(
+        oauth_error
+            .to_string()
+            .contains("unsupported ChatGPT OAuth")
+    );
+    assert!(api_key_error.to_string().contains("unsupported API-key"));
+}
+
+/// Proves settings cannot redirect credential hydration to another provider or
+/// select a slot inconsistent with the provider kind.
+#[test]
+fn provider_settings_credential_reference_is_authoritative_and_exact() {
+    let provider = ProviderName::new("chatgpt");
+    for settings in [
+        br#"{"kind":"chatgpt","credential":{"kind":"oauth","secret_path":"providers/other/oauth.json"}}"#
+            .as_slice(),
+        br#"{"kind":"chatgpt","credential":{"kind":"api_key","secret_path":"providers/chatgpt/api-key.json"}}"#
+            .as_slice(),
+    ] {
+        assert!(parse_settings_profile(&provider, settings).is_err());
+    }
+}
 
 /// Cloneable in-memory sink used to inspect structured tracing output.
 #[derive(Clone, Default)]
@@ -320,6 +409,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
         account_id: None,
     };
     let mut profiles = BuiltinProviderProfiles {
+        credential_paths: Default::default(),
         providers: BTreeMap::from([
             (
                 first.clone(),
@@ -425,6 +515,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
             profiles,
             &mut successful_rejections,
             &test_network_policy(),
+            None,
         )
     });
     assert_eq!(successful.len(), 2);
@@ -434,561 +525,6 @@ fn startup_quota_initialization_resolves_once_per_provider() {
 /// credential and Responses-mode generation. Credential or mode replacement
 /// permits a new attempt, while a valid replacement clears stale suppression
 /// without calling the endpoint.
-#[test]
-fn permanent_oauth_rejection_is_suppressed_for_unchanged_generation() {
-    let temp = tempfile::tempdir().expect("temporary provider state");
-    let auth_file = path_tau_provider_storage::ProviderStore::open_in(temp.path())
-        .auth_file::<BuiltinProviderProfile>("chatgpt")
-        .expect("test auth file");
-    let provider = ProviderName::new("chatgpt");
-    let expired = OpenAiAuth {
-        access_token: "expired-access".to_owned(),
-        refresh_token: "reused-refresh".to_owned(),
-        expires_at_ms: now_ms().saturating_sub(1),
-        account_id: Some("account".to_owned()),
-    };
-    auth_file
-        .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
-            auth: expired.clone(),
-            responses_lite_compatibility: false,
-        }))
-        .expect("save expired profile");
-    let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(
-        400,
-        r#"{"error":{"code":"refresh_token_reused","message":"already used"}}"#,
-    );
-    let mut attempts = 0;
-    let mut cache = OAuthRefreshRejectionCache::default();
-
-    for expected_suppressed in [false, true] {
-        let error = refresh_chatgpt_credentials_in(
-            &auth_file,
-            &provider,
-            CodexMode::Standard,
-            &mut cache,
-            |_| {
-                attempts += 1;
-                Err(rejection.clone())
-            },
-        )
-        .expect_err("refresh rejection");
-        assert_eq!(
-            matches!(
-                error,
-                RefreshCredentialsError::Suppressed {
-                    credentials: _,
-                    error: _
-                }
-            ),
-            expected_suppressed
-        );
-    }
-    assert_eq!(attempts, 1);
-
-    let changed = OpenAiAuth {
-        access_token: expired.access_token,
-        refresh_token: "replacement-refresh".to_owned(),
-        expires_at_ms: expired.expires_at_ms,
-        account_id: expired.account_id,
-    };
-    auth_file
-        .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
-            auth: changed,
-            responses_lite_compatibility: false,
-        }))
-        .expect("replace credential generation");
-    let error = refresh_chatgpt_credentials_in(
-        &auth_file,
-        &provider,
-        CodexMode::Standard,
-        &mut cache,
-        |_| {
-            attempts += 1;
-            Err(rejection)
-        },
-    )
-    .expect_err("replacement credential gets one attempt");
-
-    assert!(matches!(
-        error,
-        RefreshCredentialsError::OAuth {
-            credentials: _,
-            error: _
-        }
-    ));
-    assert_eq!(attempts, 2);
-
-    let error = refresh_chatgpt_credentials_in(
-        &auth_file,
-        &provider,
-        CodexMode::LiteCompatibility,
-        &mut cache,
-        |_| {
-            attempts += 1;
-            Err(
-                path_tau_provider_codex_oauth::OAuthError::from_http_response(
-                    400,
-                    r#"{"error":{"code":"refresh_token_reused"}}"#,
-                ),
-            )
-        },
-    )
-    .expect_err("profile mode change permits a new attempt");
-    assert!(matches!(
-        error,
-        RefreshCredentialsError::OAuth {
-            credentials: _,
-            error: _
-        }
-    ));
-    assert_eq!(attempts, 3);
-
-    let fresh = OpenAiAuth {
-        access_token: "fresh-access".to_owned(),
-        refresh_token: "fresh-refresh".to_owned(),
-        expires_at_ms: u64::MAX,
-        account_id: Some("fresh-account".to_owned()),
-    };
-    auth_file
-        .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
-            auth: fresh.clone(),
-            responses_lite_compatibility: false,
-        }))
-        .expect("save valid replacement profile");
-    let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
-    let mut loaded_fresh = fresh;
-    let config = resolve_chatgpt_backend_with_refresh(
-        &model,
-        &provider,
-        &mut loaded_fresh,
-        CodexMode::Standard,
-        &mut cache,
-        |provider, mode, cache| {
-            refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
-                attempts += 1;
-                panic!("valid replacement must not call OAuth endpoint")
-            })
-        },
-    )
-    .expect("valid replacement resolves");
-    assert!(config.credentials_match("fresh-access", Some("fresh-account")));
-    assert_eq!(attempts, 3);
-    assert!(!cache.contains(&provider));
-}
-
-/// Refresh error formatting must never expose the authoritative credential
-/// carrier used for stale-generation-safe fallback.
-#[test]
-fn refresh_credentials_error_debug_excludes_credentials() {
-    let secret = "authoritative-credential-secret";
-    let error = RefreshCredentialsError::OAuth {
-        credentials: Box::new(OpenAiAuth {
-            access_token: secret.to_owned(),
-            refresh_token: secret.to_owned(),
-            expires_at_ms: 1,
-            account_id: Some(secret.to_owned()),
-        }),
-        error: path_tau_provider_codex_oauth::OAuthError::from_http_response(
-            400,
-            r#"{"error":{"code":"refresh_token_reused"}}"#,
-        ),
-    };
-
-    assert!(!error.to_string().contains(secret));
-    assert!(!format!("{error:?}").contains(secret));
-}
-
-/// A permanent endpoint rejection remains cached when sidecar unlock fails.
-/// The authoritative locked generation controls valid-only fallback, the next
-/// attempt is suppressed without network access, and diagnostics expose neither
-/// credentials nor reflected provider content.
-#[test]
-fn permanent_rejection_survives_unlock_failure() {
-    for (expires_at_ms, expected_available) in [
-        (now_ms().saturating_add(60_000), true),
-        (now_ms().saturating_sub(1), false),
-    ] {
-        let temp = tempfile::tempdir().expect("temporary provider state");
-        let auth_file = path_tau_provider_storage::ProviderStore::open_in(temp.path())
-            .auth_file::<BuiltinProviderProfile>("chatgpt")
-            .expect("test auth file");
-        let provider = ProviderName::new("chatgpt");
-        let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
-        let secret = "authoritative-unlock-secret";
-        let authoritative = OpenAiAuth {
-            access_token: secret.to_owned(),
-            refresh_token: secret.to_owned(),
-            expires_at_ms,
-            account_id: Some(secret.to_owned()),
-        };
-        auth_file
-            .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
-                auth: authoritative.clone(),
-                responses_lite_compatibility: false,
-            }))
-            .expect("save authoritative generation");
-        let rejection_body = serde_json::json!({
-            "error": {
-                "code": "refresh_token_reused",
-                "message": format!("reflected {secret}"),
-            }
-        })
-        .to_string();
-        let rejection =
-            path_tau_provider_codex_oauth::OAuthError::from_http_response(400, &rejection_body);
-        let mut subsequent_attempts = 0;
-        let mut cache = OAuthRefreshRejectionCache::default();
-        let failure = finish_chatgpt_refresh_attempt(
-            AuthFileLockResult::Completed {
-                value: LockedRefreshOutcome::Rejected {
-                    credentials: authoritative.clone(),
-                    error: rejection.clone(),
-                },
-                unlock_error: Some(path_std_io::Error::other("simulated unlock failure")),
-            },
-            &provider,
-            CodexMode::Standard,
-            &mut cache,
-        )
-        .expect_err("endpoint rejection plus unlock failure");
-
-        match &failure {
-            RefreshCredentialsError::OAuthWithUnlockFailure {
-                credentials,
-                error,
-                unlock_error,
-            } => {
-                assert_eq!(credentials.as_ref(), &authoritative);
-                assert_eq!(error, &rejection);
-                assert_eq!(unlock_error.kind(), std::io::ErrorKind::Other);
-            }
-            other => panic!("unexpected refresh failure: {other:?}"),
-        }
-        assert!(
-            cache
-                .rejection(&provider, &authoritative, CodexMode::Standard)
-                .is_some()
-        );
-        assert!(failure.to_string().contains("lock release also failed"));
-        assert!(!failure.to_string().contains(secret));
-        assert!(!format!("{failure:?}").contains(secret));
-
-        let trace = SharedTraceWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .without_time()
-            .with_ansi(false)
-            .with_writer({
-                let trace = trace.clone();
-                move || trace.clone()
-            })
-            .finish();
-        let mut pending_failure = Some(failure);
-        let mut stale_outer = OpenAiAuth {
-            access_token: "stale-outer".to_owned(),
-            refresh_token: "stale-refresh".to_owned(),
-            expires_at_ms: now_ms().saturating_sub(1),
-            account_id: None,
-        };
-        let resolved = tracing::subscriber::with_default(subscriber, || {
-            resolve_chatgpt_backend_with_refresh(
-                &model,
-                &provider,
-                &mut stale_outer,
-                CodexMode::Standard,
-                &mut cache,
-                |_, _, _| Err(pending_failure.take().expect("one injected unlock failure")),
-            )
-        });
-        assert_eq!(resolved.is_some(), expected_available);
-        assert_eq!(stale_outer, authoritative);
-
-        let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
-        assert!(trace.contains("provider=chatgpt"));
-        assert!(trace.contains("releasing the credential lock failed"));
-        assert!(trace.contains("unlock_error_kind=Other"));
-        assert!(!trace.contains(secret));
-
-        let repeated = refresh_chatgpt_credentials_in(
-            &auth_file,
-            &provider,
-            CodexMode::Standard,
-            &mut cache,
-            |_| {
-                subsequent_attempts += 1;
-                Err(rejection.clone())
-            },
-        )
-        .expect_err("unchanged rejected generation stays suppressed");
-        match repeated {
-            RefreshCredentialsError::Suppressed { credentials, error } => {
-                assert_eq!(*credentials, authoritative);
-                assert_eq!(error, rejection);
-            }
-            other => panic!("unexpected repeated refresh result: {other:?}"),
-        }
-        assert_eq!(subsequent_attempts, 0);
-    }
-}
-
-/// Unlock failure cannot discard a cached authoritative rejection in favor of
-/// stale pre-lock credentials; the locked expired generation remains
-/// unavailable without another OAuth request.
-#[test]
-fn suppressed_generation_survives_unlock_failure() {
-    let provider = ProviderName::new("chatgpt");
-    let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
-    let secret = "suppressed-locked-secret";
-    let locked_expired = OpenAiAuth {
-        access_token: secret.to_owned(),
-        refresh_token: secret.to_owned(),
-        expires_at_ms: now_ms().saturating_sub(1),
-        account_id: Some(secret.to_owned()),
-    };
-    let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(
-        400,
-        r#"{"error":{"code":"refresh_token_reused"}}"#,
-    );
-    let mut cache = OAuthRefreshRejectionCache::default();
-    cache.record_if_permanent(&provider, &locked_expired, CodexMode::Standard, &rejection);
-    let mut stale_valid = OpenAiAuth {
-        access_token: "stale-valid".to_owned(),
-        refresh_token: "stale-refresh".to_owned(),
-        expires_at_ms: now_ms().saturating_add(60_000),
-        account_id: Some("stale-account".to_owned()),
-    };
-    let trace = SharedTraceWriter::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .without_time()
-        .with_ansi(false)
-        .with_writer({
-            let trace = trace.clone();
-            move || trace.clone()
-        })
-        .finish();
-    let mut oauth_calls = 0;
-    let resolved = tracing::subscriber::with_default(subscriber, || {
-        resolve_chatgpt_backend_with_refresh(
-            &model,
-            &provider,
-            &mut stale_valid,
-            CodexMode::Standard,
-            &mut cache,
-            |provider, mode, cache| {
-                let error = cache
-                    .rejection(provider, &locked_expired, mode)
-                    .unwrap_or_else(|| {
-                        oauth_calls += 1;
-                        panic!("cached rejection must suppress the OAuth endpoint")
-                    });
-                finish_chatgpt_refresh_attempt(
-                    AuthFileLockResult::Completed {
-                        value: LockedRefreshOutcome::Suppressed {
-                            credentials: locked_expired.clone(),
-                            error,
-                        },
-                        unlock_error: Some(path_std_io::Error::other("simulated unlock failure")),
-                    },
-                    provider,
-                    mode,
-                    cache,
-                )
-            },
-        )
-    });
-
-    assert!(resolved.is_none());
-    assert_eq!(stale_valid, locked_expired);
-    assert_eq!(oauth_calls, 0);
-    assert!(cache.contains(&provider));
-    let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
-    assert!(trace.contains("provider=chatgpt"));
-    assert!(trace.contains("releasing the credential lock failed"));
-    assert!(!trace.contains(secret));
-}
-
-/// Unlock failure after loading current or saving refreshed credentials still
-/// installs that authoritative generation and clears rejection state for the
-/// replaced generation.
-#[test]
-fn authoritative_credentials_survive_unlock_failure() {
-    let provider = ProviderName::new("chatgpt");
-    let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
-    let rejected = OpenAiAuth {
-        access_token: "rejected-access".to_owned(),
-        refresh_token: "rejected-refresh".to_owned(),
-        expires_at_ms: now_ms().saturating_sub(1),
-        account_id: None,
-    };
-    let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(
-        400,
-        r#"{"error":{"code":"refresh_token_reused"}}"#,
-    );
-    let mut cache = OAuthRefreshRejectionCache::default();
-    cache.record_if_permanent(&provider, &rejected, CodexMode::Standard, &rejection);
-    let secret = "authoritative-current-secret";
-    let authoritative = OpenAiAuth {
-        access_token: secret.to_owned(),
-        refresh_token: secret.to_owned(),
-        expires_at_ms: now_ms().saturating_add(60_000),
-        account_id: Some(secret.to_owned()),
-    };
-    let mut stale_valid = OpenAiAuth {
-        access_token: "stale-valid".to_owned(),
-        refresh_token: "stale-refresh".to_owned(),
-        expires_at_ms: now_ms().saturating_add(60_000),
-        account_id: None,
-    };
-    let trace = SharedTraceWriter::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .without_time()
-        .with_ansi(false)
-        .with_writer({
-            let trace = trace.clone();
-            move || trace.clone()
-        })
-        .finish();
-    let resolved = tracing::subscriber::with_default(subscriber, || {
-        resolve_chatgpt_backend_with_refresh(
-            &model,
-            &provider,
-            &mut stale_valid,
-            CodexMode::Standard,
-            &mut cache,
-            |provider, mode, cache| {
-                finish_chatgpt_refresh_attempt(
-                    AuthFileLockResult::Completed {
-                        value: LockedRefreshOutcome::Credentials(authoritative.clone()),
-                        unlock_error: Some(path_std_io::Error::other("simulated unlock failure")),
-                    },
-                    provider,
-                    mode,
-                    cache,
-                )
-            },
-        )
-    })
-    .expect("authoritative valid credentials remain available");
-
-    assert!(resolved.credentials_match(secret, Some(secret)));
-    assert_eq!(stale_valid, authoritative);
-    assert!(!cache.contains(&provider));
-    let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
-    assert!(trace.contains("provider=chatgpt"));
-    assert!(trace.contains("failed to release credential lock"));
-    assert!(!trace.contains(secret));
-}
-
-/// The auth-file generation loaded under lock is authoritative for failed
-/// refresh fallback; a stale pre-lock profile may never be used after rotation.
-#[test]
-fn rejected_locked_generation_replaces_stale_prelock_credentials() {
-    let temp = tempfile::tempdir().expect("temporary provider state");
-    let auth_file = path_tau_provider_storage::ProviderStore::open_in(temp.path())
-        .auth_file::<BuiltinProviderProfile>("chatgpt")
-        .expect("test auth file");
-    let provider = ProviderName::new("chatgpt");
-    let model = ModelId::new(provider.clone(), ModelName::new("gpt-5.4"));
-    let rejection = path_tau_provider_codex_oauth::OAuthError::from_http_response(
-        400,
-        r#"{"error":{"code":"refresh_token_reused"}}"#,
-    );
-    let mut attempts = 0;
-    let mut cache = OAuthRefreshRejectionCache::default();
-
-    let locked_expired = OpenAiAuth {
-        access_token: "locked-expired".to_owned(),
-        refresh_token: "locked-refresh".to_owned(),
-        expires_at_ms: now_ms().saturating_sub(1),
-        account_id: Some("locked-account".to_owned()),
-    };
-    auth_file
-        .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
-            auth: locked_expired.clone(),
-            responses_lite_compatibility: false,
-        }))
-        .expect("save locked expired generation");
-    let mut stale_valid = OpenAiAuth {
-        access_token: "stale-valid".to_owned(),
-        refresh_token: "stale-refresh".to_owned(),
-        expires_at_ms: now_ms().saturating_add(60_000),
-        account_id: Some("stale-account".to_owned()),
-    };
-    let unavailable = resolve_chatgpt_backend_with_refresh(
-        &model,
-        &provider,
-        &mut stale_valid,
-        CodexMode::Standard,
-        &mut cache,
-        |provider, mode, cache| {
-            refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
-                attempts += 1;
-                Err(rejection.clone())
-            })
-        },
-    );
-    assert!(unavailable.is_none());
-    assert_eq!(stale_valid, locked_expired);
-
-    let locked_valid = OpenAiAuth {
-        access_token: "locked-valid".to_owned(),
-        refresh_token: "locked-refresh-2".to_owned(),
-        expires_at_ms: now_ms().saturating_add(60_000),
-        account_id: Some("locked-account-2".to_owned()),
-    };
-    auth_file
-        .save(&BuiltinProviderProfile::Chatgpt(ChatGptProfile {
-            auth: locked_valid.clone(),
-            responses_lite_compatibility: false,
-        }))
-        .expect("save locked valid generation");
-    let mut stale_expired = OpenAiAuth {
-        access_token: "stale-expired".to_owned(),
-        refresh_token: "stale-refresh".to_owned(),
-        expires_at_ms: now_ms().saturating_sub(1),
-        account_id: Some("stale-account".to_owned()),
-    };
-    let config = resolve_chatgpt_backend_with_refresh(
-        &model,
-        &provider,
-        &mut stale_expired,
-        CodexMode::Standard,
-        &mut cache,
-        |provider, mode, cache| {
-            refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
-                attempts += 1;
-                Err(rejection.clone())
-            })
-        },
-    )
-    .expect("authoritative still-valid bearer may fall back");
-    assert!(config.credentials_match("locked-valid", Some("locked-account-2")));
-    assert_eq!(stale_expired, locked_valid);
-    assert_eq!(attempts, 2);
-
-    let mut same_generation = locked_valid.clone();
-    let cached = resolve_chatgpt_backend_with_refresh(
-        &model,
-        &provider,
-        &mut same_generation,
-        CodexMode::Standard,
-        &mut cache,
-        |provider, mode, cache| {
-            refresh_chatgpt_credentials_in(&auth_file, provider, mode, cache, |_| {
-                attempts += 1;
-                Err(rejection.clone())
-            })
-        },
-    )
-    .expect("cached rejection retains valid fallback");
-    assert!(cached.credentials_match("locked-valid", Some("locked-account-2")));
-    assert_eq!(attempts, 2);
-}
-
-/// Failed preemptive refresh may use an access token until its exact expiry,
-/// but an already expired bearer must make the backend unavailable.
 #[test]
 fn refresh_failure_falls_back_only_to_still_valid_access_token() {
     let provider = ProviderName::new("chatgpt");
@@ -1036,6 +572,7 @@ fn chatgpt_profile_modes_are_independent_and_startup_stable() {
     let standard = ProviderName::new("standard");
     let lite = ProviderName::new("lite");
     let mut startup = BuiltinProviderProfiles {
+        credential_paths: Default::default(),
         providers: BTreeMap::from([
             (
                 standard.clone(),
@@ -1151,7 +688,6 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
     let provider = ChatCompletionsProvider {
         base_url: "http://127.0.0.1:8080/v1".to_owned(),
         api_key: String::new(),
-        api_key_secret: None,
         models: vec![configured.clone()],
         max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
         extra_body: BTreeMap::new(),
@@ -1159,6 +695,7 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
         compat: chat_completions_add_compat(),
     };
     let mut profiles = BuiltinProviderProfiles {
+        credential_paths: Default::default(),
         providers: BTreeMap::from([(
             provider_name.clone(),
             BuiltinProviderProfile::ChatCompletions(provider),
@@ -1174,6 +711,7 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
             &mut profiles,
             &mut refresh_rejections,
             &test_network_policy(),
+                    None,
         ),
         Some(PromptBackend::ChatCompletions { model, .. }) if model.id == configured.id
     ));
@@ -1183,6 +721,7 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
             &mut profiles,
             &mut refresh_rejections,
             &test_network_policy(),
+            None,
         )
         .is_none()
     );
@@ -1198,10 +737,10 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
     let configured = test_chat_model("anthropic/claude-test");
     let profile = OpenRouterProfile {
         api_key: "key".to_owned(),
-        api_key_secret: None,
         models: vec![configured.clone()],
     };
     let mut profiles = BuiltinProviderProfiles {
+        credential_paths: Default::default(),
         providers: BTreeMap::from([(
             provider_name.clone(),
             BuiltinProviderProfile::OpenRouter(profile),
@@ -1217,6 +756,7 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
             &mut profiles,
             &mut refresh_rejections,
             &test_network_policy(),
+                    None,
         ),
         Some(PromptBackend::ChatCompletions { provider, model })
             if provider.base_url == "https://openrouter.ai/api/v1"
@@ -1228,6 +768,7 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
             &mut profiles,
             &mut refresh_rejections,
             &test_network_policy(),
+            None,
         )
         .is_none()
     );
@@ -2402,177 +1943,4 @@ fn quota_refresh_deadlines_coalesce_and_back_off() {
     assert_eq!(quota.failure_delay(&provider), QUOTA_REFRESH_INTERVAL);
     quota.ensure_profile(provider.clone(), 8);
     assert!(!quota.refresh_is_current(&provider, &epoch, second));
-}
-
-/// Secret references must remain serializable profile metadata while all three
-/// API-key backends receive only the resolved startup-snapshot value.
-#[test]
-fn api_key_secret_profiles_round_trip_and_resolve_for_all_backends() {
-    let secret_name = "provider_key";
-    let secret_value = "credential-never-in-profile";
-    let mut profiles = BuiltinProviderProfiles {
-        providers: BTreeMap::from([
-            (
-                ProviderName::new("compatible"),
-                serde_json::from_value(serde_json::json!({
-                    "kind": "chat_completions",
-                    "api_key_secret": secret_name,
-                }))
-                .expect("Chat Completions profile"),
-            ),
-            (
-                ProviderName::new("router"),
-                serde_json::from_value(serde_json::json!({
-                    "kind": "openrouter",
-                    "api_key_secret": secret_name,
-                }))
-                .expect("OpenRouter profile"),
-            ),
-            (
-                ProviderName::new("public"),
-                serde_json::from_value(serde_json::json!({
-                    "kind": "responses",
-                    "api_key_secret": secret_name,
-                }))
-                .expect("Responses profile"),
-            ),
-        ]),
-    };
-    let encoded = serde_json::to_string(&profiles.providers[&ProviderName::new("compatible")])
-        .expect("serialize profile");
-    assert!(encoded.contains(secret_name));
-    assert!(!encoded.contains(secret_value));
-
-    profiles
-        .resolve_api_key_secrets(&BTreeMap::from([(
-            secret_name.to_owned(),
-            SecretValue::new(secret_value),
-        )]))
-        .expect("resolve declared secret");
-
-    for profile in profiles.providers.values() {
-        let key = match profile {
-            BuiltinProviderProfile::ChatCompletions(provider) => &provider.api_key,
-            BuiltinProviderProfile::OpenRouter(provider) => &provider.api_key,
-            BuiltinProviderProfile::Responses(provider) => &provider.api_key,
-            BuiltinProviderProfile::Chatgpt(_) => panic!("unexpected OAuth profile"),
-        };
-        assert_eq!(key, secret_value);
-    }
-}
-
-/// Invalid sources must fail before request routing and diagnostics must not
-/// expose the unavailable secret's value.
-#[test]
-fn api_key_secret_resolution_rejects_ambiguous_invalid_and_unavailable_sources() {
-    let provider = ProviderName::new("example");
-    let secret_value = "credential-must-not-leak";
-    let secrets = BTreeMap::from([("available".to_owned(), SecretValue::new(secret_value))]);
-
-    for (api_key, reference, expected) in [
-        ("inline", Some("available"), "must not set both"),
-        ("", Some(""), "invalid api_key_secret"),
-        ("", Some("bad/name"), "invalid api_key_secret"),
-        (
-            "",
-            Some("missing"),
-            "requires unavailable declared secret 'missing'",
-        ),
-    ] {
-        let mut api_key = api_key.to_owned();
-        let error = crate::api_key_secret::resolve(
-            &provider,
-            &mut api_key,
-            &reference.map(str::to_owned),
-            &secrets,
-        )
-        .expect_err("invalid source must fail closed");
-        assert!(error.to_string().contains(expected));
-        assert!(!error.to_string().contains(secret_value));
-        assert!(!format!("{error:?}").contains(secret_value));
-    }
-}
-
-/// Existing inline and keyless profiles retain their prior serialization and
-/// routing semantics when no secret reference is present.
-#[test]
-fn api_key_secret_preserves_inline_and_keyless_profiles() {
-    let provider: BuiltinProviderProfile = serde_json::from_value(serde_json::json!({
-        "kind": "responses",
-        "api_key": "inline",
-    }))
-    .expect("inline profile");
-    let keyless: BuiltinProviderProfile = serde_json::from_value(serde_json::json!({
-        "kind": "responses",
-    }))
-    .expect("keyless profile");
-    assert_eq!(api_key_status("inline", &None), "api-key");
-    assert_eq!(api_key_status("", &None), "no-api-key");
-    assert_eq!(
-        api_key_status("", &Some("reference".to_owned())),
-        "api-key-secret"
-    );
-    assert!(
-        serde_json::to_string(&provider)
-            .expect("serialize inline profile")
-            .contains("\"api_key\":\"inline\"")
-    );
-    assert!(
-        !serde_json::to_string(&keyless)
-            .expect("serialize keyless profile")
-            .contains("api_key")
-    );
-}
-
-/// References must use the same conservative logical-name grammar as harness
-/// declarations so profile and extension authorization cannot disagree.
-#[test]
-fn api_key_secret_uses_extension_secret_name_grammar() {
-    for name in ["a", "api_key.2", "api-key_3"] {
-        assert!(crate::api_key_secret::is_valid_secret_name(name), "{name}");
-    }
-    for name in ["", ".", "..", "a/b", "a b", "☃"] {
-        assert!(!crate::api_key_secret::is_valid_secret_name(name), "{name}");
-    }
-}
-
-/// A profile whose reference cannot resolve must disappear before model
-/// publication or routing, never silently become a keyless backend.
-#[test]
-fn api_key_secret_filter_excludes_unavailable_profiles() {
-    let profile = |api_key: &str, api_key_secret: Option<&str>| {
-        BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
-            api_key: api_key.to_owned(),
-            api_key_secret: api_key_secret.map(str::to_owned),
-            models: vec![test_chat_model("model")],
-            ..ChatCompletionsProvider::default()
-        })
-    };
-    let profiles = BuiltinProviderProfiles {
-        providers: BTreeMap::from([
-            (ProviderName::new("valid"), profile("", Some("available"))),
-            (ProviderName::new("missing"), profile("", Some("missing"))),
-            (ProviderName::new("empty"), profile("", Some(""))),
-            (ProviderName::new("invalid"), profile("", Some("bad/name"))),
-            (
-                ProviderName::new("dual"),
-                profile("inline", Some("available")),
-            ),
-        ]),
-    };
-    let filtered = resolve_api_key_secret_profiles(
-        profiles,
-        &BTreeMap::from([("available".to_owned(), SecretValue::new("secret-value"))]),
-    );
-    assert_eq!(
-        filtered.providers.keys().collect::<Vec<_>>(),
-        vec![&ProviderName::new("valid")]
-    );
-    assert_eq!(
-        models_for_profiles(&filtered)
-            .iter()
-            .map(|model| model.id.provider.as_str())
-            .collect::<Vec<_>>(),
-        vec!["valid"]
-    );
 }

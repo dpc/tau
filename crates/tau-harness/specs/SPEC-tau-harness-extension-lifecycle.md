@@ -278,3 +278,8 @@ boundaries. It accepts extension names only, not arguments, configuration, or
 shell syntax. Do not place credentials in it (environment values may be visible
 through process/service inspection); use Tau's secret mechanisms and run only
 extensions you trust.
+Every supervised extension crosses the fail-closed launch isolation boundary in
+[SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).
+The harness installs user and mount namespaces outside the complete configured
+argv, masks secrets before selecting cwd, and denies Secret authority to
+test-only in-process connections.

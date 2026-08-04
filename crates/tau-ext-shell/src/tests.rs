@@ -475,6 +475,7 @@ fn spawn_extension_with_exit_and_prefix(
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: Default::default(),
+            settings_files: Default::default(),
         }))
         .expect("write initial configure");
     writer.flush().expect("flush initial configure");
@@ -502,6 +503,7 @@ fn prefixed_shell_dispatch_and_dir_lock_refresh_use_wire_names() {
             )]),
             state_dir: None,
             secrets: Default::default(),
+            settings_files: Default::default(),
         }))
         .expect("enable dir_lock");
     writer.flush().expect("flush config");
@@ -647,6 +649,7 @@ fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable:
             )]),
             state_dir: None,
             secrets: Default::default(),
+            settings_files: Default::default(),
         }))
         .expect("configure dir_lock");
     writer.flush().expect("flush config");
@@ -1448,6 +1451,7 @@ fn initial_dir_lock_override_is_final_before_ready() {
             )]),
             state_dir: None,
             secrets: Default::default(),
+            settings_files: Default::default(),
         }))
         .expect("configure");
     input_writer.flush().expect("flush input");
@@ -5917,6 +5921,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
             )]),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         }))
         .expect("configure");
     writer
@@ -6035,6 +6040,7 @@ fn shell_extension_rejects_invalid_config() {
             )]),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         }))
         .expect("configure");
     writer.flush().expect("flush");
@@ -6085,6 +6091,7 @@ fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
             )]),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         }))
         .expect("configure");
     writer.flush().expect("flush");
@@ -6175,6 +6182,7 @@ fn shell_extension_reports_invalid_working_directory_config() {
             )]),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         }))
         .expect("configure");
     writer.flush().expect("flush");

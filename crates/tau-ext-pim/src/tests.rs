@@ -181,6 +181,7 @@ fn configure(config: CborValue, state_root: &std::path::Path) -> tau_proto::Conf
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: Some(state_root.join("state")),
         secrets: BTreeMap::new(),
+        settings_files: Default::default(),
     }
 }
 
@@ -435,6 +436,7 @@ fn effective_config_and_reconfigure_replace_google_auth_inventory() {
                     .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: Some(temp.path().join("state")),
                 secrets: secrets.clone(),
+                settings_files: Default::default(),
             },
             storage.clone(),
         )
@@ -489,6 +491,7 @@ fn effective_config_and_reconfigure_replace_google_auth_inventory() {
                     .expect("test extension name must satisfy the identifier grammar"),
                 state_dir: Some(temp.path().join("state")),
                 secrets,
+                settings_files: Default::default(),
             },
             storage,
         )
@@ -1065,6 +1068,11 @@ fn extension_data_result_for_request(
         tau_proto::ExtensionDataRequestOp::WriteFile { .. } => {
             tau_proto::ExtensionDataResultPayload::Ok {
                 value: tau_proto::ExtensionDataValue::WriteFile,
+            }
+        }
+        tau_proto::ExtensionDataRequestOp::CompareAndSwapFile { .. } => {
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::CompareAndSwapFile,
             }
         }
         tau_proto::ExtensionDataRequestOp::CreateFile { .. } => {

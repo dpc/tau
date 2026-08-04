@@ -37,7 +37,8 @@ Tau follows the XDG directory layout on Linux:
   - `sessions/<session_id>/` — durable session membership, metadata, logs, and debug captures.
   - `agents/<agent_id>/` — durable agent transcripts and metadata.
   - `cli.json` — persisted CLI runtime toggles.
-  - `auth.d/<provider>.json` — provider credentials; `auth.json` may exist as legacy credentials.
+  - `provider-settings/<extension>/<provider>.json` — credential-free provider settings.
+  - `secrets/ext/<extension>/providers/<provider>/` — typed provider credentials.
 - Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`.
   - `<pid>-<instance>.sock` — daemon socket.
   - `<pid>-<instance>.json` — discovery metadata with pid, project root, version, and the

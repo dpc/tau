@@ -48,6 +48,7 @@ fn swarm_tool_declarations_apply_instance_prefixes() {
         tool_prefix: Some(tau_proto::ToolNamePrefix::parse("work").expect("prefix")),
         state_dir: None,
         secrets: BTreeMap::new(),
+        settings_files: Default::default(),
     };
     let scope = tau_client::ToolNameScope::from_configure(&configure);
     for (expected_tool, expected_group, declaration) in [

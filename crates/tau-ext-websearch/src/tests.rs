@@ -481,6 +481,7 @@ fn configure_message(config: serde_json::Value) -> HarnessOutputMessage {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: BTreeMap::new(),
+        settings_files: Default::default(),
     })
 }
 

@@ -10,6 +10,7 @@ use std::{fs as path_std_fs, io as path_std_io};
 
 mod provider_access;
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -48,7 +49,7 @@ fn start(args: DevTmuxStartArgs) -> Result<(), CliError> {
     provider_access.print_summary();
 
     let tau_bin = resolve_tau_bin(args.tau_bin)?;
-    let command = env.tau_shell_command(&tau_bin, provider_access.provider_extension_enabled())?;
+    let command = env.tau_shell_command(&tau_bin, &provider_access.provider_extensions())?;
     start_tmux_session(&env.target, args.width, args.height, command)?;
     print_start_summary(&env);
 
@@ -282,15 +283,27 @@ impl TmuxEnvironment {
     fn tau_shell_command(
         &self,
         tau_bin: &Path,
-        enable_provider_extension: bool,
+        provider_extensions: &BTreeSet<tau_proto::ExtensionName>,
     ) -> Result<String, CliError> {
         let working_directory_override = serde_json::to_string(&self.workdir.display().to_string())
             .map_err(|error| CliError::Participant(error.to_string()))?;
-        let provider_extension_arg = if enable_provider_extension {
-            " --enable-extension provider-builtin"
-        } else {
-            ""
-        };
+        let mut provider_extension_args = String::new();
+        for extension in provider_extensions {
+            provider_extension_args.push_str(" --enable-extension ");
+            provider_extension_args.push_str(&shell_quote(extension.as_str()));
+            if extension.as_str() != "provider-builtin" {
+                for override_value in [
+                    format!(
+                        "extensions.{}.suffix=[\"component\",\"ext-provider-builtin\"]",
+                        extension
+                    ),
+                    format!("extensions.{}.role=\"provider\"", extension),
+                ] {
+                    provider_extension_args.push_str(" --harness-config=");
+                    provider_extension_args.push_str(&shell_quote(&override_value));
+                }
+            }
+        }
         Ok([
             format!("cd {}", shell_quote_path(&self.workdir)),
             format!(
@@ -302,7 +315,7 @@ impl TmuxEnvironment {
                 shell_quote_path(&self.state),
                 shell_quote_path(&self.runtime),
                 shell_quote_path(tau_bin),
-                provider_extension_arg,
+                provider_extension_args,
                 shell_quote(&format!(
                     "extensions.core-shell.config.working_directory={working_directory_override}"
                 )),

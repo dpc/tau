@@ -538,6 +538,7 @@ fn valid_config_message() -> HarnessOutputMessage {
         })),
         state_dir: None,
         secrets,
+        settings_files: Default::default(),
     })
 }
 
@@ -574,6 +575,7 @@ fn malformed_config_message() -> HarnessOutputMessage {
         })),
         state_dir: None,
         secrets: BTreeMap::new(),
+        settings_files: Default::default(),
     })
 }
 

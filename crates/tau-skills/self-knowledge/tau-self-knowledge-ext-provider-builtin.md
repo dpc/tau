@@ -35,7 +35,8 @@ does not change the logical prompt's slow authentication retry cadence.
 
 ## Provider profiles and CLI
 
-Provider profiles live as JSON files under Tau state `auth.d/` (`~/.local/state/tau/auth.d/<name>.json` on typical Linux systems). Manage them with:
+Provider registrations pair credential-free JSON settings with a typed credential
+record in the configured extension instance's private state. Manage them with:
 
 ```sh
 tau provider add
@@ -43,27 +44,27 @@ tau provider list
 tau provider remove <name>
 ```
 
+Use `--extension <instance>` when more than one enabled built-in provider
+instance exists. Setup writes the credential first and settings last; removal
+deletes settings first. Restart Tau after settings changes. Credential rotation
+is observed at the next prompt boundary without restart.
+
 Supported profile kinds:
 
 - `chatgpt` — ChatGPT/Codex OAuth credentials for the Responses backend.
-- `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, optional inline API key or scoped `api_key_secret`, model list, max output tokens, extra body, and compatibility options. `tau provider add` accepts `chat-completions` at the interactive provider-kind prompt.
-- `openrouter` — OpenRouter profile with an inline API key or scoped `api_key_secret`, and either explicit models or models fetched from OpenRouter.
+- `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, typed API-key credential, model list, max output tokens, extra body, and compatibility options. `tau provider add` accepts `chat-completions` at the interactive provider-kind prompt.
+- `openrouter` — OpenRouter profile with a typed API-key credential and either explicit or fetched models.
 - `responses` — generic public Responses endpoint with base URL, optional API
-  key or scoped `api_key_secret`, explicit `sse` or `websocket` transport, and an explicit model list.
+  typed API-key credential, explicit `sse` or `websocket` transport, and an explicit model list.
   Omitted transport in an older profile means SSE. `tau provider add` calls this selection
   `responses API`; it calls the existing Chat Completions selection
   `completions API`.
 
-For `chat_completions`, `openrouter`, and `responses`, a manual profile may use
-`api_key_secret` instead of `api_key`. Declare that exact name under
-`extensions.provider-builtin.secrets` in `harness.yaml` and set the matching
-`TAU_SECRET_*` value before starting Tau. The wizard does not offer references.
-Tau captures only provider-builtin's declared `Configure.secrets` at startup;
-it never reads secret environment variables or files in the child. Empty,
-invalid, unavailable, and dual-source profiles fail closed rather than using
-keyless requests. Editing profile JSON affects later attempts and retries, but
-secret-source changes require restart. `tau provider list` shows
-`api-key-secret` without resolving or printing the reference.
+Settings contain only a deterministic Secret-scope credential reference.
+Provider startup loads and validates that typed record before publishing models.
+Missing or malformed credentials exclude the profile. Runtime reloads credentials
+at prompt boundaries and refreshes ChatGPT OAuth records with compare-and-swap,
+so a losing refresher never retries a rotated token.
 
 The profile kinds route to three deliberately separate wire backends.
 `chat_completions` and `openrouter` use the OpenAI-compatible HTTP/SSE

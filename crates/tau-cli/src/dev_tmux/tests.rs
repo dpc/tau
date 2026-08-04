@@ -17,6 +17,13 @@ fn common_without_scratch_root() -> DevTmuxCommonArgs {
     }
 }
 
+fn provider_extensions(names: &[&str]) -> BTreeSet<tau_proto::ExtensionName> {
+    names
+        .iter()
+        .map(|name| tau_proto::ExtensionName::parse(*name).expect("extension"))
+        .collect()
+}
+
 /// Verifies the generated shell command keeps Tau confined to scratch XDG
 /// paths and starts only the local core-shell extension, which is the main
 /// safety property of the manual tmux E2E helper.
@@ -27,7 +34,10 @@ fn tau_shell_command_uses_scratch_environment_and_core_shell_only() {
     let env = TmuxEnvironment::new(common(&scratch), Some(workdir)).expect("env builds");
 
     let command = env
-        .tau_shell_command(Path::new("/tmp/tau bin/target/debug/tau"), false)
+        .tau_shell_command(
+            Path::new("/tmp/tau bin/target/debug/tau"),
+            &provider_extensions(&[]),
+        )
         .expect("command builds");
 
     assert!(command.contains("HOME='/tmp/tau tmux scratch/home'"));
@@ -98,7 +108,7 @@ fn tau_shell_command_quotes_shell_and_harness_config_values() {
     let env = TmuxEnvironment::new(common(&scratch), Some(workdir)).expect("env builds");
 
     let command = env
-        .tau_shell_command(Path::new("/tmp/tau'bin"), false)
+        .tau_shell_command(Path::new("/tmp/tau'bin"), &provider_extensions(&[]))
         .expect("command builds");
 
     assert!(command.contains("HOME='/tmp/tau'\\''tmux/home'"));
@@ -117,11 +127,21 @@ fn tau_shell_command_enables_provider_extension_only_when_requested() {
     let env = TmuxEnvironment::new(common(&scratch), None).expect("env builds");
 
     let command = env
-        .tau_shell_command(Path::new("/tmp/tau"), true)
+        .tau_shell_command(
+            Path::new("/tmp/tau"),
+            &provider_extensions(&["provider-builtin", "provider-work"]),
+        )
         .expect("command builds");
 
     assert!(command.contains("--disable-extensions-all"));
-    assert!(command.contains("--enable-extension core-shell --enable-extension provider-builtin"));
+    assert!(
+        command.contains("--enable-extension core-shell --enable-extension 'provider-builtin'")
+    );
+    assert!(command.contains("--enable-extension 'provider-work'"));
+    assert!(command.contains(
+        "--harness-config='extensions.provider-work.suffix=[\"component\",\"ext-provider-builtin\"]'"
+    ));
+    assert!(command.contains("--harness-config='extensions.provider-work.role=\"provider\"'"));
 }
 
 /// Protects cleanup from deleting arbitrary directories: even when a user

@@ -301,6 +301,7 @@ fn configure_from_json(config: serde_json::Value) -> tau_proto::Configure {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: secrets(),
+        settings_files: Default::default(),
     }
 }
 

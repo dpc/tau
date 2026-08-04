@@ -39,34 +39,38 @@ To intentionally allow selected provider profiles for manual E2E testing, create
 
 ```yaml
 testing_providers:
-  - chatgpt
-  - openrouter
+  - extension: provider-builtin
+    provider: chatgpt
+  - extension: provider-work
+    provider: openrouter
 ```
 
-Each entry is an exact configured provider profile name. To discover profile
-names, run this in the real Tau environment before starting the scratch tmux
-session:
+Each entry is an exact configured extension instance and provider profile. To
+discover profile names, run this in the real Tau environment before starting the
+scratch tmux session:
 
 ```sh
 tau provider list
 ```
 
-Use the exact profile name shown there, which is also the stem of the real Tau
-provider auth/profile file:
+The setup registration consists of credential-free settings and one typed
+credential directory:
 
 ```text
-~/.local/state/tau/auth.d/<provider>.json
+~/.local/state/tau/provider-settings/<extension>/<provider>.json
+~/.local/state/tau/secrets/ext/<extension>/providers/<provider>/
 ```
 
 For provider-management details, read
 `tau-self-knowledge-ext-provider-builtin`.
 
-Only those exact `auth.d/<provider>.json` files are copied into the scratch Tau
-state. Lock files, unrelated provider profiles, sessions, logs, general
+Only those exact registration pairs are copied into scratch Tau state. Unrelated
+provider profiles, sessions, logs, general
 `harness.yaml`, `cli.yaml`, and other user config/state are deliberately not
-copied. When the allowlist is non-empty, `tau dev tmux start` also enables the
-`provider-builtin` extension inside the tmux Tau so copied profiles can publish
-models.
+copied. `tau dev tmux start` enables every exact extension instance named by the
+allowlist. It retains the canonical built-in identity for `provider-builtin` and
+adds scratch-only built-in component and provider-role configuration for renamed
+instances so their copied profiles can publish models.
 
 If `testing.yaml` exists but `testing_providers` is empty, the helper warns and
 copies no provider credentials.
@@ -76,7 +80,7 @@ copies no provider credentials.
 - Keep the default safe: no provider credentials are available unless
   `testing.yaml` explicitly lists exact provider profiles.
 - Do not ask Tau to copy all providers.
-- Do not put path-like names in `testing_providers`; provider names must be
-  filename-safe Tau provider namespaces.
+- Do not put path-like names in `testing_providers`; both names use validated Tau
+  namespaces.
 - Treat any copied provider credential as available to the tmux Tau process and
   the agent being tested.

@@ -129,8 +129,15 @@ fn connect_supervised_test_process(
     config: ExtensionConfig,
     kind: tau_proto::ClientKind,
 ) -> (tau_proto::ConnectionId, u32) {
-    let spawned = spawn_supervised(&config, kind.clone(), None, &h.tx)
-        .expect("spawn supervised test process");
+    let spawned = spawn_supervised(
+        &config,
+        kind.clone(),
+        None,
+        &h.tx,
+        &h.state_dir,
+        h.storage_mode.is_memory_only(),
+    )
+    .expect("spawn supervised test process");
     let connection_id = spawned.connection_id.clone();
     let child_pid = spawned.child_pid;
     h.connect_extension(ExtensionConnectCommand {
@@ -444,6 +451,52 @@ fn connect_handshaking_extension(
 
 fn connect_handshaking_tool(h: &mut Harness, conn_id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
     connect_handshaking_extension(h, conn_id, tau_proto::ClientKind::Tool)
+}
+
+fn configure_supervised_extension(
+    h: &mut Harness,
+    connection_id: &str,
+    kind: tau_proto::ClientKind,
+) -> tau_proto::Configure {
+    let sink = connect_handshaking_extension(h, connection_id, kind.clone());
+    let entry = h
+        .extensions
+        .entries
+        .get_mut(connection_id)
+        .expect("extension");
+    entry.supervised_config = Some(crate::settings::ExtensionConfig {
+        tool_prefix: None,
+        name: connection_id.to_owned(),
+        command: "tau-test-extension".to_owned(),
+        args: vec!["--stdio".to_owned()],
+        role: (kind == tau_proto::ClientKind::Provider).then(|| "provider".to_owned()),
+        require: true,
+        cwd: None,
+        config: serde_json::json!({}),
+        secrets: BTreeMap::new(),
+    });
+    entry.state = ExtensionState::Spawning;
+
+    h.handle_extension_event(
+        connection_id,
+        TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: crate::test_extension_name("tau-test-extension"),
+            client_kind: kind,
+            expected_session_id: None,
+            capabilities: Default::default(),
+        })),
+    )
+    .expect("hello");
+
+    sink.lock()
+        .expect("sink")
+        .iter()
+        .find_map(|routed| match &routed.frame {
+            HarnessOutputMessage::Configure(configure) => Some(configure.clone()),
+            _ => None,
+        })
+        .expect("configure sent")
 }
 
 fn insert_extension_entry_with_meter(
@@ -1475,6 +1528,66 @@ fn configure_includes_extension_state_dir_and_creates_it() {
     assert!(expected.is_dir(), "{} should exist", expected.display());
 }
 
+/// Proves a stale provider-settings directory for a tool extension cannot cross
+/// the provider-only Configure boundary, even for a supervised persistent peer.
+#[test]
+fn tool_configure_ignores_stale_provider_settings_directory() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let settings = tau_config::settings::extension_provider_settings_dir_of(&sp, "std-email")
+        .expect("settings path");
+    std::fs::create_dir_all(&settings).expect("stale settings directory");
+    std::fs::write(settings.join("provider.json"), b"must-not-cross").expect("stale settings");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let configure =
+        configure_supervised_extension(&mut h, "std-email", tau_proto::ClientKind::Tool);
+    assert!(configure.settings_files.is_empty());
+}
+
+/// Proves a persistent Provider receives its exact settings snapshot so the
+/// provider-only gate does not accidentally deny the authorized positive case.
+#[test]
+fn persistent_provider_configure_includes_settings_snapshot() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let settings = tau_config::settings::extension_provider_settings_dir_of(&sp, "provider-work")
+        .expect("settings path");
+    std::fs::create_dir_all(&settings).expect("settings directory");
+    std::fs::write(settings.join("provider.json"), b"provider-settings").expect("settings");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+
+    let configure =
+        configure_supervised_extension(&mut h, "provider-work", tau_proto::ClientKind::Provider);
+
+    assert_eq!(
+        configure.settings_files.get("provider.json"),
+        Some(&b"provider-settings".to_vec())
+    );
+}
+
+/// Proves a memory-only Provider receives no settings snapshot even when stale
+/// persistent data exists, preserving the storage-mode half of the boundary.
+#[test]
+fn memory_only_provider_configure_ignores_stale_settings() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let settings = tau_config::settings::extension_provider_settings_dir_of(&sp, "provider-memory")
+        .expect("settings path");
+    std::fs::create_dir_all(&settings).expect("stale settings directory");
+    std::fs::write(settings.join("provider.json"), b"must-not-cross").expect("stale settings");
+    let mut h = quiet_provider_harness_with_start_reason_and_storage_mode(
+        &sp,
+        tau_proto::SessionStartReason::Initial,
+        crate::HarnessStorageMode::MemoryOnly,
+    )
+    .expect("memory-only harness");
+
+    let configure =
+        configure_supervised_extension(&mut h, "provider-memory", tau_proto::ClientKind::Provider);
+
+    assert!(configure.settings_files.is_empty());
+}
+
 /// Memory-only lifecycle still completes Hello/Configure while delegating no
 /// persistent extension state path.
 #[test]
@@ -1563,6 +1676,54 @@ fn configure_includes_only_resolved_extension_secrets() {
         .expect("configure sent");
     assert_eq!(configure.secrets.len(), 1);
     assert_eq!(configure.secrets["mail_password"].expose_secret(), "secret");
+}
+
+/// Proves the lifecycle checks the complete encoded Configure frame, including
+/// non-settings fields, before handing it to the protocol writer.
+#[test]
+fn oversized_complete_configure_disconnects_before_publication() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let sink = connect_handshaking_tool(&mut h, "oversized-configure");
+    let entry = h
+        .extensions
+        .entries
+        .get_mut("oversized-configure")
+        .expect("extension");
+    entry.secrets.insert(
+        "oversized".to_owned(),
+        tau_proto::SecretValue::new("x".repeat(
+            usize::try_from(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES).expect("frame size") + 1,
+        )),
+    );
+    entry.state = ExtensionState::Spawning;
+
+    h.handle_extension_event(
+        "oversized-configure",
+        TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: crate::test_extension_name("oversized-configure"),
+            client_kind: tau_proto::ClientKind::Tool,
+            expected_session_id: None,
+            capabilities: Default::default(),
+        })),
+    )
+    .expect("hello");
+
+    let frames = sink.lock().expect("sink");
+    assert!(frames.iter().any(|routed| {
+        matches!(
+            &routed.frame,
+            HarnessOutputMessage::Disconnect(Disconnect { reason: Some(reason) })
+                if reason == "extension Configure exceeds protocol frame limit"
+        )
+    }));
+    assert!(
+        !frames
+            .iter()
+            .any(|routed| matches!(routed.frame, HarnessOutputMessage::Configure(_)))
+    );
 }
 
 #[test]

@@ -88,9 +88,6 @@ pub struct OpenRouterProfile {
     /// API key for OpenRouter bearer auth.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_key: String,
-    /// Harness-authorized logical secret name supplying OpenRouter bearer auth.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_secret: Option<String>,
     /// Models configured for this profile.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ChatCompletionsModel>,
@@ -102,7 +99,6 @@ impl OpenRouterProfile {
         ChatCompletionsProvider {
             base_url: "https://openrouter.ai/api/v1".to_owned(),
             api_key: self.api_key.clone(),
-            api_key_secret: None,
             models: self
                 .models
                 .iter()

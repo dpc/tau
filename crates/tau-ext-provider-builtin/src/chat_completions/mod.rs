@@ -20,9 +20,6 @@ pub struct ChatCompletionsProvider {
     /// Optional bearer token.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_key: String,
-    /// Harness-authorized logical secret name supplying the bearer token.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_secret: Option<String>,
     /// Models published under the profile namespace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ChatCompletionsModel>,
@@ -174,7 +171,6 @@ impl Default for ChatCompletionsProvider {
         Self {
             base_url: String::new(),
             api_key: String::new(),
-            api_key_secret: None,
             models: Vec::new(),
             tags: Vec::new(),
             max_output_tokens: default_max_output_tokens(),

@@ -571,6 +571,7 @@ fn runner_subscribes_projection_for_restore_and_live_delivery() {
                 .expect("valid extension name"),
             state_dir: None,
             secrets: BTreeMap::from([("swarm".into(), SecretValue::new("secret"))]),
+            settings_files: Default::default(),
         }))
         .expect("configure frame");
     input_writer.flush().expect("configure flush");
@@ -681,6 +682,7 @@ async fn runner_and_published_server_complete_remote_prompt_vertical() {
                 .expect("valid extension name"),
             state_dir: None,
             secrets: BTreeMap::from([("swarm".into(), SecretValue::new("secret"))]),
+            settings_files: Default::default(),
         }))
         .expect("configure");
     writer.flush().expect("configure flush");

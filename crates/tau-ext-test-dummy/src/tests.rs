@@ -87,6 +87,7 @@ fn restart_config(mode: &str) -> HarnessOutputMessage {
         )]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
     })
 }
 
@@ -111,6 +112,7 @@ fn release_config(socket_path: &std::path::Path, nonce: &str) -> HarnessOutputMe
         ]),
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
     })
 }
 
@@ -172,6 +174,7 @@ fn restart_input(input_frames: &[HarnessOutputMessage]) -> Vec<u8> {
                 config: CborValue::Map(Vec::new()),
                 state_dir: None,
                 secrets: path_std_collections::BTreeMap::new(),
+                settings_files: Default::default(),
             }))
             .expect("write initial configure");
     }
@@ -421,6 +424,7 @@ fn release_mode_requires_complete_configuration() {
                 config,
                 state_dir: None,
                 secrets: path_std_collections::BTreeMap::new(),
+                settings_files: Default::default(),
             })],
             1,
         );
@@ -831,6 +835,7 @@ fn run_intercept(
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: path_std_collections::BTreeMap::new(),
+            settings_files: Default::default(),
         }))
         .expect("write initial configure");
     writer

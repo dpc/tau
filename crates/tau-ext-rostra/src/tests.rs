@@ -240,6 +240,7 @@ fn mnemonic_configuration_derives_read_only_identity() {
             mnemonic_secret.to_owned(),
             tau_proto::SecretValue::new(secret.to_string()),
         )]),
+        settings_files: Default::default(),
     };
     configure(
         &mut state,
@@ -279,6 +280,7 @@ fn mnemonic_configuration_derives_read_only_identity() {
             mnemonic_secret.to_owned(),
             tau_proto::SecretValue::new(secret.to_string()),
         )]),
+        settings_files: Default::default(),
     };
     configure(
         &mut state,
@@ -365,6 +367,7 @@ fn standard_tool_registrations_share_rostra_group() {
                 "rostra_identity_mnemonic".to_owned(),
                 tau_proto::SecretValue::new(secret.to_string()),
             )]),
+            settings_files: Default::default(),
         }))
         .expect("configure Rostra");
     writer.flush().expect("flush configuration");
@@ -614,6 +617,7 @@ fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
             "rostra_identity_mnemonic".to_owned(),
             tau_proto::SecretValue::new(secret.to_string()),
         )]),
+        settings_files: Default::default(),
     };
     writer
         .write_message(&HarnessOutputMessage::Configure(configure))

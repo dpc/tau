@@ -2510,6 +2510,29 @@ pub fn extension_state_dir_of(
     Ok(state_dir.join("ext").join(extension_name))
 }
 
+/// Returns the harness-mediated durable secret root reserved for one configured
+/// extension instance.
+///
+/// The harness never sends this path to the extension. The configured instance
+/// name is validated before it becomes one path component.
+pub fn extension_secret_dir_of(
+    state_dir: &Path,
+    extension_name: &str,
+) -> Result<PathBuf, InvalidExtensionName> {
+    validate_extension_name(extension_name)?;
+    Ok(state_dir.join("secrets").join("ext").join(extension_name))
+}
+
+/// Returns the CLI-owned provider settings root for one configured extension
+/// instance.
+pub fn extension_provider_settings_dir_of(
+    state_dir: &Path,
+    extension_name: &str,
+) -> Result<PathBuf, InvalidExtensionName> {
+    validate_extension_name(extension_name)?;
+    Ok(state_dir.join("provider-settings").join(extension_name))
+}
+
 /// Validates that an extension name is safe to use as a single path component
 /// in harness-owned per-extension paths and as an unambiguous segment in
 /// dotted harness config override paths. Valid names contain only ASCII
@@ -2585,13 +2608,20 @@ impl Default for TauDirs {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TestingSettings {
-    /// Provider profile names that `tau dev tmux start` may copy into its
-    /// scratch Tau state directory.
-    ///
-    /// Names are exact built-in provider namespaces and map to
-    /// `auth.d/<provider>.json` in Tau provider auth storage.
+    /// Exact extension-instance and provider pairs that `tau dev tmux start`
+    /// may copy into its scratch Tau state directory.
     #[serde(default)]
-    pub testing_providers: Vec<ProviderName>,
+    pub testing_providers: Vec<TestingProvider>,
+}
+
+/// One exact provider registration allowed in a development scratch harness.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(deny_unknown_fields)]
+pub struct TestingProvider {
+    /// Stable configured provider-extension instance name.
+    pub extension: tau_proto::ExtensionName,
+    /// Provider namespace inside that instance.
+    pub provider: ProviderName,
 }
 
 /// Loads CLI settings from `cli.yaml` with `cli.d/*.yaml` overrides.

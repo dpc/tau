@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error as _;
+use std::os::unix::fs::PermissionsExt as _;
 
 use super::*;
 
@@ -47,9 +48,62 @@ fn supervised_command_uses_configured_cwd() {
     let cwd = PathBuf::from("/tmp/tau-extension-cwd");
     let config = test_extension_config(Some(cwd.clone()));
 
-    let command = supervised_command(&config, false);
+    let (command, _) = supervised_command(
+        &config,
+        &ClientKind::Tool,
+        false,
+        Path::new("/tmp/tau-state"),
+        false,
+    )
+    .expect("build supervised command");
 
     assert_eq!(command.get_current_dir(), Some(cwd.as_path()));
+}
+
+/// Proves persistent launch preparation creates a mount root only for
+/// providers, preventing ordinary tool extensions from populating the
+/// provider-settings tree.
+#[test]
+fn persistent_launch_prepares_settings_mount_only_for_provider() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&state).expect("state root");
+
+    assert_eq!(
+        prepare_provider_settings_mount(&state, "std-shell", &ClientKind::Tool, false)
+            .expect("prepare tool launch"),
+        None
+    );
+    assert!(!state.join("provider-settings").exists());
+
+    let provider_root =
+        prepare_provider_settings_mount(&state, "provider-work", &ClientKind::Provider, false)
+            .expect("prepare provider launch")
+            .expect("provider settings root");
+    assert_eq!(provider_root, state.join("provider-settings/provider-work"));
+    assert!(provider_root.is_dir());
+    assert_eq!(
+        std::fs::symlink_metadata(&provider_root)
+            .expect("provider settings metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+
+    let memory_state = temp.path().join("memory-state");
+    std::fs::create_dir(&memory_state).expect("memory-only state root");
+    assert_eq!(
+        prepare_provider_settings_mount(
+            &memory_state,
+            "provider-memory",
+            &ClientKind::Provider,
+            true,
+        )
+        .expect("prepare memory-only provider launch"),
+        None
+    );
+    assert!(!memory_state.join("provider-settings").exists());
 }
 
 /// Ensures a built-in instance's failed executable is actionable without
@@ -63,7 +117,14 @@ fn builtin_spawn_failure_is_contextual_and_secret_safe() {
     config.config = serde_json::json!({"token": "config-secret"});
 
     let (tx, _rx) = mpsc::channel();
-    let error = match spawn_supervised(&config, ClientKind::Provider, None, &tx) {
+    let error = match spawn_supervised(
+        &config,
+        ClientKind::Provider,
+        None,
+        &tx,
+        Path::new("/tmp/tau-state"),
+        false,
+    ) {
         Ok(_) => panic!("missing built-in executable must fail"),
         Err(error) => error,
     };
@@ -106,7 +167,14 @@ fn custom_spawn_failure_includes_only_relevant_bounded_context() {
     config.config = serde_json::json!({"secret": "config-secret"});
 
     let (tx, _rx) = mpsc::channel();
-    let error = match spawn_supervised(&config, ClientKind::Tool, None, &tx) {
+    let error = match spawn_supervised(
+        &config,
+        ClientKind::Tool,
+        None,
+        &tx,
+        Path::new("/tmp/tau-state"),
+        false,
+    ) {
         Ok(_) => panic!("missing custom cwd must fail"),
         Err(error) => error,
     };

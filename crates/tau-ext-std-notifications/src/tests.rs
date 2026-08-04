@@ -278,6 +278,7 @@ fn configure_frame(config: tau_proto::CborValue) -> HarnessOutputMessage {
         config,
         state_dir: None,
         secrets: path_std_collections::BTreeMap::new(),
+        settings_files: Default::default(),
     })
 }
 

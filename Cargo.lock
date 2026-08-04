@@ -5872,8 +5872,10 @@ dependencies = [
 name = "tau-ext-provider-builtin"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "dialoguer",
  "dirs",
+ "fs2",
  "proptest",
  "reqwest 0.12.28",
  "serde",

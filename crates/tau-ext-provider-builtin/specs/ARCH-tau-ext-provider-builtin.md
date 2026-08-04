@@ -1,14 +1,16 @@
 # ARCH-tau-ext-provider-builtin: tau-ext-provider-builtin architecture
 
-`tau-ext-provider-builtin` is Tau's built-in provider bridge. It resolves local
-provider profiles and credentials, publishes available models, receives
+`tau-ext-provider-builtin` is Tau's built-in provider bridge. It resolves an
+immutable credential-free settings snapshot and runtime Secret RPC credentials, publishes available models, receives
 model-visible prompt and tool context from the harness, invokes external model
 services, and reports provider execution through Tau protocol events.
 
 ## Ownership boundaries
 
-Tau state `auth.d/<namespace>.json` files define provider namespaces, and each
-profile's serialized kind selects its backend family. ChatGPT profiles use the
+Tau state stores credential-free profiles at
+`provider-settings/<extension>/<namespace>.json`; each profile's serialized kind
+selects its backend family. Typed credentials live separately in the selected
+extension instance's Secret scope. ChatGPT profiles use the
 model matrix and finite inference facade owned by `tau-provider-codex`; Chat
 Completions and OpenRouter profiles use the Chat Completions backend. Generic
 public `responses` profiles use the separate API-key Responses backend with
@@ -66,12 +68,11 @@ bounded best-effort background writer; overload, write failure, or process
 shutdown can omit captures but never delay provider or UI work. Detailed
 credential and response controls are owned by [`SECURITY.md`](../SECURITY.md).
 
-The three API-key profile kinds may name an `api_key_secret` instead of
-persisting an inline key. The extension resolves that exact logical name only
-from its existing scoped `Configure.secrets` map; it never reads
-`TAU_SECRET_*`, secret files, or another extension's values. The map is a
-harness-startup snapshot, so profile reloads can select another already
-authorized secret while environment and secret-file changes require restart.
+Provider settings never contain OAuth or API-key values. The extension reloads
+typed version-zero credentials through its configured-instance Secret scope and
+uses compare-and-swap for rotating OAuth refresh tokens. Credential rotation is
+visible without restart; settings changes require restart. See
+[SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).
 
 ## Runtime and worker flow
 

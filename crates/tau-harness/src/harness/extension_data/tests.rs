@@ -79,3 +79,70 @@ fn list_files_rejects_directories_larger_than_extension_data_limit() {
 
     assert_eq!(err.kind, tau_proto::ExtensionDataErrorKind::QuotaExceeded);
 }
+
+/// Proves CAS replaces only an exact generation and rejects a stale writer.
+#[test]
+fn compare_and_swap_replaces_only_the_expected_generation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("secret");
+    run_extension_data_write_file_with_limit(
+        &root,
+        "providers/chatgpt/oauth.json".to_owned(),
+        b"first".to_vec(),
+        MAX_SECRET_DATA_FILE_BYTES,
+    )
+    .expect("initial write");
+    let first_generation = blake3::hash(b"first").to_hex().to_string();
+
+    assert!(matches!(
+        run_extension_data_compare_and_swap_file(
+            &root,
+            "providers/chatgpt/oauth.json".to_owned(),
+            first_generation.clone(),
+            b"second".to_vec(),
+            MAX_SECRET_DATA_FILE_BYTES,
+        ),
+        Ok(tau_proto::ExtensionDataValue::CompareAndSwapFile)
+    ));
+    let error = run_extension_data_compare_and_swap_file(
+        &root,
+        "providers/chatgpt/oauth.json".to_owned(),
+        first_generation,
+        b"stale".to_vec(),
+        MAX_SECRET_DATA_FILE_BYTES,
+    )
+    .expect_err("stale generation rejected");
+    assert_eq!(
+        error.kind,
+        tau_proto::ExtensionDataErrorKind::GenerationMismatch
+    );
+    assert_eq!(
+        std::fs::read(root.join("providers/chatgpt/oauth.json")).expect("read"),
+        b"second"
+    );
+}
+
+/// Proves CAS never follows a credential leaf symlink outside its scope.
+#[cfg(unix)]
+#[test]
+fn compare_and_swap_rejects_a_symlink_leaf() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("secret");
+    std::fs::create_dir_all(&root).expect("root");
+    let outside = temp.path().join("outside");
+    std::fs::write(&outside, "outside").expect("outside");
+    symlink(&outside, root.join("credential.json")).expect("symlink");
+
+    let error = run_extension_data_compare_and_swap_file(
+        &root,
+        "credential.json".to_owned(),
+        blake3::hash(b"outside").to_hex().to_string(),
+        b"replacement".to_vec(),
+        MAX_SECRET_DATA_FILE_BYTES,
+    )
+    .expect_err("symlink rejected");
+    assert_eq!(error.kind, tau_proto::ExtensionDataErrorKind::InvalidPath);
+    assert_eq!(std::fs::read(outside).expect("outside"), b"outside");
+}

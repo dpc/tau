@@ -62,7 +62,6 @@ fn profile_publishes_default_responses_efforts() {
     let provider = ResponsesProvider {
         base_url: "https://example.test/v1".to_owned(),
         api_key: String::new(),
-        api_key_secret: None,
         models: vec![ResponsesModel {
             id: tau_proto::ModelName::new("example-model"),
             efforts: None,

@@ -881,3 +881,13 @@ Compact identity, sequence, and timestamp fields remain facts of the captured
 journals when those journals move between sessions; export never rebinds them to
 the containing session. Original-host wall-clock samples can regress or differ
 across hosts and do not establish delivery order, latency, or happens-before.
+Tau keeps extension credentials in harness-mediated configured-instance Secret
+scope. Supervised extensions run in mandatory fail-closed Linux user and mount
+namespaces that hide the whole Tau secret root. Only configured Provider
+instances receive their selected provider settings through a read-only mount and
+`Configure.settings_files`; Tool and memory-only instances receive neither. This
+is defense in depth for trusted configured same-UID executables, not containment
+from malicious same-UID code or misuse of credentials returned to an authorized
+extension. Secret payloads remain absent from logs, events, journals, generic
+debug output, and errors. See
+[`SPEC-extension-secret-storage`](specs/SPEC-extension-secret-storage.md).

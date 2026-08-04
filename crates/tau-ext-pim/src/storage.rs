@@ -369,6 +369,7 @@ fn format_storage_error(kind: ExtensionDataErrorKind, message: String) -> String
             ExtensionDataErrorKind::NotDir => "not_dir",
             ExtensionDataErrorKind::Permission => "permission",
             ExtensionDataErrorKind::QuotaExceeded => "quota_exceeded",
+            ExtensionDataErrorKind::GenerationMismatch => "generation_mismatch",
             ExtensionDataErrorKind::Io => "io",
         }
     )

@@ -83,3 +83,8 @@ journals and harness-extension interfaces are gated by
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
 Extension-owned durable state that can be reconstructed from committed facts follows
 [GATE-event-log-first-extension-state](GATE-event-log-first-extension-state.md).
+Configured extensions use harness-mediated, instance-scoped credential storage.
+Every supervised extension inherits a mandatory outer Linux mount mask, while
+the trust model remains a configured same-UID executable boundary rather than a
+hostile-code sandbox. The cross-component contract is
+[SPEC-extension-secret-storage](SPEC-extension-secret-storage.md).

@@ -53,6 +53,7 @@ fn responses_profile_round_trips_canonically() {
 
 fn compatibility_profiles() -> BuiltinProviderProfiles {
     BuiltinProviderProfiles {
+        credential_paths: Default::default(),
         providers: BTreeMap::from([
             (
                 ProviderName::new("chatgpt"),
@@ -89,6 +90,7 @@ fn responses_profile_routes_to_public_responses_backend() {
         &mut profiles,
         &mut rejections,
         &test_network_policy(),
+        None,
     );
     let Some(PromptBackend::PublicResponses { provider, model }) = backend else {
         panic!("Responses fixture must resolve to the public Responses backend");
@@ -103,7 +105,13 @@ fn compatibility_route_snapshot(
     refresh_rejections: &mut OAuthRefreshRejectionCache,
 ) -> serde_json::Value {
     let requested = model.to_string();
-    match resolve_prompt_backend(&model, profiles, refresh_rejections, &test_network_policy()) {
+    match resolve_prompt_backend(
+        &model,
+        profiles,
+        refresh_rejections,
+        &test_network_policy(),
+        None,
+    ) {
         Some(PromptBackend::Responses(config)) => serde_json::json!({
             "requested": requested,
             "backend": "responses",

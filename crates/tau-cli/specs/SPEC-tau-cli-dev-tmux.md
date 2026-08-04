@@ -12,12 +12,19 @@ printed by `start`.
 
 Provider access reads only `testing.yaml` from the real Tau config directory.
 Missing or empty configuration warns and keeps the child local-only. Non-empty
-`testing_providers` values are exact provider-profile allowlist entries; there is
-no all-providers mode. Only matching regular
-`auth.d/<provider>.json` files may be copied. Provider lock files, general config,
-sessions, logs, and unrelated profiles are never copied. Path traversal, symlinks,
-non-regular files, and unsafe source or destination entries fail closed.
-`provider-builtin` is enabled only while the allowlist is non-empty.
+`testing_providers` values are exact extension/provider allowlist pairs; there is
+no all-providers mode. Only matching regular credential-free settings files and
+typed credential subtrees may be copied. General config, sessions, logs, and
+unrelated profiles are never copied. Path traversal, symlinks, non-regular files,
+and unsafe source or destination entries fail closed.
+The scratch Tau enables every extension instance named by the allowlist. The
+canonical `provider-builtin` instance inherits its built-in component identity;
+renamed instances receive exact scratch-only built-in component suffix and
+provider-role configuration.
 
 The trusted-local process and scratch-cleanup boundaries are described by
 [`ARCH-tau-cli`](ARCH-tau-cli.md).
+Provider access allowlists exact `(extension instance, provider)` pairs and
+copies only those settings files and secret subtrees into private scratch state,
+as required by
+[SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).

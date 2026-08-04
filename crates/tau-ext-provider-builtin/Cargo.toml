@@ -19,8 +19,10 @@ workspace = true
 quota-test-support = []
 
 [dependencies]
+blake3.workspace = true
 dialoguer.workspace = true
 dirs.workspace = true
+fs2.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -32,6 +34,7 @@ tau-provider-chat-completions.workspace = true
 tau-provider-codex.workspace = true
 tau-provider-responses.workspace = true
 tau-term-screen.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
@@ -39,5 +42,4 @@ tracing.workspace = true
 proptest.workspace = true
 tau-core.workspace = true
 tau-provider-codex = { workspace = true, features = ["test-support"] }
-tempfile.workspace = true
 tracing-subscriber.workspace = true

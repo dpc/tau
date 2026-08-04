@@ -371,6 +371,7 @@ fn spawn_extension_with_config(
             config,
             state_dir: Some(state_dir),
             secrets,
+            settings_files: Default::default(),
         }))
         .expect("initial configure");
     pair.writer.flush().expect("flush initial configure");
@@ -747,6 +748,7 @@ fn email_run_configures_storage_and_skips_replayed_tools() {
             config: CborValue::Map(Vec::new()),
             state_dir: Some(temp.path().join("state")),
             secrets: BTreeMap::new(),
+            settings_files: Default::default(),
         }))
         .expect("write configure");
     pair.writer
@@ -883,6 +885,7 @@ fn email_run_malformed_config_emits_config_error_and_continues() {
             )]),
             state_dir: Some(temp.path().join("state")),
             secrets: BTreeMap::new(),
+            settings_files: Default::default(),
         }))
         .expect("write malformed configure");
     pair.writer
@@ -1087,6 +1090,7 @@ fn email_runner_republishes_effective_google_auth_accounts() {
             config: email_config(&["current"]),
             state_dir: Some(state_dir.path().to_path_buf()),
             secrets,
+            settings_files: Default::default(),
         }))
         .expect("replacement configure");
     pair.writer.flush().expect("flush replacement configure");
@@ -4569,6 +4573,7 @@ fn configure_requires_state_dir_and_rejected_config_is_reported() {
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: configure_secrets(),
+            settings_files: Default::default(),
         }))
         .expect("configure");
     pair.writer.flush().expect("flush");

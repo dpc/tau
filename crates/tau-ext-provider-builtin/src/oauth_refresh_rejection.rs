@@ -101,39 +101,20 @@ impl OAuthRefreshRejectionCache {
     }
 }
 
-/// Typed result of resolving a filesystem-backed ChatGPT credential refresh.
+/// Typed result of resolving a Secret-RPC-backed ChatGPT credential refresh.
 pub(crate) enum RefreshCredentialsError {
-    /// Provider profile storage or locking failed before authoritative reload.
+    /// Credential RPC or serialization failed.
     Storage(std::io::Error),
-    /// The OAuth endpoint rejected the authoritative locked credentials.
+    /// The OAuth endpoint rejected the authoritative credential generation.
     OAuth {
-        /// Credential generation loaded while holding the auth-file lock.
+        /// Credential generation read through Secret RPC.
         credentials: Box<OpenAiAuth>,
         /// Typed bounded OAuth failure with credential-safe formatting.
         error: OAuthError,
     },
-    /// Refresh failed or was suppressed for the locked generation, and lock
-    /// release then also failed.
-    OAuthWithUnlockFailure {
-        /// Credential generation loaded while holding the auth-file lock.
-        credentials: Box<OpenAiAuth>,
-        /// Typed bounded OAuth failure with credential-safe formatting.
-        error: OAuthError,
-        /// Failure returned while releasing the sidecar lock.
-        unlock_error: std::io::Error,
-    },
-    /// Authoritative current or newly saved credentials are available, but lock
-    /// release failed afterwards.
-    CredentialsWithUnlockFailure {
-        /// Credential generation loaded or saved while holding the auth-file
-        /// lock.
-        credentials: Box<OpenAiAuth>,
-        /// Failure returned while releasing the sidecar lock.
-        unlock_error: std::io::Error,
-    },
-    /// The authoritative locked generation already had a permanent rejection.
+    /// The authoritative generation already had a permanent rejection.
     Suppressed {
-        /// Credential generation loaded while holding the auth-file lock.
+        /// Credential generation read through Secret RPC.
         credentials: Box<OpenAiAuth>,
         /// Previously recorded typed failure with credential-safe formatting.
         error: OAuthError,
@@ -148,17 +129,6 @@ impl fmt::Display for RefreshCredentialsError {
                 credentials: _,
                 error,
             } => error.fmt(formatter),
-            Self::OAuthWithUnlockFailure {
-                credentials: _,
-                error,
-                unlock_error: _,
-            } => {
-                write!(formatter, "{error}; credential lock release also failed")
-            }
-            Self::CredentialsWithUnlockFailure {
-                credentials: _,
-                unlock_error: _,
-            } => formatter.write_str("credential lock release failed"),
             Self::Suppressed {
                 credentials: _,
                 error,
@@ -186,22 +156,6 @@ impl fmt::Debug for RefreshCredentialsError {
                 .debug_tuple("RefreshCredentialsError::OAuth")
                 .field(error)
                 .finish(),
-            Self::OAuthWithUnlockFailure {
-                credentials: _,
-                error,
-                unlock_error,
-            } => formatter
-                .debug_struct("RefreshCredentialsError::OAuthWithUnlockFailure")
-                .field("error", error)
-                .field("unlock_error", unlock_error)
-                .finish(),
-            Self::CredentialsWithUnlockFailure {
-                credentials: _,
-                unlock_error,
-            } => formatter
-                .debug_struct("RefreshCredentialsError::CredentialsWithUnlockFailure")
-                .field("unlock_error", unlock_error)
-                .finish(),
             Self::Suppressed {
                 credentials: _,
                 error,
@@ -221,39 +175,10 @@ impl Error for RefreshCredentialsError {
                 credentials: _,
                 error,
             }
-            | Self::OAuthWithUnlockFailure {
-                credentials: _,
-                error,
-                unlock_error: _,
-            }
             | Self::Suppressed {
                 credentials: _,
                 error,
             } => Some(error),
-            Self::CredentialsWithUnlockFailure {
-                credentials: _,
-                unlock_error,
-            } => Some(unlock_error),
         }
     }
-}
-
-/// Lock-scoped outcome used to update process-local rejection state afterwards.
-pub(crate) enum LockedRefreshOutcome {
-    /// Current or newly refreshed credentials are available.
-    Credentials(OpenAiAuth),
-    /// This authoritative generation was already permanently rejected.
-    Suppressed {
-        /// Credential generation loaded while holding the auth-file lock.
-        credentials: OpenAiAuth,
-        /// Previously recorded typed failure.
-        error: OAuthError,
-    },
-    /// This authoritative generation's refresh attempt failed.
-    Rejected {
-        /// Credential generation loaded while holding the auth-file lock.
-        credentials: OpenAiAuth,
-        /// Typed OAuth failure returned by the endpoint.
-        error: OAuthError,
-    },
 }

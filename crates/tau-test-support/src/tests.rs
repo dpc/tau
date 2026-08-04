@@ -223,6 +223,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: None,
             secrets: Default::default(),
+            settings_files: Default::default(),
         }),
     )
     .expect("configure provider");
@@ -264,6 +265,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
                 .expect("test extension name must satisfy the identifier grammar"),
             state_dir: Some(tool_state_dir),
             secrets: Default::default(),
+            settings_files: Default::default(),
         }),
     )
     .expect("configure tool");

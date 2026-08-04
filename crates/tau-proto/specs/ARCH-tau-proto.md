@@ -176,6 +176,12 @@ provider XML never interpret hostile metadata.
 
 `encode_message` writes one self-delimiting CBOR item. `decode_message_from_slice` and the harness input/output slice helpers must decode exactly one item and reject trailing bytes; use `MessageReader` for streams of concatenated messages.
 
+Extension data includes the configured-instance `Secret` scope and complete-file
+generation compare-and-swap governed by
+[SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md).
+Secret request and result debug projections expose lengths and operation metadata,
+never payload bytes.
+
 External agent-message delivery is modeled as a dedicated directional RPC
 (`external_agent_message` / `external_agent_message_result`) rather than as a
 generic `emit`. The payload carries sender and recipient session ids separately

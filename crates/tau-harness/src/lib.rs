@@ -26,6 +26,7 @@ mod error;
 mod event;
 mod event_log;
 mod extension;
+mod extension_launcher;
 mod format;
 mod frozen_agent_discovery;
 mod harness;

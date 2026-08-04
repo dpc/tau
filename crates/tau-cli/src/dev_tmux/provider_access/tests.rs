@@ -1,397 +1,205 @@
-use std::os::unix as path_std_os_unix;
 use std::path::PathBuf;
-#[cfg(unix)]
-use std::process::Command;
 
 use super::*;
 
-/// Ensures a missing `testing.yaml` produces the safe local-only provider
-/// access plan that neither copies provider files nor enables provider-builtin.
+fn target(extension: &str, provider: &str) -> TestingProvider {
+    TestingProvider {
+        extension: tau_proto::ExtensionName::parse(extension).expect("extension"),
+        provider: tau_proto::ProviderName::new(provider),
+    }
+}
+
+/// Proves an absent testing file grants no provider access.
 #[test]
 fn missing_testing_config_keeps_provider_access_disabled() {
     let access = provider_access_from_settings(None, PathBuf::from("/tmp/scratch/state"), None);
-
     assert!(access.is_missing_config());
     assert!(!access.provider_extension_enabled());
-    assert!(missing_testing_config_warning().contains("tau-self-knowledge-e2e-testing"));
 }
 
-/// Ensures an explicit allowlist is exact: only named auth.d JSON provider
-/// profiles are copied into scratch state, while other profiles and lock files
-/// remain unavailable to the tmux child.
+/// Proves one allowlisted pair copies only that instance and provider.
 #[test]
-fn provider_allowlist_copies_only_exact_auth_json_files() {
+fn provider_allowlist_copies_exact_instance_registration() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let source_state = temp.path().join("real-state");
-    let scratch_state = temp.path().join("scratch-state");
-    let source_auth = source_state.join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&source_auth).expect("mkdir source auth");
-    std::fs::write(source_auth.join("chatgpt.json"), r#"{"kind":"chatgpt"}"#).expect("chatgpt");
-    std::fs::write(
-        source_auth.join("openrouter.json"),
-        r#"{"kind":"openrouter"}"#,
-    )
-    .expect("openrouter");
-    std::fs::write(source_auth.join("chatgpt.lock"), "lock").expect("lock");
+    let source = temp.path().join("real");
+    let scratch = temp.path().join("scratch");
+    let allowed = target("provider-builtin", "chatgpt");
+    let denied = target("provider-builtin", "openrouter");
+    for entry in [&allowed, &denied] {
+        let settings = extension_provider_settings_dir_of(&source, entry.extension.as_str())
+            .expect("settings root")
+            .join(format!("{}.json", entry.provider));
+        std::fs::create_dir_all(settings.parent().expect("parent")).expect("settings dir");
+        std::fs::write(&settings, format!("settings:{}", entry.provider)).expect("settings");
+        let secrets = extension_secret_dir_of(&source, entry.extension.as_str())
+            .expect("secret root")
+            .join("providers")
+            .join(entry.provider.as_str());
+        std::fs::create_dir_all(&secrets).expect("secret dir");
+        std::fs::write(
+            secrets.join("oauth.json"),
+            format!("secret:{}", entry.provider),
+        )
+        .expect("secret");
+    }
     let access = provider_access_from_settings(
-        Some(source_state),
-        scratch_state.clone(),
-        Some(tau_config::settings::TestingSettings {
-            testing_providers: vec![tau_proto::ProviderName::new("chatgpt")],
+        Some(source),
+        scratch.clone(),
+        Some(TestingSettings {
+            testing_providers: vec![allowed.clone()],
         }),
     );
 
-    access
-        .copy_allowed_profiles()
-        .expect("copy provider profile");
+    access.copy_allowed_profiles().expect("copy registration");
 
+    let copied_settings = extension_provider_settings_dir_of(&scratch, allowed.extension.as_str())
+        .expect("settings")
+        .join("chatgpt.json");
+    let copied_secret = extension_secret_dir_of(&scratch, allowed.extension.as_str())
+        .expect("secrets")
+        .join("providers/chatgpt/oauth.json");
     assert_eq!(
-        std::fs::read_to_string(scratch_state.join(PROVIDER_AUTH_DIR).join("chatgpt.json"))
-            .expect("copied chatgpt"),
-        r#"{"kind":"chatgpt"}"#
+        std::fs::read_to_string(copied_settings).expect("read"),
+        "settings:chatgpt"
+    );
+    assert_eq!(
+        std::fs::read_to_string(copied_secret).expect("read"),
+        "secret:chatgpt"
     );
     assert!(
-        !scratch_state
-            .join(PROVIDER_AUTH_DIR)
+        !extension_provider_settings_dir_of(&scratch, denied.extension.as_str())
+            .expect("settings")
             .join("openrouter.json")
             .exists()
     );
-    assert!(
-        !scratch_state
-            .join(PROVIDER_AUTH_DIR)
-            .join("chatgpt.lock")
-            .exists()
-    );
 }
 
-/// Ensures a reused scratch root is reconciled to the current missing-config
-/// local-only policy by deleting stale provider JSON files from scratch state.
+/// Proves an explicit empty allowlist narrows reusable scratch state to none.
 #[test]
-fn missing_testing_config_removes_stale_scratch_provider_profiles() {
+fn empty_allowlist_removes_stale_settings_and_secrets() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let scratch_state = temp.path().join("scratch-state");
-    let scratch_auth = scratch_state.join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
-    std::fs::write(scratch_auth.join("chatgpt.json"), "secret").expect("stale profile");
-    let access = provider_access_from_settings(None, scratch_state.clone(), None);
-
-    access
-        .copy_allowed_profiles()
-        .expect("stale provider profiles reconciled");
-
-    assert!(!scratch_state.join(PROVIDER_AUTH_DIR).exists());
-}
-
-/// Ensures an explicitly empty `testing_providers` list behaves like a
-/// deliberate local-only configuration: provider-builtin stays disabled, the
-/// empty-config warning is used, and stale scratch profiles are removed.
-#[test]
-fn empty_testing_provider_allowlist_disables_access_and_removes_stale_profiles() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let scratch_state = temp.path().join("scratch-state");
-    let scratch_auth = scratch_state.join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
-    std::fs::write(scratch_auth.join("chatgpt.json"), "secret").expect("stale profile");
+    let scratch = temp.path().join("scratch");
+    let settings = scratch.join(PROVIDER_SETTINGS_DIR).join("stale/file.json");
+    let secret = scratch
+        .join(EXTENSION_SECRETS_DIR)
+        .join("stale/providers/p/oauth.json");
+    std::fs::create_dir_all(settings.parent().expect("parent")).expect("settings dir");
+    std::fs::create_dir_all(secret.parent().expect("parent")).expect("secret dir");
+    std::fs::write(settings, "stale").expect("settings");
+    std::fs::write(secret, "stale").expect("secret");
     let access = provider_access_from_settings(
         None,
-        scratch_state.clone(),
-        Some(tau_config::settings::TestingSettings {
+        scratch.clone(),
+        Some(TestingSettings {
             testing_providers: Vec::new(),
         }),
     );
 
-    assert!(!access.is_missing_config());
-    assert!(!access.provider_extension_enabled());
-    assert!(empty_testing_provider_warning().contains("no testing_providers"));
-    access
-        .copy_allowed_profiles()
-        .expect("empty allowlist reconciles stale provider profiles");
+    access.copy_allowed_profiles().expect("reconcile");
 
-    assert!(!scratch_state.join(PROVIDER_AUTH_DIR).exists());
+    assert!(!scratch.join(PROVIDER_SETTINGS_DIR).exists());
+    assert!(!scratch.join(EXTENSION_SECRETS_DIR).exists());
 }
 
-/// Ensures a reused scratch root is narrowed to the current exact allowlist
-/// before fresh provider profiles are copied into it.
+/// Proves one bad allowlisted registration removes material copied for earlier
+/// pairs, preventing reusable scratch state from retaining a partial grant.
 #[test]
-fn provider_allowlist_removes_unallowed_stale_scratch_profiles() {
+fn partial_copy_failure_reconciles_both_scratch_trees() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let source_state = temp.path().join("real-state");
-    let scratch_state = temp.path().join("scratch-state");
-    let source_auth = source_state.join(PROVIDER_AUTH_DIR);
-    let scratch_auth = scratch_state.join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&source_auth).expect("mkdir source auth");
-    std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
-    std::fs::write(source_auth.join("chatgpt.json"), "fresh").expect("source profile");
-    std::fs::write(scratch_auth.join("chatgpt.json"), "stale").expect("stale allowed");
-    std::fs::write(scratch_auth.join("openrouter.json"), "stale").expect("stale unallowed");
+    let source = temp.path().join("real");
+    let scratch = temp.path().join("scratch");
+    let valid = target("provider-builtin", "chatgpt");
+    let missing = target("provider-work", "missing");
+    let settings = extension_provider_settings_dir_of(&source, valid.extension.as_str())
+        .expect("settings root")
+        .join("chatgpt.json");
+    std::fs::create_dir_all(settings.parent().expect("parent")).expect("settings dir");
+    std::fs::write(settings, "settings").expect("settings");
+    let secrets = extension_secret_dir_of(&source, valid.extension.as_str())
+        .expect("secret root")
+        .join("providers/chatgpt");
+    std::fs::create_dir_all(&secrets).expect("secret dir");
+    std::fs::write(secrets.join("oauth.json"), "secret").expect("secret");
     let access = provider_access_from_settings(
-        Some(source_state),
-        scratch_state.clone(),
-        Some(tau_config::settings::TestingSettings {
-            testing_providers: vec![tau_proto::ProviderName::new("chatgpt")],
+        Some(source),
+        scratch.clone(),
+        Some(TestingSettings {
+            testing_providers: vec![valid, missing],
         }),
     );
 
     access
         .copy_allowed_profiles()
-        .expect("provider profiles reconciled");
+        .expect_err("missing registration must fail");
 
-    assert_eq!(
-        std::fs::read_to_string(scratch_auth.join("chatgpt.json")).expect("allowed refreshed"),
-        "fresh"
-    );
-    assert!(!scratch_auth.join("openrouter.json").exists());
+    assert!(!scratch.join(PROVIDER_SETTINGS_DIR).exists());
+    assert!(!scratch.join(EXTENSION_SECRETS_DIR).exists());
 }
 
-/// Ensures a failed multi-provider copy cleans up credentials already copied
-/// for the current allowlist instead of leaving partial scratch secrets behind.
-#[test]
-fn provider_allowlist_copy_failure_cleans_up_partial_profiles() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let source_state = temp.path().join("real-state");
-    let scratch_state = temp.path().join("scratch-state");
-    let source_auth = source_state.join(PROVIDER_AUTH_DIR);
-    let scratch_auth = scratch_state.join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&source_auth).expect("mkdir source auth");
-    std::fs::write(source_auth.join("chatgpt.json"), "secret").expect("source profile");
-    let access = provider_access_from_settings(
-        Some(source_state),
-        scratch_state,
-        Some(tau_config::settings::TestingSettings {
-            testing_providers: vec![
-                tau_proto::ProviderName::new("chatgpt"),
-                tau_proto::ProviderName::new("openrouter"),
-            ],
-        }),
-    );
-
-    let error = access
-        .copy_allowed_profiles()
-        .expect_err("missing second provider aborts copy");
-
-    assert!(error.to_string().contains("openrouter"));
-    assert!(!scratch_auth.join("chatgpt.json").exists());
-}
-
-/// Ensures a pre-existing regular destination that is hard-linked outside the
-/// scratch tree is unlinked before copying instead of being truncated through
-/// the outside link.
+/// Proves a credential leaf symlink cannot redirect copying outside state.
 #[cfg(unix)]
 #[test]
-fn provider_allowlist_does_not_truncate_hardlinked_destination() {
+fn source_secret_symlink_fails_closed() {
+    use std::os::unix::fs::symlink;
+
     let temp = tempfile::tempdir().expect("tempdir");
-    let source_state = temp.path().join("real-state");
-    let scratch_state = temp.path().join("scratch-state");
-    let source_auth = source_state.join(PROVIDER_AUTH_DIR);
-    let scratch_auth = scratch_state.join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&source_auth).expect("mkdir source auth");
-    std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
-    std::fs::write(source_auth.join("chatgpt.json"), "fresh").expect("source profile");
-    let outside = temp.path().join("outside.json");
-    std::fs::write(&outside, "outside-secret").expect("outside");
-    std::fs::hard_link(&outside, scratch_auth.join("chatgpt.json")).expect("hard link");
-    let access = provider_access_from_settings(
-        Some(source_state),
-        scratch_state,
-        Some(tau_config::settings::TestingSettings {
-            testing_providers: vec![tau_proto::ProviderName::new("chatgpt")],
-        }),
-    );
-
-    access
-        .copy_allowed_profiles()
-        .expect("hardlinked destination unlinked and replaced");
-
-    assert_eq!(
-        std::fs::read_to_string(outside).expect("outside unchanged"),
-        "outside-secret"
-    );
-    assert_eq!(
-        std::fs::read_to_string(scratch_auth.join("chatgpt.json")).expect("scratch profile"),
-        "fresh"
-    );
-}
-
-/// Ensures a pre-existing FIFO destination at an allowed provider JSON path is
-/// removed during scratch reconciliation, so copying never opens it for writing
-/// and cannot block or stream credentials into a special file.
-#[cfg(unix)]
-#[test]
-fn provider_allowlist_replaces_fifo_destination_without_blocking() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let source_state = temp.path().join("real-state");
-    let scratch_state = temp.path().join("scratch-state");
-    let source_auth = source_state.join(PROVIDER_AUTH_DIR);
-    let scratch_auth = scratch_state.join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&source_auth).expect("mkdir source auth");
-    std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
-    std::fs::write(source_auth.join("chatgpt.json"), "fresh").expect("source profile");
-    let fifo = scratch_auth.join("chatgpt.json");
-    let output = Command::new("mkfifo")
-        .arg(&fifo)
-        .output()
-        .expect("run mkfifo");
-    assert!(
-        output.status.success(),
-        "mkfifo failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let access = provider_access_from_settings(
-        Some(source_state),
-        scratch_state,
-        Some(tau_config::settings::TestingSettings {
-            testing_providers: vec![tau_proto::ProviderName::new("chatgpt")],
-        }),
-    );
-
-    access
-        .copy_allowed_profiles()
-        .expect("fifo destination replaced");
-
-    assert_eq!(
-        std::fs::read_to_string(scratch_auth.join("chatgpt.json")).expect("scratch profile"),
-        "fresh"
-    );
-}
-
-/// Ensures provider copying refuses symlinked source profiles instead of
-/// following them to arbitrary user files outside the provider auth directory.
-#[cfg(unix)]
-#[test]
-fn provider_profile_copy_rejects_source_symlink() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let source_auth = temp.path().join("real-state").join(PROVIDER_AUTH_DIR);
-    let scratch_auth = temp.path().join("scratch-state").join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&source_auth).expect("mkdir source auth");
-    std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
-    let outside = temp.path().join("outside.json");
+    let source = temp.path().join("real");
+    let scratch = temp.path().join("scratch");
+    let entry = target("provider-builtin", "chatgpt");
+    let settings = extension_provider_settings_dir_of(&source, entry.extension.as_str())
+        .expect("settings")
+        .join("chatgpt.json");
+    std::fs::create_dir_all(settings.parent().expect("parent")).expect("dir");
+    std::fs::write(settings, "settings").expect("settings");
+    let credential_dir = extension_secret_dir_of(&source, entry.extension.as_str())
+        .expect("secrets")
+        .join("providers/chatgpt");
+    std::fs::create_dir_all(&credential_dir).expect("dir");
+    let outside = temp.path().join("outside");
     std::fs::write(&outside, "secret").expect("outside");
-    path_std_os_unix::fs::symlink(&outside, source_auth.join("chatgpt.json")).expect("symlink");
-
-    let error = copy_provider_profile(
-        &source_auth,
-        &scratch_auth,
-        &tau_proto::ProviderName::new("chatgpt"),
-    )
-    .expect_err("symlink source refused");
-
-    assert!(error.to_string().contains("refusing symlink path"));
-}
-
-/// Ensures provider copying refuses a FIFO source profile without blocking,
-/// preventing special files in real provider storage from being treated as
-/// credential JSON.
-#[cfg(unix)]
-#[test]
-fn provider_profile_copy_rejects_source_fifo_without_blocking() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let source_auth = temp.path().join("real-state").join(PROVIDER_AUTH_DIR);
-    let scratch_auth = temp.path().join("scratch-state").join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&source_auth).expect("mkdir source auth");
-    std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
-    let fifo = source_auth.join("chatgpt.json");
-    let output = Command::new("mkfifo")
-        .arg(&fifo)
-        .output()
-        .expect("run mkfifo");
-    assert!(
-        output.status.success(),
-        "mkfifo failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let error = copy_provider_profile(
-        &source_auth,
-        &scratch_auth,
-        &tau_proto::ProviderName::new("chatgpt"),
-    )
-    .expect_err("fifo source refused");
-
-    assert!(error.to_string().contains("non-regular provider profile"));
-    assert!(!scratch_auth.join("chatgpt.json").exists());
-}
-
-/// Ensures provider copying refuses symlinked scratch destinations so a reused
-/// scratch tree cannot redirect copied credentials into arbitrary files.
-#[cfg(unix)]
-#[test]
-fn provider_profile_copy_rejects_destination_symlink() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let source_auth = temp.path().join("real-state").join(PROVIDER_AUTH_DIR);
-    let scratch_auth = temp.path().join("scratch-state").join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&source_auth).expect("mkdir source auth");
-    std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
-    std::fs::write(source_auth.join("chatgpt.json"), "secret").expect("source");
-    let outside = temp.path().join("outside.json");
-    std::fs::write(&outside, "unchanged").expect("outside");
-    path_std_os_unix::fs::symlink(&outside, scratch_auth.join("chatgpt.json")).expect("symlink");
-
-    let error = copy_provider_profile(
-        &source_auth,
-        &scratch_auth,
-        &tau_proto::ProviderName::new("chatgpt"),
-    )
-    .expect_err("symlink destination refused");
-
-    assert!(error.to_string().contains("refusing symlink path"));
-    assert_eq!(
-        std::fs::read_to_string(outside).expect("outside unchanged"),
-        "unchanged"
-    );
-}
-
-/// Ensures the allowlist copier rejects a symlinked real `auth.d` directory
-/// before looking up opted-in profile names, keeping provider access tied to
-/// the expected Tau provider storage tree.
-#[cfg(unix)]
-#[test]
-fn provider_allowlist_rejects_source_auth_directory_symlink() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let source_state = temp.path().join("real-state");
-    let outside_auth = temp.path().join("outside-auth");
-    let scratch_state = temp.path().join("scratch-state");
-    std::fs::create_dir_all(&source_state).expect("mkdir source state");
-    std::fs::create_dir_all(&outside_auth).expect("mkdir outside auth");
-    path_std_os_unix::fs::symlink(&outside_auth, source_state.join(PROVIDER_AUTH_DIR))
-        .expect("auth dir symlink");
+    symlink(outside, credential_dir.join("oauth.json")).expect("symlink");
     let access = provider_access_from_settings(
-        Some(source_state),
-        scratch_state,
-        Some(tau_config::settings::TestingSettings {
-            testing_providers: vec![tau_proto::ProviderName::new("chatgpt")],
+        Some(source),
+        scratch,
+        Some(TestingSettings {
+            testing_providers: vec![entry],
         }),
     );
 
-    let error = access
-        .copy_allowed_profiles()
-        .expect_err("symlink auth dir refused");
-
-    assert!(error.to_string().contains("source auth directory"));
-    assert!(error.to_string().contains("refusing symlink path"));
+    assert!(access.copy_allowed_profiles().is_err());
 }
 
-/// Ensures stale scratch cleanup fails closed on symlinked entries instead of
-/// following or deleting a link that could point outside the helper scratch
-/// tree.
+/// Proves copying rejects a symlinked source ancestor rather than relying only
+/// on `O_NOFOLLOW` at the final credential file.
 #[cfg(unix)]
 #[test]
-fn provider_reconcile_rejects_scratch_auth_entry_symlink() {
+fn source_settings_ancestor_symlink_fails_closed() {
+    use std::os::unix::fs::symlink;
+
     let temp = tempfile::tempdir().expect("tempdir");
-    let scratch_state = temp.path().join("scratch-state");
-    let scratch_auth = scratch_state.join(PROVIDER_AUTH_DIR);
-    std::fs::create_dir_all(&scratch_auth).expect("mkdir scratch auth");
-    let outside = temp.path().join("outside.json");
-    std::fs::write(&outside, "unchanged").expect("outside");
-    path_std_os_unix::fs::symlink(&outside, scratch_auth.join("chatgpt.json")).expect("symlink");
-    let access = provider_access_from_settings(None, scratch_state, None);
-
-    let error = access
-        .copy_allowed_profiles()
-        .expect_err("scratch auth symlink refused");
-
-    assert!(error.to_string().contains("refusing symlink path"));
-    assert_eq!(
-        std::fs::read_to_string(outside).expect("outside unchanged"),
-        "unchanged"
+    let source = temp.path().join("real");
+    let scratch = temp.path().join("scratch");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(outside.join("provider-builtin")).expect("outside");
+    std::fs::write(
+        outside.join("provider-builtin/chatgpt.json"),
+        "outside-settings",
+    )
+    .expect("outside settings");
+    std::fs::create_dir_all(&source).expect("source");
+    symlink(&outside, source.join(PROVIDER_SETTINGS_DIR)).expect("settings ancestor symlink");
+    let access = provider_access_from_settings(
+        Some(source),
+        scratch.clone(),
+        Some(TestingSettings {
+            testing_providers: vec![target("provider-builtin", "chatgpt")],
+        }),
     );
+
+    access
+        .copy_allowed_profiles()
+        .expect_err("ancestor symlink must fail");
+
+    assert!(!scratch.join(PROVIDER_SETTINGS_DIR).exists());
+    assert!(!scratch.join(EXTENSION_SECRETS_DIR).exists());
 }

@@ -32,8 +32,9 @@ order. It is an optional standalone testing-only file used by development
 helpers such as `tau dev tmux start` to decide whether provider profiles may be
 copied into scratch state. Absence is distinct from an empty
 `testing_providers: []` list so callers can warn differently, but both states
-mean no provider access. Unknown fields fail closed, and provider entries are
-validated as `ProviderName`s so path-like values never become filenames.
+mean no provider access. Unknown fields fail closed, and each entry validates an
+exact `ExtensionName`/`ProviderName` pair so path-like values never become
+filenames.
 Unreadable, unstatable, or non-regular `testing.yaml` paths are explicit config
 errors rather than missing files.
 

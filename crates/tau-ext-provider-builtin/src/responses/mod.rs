@@ -20,9 +20,6 @@ pub struct ResponsesProvider {
     /// Optional bearer credential.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_key: String,
-    /// Harness-authorized logical secret name supplying the bearer credential.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_secret: Option<String>,
     /// Explicitly configured models published under this namespace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ResponsesModel>,

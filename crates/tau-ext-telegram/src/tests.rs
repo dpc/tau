@@ -495,6 +495,7 @@ fn telegram_uses_generic_tool_prefix() {
             .expect("test extension name must satisfy the identifier grammar"),
         state_dir: None,
         secrets: BTreeMap::new(),
+        settings_files: Default::default(),
     });
     let names = ToolNames::from_scope(&scope).expect("scoped names");
     assert_eq!(names.register.as_str(), "work_telegram_register");
@@ -2226,6 +2227,7 @@ fn run_exits_after_register_then_disconnect() {
             })),
             state_dir: Some(temp_state_dir()),
             secrets,
+            settings_files: Default::default(),
         }))
         .expect("config");
     writer
@@ -2271,6 +2273,7 @@ fn run_exits_promptly_when_disconnect_races_long_poll() {
             })),
             state_dir: Some(temp_state_dir()),
             secrets,
+            settings_files: Default::default(),
         }))
         .expect("config");
     writer
@@ -2318,6 +2321,7 @@ fn run_ignores_replayed_tool_delivery_before_live_send() {
             })),
             state_dir: Some(temp_state_dir()),
             secrets,
+            settings_files: Default::default(),
         }))
         .expect("config");
     writer
@@ -2375,6 +2379,7 @@ fn run_initial_malformed_config_emits_config_error_without_ready() {
             })),
             state_dir: Some(temp_state_dir()),
             secrets: BTreeMap::new(),
+            settings_files: Default::default(),
         }))
         .expect("invalid config");
     writer.flush().expect("flush");
@@ -2422,6 +2427,7 @@ fn run_custom_instance_registers_and_dispatches_namespaced_tools() {
             })),
             state_dir: Some(temp_state_dir()),
             secrets,
+            settings_files: Default::default(),
         }))
         .expect("config");
     writer
@@ -2512,6 +2518,7 @@ fn run_ignores_unrelated_tool_started_events() {
             })),
             state_dir: Some(temp_state_dir()),
             secrets,
+            settings_files: Default::default(),
         }))
         .expect("config");
     writer
@@ -2570,6 +2577,7 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
             })),
             state_dir: Some(temp_state_dir()),
             secrets,
+            settings_files: Default::default(),
         }))
         .expect("valid config");
     writer
@@ -2589,6 +2597,7 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
             })),
             state_dir: Some(temp_state_dir()),
             secrets: BTreeMap::new(),
+            settings_files: Default::default(),
         }))
         .expect("invalid config");
     writer
@@ -2652,6 +2661,7 @@ fn run_legacy_tool_namespace_is_rejected() {
             })),
             state_dir: Some(temp_state_dir()),
             secrets: secrets.clone(),
+            settings_files: Default::default(),
         }))
         .expect("valid config");
     writer
@@ -2674,6 +2684,7 @@ fn run_legacy_tool_namespace_is_rejected() {
             })),
             state_dir: Some(temp_state_dir()),
             secrets,
+            settings_files: Default::default(),
         }))
         .expect("namespace config");
     writer

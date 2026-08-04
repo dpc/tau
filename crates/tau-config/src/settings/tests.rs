@@ -212,14 +212,13 @@ fn testing_settings_rejects_fifo_without_blocking() {
     assert!(error.to_string().contains("not a regular file"));
 }
 
-/// Ensures `testing.yaml` parses exact provider profile names through the same
-/// provider-name validator used by model routing and provider auth filenames.
+/// Ensures `testing.yaml` parses exact extension/provider targets.
 #[test]
 fn testing_settings_parses_testing_provider_allowlist() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         td.path().join("testing.yaml"),
-        "testing_providers:\n  - chatgpt\n  - openrouter.work\n",
+        "testing_providers:\n  - extension: provider-builtin\n    provider: chatgpt\n  - extension: provider-work\n    provider: openrouter.work\n",
     )
     .expect("write testing settings");
 
@@ -230,27 +229,32 @@ fn testing_settings_parses_testing_provider_allowlist() {
     assert_eq!(
         loaded.testing_providers,
         vec![
-            tau_proto::ProviderName::new("chatgpt"),
-            tau_proto::ProviderName::new("openrouter.work")
+            TestingProvider {
+                extension: tau_proto::ExtensionName::parse("provider-builtin").expect("extension"),
+                provider: tau_proto::ProviderName::new("chatgpt"),
+            },
+            TestingProvider {
+                extension: tau_proto::ExtensionName::parse("provider-work").expect("extension"),
+                provider: tau_proto::ProviderName::new("openrouter.work"),
+            },
         ]
     );
 }
 
-/// Prevents malformed or path-like provider names in `testing.yaml` from being
-/// accepted, because the allowlist is later translated into auth.d filenames.
+/// Prevents malformed or path-like extension names in `testing.yaml`.
 #[test]
 fn testing_settings_rejects_unsafe_provider_names() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         td.path().join("testing.yaml"),
-        "testing_providers:\n  - ../chatgpt\n",
+        "testing_providers:\n  - extension: ../provider-builtin\n    provider: chatgpt\n",
     )
     .expect("write testing settings");
 
     let error = load_testing_settings(&dirs_with_config(td.path()))
         .expect_err("unsafe provider name rejected");
 
-    assert!(error.to_string().contains("provider name"));
+    assert!(error.to_string().contains("extension name"));
 }
 
 /// Ensures typos in `testing.yaml` fail closed instead of silently producing an

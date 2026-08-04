@@ -40,33 +40,24 @@ are governed by [`tau-provider-codex/SECURITY.md`](../tau-provider-codex/SECURIT
 extension logs only the typed error's default safe projection and never its
 untrusted parsed provider fields.
 
-Permanent refresh suppression is memory-only and contains secret credential
-copies solely for exact equality; its types have no credential-revealing debug
-projection. The auth-file lock serializes reload and refresh, and the generation
-loaded under that lock replaces any stale caller snapshot before valid-only
-fallback. Closed credential-invalidating 400/401 codes may suppress the exact
-generation for this process. Profile rotation clears it; restart may retry once.
+Permanent refresh suppression is memory-only and keyed by the credential record
+generation. Its types have no credential-revealing debug projection. Secret-scope
+compare-and-swap serializes refresh publication, and a losing refresher reloads
+the winning generation rather than retrying a rotated refresh token. Closed
+credential-invalidating 400/401 codes may suppress the exact generation for this
+process. Rotation clears it; restart may retry once.
 
 The cross-component authority and no-guessed-applicability rule are defined by
 [GATE-provider-quota-pacing](../../specs/GATE-provider-quota-pacing.md).
 
-## API-key secret references
+## Scoped credential records
 
-`chat_completions`, `openrouter`, and public `responses` profiles may name an
-`api_key_secret`. The extension captures only its initial, harness-authorized
-`Configure.secrets` map and never reads `TAU_SECRET_*`, secret files, or another
-extension's values. A reference must exactly match a map key; its logical name
-is profile metadata, while its value remains process-local.
-
-Empty, invalid, unavailable, and dual-source (`api_key` plus
-`api_key_secret`) profiles fail closed and are excluded from publication and
-routing rather than becoming keyless. Prompt, prewarm, retry, and quota reloads
-resolve the current profile against that immutable startup map, so a profile may
-select another startup-authorized name but a secret-source change requires
-restart. Diagnostics may identify provider and reference names but never secret
-values. `api_key_secret` serialization, safe error text, backend resolution,
-list redaction, and Configure snapshot behavior are covered by the
-`api_key_secret_*` provider-builtin tests.
+Credential-free settings contain one deterministic `credential.secret_path`.
+The runtime reads a typed version-zero OAuth or API-key record through Secret
+RPC before publishing that provider's models and again at every prompt boundary.
+Unavailable, malformed, wrong-kind, or wrong-version records exclude the
+provider. Diagnostics may identify provider names and safe error categories but
+never secret paths, values, or host filesystem paths.
 
 ## Provider cancellation boundary
 
@@ -113,3 +104,9 @@ output. Only validated bounded text can become an explicitly untrusted
 user-role historical checkpoint. Re-review locality, budgeting, capture, and
 terminalization whenever this profile or dispatch path changes.
 Known-remote OpenRouter conversion strips the local-only declaration.
+Provider settings contain no credentials. The extension reads typed version-zero
+OAuth and API-key records only through its configured-instance Secret RPC,
+reloads them at prompt time, and persists OAuth rotation with generation
+compare-and-swap. Secret frames and decoded records must never enter logs,
+events, transcripts, errors, or debug output. This boundary is specified by
+[`SPEC-extension-secret-storage`](../../specs/SPEC-extension-secret-storage.md).

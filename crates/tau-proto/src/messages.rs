@@ -129,6 +129,14 @@ pub struct Configure {
     /// Secret values explicitly authorized for this extension.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, SecretValue>,
+    /// Bounded immutable startup snapshot of CLI-owned non-secret settings
+    /// files.
+    ///
+    /// Keys are sanitized relative file names. The harness captures this map
+    /// once before configuration; changes become visible after extension
+    /// restart.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings_files: BTreeMap<String, Vec<u8>>,
 }
 
 /// Secret text passed from the harness to one authorized extension.
@@ -909,10 +917,16 @@ pub enum ExtensionDataScope {
     User,
     /// User cache data under `~/.cache/tau/ext/<ext-name>`.
     Cache,
+    /// Durable credential data under the harness-only
+    /// `~/.local/state/tau/secrets/ext/<ext-name>` root.
+    ///
+    /// The harness never exposes this root directly to the extension and denies
+    /// this scope to memory-only and in-process extensions.
+    Secret,
 }
 
 /// Extension request for harness-mediated file access inside its data roots.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionDataRequest {
     /// Request correlation id echoed by [`ExtensionDataResult`].
     pub request_id: String,
@@ -920,6 +934,17 @@ pub struct ExtensionDataRequest {
     pub scope: ExtensionDataScope,
     /// File operation to perform.
     pub op: ExtensionDataRequestOp,
+}
+
+impl std::fmt::Debug for ExtensionDataRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExtensionDataRequest")
+            .field("request_id", &self.request_id)
+            .field("scope", &self.scope)
+            .field("op", &self.op)
+            .finish()
+    }
 }
 
 /// Extension-provided path text inside an extension data scope.
@@ -978,7 +1003,7 @@ impl AsRef<str> for ExtensionDataPath {
 /// The harness may reject operations with
 /// [`ExtensionDataErrorKind::QuotaExceeded`] when file contents or directory
 /// listings exceed harness-owned resource limits.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ExtensionDataRequestOp {
     /// Read one whole file at an extension-provided path, subject to harness
@@ -990,6 +1015,16 @@ pub enum ExtensionDataRequestOp {
     WriteFile {
         /// Relative file path inside the selected extension data scope.
         path: ExtensionDataPath,
+        /// Complete replacement file contents.
+        contents: Vec<u8>,
+    },
+    /// Replace one complete file only when its current BLAKE3 generation
+    /// matches.
+    CompareAndSwapFile {
+        /// Relative file path inside the selected extension data scope.
+        path: ExtensionDataPath,
+        /// Lowercase BLAKE3 digest of the complete expected current contents.
+        expected_generation: String,
         /// Complete replacement file contents.
         contents: Vec<u8>,
     },
@@ -1026,8 +1061,57 @@ pub enum ExtensionDataRequestOp {
     /// harness validation, subject to the harness directory-entry quota.
     ListFiles { path: ExtensionDataPath },
 }
+
+impl std::fmt::Debug for ExtensionDataRequestOp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReadFile { path } => formatter
+                .debug_struct("ReadFile")
+                .field("path", path)
+                .finish(),
+            Self::WriteFile { path, contents } => formatter
+                .debug_struct("WriteFile")
+                .field("path", path)
+                .field("contents_len", &contents.len())
+                .finish(),
+            Self::CompareAndSwapFile {
+                path,
+                expected_generation,
+                contents,
+            } => formatter
+                .debug_struct("CompareAndSwapFile")
+                .field("path", path)
+                .field("expected_generation", expected_generation)
+                .field("contents_len", &contents.len())
+                .finish(),
+            Self::CreateFile { path, contents } => formatter
+                .debug_struct("CreateFile")
+                .field("path", path)
+                .field("contents_len", &contents.len())
+                .finish(),
+            Self::AppendFile { path, contents } => formatter
+                .debug_struct("AppendFile")
+                .field("path", path)
+                .field("contents_len", &contents.len())
+                .finish(),
+            Self::DeleteFile { path } => formatter
+                .debug_struct("DeleteFile")
+                .field("path", path)
+                .finish(),
+            Self::RenameFile { from, to } => formatter
+                .debug_struct("RenameFile")
+                .field("from", from)
+                .field("to", to)
+                .finish(),
+            Self::ListFiles { path } => formatter
+                .debug_struct("ListFiles")
+                .field("path", path)
+                .finish(),
+        }
+    }
+}
 /// Harness response to an [`ExtensionDataRequest`].
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionDataResult {
     /// Request correlation id copied from the request.
     pub request_id: String,
@@ -1035,8 +1119,18 @@ pub struct ExtensionDataResult {
     pub result: ExtensionDataResultPayload,
 }
 
+impl std::fmt::Debug for ExtensionDataResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExtensionDataResult")
+            .field("request_id", &self.request_id)
+            .field("result", &self.result)
+            .finish()
+    }
+}
+
 /// Result payload for an extension data RPC.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ExtensionDataResultPayload {
     /// Operation succeeded.
@@ -1051,14 +1145,29 @@ pub enum ExtensionDataResultPayload {
     },
 }
 
+impl std::fmt::Debug for ExtensionDataResultPayload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ok { value } => formatter.debug_tuple("Ok").field(value).finish(),
+            Self::Error { kind, message } => formatter
+                .debug_struct("Error")
+                .field("kind", kind)
+                .field("message", message)
+                .finish(),
+        }
+    }
+}
+
 /// Successful value returned by an extension data RPC.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ExtensionDataValue {
     /// Whole file contents from a read request.
     ReadFile { contents: Vec<u8> },
     /// Empty success marker for a write request.
     WriteFile,
+    /// Empty success marker for a compare-and-swap request.
+    CompareAndSwapFile,
     /// Empty success marker for a create request.
     CreateFile,
     /// Empty success marker for an append request.
@@ -1069,6 +1178,27 @@ pub enum ExtensionDataValue {
     RenameFile,
     /// Direct child entries from a list request.
     ListFiles { entries: Vec<ExtensionDataEntry> },
+}
+
+impl std::fmt::Debug for ExtensionDataValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReadFile { contents } => formatter
+                .debug_struct("ReadFile")
+                .field("contents_len", &contents.len())
+                .finish(),
+            Self::WriteFile => formatter.write_str("WriteFile"),
+            Self::CompareAndSwapFile => formatter.write_str("CompareAndSwapFile"),
+            Self::CreateFile => formatter.write_str("CreateFile"),
+            Self::AppendFile => formatter.write_str("AppendFile"),
+            Self::DeleteFile => formatter.write_str("DeleteFile"),
+            Self::RenameFile => formatter.write_str("RenameFile"),
+            Self::ListFiles { entries } => formatter
+                .debug_struct("ListFiles")
+                .field("entries", entries)
+                .finish(),
+        }
+    }
 }
 
 /// Machine-readable extension data RPC error kind.
@@ -1089,6 +1219,8 @@ pub enum ExtensionDataErrorKind {
     Permission,
     /// Operation exceeded a harness-enforced resource quota.
     QuotaExceeded,
+    /// Compare-and-swap expected generation did not match the current file.
+    GenerationMismatch,
     /// Any other I/O or harness-side error.
     Io,
 }
