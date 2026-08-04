@@ -66,6 +66,13 @@ bounded best-effort background writer; overload, write failure, or process
 shutdown can omit captures but never delay provider or UI work. Detailed
 credential and response controls are owned by [`SECURITY.md`](../SECURITY.md).
 
+The three API-key profile kinds may name an `api_key_secret` instead of
+persisting an inline key. The extension resolves that exact logical name only
+from its existing scoped `Configure.secrets` map; it never reads
+`TAU_SECRET_*`, secret files, or another extension's values. The map is a
+harness-startup snapshot, so profile reloads can select another already
+authorized secret while environment and secret-file changes require restart.
+
 ## Runtime and worker flow
 
 Protocol startup publishes provider kind and subscriptions, declares models,

@@ -119,6 +119,7 @@ fn openrouter_suppresses_local_summary_compaction() {
     .expect("configured remote model");
     let profile = OpenRouterProfile {
         api_key: String::new(),
+        api_key_secret: None,
         models: vec![model],
     };
     let provider = profile.to_chat_completions();

@@ -1151,6 +1151,7 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
     let provider = ChatCompletionsProvider {
         base_url: "http://127.0.0.1:8080/v1".to_owned(),
         api_key: String::new(),
+        api_key_secret: None,
         models: vec![configured.clone()],
         max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
         extra_body: BTreeMap::new(),
@@ -1197,6 +1198,7 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
     let configured = test_chat_model("anthropic/claude-test");
     let profile = OpenRouterProfile {
         api_key: "key".to_owned(),
+        api_key_secret: None,
         models: vec![configured.clone()],
     };
     let mut profiles = BuiltinProviderProfiles {
@@ -2400,4 +2402,177 @@ fn quota_refresh_deadlines_coalesce_and_back_off() {
     assert_eq!(quota.failure_delay(&provider), QUOTA_REFRESH_INTERVAL);
     quota.ensure_profile(provider.clone(), 8);
     assert!(!quota.refresh_is_current(&provider, &epoch, second));
+}
+
+/// Secret references must remain serializable profile metadata while all three
+/// API-key backends receive only the resolved startup-snapshot value.
+#[test]
+fn api_key_secret_profiles_round_trip_and_resolve_for_all_backends() {
+    let secret_name = "provider_key";
+    let secret_value = "credential-never-in-profile";
+    let mut profiles = BuiltinProviderProfiles {
+        providers: BTreeMap::from([
+            (
+                ProviderName::new("compatible"),
+                serde_json::from_value(serde_json::json!({
+                    "kind": "chat_completions",
+                    "api_key_secret": secret_name,
+                }))
+                .expect("Chat Completions profile"),
+            ),
+            (
+                ProviderName::new("router"),
+                serde_json::from_value(serde_json::json!({
+                    "kind": "openrouter",
+                    "api_key_secret": secret_name,
+                }))
+                .expect("OpenRouter profile"),
+            ),
+            (
+                ProviderName::new("public"),
+                serde_json::from_value(serde_json::json!({
+                    "kind": "responses",
+                    "api_key_secret": secret_name,
+                }))
+                .expect("Responses profile"),
+            ),
+        ]),
+    };
+    let encoded = serde_json::to_string(&profiles.providers[&ProviderName::new("compatible")])
+        .expect("serialize profile");
+    assert!(encoded.contains(secret_name));
+    assert!(!encoded.contains(secret_value));
+
+    profiles
+        .resolve_api_key_secrets(&BTreeMap::from([(
+            secret_name.to_owned(),
+            SecretValue::new(secret_value),
+        )]))
+        .expect("resolve declared secret");
+
+    for profile in profiles.providers.values() {
+        let key = match profile {
+            BuiltinProviderProfile::ChatCompletions(provider) => &provider.api_key,
+            BuiltinProviderProfile::OpenRouter(provider) => &provider.api_key,
+            BuiltinProviderProfile::Responses(provider) => &provider.api_key,
+            BuiltinProviderProfile::Chatgpt(_) => panic!("unexpected OAuth profile"),
+        };
+        assert_eq!(key, secret_value);
+    }
+}
+
+/// Invalid sources must fail before request routing and diagnostics must not
+/// expose the unavailable secret's value.
+#[test]
+fn api_key_secret_resolution_rejects_ambiguous_invalid_and_unavailable_sources() {
+    let provider = ProviderName::new("example");
+    let secret_value = "credential-must-not-leak";
+    let secrets = BTreeMap::from([("available".to_owned(), SecretValue::new(secret_value))]);
+
+    for (api_key, reference, expected) in [
+        ("inline", Some("available"), "must not set both"),
+        ("", Some(""), "invalid api_key_secret"),
+        ("", Some("bad/name"), "invalid api_key_secret"),
+        (
+            "",
+            Some("missing"),
+            "requires unavailable declared secret 'missing'",
+        ),
+    ] {
+        let mut api_key = api_key.to_owned();
+        let error = crate::api_key_secret::resolve(
+            &provider,
+            &mut api_key,
+            &reference.map(str::to_owned),
+            &secrets,
+        )
+        .expect_err("invalid source must fail closed");
+        assert!(error.to_string().contains(expected));
+        assert!(!error.to_string().contains(secret_value));
+        assert!(!format!("{error:?}").contains(secret_value));
+    }
+}
+
+/// Existing inline and keyless profiles retain their prior serialization and
+/// routing semantics when no secret reference is present.
+#[test]
+fn api_key_secret_preserves_inline_and_keyless_profiles() {
+    let provider: BuiltinProviderProfile = serde_json::from_value(serde_json::json!({
+        "kind": "responses",
+        "api_key": "inline",
+    }))
+    .expect("inline profile");
+    let keyless: BuiltinProviderProfile = serde_json::from_value(serde_json::json!({
+        "kind": "responses",
+    }))
+    .expect("keyless profile");
+    assert_eq!(api_key_status("inline", &None), "api-key");
+    assert_eq!(api_key_status("", &None), "no-api-key");
+    assert_eq!(
+        api_key_status("", &Some("reference".to_owned())),
+        "api-key-secret"
+    );
+    assert!(
+        serde_json::to_string(&provider)
+            .expect("serialize inline profile")
+            .contains("\"api_key\":\"inline\"")
+    );
+    assert!(
+        !serde_json::to_string(&keyless)
+            .expect("serialize keyless profile")
+            .contains("api_key")
+    );
+}
+
+/// References must use the same conservative logical-name grammar as harness
+/// declarations so profile and extension authorization cannot disagree.
+#[test]
+fn api_key_secret_uses_extension_secret_name_grammar() {
+    for name in ["a", "api_key.2", "api-key_3"] {
+        assert!(crate::api_key_secret::is_valid_secret_name(name), "{name}");
+    }
+    for name in ["", ".", "..", "a/b", "a b", "☃"] {
+        assert!(!crate::api_key_secret::is_valid_secret_name(name), "{name}");
+    }
+}
+
+/// A profile whose reference cannot resolve must disappear before model
+/// publication or routing, never silently become a keyless backend.
+#[test]
+fn api_key_secret_filter_excludes_unavailable_profiles() {
+    let profile = |api_key: &str, api_key_secret: Option<&str>| {
+        BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+            api_key: api_key.to_owned(),
+            api_key_secret: api_key_secret.map(str::to_owned),
+            models: vec![test_chat_model("model")],
+            ..ChatCompletionsProvider::default()
+        })
+    };
+    let profiles = BuiltinProviderProfiles {
+        providers: BTreeMap::from([
+            (ProviderName::new("valid"), profile("", Some("available"))),
+            (ProviderName::new("missing"), profile("", Some("missing"))),
+            (ProviderName::new("empty"), profile("", Some(""))),
+            (ProviderName::new("invalid"), profile("", Some("bad/name"))),
+            (
+                ProviderName::new("dual"),
+                profile("inline", Some("available")),
+            ),
+        ]),
+    };
+    let filtered = resolve_api_key_secret_profiles(
+        profiles,
+        &BTreeMap::from([("available".to_owned(), SecretValue::new("secret-value"))]),
+    );
+    assert_eq!(
+        filtered.providers.keys().collect::<Vec<_>>(),
+        vec![&ProviderName::new("valid")]
+    );
+    assert_eq!(
+        models_for_profiles(&filtered)
+            .iter()
+            .map(|model| model.id.provider.as_str())
+            .collect::<Vec<_>>(),
+        vec!["valid"]
+    );
 }

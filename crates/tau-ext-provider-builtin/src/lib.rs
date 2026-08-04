@@ -9,6 +9,7 @@
 use std::collections::hash_map as path_std_collections_hash_map;
 use std::io as path_std_io;
 
+mod api_key_secret;
 mod chat_completions;
 mod oauth_refresh_rejection;
 mod prewarm;
@@ -61,7 +62,7 @@ use tau_proto::{
     ModelName, PeerOutputWriter, ProviderBackend, ProviderBackendKind, ProviderBackendTransport,
     ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderModelsDeclared, ProviderName,
     ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseStats,
-    ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason,
+    ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason, SecretValue,
 };
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider::storage::{AuthFile, AuthFileLockResult, ProviderStore};
@@ -80,6 +81,9 @@ pub const LOG_TARGET: &str = "provider-builtin";
 const EXTENSION_NAME: &str = "tau-ext-provider-builtin";
 const CHATGPT_PROVIDER_NAME: &str = "chatgpt";
 const DEFAULT_RESPONSES_LITE_COMPATIBILITY: bool = false;
+
+/// Immutable secrets authorized for this extension at harness startup.
+type SecretSnapshot = Arc<Mutex<BTreeMap<String, SecretValue>>>;
 
 #[cfg(test)]
 fn test_network_policy() -> tau_provider::OutboundNetworkPolicy {
@@ -135,6 +139,42 @@ pub struct BuiltinProviderProfiles {
 }
 
 impl BuiltinProviderProfiles {
+    fn resolve_api_key_secrets(
+        &mut self,
+        secrets: &BTreeMap<String, SecretValue>,
+    ) -> Result<(), api_key_secret::ApiKeySecretError> {
+        for (provider_name, profile) in &mut self.providers {
+            match profile {
+                BuiltinProviderProfile::Chatgpt(_) => {}
+                BuiltinProviderProfile::ChatCompletions(profile) => {
+                    api_key_secret::resolve(
+                        provider_name,
+                        &mut profile.api_key,
+                        &profile.api_key_secret,
+                        secrets,
+                    )?;
+                }
+                BuiltinProviderProfile::OpenRouter(profile) => {
+                    api_key_secret::resolve(
+                        provider_name,
+                        &mut profile.api_key,
+                        &profile.api_key_secret,
+                        secrets,
+                    )?;
+                }
+                BuiltinProviderProfile::Responses(profile) => {
+                    api_key_secret::resolve(
+                        provider_name,
+                        &mut profile.api_key,
+                        &profile.api_key_secret,
+                        secrets,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn startup_responses_modes(&self) -> BTreeMap<ProviderName, CodexMode> {
         self.providers
             .iter()
@@ -791,6 +831,7 @@ fn cmd_add_responses() -> Result<(), Box<dyn Error>> {
         &BuiltinProviderProfile::Responses(ResponsesProvider {
             base_url,
             api_key,
+            api_key_secret: None,
             models,
             tags: Vec::new(),
             max_output_tokens: 8192,
@@ -843,6 +884,7 @@ fn cmd_add_chat_completions() -> Result<(), Box<dyn Error>> {
     let profile = ChatCompletionsProvider {
         base_url,
         api_key,
+        api_key_secret: None,
         models,
         max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
         extra_body: BTreeMap::new(),
@@ -876,7 +918,11 @@ fn cmd_add_openrouter(network: &tau_provider::OutboundNetworkPolicy) -> Result<(
     } else {
         parse_chat_model_list(&models_input)?
     };
-    let profile = OpenRouterProfile { api_key, models };
+    let profile = OpenRouterProfile {
+        api_key,
+        api_key_secret: None,
+        models,
+    };
     save_profile(&name, &BuiltinProviderProfile::OpenRouter(profile))?;
     Ok(())
 }
@@ -922,11 +968,7 @@ fn cmd_list() -> Result<(), Box<dyn Error>> {
                 println!("{name}\tchatgpt\t{status}\t{mode}");
             }
             BuiltinProviderProfile::ChatCompletions(provider) => {
-                let auth_status = if provider.api_key.trim().is_empty() {
-                    "no-api-key"
-                } else {
-                    "api-key"
-                };
+                let auth_status = api_key_status(&provider.api_key, &provider.api_key_secret);
                 let models = provider
                     .models
                     .iter()
@@ -939,11 +981,7 @@ fn cmd_list() -> Result<(), Box<dyn Error>> {
                 );
             }
             BuiltinProviderProfile::OpenRouter(profile) => {
-                let auth_status = if profile.api_key.trim().is_empty() {
-                    "no-api-key"
-                } else {
-                    "api-key"
-                };
+                let auth_status = api_key_status(&profile.api_key, &profile.api_key_secret);
                 let models = profile
                     .models
                     .iter()
@@ -955,11 +993,7 @@ fn cmd_list() -> Result<(), Box<dyn Error>> {
                 );
             }
             BuiltinProviderProfile::Responses(provider) => {
-                let auth_status = if provider.api_key.trim().is_empty() {
-                    "no-api-key"
-                } else {
-                    "api-key"
-                };
+                let auth_status = api_key_status(&provider.api_key, &provider.api_key_secret);
                 let models = provider
                     .models
                     .iter()
@@ -974,6 +1008,18 @@ fn cmd_list() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+/// Returns the credential source label shown without resolving a secret
+/// reference.
+fn api_key_status(api_key: &str, api_key_secret: &Option<String>) -> &'static str {
+    if api_key_secret.is_some() {
+        "api-key-secret"
+    } else if api_key.trim().is_empty() {
+        "no-api-key"
+    } else {
+        "api-key"
+    }
 }
 
 fn prompt_provider_name(default: &str) -> Result<ProviderName, Box<dyn Error>> {
@@ -1097,8 +1143,20 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    let startup_profiles = load_profiles();
-    run_inner(reader, writer, startup_profiles, load_profiles)
+    let secret_snapshot = Arc::new(Mutex::new(BTreeMap::new()));
+    let profile_snapshot = Arc::clone(&secret_snapshot);
+    run_inner_with_configured_secrets(
+        reader,
+        writer,
+        BuiltinProviderProfiles::default(),
+        move || {
+            let secrets = profile_snapshot
+                .lock()
+                .expect("lock provider secret snapshot");
+            load_profiles_with_secrets(&secrets)
+        },
+        secret_snapshot,
+    )
 }
 
 fn load_profiles() -> BuiltinProviderProfiles {
@@ -1113,6 +1171,45 @@ fn load_profiles() -> BuiltinProviderProfiles {
             BuiltinProviderProfiles::default()
         }
     }
+}
+
+/// Loads profiles and resolves API-key references from one Configure secret
+/// snapshot.
+fn load_profiles_with_secrets(secrets: &BTreeMap<String, SecretValue>) -> BuiltinProviderProfiles {
+    resolve_api_key_secret_profiles(load_profiles(), secrets)
+}
+
+/// Excludes profiles whose API-key references cannot resolve from this
+/// snapshot.
+fn resolve_api_key_secret_profiles(
+    mut profiles: BuiltinProviderProfiles,
+    secrets: &BTreeMap<String, SecretValue>,
+) -> BuiltinProviderProfiles {
+    let names = profiles.providers.keys().cloned().collect::<Vec<_>>();
+    for name in names {
+        let Some(profile) = profiles.providers.get(&name).cloned() else {
+            continue;
+        };
+        let mut resolved = BuiltinProviderProfiles {
+            providers: BTreeMap::from([(name.clone(), profile)]),
+        };
+        if let Err(error) = resolved.resolve_api_key_secrets(secrets) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                provider = %name,
+                error = %error,
+                "skipping provider profile with unavailable API-key secret"
+            );
+            profiles.providers.remove(&name);
+            continue;
+        }
+        let profile = resolved
+            .providers
+            .remove(&name)
+            .expect("resolved provider profile remains present");
+        profiles.providers.insert(name, profile);
+    }
+    profiles
 }
 
 fn load_profiles_result() -> std::io::Result<BuiltinProviderProfiles> {
@@ -1181,6 +1278,7 @@ fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
     BuiltinProviderProfiles { providers }
 }
 
+#[cfg(test)]
 fn run_inner<R, W, F>(
     reader: R,
     writer: W,
@@ -1202,6 +1300,39 @@ where
     )
 }
 
+/// Runs the production extension with its startup-stable Configure secret
+/// snapshot.
+fn run_inner_with_configured_secrets<R, W, F>(
+    reader: R,
+    writer: W,
+    startup_profiles: BuiltinProviderProfiles,
+    load_prompt_profiles: F,
+    secret_snapshot: SecretSnapshot,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
+{
+    run_inner_with_executors_and_clock_with_secrets(
+        reader,
+        writer,
+        load_prompt_profiles,
+        prompt_concurrency_limit(),
+        RuntimeExecutors {
+            prompt: production_prompt_executor(),
+            prewarm: production_prewarm_executor(),
+            retry_clock: Arc::new(SystemRetryClock),
+        },
+        RuntimeStartup {
+            profiles: startup_profiles,
+            secret_snapshot,
+            publish_models_after_configure: true,
+        },
+    )
+}
+
+#[cfg(any(test, feature = "quota-test-support"))]
 fn run_inner_with_prompt_executor<R, W, F>(
     reader: R,
     writer: W,
@@ -1226,6 +1357,7 @@ where
     )
 }
 
+#[cfg(any(test, feature = "quota-test-support"))]
 fn run_inner_with_executors<R, W, F>(
     reader: R,
     writer: W,
@@ -1240,16 +1372,20 @@ where
     W: Write + Send + 'static,
     F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
-    run_inner_with_executors_and_clock(
+    run_inner_with_executors_and_clock_with_secrets(
         reader,
         writer,
-        startup_profiles,
         load_prompt_profiles,
         prompt_concurrency_limit,
         RuntimeExecutors {
             prompt: prompt_executor,
             prewarm: prewarm_executor,
             retry_clock: Arc::new(SystemRetryClock),
+        },
+        RuntimeStartup {
+            profiles: startup_profiles,
+            secret_snapshot: Arc::new(Mutex::new(BTreeMap::new())),
+            publish_models_after_configure: false,
         },
     )
 }
@@ -1264,6 +1400,18 @@ struct RuntimeExecutors {
     retry_clock: Arc<dyn RetryClock>,
 }
 
+/// Startup profiles and secret authority supplied to one provider runtime.
+struct RuntimeStartup {
+    /// Profiles used by test-only static model publication.
+    profiles: BuiltinProviderProfiles,
+    /// Immutable provider-builtin secret snapshot from initial Configure.
+    secret_snapshot: SecretSnapshot,
+    /// Whether production must defer model publication until Configure
+    /// resolution.
+    publish_models_after_configure: bool,
+}
+
+#[cfg(test)]
 fn run_inner_with_executors_and_clock<R, W, F>(
     reader: R,
     writer: W,
@@ -1277,8 +1425,37 @@ where
     W: Write + Send + 'static,
     F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
+    run_inner_with_executors_and_clock_with_secrets(
+        reader,
+        writer,
+        load_prompt_profiles,
+        prompt_concurrency_limit,
+        executors,
+        RuntimeStartup {
+            profiles: startup_profiles,
+            secret_snapshot: Arc::new(Mutex::new(BTreeMap::new())),
+            publish_models_after_configure: false,
+        },
+    )
+}
+
+/// Runs the extension with injected executors and an authorized secret
+/// snapshot.
+fn run_inner_with_executors_and_clock_with_secrets<R, W, F>(
+    reader: R,
+    writer: W,
+    load_prompt_profiles: F,
+    prompt_concurrency_limit: usize,
+    executors: RuntimeExecutors,
+    startup: RuntimeStartup,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
+{
     let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
-    let startup_responses_modes = startup_profiles.startup_responses_modes();
+    let startup_responses_modes = startup.profiles.startup_responses_modes();
     let network = Arc::new(tau_provider::OutboundNetworkPolicy::from_env());
     let runtime = ProviderRuntime {
         load_prompt_profiles,
@@ -1306,8 +1483,11 @@ where
         quota: QuotaCoordinator::default(),
         oauth_refresh_rejections: OAuthRefreshRejectionCache::default(),
     };
-    let mut runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(startup_profiles))
-        .start_manual_loop(reader, writer, runtime)?;
+    let mut runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(
+        startup.secret_snapshot,
+        (!startup.publish_models_after_configure).then_some(startup.profiles),
+    ))
+    .start_manual_loop(reader, writer, runtime)?;
     let worker_waker = runtime.waker();
     runtime.state_mut().set_worker_waker(worker_waker);
     let handle = runtime.handle();
@@ -1317,16 +1497,22 @@ where
 
 /// Tau-client declaration for the built-in provider peer.
 struct ProviderExtension<F> {
-    /// Provider profiles used to publish startup model availability.
-    startup_profiles: BuiltinProviderProfiles,
+    /// Harness-authorized secrets captured by the initial Configure frame.
+    secret_snapshot: SecretSnapshot,
+    /// Models declared statically by test-only, non-secret profile loaders.
+    startup_profiles: Option<BuiltinProviderProfiles>,
     /// Marker tying the declaration to the runtime state's profile loader type.
     _load_prompt_profiles: PhantomData<fn() -> F>,
 }
 
 impl<F> ProviderExtension<F> {
-    /// Creates a provider declaration for the supplied startup profiles.
-    fn new(startup_profiles: BuiltinProviderProfiles) -> Self {
+    /// Creates a provider declaration retaining the initial Configure secrets.
+    fn new(
+        secret_snapshot: SecretSnapshot,
+        startup_profiles: Option<BuiltinProviderProfiles>,
+    ) -> Self {
         Self {
+            secret_snapshot,
             startup_profiles,
             _load_prompt_profiles: PhantomData,
         }
@@ -1348,11 +1534,34 @@ where
     }
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        let secret_snapshot = self.secret_snapshot;
+        let startup_profiles = self.startup_profiles;
+        let publish_models_after_configure = startup_profiles.is_none();
+        let mut configured = false;
         // No past effectful provider events requested: provider work starts from
         // fresh live state. Harness session directory announcements are
         // current-state facts, so replay catch-up is allowed for diagnostics
         // policy only.
         builder
+            .configure_raw(move |cx| {
+                if configured {
+                    return Ok(());
+                }
+                configured = true;
+                *secret_snapshot
+                    .lock()
+                    .expect("lock provider secret snapshot") = cx.configure.secrets.clone();
+                if !publish_models_after_configure {
+                    return Ok(());
+                }
+                let profiles = cx.state.load_profiles();
+                cx.state
+                    .set_startup_responses_modes(profiles.startup_responses_modes());
+                cx.handle
+                    .emit_transient(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+                        models: models_for_profiles(&profiles),
+                    }))
+            })
             .on_raw_live(
                 tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_PREWARM_REQUESTED),
                 handle_provider_delivery::<F>,
@@ -1381,10 +1590,14 @@ where
                 tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_CREATED),
                 handle_provider_delivery::<F>,
             )
-            .startup_transient_event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
-                models: models_for_profiles(&self.startup_profiles),
-            }))
             .ready_message("builtin provider ready");
+        if let Some(profiles) = startup_profiles {
+            builder.startup_transient_event(Event::ProviderModelsDeclared(
+                ProviderModelsDeclared {
+                    models: models_for_profiles(&profiles),
+                },
+            ));
+        }
     }
 }
 
@@ -1517,6 +1730,12 @@ where
         let mut profiles = (self.load_prompt_profiles)();
         profiles.apply_startup_responses_modes(&self.startup_responses_modes);
         profiles
+    }
+
+    /// Captures ChatGPT route modes from the profiles resolved at extension
+    /// startup.
+    fn set_startup_responses_modes(&mut self, modes: BTreeMap<ProviderName, CodexMode>) {
+        self.startup_responses_modes = modes;
     }
 
     fn set_worker_waker(&mut self, waker: ManualRuntimeWaker) {

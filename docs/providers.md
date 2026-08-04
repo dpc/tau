@@ -305,6 +305,51 @@ The extension owns its serialized profiles, model publication, OpenRouter
 discovery, public stream sampling, retry scheduling, and provider events; the
 backend performs one finite typed attempt.
 
+### API-key secret references
+
+`chat_completions`, `openrouter`, and public `responses` profiles may use
+`api_key_secret` instead of storing an inline `api_key`. `chatgpt` remains
+OAuth-only and does not support this field. The interactive `tau provider add`
+wizard still writes inline keys; create or edit the profile JSON manually when
+using a reference.
+
+Declare the exact logical name for the built-in provider extension, set the
+startup secret, then write the reference:
+
+```yaml
+# harness.yaml
+extensions:
+  provider-builtin:
+    secrets:
+      openai_api_key: {}
+```
+
+```sh
+TAU_SECRET_OPENAI_API_KEY='…' tau
+```
+
+```json
+{
+  "kind": "chat_completions",
+  "base_url": "https://api.openai.com/v1",
+  "api_key_secret": "openai_api_key",
+  "models": [{"id": "gpt-4.1"}]
+}
+```
+
+Secret names are nonempty ASCII letters, digits, `.`, `_`, or `-`, except `.`
+and `..`; the reference must exactly match the declared name. A profile must
+not set both a nonempty `api_key` and `api_key_secret`, and an empty or
+unavailable reference rejects that profile rather than falling back to an
+unauthenticated request. `tau provider list` reports this source as
+`api-key-secret` without resolving or printing the reference.
+
+Tau resolves declared secrets once at harness startup and sends only the
+provider extension's scoped values. Editing a profile changes new attempts and
+retries, including its selected reference, but changing `TAU_SECRET_*` or a
+secret file requires restarting Tau. Existing inline-key and keyless profiles
+need no migration.
+
 Generic Chat Completions models do not support standalone compaction. A local
 model can opt in to Tau summary compaction by declaring its context window plus
 an explicit `local_summary_compaction` object:

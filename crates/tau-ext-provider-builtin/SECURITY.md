@@ -50,6 +50,24 @@ generation for this process. Profile rotation clears it; restart may retry once.
 The cross-component authority and no-guessed-applicability rule are defined by
 [GATE-provider-quota-pacing](../../specs/GATE-provider-quota-pacing.md).
 
+## API-key secret references
+
+`chat_completions`, `openrouter`, and public `responses` profiles may name an
+`api_key_secret`. The extension captures only its initial, harness-authorized
+`Configure.secrets` map and never reads `TAU_SECRET_*`, secret files, or another
+extension's values. A reference must exactly match a map key; its logical name
+is profile metadata, while its value remains process-local.
+
+Empty, invalid, unavailable, and dual-source (`api_key` plus
+`api_key_secret`) profiles fail closed and are excluded from publication and
+routing rather than becoming keyless. Prompt, prewarm, retry, and quota reloads
+resolve the current profile against that immutable startup map, so a profile may
+select another startup-authorized name but a secret-source change requires
+restart. Diagnostics may identify provider and reference names but never secret
+values. `api_key_secret` serialization, safe error text, backend resolution,
+list redaction, and Configure snapshot behavior are covered by the
+`api_key_secret_*` provider-builtin tests.
+
 ## Provider cancellation boundary
 
 Broadcast cancellation uses two synchronized generations. The provider runtime

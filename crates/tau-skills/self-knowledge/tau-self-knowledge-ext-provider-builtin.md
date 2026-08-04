@@ -46,13 +46,24 @@ tau provider remove <name>
 Supported profile kinds:
 
 - `chatgpt` — ChatGPT/Codex OAuth credentials for the Responses backend.
-- `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, optional API key, model list, max output tokens, extra body, and compatibility options. `tau provider add` accepts `chat-completions` at the interactive provider-kind prompt.
-- `openrouter` — OpenRouter profile with API key and either explicit models or models fetched from OpenRouter.
+- `chat_completions` — OpenAI-compatible Chat Completions endpoint with base URL, optional inline API key or scoped `api_key_secret`, model list, max output tokens, extra body, and compatibility options. `tau provider add` accepts `chat-completions` at the interactive provider-kind prompt.
+- `openrouter` — OpenRouter profile with an inline API key or scoped `api_key_secret`, and either explicit models or models fetched from OpenRouter.
 - `responses` — generic public Responses endpoint with base URL, optional API
-  key, explicit `sse` or `websocket` transport, and an explicit model list.
+  key or scoped `api_key_secret`, explicit `sse` or `websocket` transport, and an explicit model list.
   Omitted transport in an older profile means SSE. `tau provider add` calls this selection
   `responses API`; it calls the existing Chat Completions selection
   `completions API`.
+
+For `chat_completions`, `openrouter`, and `responses`, a manual profile may use
+`api_key_secret` instead of `api_key`. Declare that exact name under
+`extensions.provider-builtin.secrets` in `harness.yaml` and set the matching
+`TAU_SECRET_*` value before starting Tau. The wizard does not offer references.
+Tau captures only provider-builtin's declared `Configure.secrets` at startup;
+it never reads secret environment variables or files in the child. Empty,
+invalid, unavailable, and dual-source profiles fail closed rather than using
+keyless requests. Editing profile JSON affects later attempts and retries, but
+secret-source changes require restart. `tau provider list` shows
+`api-key-secret` without resolving or printing the reference.
 
 The profile kinds route to three deliberately separate wire backends.
 `chat_completions` and `openrouter` use the OpenAI-compatible HTTP/SSE
@@ -90,7 +101,10 @@ field, so generated profiles receive the full set. Each request explicitly
 sends the harness-effective level as `reasoning.effort`, mapping Tau `off` to
 API `none`.
 
-The extension has no ordinary `extensions.provider-builtin.config` schema for provider credentials; credentials belong in provider auth/profile storage, not harness config.
+The extension has no ordinary `extensions.provider-builtin.config` credential
+schema. Inline credentials remain in provider auth/profile storage; referenced
+credentials use the separately scoped `extensions.provider-builtin.secrets`
+declarations described above.
 ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.
 
 Compatible model entries may also set

@@ -102,6 +102,13 @@ An extension entry can:
 - declare the Tau-managed secrets that the harness may inject; and
 - set `tool_prefix` to distinguish tools from multiple configured instances.
 
+The built-in provider extension uses this same declaration for manual
+`api_key_secret` references in provider profiles. Declare only each API key a
+profile needs under `extensions.provider-builtin.secrets`; the harness captures
+the value at startup and passes it only to that extension. See
+[providers](providers.md#api-key-secret-references) for the profile JSON and
+restart semantics.
+
 For example:
 
 ```yaml
