@@ -2679,6 +2679,44 @@ fn harness_agent_provider_defaults_apply_to_all_roles() {
     );
 }
 
+/// Ensures visibility defaults to true and follows normal broad-to-specific
+/// role inheritance without disabling roles.
+#[test]
+fn harness_role_visibility_defaults_and_inherits() {
+    let td = TempDir::new().expect("tempdir");
+    let default_settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("load defaults");
+    assert_eq!(default_settings.roles["engineer"].visible, Some(true));
+
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        agents:
+          visible: false
+          role_groups:
+            hidden:
+              roles:
+                inherited: {}
+                role-visible:
+                  visible: true
+            visible:
+              visible: true
+              roles:
+                group-inherited: {}
+                role-hidden:
+                  visible: false
+        "#,
+    )
+    .expect("write harness");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(settings.roles["inherited"].visible, Some(false));
+    assert_eq!(settings.roles["role-visible"].visible, Some(true));
+    assert_eq!(settings.roles["group-inherited"].visible, Some(true));
+    assert_eq!(settings.roles["role-hidden"].visible, Some(false));
+}
+
 /// Locks scope precedence across source layers: all agent defaults resolve
 /// first, then all group defaults, and role overrides resolve last.
 #[test]

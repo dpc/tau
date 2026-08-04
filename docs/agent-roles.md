@@ -27,6 +27,8 @@ A role can also set:
 
 - `description`: short free-form summary shown in `:role ...` completions
 - `order`: optional numeric order within the containing role group
+- `visible`: whether the role appears in the built-in available-sub-task-role
+  prompt catalog; defaults to `true`
 - `context_size_alerts`: named token thresholds that queue configurable internal
   prompts after a turn; committed deliveries appear in UI history as
   `[tau-internal]: <configured message>`
@@ -80,6 +82,12 @@ agents:
 Use the same top-level `agents` scope for model defaults shared by every role.
 `agents.enable` defaults to `true`; set it to `false` to disable every role,
 then use a group or role `enable: true` override to retain the roles you need.
+`agents.visible` also defaults to `true` and inherits through groups and roles.
+Set it to `false` to omit roles from the built-in catalog shown to agents with
+`agent_start`; a narrower `visible: true` overrides that default. Visibility
+only affects this prompt catalog. Hidden roles remain selectable, explicitly
+callable through `agent_start`, and present in authorization, diagnostics, UI,
+and other role lists.
 Tau retains source order within each scope, but resolves scopes globally: all
 `agents` settings apply first, then all role-group settings, then all role
 settings. A role setting therefore overrides a group setting even when the

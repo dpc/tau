@@ -721,6 +721,13 @@ struct AgentsSettings {
         deserialize_with = "present_option"
     )]
     enable: Option<Option<bool>>,
+    /// Whether roles default to appearing in the built-in delegate-role
+    /// catalog.
+    ///
+    /// Omission retains the visible baseline. Explicit `null` clears this patch
+    /// and leaves the role's default presentation behavior in effect.
+    #[serde(default = "agent_visible_default", deserialize_with = "present_option")]
+    visible: Option<Option<bool>>,
     #[serde(default, alias = "defaultRole")]
     default_role: Option<String>,
     #[serde(alias = "idTemplate")]
@@ -1020,6 +1027,9 @@ struct HarnessProfileAgentOverrides {
     /// Default enablement patch applied to every role.
     #[serde(alias = "enabled", deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
+    /// Default built-in delegate-role catalog visibility applied to every role.
+    #[serde(deserialize_with = "present_option")]
+    visible: Option<Option<bool>>,
     /// Role groups and their member role patches.
     #[serde(alias = "roleGroups")]
     role_groups: RawRoleGroups,
@@ -1060,6 +1070,7 @@ impl From<HarnessProfileAgentOverrides> for HarnessAgentRoleOverrides {
     fn from(profile: HarnessProfileAgentOverrides) -> Self {
         Self {
             enable: profile.enable,
+            visible: profile.visible,
             role_groups: profile.role_groups,
             prompt_fragments: profile.prompt_fragments,
             required_skills: profile.required_skills,
@@ -1109,6 +1120,10 @@ struct HarnessAgentRoleOverrides {
     /// patches.
     #[serde(alias = "enabled", deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
+    /// Agent-global built-in delegate-role catalog visibility patch replayed
+    /// before group and role patches.
+    #[serde(deserialize_with = "present_option")]
+    visible: Option<Option<bool>>,
     #[serde(alias = "roleGroups")]
     role_groups: RawRoleGroups,
     #[serde(alias = "promptFragments")]
@@ -1142,6 +1157,7 @@ impl AgentsSettings {
     fn role_defaults(&self) -> AgentRolePatch {
         AgentRolePatch {
             enable: self.enable,
+            visible: self.visible,
             model: self.model.clone(),
             effort: self.effort,
             verbosity: self.verbosity,
@@ -1158,6 +1174,7 @@ impl HarnessAgentRoleOverrides {
     fn role_defaults(&self) -> AgentRolePatch {
         AgentRolePatch {
             enable: self.enable,
+            visible: self.visible,
             model: self.model.clone(),
             effort: self.effort,
             verbosity: self.verbosity,
@@ -1226,6 +1243,8 @@ struct RawRoleGroup {
     // reading old config during migration.
     #[serde(alias = "enabled", deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
+    #[serde(deserialize_with = "present_option")]
+    visible: Option<Option<bool>>,
     #[serde(deserialize_with = "present_option")]
     order: Option<Option<i64>>,
     #[serde(alias = "interSessionReceiver", deserialize_with = "present_option")]
@@ -1390,11 +1409,17 @@ fn agent_enable_default() -> Option<Option<bool>> {
     Some(Some(true))
 }
 
+fn agent_visible_default() -> Option<Option<bool>> {
+    Some(Some(true))
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct AgentRolePatch {
     #[serde(alias = "enabled", deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
+    #[serde(deserialize_with = "present_option")]
+    visible: Option<Option<bool>>,
     #[serde(deserialize_with = "present_option")]
     order: Option<Option<i64>>,
     #[serde(alias = "interSessionReceiver", deserialize_with = "present_option")]
@@ -1444,6 +1469,7 @@ impl RawRoleGroup {
     fn defaults(&self) -> AgentRolePatch {
         AgentRolePatch {
             enable: self.enable,
+            visible: self.visible,
             order: self.order,
             inter_session_receiver: self.inter_session_receiver,
             inter_session_auto_start: self.inter_session_auto_start,
@@ -1916,6 +1942,12 @@ pub struct AgentRole {
     /// reading old config during migration.
     #[serde(alias = "enabled", skip_serializing_if = "Option::is_none")]
     pub enable: Option<bool>,
+    /// Whether this role appears in the built-in delegate-role prompt catalog.
+    ///
+    /// Visibility only controls that catalog. It does not affect role
+    /// availability, authorization, or explicit `agent_start` requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
     /// Optional role ordering key within a role group. Lower values come first;
     /// roles with the same order, or without an order, are sorted by role name.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2150,6 +2182,9 @@ impl AgentRole {
     fn apply_patch(&mut self, patch: &AgentRolePatch) {
         if let Some(enable) = patch.enable {
             self.enable = enable;
+        }
+        if let Some(visible) = patch.visible {
+            self.visible = visible;
         }
         if let Some(order) = patch.order {
             self.order = order;
@@ -2721,6 +2756,7 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
 
     let mut effective_agent_defaults = AgentRole {
         enable: Some(true),
+        visible: Some(true),
         ..AgentRole::default()
     };
     for overrides in &role_layers {

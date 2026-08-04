@@ -294,6 +294,11 @@ impl Harness {
         )
         .into_iter()
         .filter(|info| {
+            self.available_roles
+                .get(&info.name)
+                .is_some_and(|role| role.visible != Some(false))
+        })
+        .filter(|info| {
             crate::model::model_for_role(
                 &self.provider_model_info,
                 &self.available_roles,

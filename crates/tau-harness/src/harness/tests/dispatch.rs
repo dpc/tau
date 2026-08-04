@@ -567,6 +567,57 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures hidden roles leave the built-in catalog but remain valid explicit
+/// `agent_start` targets, preserving visibility as presentation-only metadata.
+#[test]
+fn hidden_delegate_roles_are_omitted_from_catalog_but_remain_explicitly_callable() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid]
+        .agent_id
+        .as_deref()
+        .map(crate::parse_agent_id)
+        .expect("durable agent id");
+    h.available_roles
+        .get_mut("engineer-junior")
+        .expect("built-in junior role")
+        .visible = Some(false);
+    h.publish_delegate_roles_context();
+
+    let role = h.selected_role.clone();
+    let model = crate::model::model_for_role(&h.provider_model_info, &h.available_roles, &role);
+    let tools = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
+    let rendered = h
+        .try_build_system_prompt_for_role_and_agent(
+            &role,
+            Some(&agent_id),
+            &tools,
+            model.as_ref(),
+            false,
+        )
+        .expect("render prompt");
+    assert!(rendered.contains("* `engineer` -"));
+    assert!(!rendered.contains("* `engineer-junior` -"));
+
+    let query = tau_proto::StartAgentRequest {
+        parent_agent: None,
+        query_id: "hidden-role".to_owned(),
+        instruction: "side task".to_owned(),
+        role: Some("engineer-junior".to_owned()),
+        input_stats: tau_proto::ToolUseStats::default(),
+        tool_call_id: Some("hidden-role-call".into()),
+        task_name: None,
+    };
+    assert_eq!(
+        h.resolve_start_agent_request_role(&query),
+        Ok("engineer-junior".to_owned())
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// A first user prompt mints its durable agent identity lazily, so the delegate
 /// role context must be published before that prompt is rendered.
 #[test]

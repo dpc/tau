@@ -100,10 +100,10 @@ array replacement:
 
 - Role sources retain their normal order (built-ins, files/drop-ins, selected
   profile, then ordered `--harness-config` layers) within each scope. After
-  collecting them, `agents` defaults (`enable`, `model`, `effort`, `verbosity`,
+  collecting them, `agents` defaults (`enable`, `visible`, `model`, `effort`, `verbosity`,
   `thinking_summary`, `service_tier`, and `compaction`) apply to every role,
   then role-group defaults, then per-role overrides. `agents.enable` defaults
-  to true. A narrow role patch
+  to true, as does `agents.visible`. A narrow role patch
   therefore remains effective over a broader group/default patch from a later
   source.
 - `agents.role_groups.<group>` defaults apply to every effective member of that
@@ -126,6 +126,10 @@ array replacement:
 - `inter_session_receiver` and `inter_session_auto_start` are ordinary scalar
   role fields. Group defaults and role overrides can grant them across any
   number of groups. Auto-start without effective receiver capability is invalid.
+- `visible` is ordinary inherited role metadata. Effective `false` suppresses
+  only the built-in available-sub-task-role prompt catalog; it neither removes a
+  role nor changes its authorization, diagnostics, UI lists, or other role
+  surfaces.
 
 ## Selectable configuration profiles
 
