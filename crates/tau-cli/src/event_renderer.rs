@@ -2205,13 +2205,18 @@ impl EventRenderer {
     /// Returns the authoritative agent-turn state for one directed watch.
     ///
     /// Prompt activity is retained as a compatibility/catch-up fallback until
-    /// the first structured lifecycle snapshot for this watch is observed.
+    /// the first complete runtime snapshot for the watched agent is observed.
     fn watched_agent_is_running(&self, watcher_id: &str, watched_agent_id: &str) -> bool {
         self.watched_agent_turn_states
             .get(watcher_id)
             .and_then(|states| states.get(watched_agent_id))
             .map_or_else(
-                || self.agent_has_active_prompt(watched_agent_id),
+                || {
+                    self.agent_stats.get(watched_agent_id).map_or_else(
+                        || self.agent_has_active_prompt(watched_agent_id),
+                        |stats| stats.runtime_state == tau_proto::AgentRuntimeState::Running,
+                    )
+                },
                 |state| state.state == tau_proto::AgentRuntimeState::Running,
             )
     }

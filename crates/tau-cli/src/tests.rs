@@ -10249,8 +10249,8 @@ fn watched_agent_response_finished_keeps_status_row() {
     sync(&handle);
 
     assert!(
-        vt.screen_contains(100, "@engineer_1 unreported %15/15"),
-        "watched-agent row should remain after provider response finishes: {:?}",
+        vt.screen_contains(100, "@engineer_1 unreported running %15/15"),
+        "outer runtime state should remain running after the inner response finishes: {:?}",
         vt.screen_text(100)
     );
 }
@@ -10394,25 +10394,16 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
             cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
         },
     ));
-    let watch_state = |message_id: &str, state| {
-        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse(message_id)
-                .expect("test identifier must satisfy its grammar"),
-            sender_id: agent_id("engineer_1"),
-            sender_session_id: None,
-            recipient_id: agent_id("parent_1"),
-            kind: tau_proto::AgentMessageKind::WatchTurnState,
-            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
-                session_id: test_session_id("s1"),
-                subscription_id: "watch-1".to_owned(),
-                state,
-                initial: false,
-                turn_generation: 1,
-            }),
-            watch_provider_status: None,
-            watch_work_status: None,
-            watch_long_wait: None,
-            message: String::new(),
+    let stats = |runtime_state| {
+        Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+            session_id: test_session_id("s1"),
+            agent_id: agent_id("engineer_1"),
+            work_status: Default::default(),
+            navigation_mode: tau_proto::AgentNavigationMode::Active,
+            runtime_state,
+            tools: Default::default(),
+            context: Default::default(),
+            estimated_api_cost: Default::default(),
         })
     };
     let watch_status = |message_id: &str, phase, title: Option<&str>| {
@@ -10449,18 +10440,13 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         tau_proto::AgentWorkStatusPhase::Unreported,
         None,
     ));
-    renderer.handle(&watch_state(
-        "turn-started",
-        tau_proto::AgentRuntimeState::Running,
-    ));
+    renderer.handle(&stats(tau_proto::AgentRuntimeState::Running));
     sync(&handle);
     assert!(vt.screen_contains(100, "@engineer_1 unreported running"));
-    renderer.handle(&watch_state(
-        "turn-stopped",
-        tau_proto::AgentRuntimeState::Idle,
-    ));
+    renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
     sync(&handle);
     assert!(vt.screen_contains(100, "@engineer_1 unreported"));
+    assert!(!vt.screen_contains(100, "@engineer_1 unreported running"));
 
     renderer.handle(&watch_status(
         "status-working",
@@ -10492,7 +10478,12 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         Some("finished"),
     ));
     sync(&handle);
-    assert!(!vt.screen_contains(100, "@engineer_1 done finished"));
+    assert!(
+        vt.screen_text(100)
+            .iter()
+            .all(|row| !row.trim_start().starts_with("@engineer_1 ")),
+        "done must remove the watched-agent activity row"
+    );
 }
 
 /// Provider-prompt fallback must clear activity on terminal without removing

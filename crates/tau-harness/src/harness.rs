@@ -18237,7 +18237,7 @@ impl Harness {
                     );
                     tau_proto::AgentNavigationMode::Active
                 }),
-            runtime_state: agent_runtime_state_for_turn(&agent.turn_state),
+            runtime_state: agent.published_runtime_state,
             tools: AgentToolStats {
                 in_flight: agent.tools_in_flight,
                 started_total: agent.tools_total,

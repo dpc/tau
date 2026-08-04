@@ -29,11 +29,13 @@ Harness sub-agent activity is rendered from generic events, not
 delegation-specific UI paths. `agent.watches_updated` identifies which agents
 are observed; current-session structured work status keeps a direct watched row
 visible while it is unreported, working, blocked, or unknown, and removes it
-only after done. Structured watch turn state decides only whether that row is
-running or watching a descendant. Individual provider invocations are inner
-model rounds, and prompt/provider events are only a pre-snapshot compatibility
-fallback. `agent.stats_updated` provides generic counters and provider response
-stats provide live response throughput details for that running turn. An idle
+only after done. Legacy structured watch turn state, when replayed, decides
+whether that row is running or watching a descendant; otherwise the complete
+`agent.stats_updated` runtime state does. Individual provider invocations are
+inner model rounds, and prompt/provider events are only a pre-stats
+compatibility fallback. `agent.stats_updated` also provides generic counters
+and provider response stats provide live response throughput details for that
+running turn. An idle
 direct target retains its status row, and one that watches an active descendant
 adds `watching -> @descendant`. This recursive projection is exact over the live
 watch DAG, keeps one row per direct target, and contributes unique effective

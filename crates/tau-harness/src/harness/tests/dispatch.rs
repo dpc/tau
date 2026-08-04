@@ -35,6 +35,41 @@ fn working_status_reminder_uses_approved_wording() {
     );
 }
 
+/// Operational snapshots must retain outer runtime activity while tool-round
+/// bookkeeping briefly makes the inner turn state idle.
+#[test]
+fn agent_stats_keep_outer_turn_running_across_inner_tool_continuation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    h.set_agent_turn_state(
+        &cid,
+        AgentTurnState::AgentThinking {
+            agent_prompt_id: test_agent_prompt_id("first-inner-round"),
+        },
+    );
+    h.set_agent_turn_state(
+        &cid,
+        AgentTurnState::ToolsRunning {
+            remaining_calls: vec!["tool-round".into()],
+        },
+    );
+    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::Idle;
+
+    assert_eq!(
+        h.agent_stats_snapshot(&cid).expect("stats").runtime_state,
+        tau_proto::AgentRuntimeState::Running
+    );
+
+    h.set_agent_turn_state(&cid, AgentTurnState::Idle);
+    assert_eq!(
+        h.agent_stats_snapshot(&cid).expect("stats").runtime_state,
+        tau_proto::AgentRuntimeState::Idle
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Self-compaction envelopes expose only closed bounded status and exact
 /// durable correlation for every terminal class.
 #[test]
@@ -34967,10 +35002,9 @@ fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
             .insert(target_id.clone(), prior_mode);
         h.agent_navigation_modes
             .insert(other_id.clone(), tau_proto::AgentNavigationMode::Suspended);
-        h.agents
-            .get_mut(&target_cid)
-            .expect("target conversation")
-            .turn_state = turn_state;
+        let target = h.agents.get_mut(&target_cid).expect("target conversation");
+        target.turn_state = turn_state;
+        target.published_runtime_state = expected_runtime;
         let requester = connect_test_client_with_origin(
             &mut h,
             "prompt-ui",

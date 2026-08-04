@@ -75,10 +75,11 @@ the CLI cache.
 Current CLI watched status rows come from the current-session semantic
 `WorkStatus` snapshot for each direct target. Absent status is unreported;
 unreported, working, blocked, and unknown remain visible, and done alone
-removes the row. `TurnState` controls activity decoration only: Running renders
-direct activity, while Idle retains the status row without an activity marker.
-Before an edge receives its first `TurnState`, active prompt tracking for the
-target is the edge-local compatibility/catch-up fallback.
+removes the row. Legacy `TurnState`, when present, controls activity decoration:
+Running renders direct activity, while Idle retains the status row without an
+activity marker. Otherwise the target's complete generic agent-stats runtime
+state controls activity decoration. Before the first stats snapshot, active
+prompt tracking for the target is the compatibility/catch-up fallback.
 
 The CLI derives recursive activity exactly over the current live watch DAG. A
 direct target whose edge reports Running renders as `@id (display name) phase

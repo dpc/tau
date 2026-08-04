@@ -439,6 +439,44 @@ fn watched_agent_turn_state_is_authoritative_for_running_counts() {
     );
 }
 
+/// Generic complete stats keep a watched row running across an inner
+/// continuation when no legacy watch-turn record is available.
+#[test]
+fn watched_agent_stats_keep_running_until_outer_turn_is_idle() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            watcher_id: agent_id("manager"),
+            watched_agent_ids: vec![agent_id("worker")],
+            changed_agent_id: Some(agent_id("worker")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
+    let stats = |runtime_state| {
+        tau_proto::Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+            session_id: "s1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            agent_id: agent_id("worker"),
+            work_status: Default::default(),
+            navigation_mode: tau_proto::AgentNavigationMode::Active,
+            runtime_state,
+            tools: Default::default(),
+            context: Default::default(),
+            estimated_api_cost: Default::default(),
+        })
+    };
+
+    renderer.handle(&stats(tau_proto::AgentRuntimeState::Running));
+    assert!(renderer.watched_agent_is_running("manager", "worker"));
+
+    renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
+    assert!(!renderer.watched_agent_is_running("manager", "worker"));
+}
+
 /// A direct status row must retain its terminal block identity while turn state
 /// starts and stops, preventing visible remove-and-reinsert flicker.
 #[test]
